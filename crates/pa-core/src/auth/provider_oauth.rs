@@ -1,6 +1,7 @@
 //! The built-in subscription providers' OAuth integration: the stored `openai-codex`, `anthropic`,
-//! `github-copilot`, and `xai` credentials refresh at their token endpoints when they expire; every
-//! other provider serves its access token until expiry.
+//! `github-copilot`, and `xai` credentials refresh at their token endpoints when they expire and
+//! force-refresh when the server rejects a locally-valid token; every other provider serves its
+//! access token until expiry.
 
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use pa_ai::oauth::{
     refresh_anthropic_token, refresh_github_copilot_token, refresh_openai_codex_token,
     refresh_xai_token, CodexHttp, ProviderHttp, ReqwestCodexHttp, ReqwestProviderHttp,
 };
+use pa_ai::utils::log::get_logger;
 
 use crate::auth::types::{AuthCredential, AuthStorageData};
 
@@ -58,20 +60,22 @@ impl ProviderOAuth {
         }
     }
 
-    /// Refresh one expired credential off the async runtime (the
-    /// `AuthStorage` seam is synchronous by contract).
-    fn refresh_blocking(
+    /// Refresh one credential off the async runtime (the `AuthStorage`
+    /// seam is synchronous by contract): the exchange failure carries the
+    /// provider's reason out, so the forced path can surface it and the
+    /// expiry path can log it instead of dropping it silently.
+    fn exchange_refresh(
         &self,
         provider_id: &str,
         credential: &AuthCredential,
-    ) -> Option<AuthCredential> {
+    ) -> Result<AuthCredential, String> {
         let AuthCredential::Oauth {
             refresh: Some(refresh_token),
             enterprise_url,
             ..
         } = credential
         else {
-            return None;
+            return Err("the credential carries no refresh token".to_string());
         };
         let http = Arc::clone(&self.http);
         let provider_http = Arc::clone(&self.provider_http);
@@ -84,13 +88,11 @@ impl ProviderOAuth {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()
-                    .ok()?;
-                let refreshed: Option<AuthCredential> = match provider_id.as_str() {
-                    OPENAI_CODEX_PROVIDER_ID => {
-                        let credentials = runtime
-                            .block_on(refresh_openai_codex_token(http.as_ref(), &refresh_token))
-                            .ok()?;
-                        Some(AuthCredential::Oauth {
+                    .map_err(|error| error.to_string())?;
+                match provider_id.as_str() {
+                    OPENAI_CODEX_PROVIDER_ID => runtime
+                        .block_on(refresh_openai_codex_token(http.as_ref(), &refresh_token))
+                        .map(|credentials| AuthCredential::Oauth {
                             access: credentials.access,
                             refresh: Some(credentials.refresh),
                             expires: credentials.expires,
@@ -101,16 +103,13 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
-                        })
-                    }
-                    ANTHROPIC_PROVIDER_ID => {
-                        let credentials = runtime
-                            .block_on(refresh_anthropic_token(
-                                provider_http.as_ref(),
-                                &refresh_token,
-                            ))
-                            .ok()?;
-                        Some(AuthCredential::Oauth {
+                        }),
+                    ANTHROPIC_PROVIDER_ID => runtime
+                        .block_on(refresh_anthropic_token(
+                            provider_http.as_ref(),
+                            &refresh_token,
+                        ))
+                        .map(|credentials| AuthCredential::Oauth {
                             access: credentials.access,
                             refresh: Some(credentials.refresh),
                             expires: credentials.expires,
@@ -121,36 +120,32 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
-                        })
-                    }
+                        }),
                     GITHUB_COPILOT_PROVIDER_ID => {
                         // The stored GitHub token exchanges for a fresh Copilot token; the
                         // enterprise domain rides the credential.
-                        let credentials = runtime
+                        runtime
                             .block_on(refresh_github_copilot_token(
                                 provider_http.as_ref(),
                                 &refresh_token,
                                 enterprise_url.as_deref(),
                             ))
-                            .ok()?;
-                        Some(AuthCredential::Oauth {
-                            access: credentials.access,
-                            refresh: Some(credentials.refresh),
-                            expires: credentials.expires,
-                            account_id: None,
-                            enterprise_url: credentials.enterprise_url,
-                            endpoint: None,
-                            token_endpoint: None,
-                            client_id: None,
-                            resource: None,
-                            issuer: None,
-                        })
+                            .map(|credentials| AuthCredential::Oauth {
+                                access: credentials.access,
+                                refresh: Some(credentials.refresh),
+                                expires: credentials.expires,
+                                account_id: None,
+                                enterprise_url: credentials.enterprise_url,
+                                endpoint: None,
+                                token_endpoint: None,
+                                client_id: None,
+                                resource: None,
+                                issuer: None,
+                            })
                     }
-                    XAI_PROVIDER_ID => {
-                        let credentials = runtime
-                            .block_on(refresh_xai_token(provider_http.as_ref(), &refresh_token))
-                            .ok()?;
-                        Some(AuthCredential::Oauth {
+                    XAI_PROVIDER_ID => runtime
+                        .block_on(refresh_xai_token(provider_http.as_ref(), &refresh_token))
+                        .map(|credentials| AuthCredential::Oauth {
                             access: credentials.access,
                             refresh: Some(credentials.refresh),
                             expires: credentials.expires,
@@ -161,20 +156,17 @@ impl ProviderOAuth {
                             client_id: None,
                             resource: None,
                             issuer: None,
-                        })
-                    }
+                        }),
                     // The match arms cover the four subscription ids;
-                    // `refresh` never dispatches another.
-                    _ => None,
-                };
-                refreshed
+                    // a refresh never dispatches another.
+                    _ => Err("unknown subscription provider".to_string()),
+                }
             })
-            .ok()?
+            .map_err(|error| format!("the refresh thread could not be spawned: {error}"))?
             .join()
-            .ok()?
+            .map_err(|_| "the refresh thread panicked".to_string())?
     }
 }
-
 impl crate::auth::OAuthIntegration for ProviderOAuth {
     fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
         match credential {
@@ -193,9 +185,62 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
         ) {
             return None;
         }
-        let credential = credentials.credential(provider_id)?;
-        self.refresh_blocking(provider_id, &credential)
+        let Some(credential) = credentials.credential(provider_id) else {
+            return None;
+        };
+        // The expiry-gated path keeps a failed credential for a later
+        // retry; the failure is logged, never surfaced.
+        let outcome = self.exchange_refresh(provider_id, &credential);
+        if let Err(error) = &outcome {
+            log_oauth_refresh_failure("core.auth", provider_id, error);
+        }
+        outcome.ok()
     }
+
+    fn refresh_forced(
+        &self,
+        provider_id: &str,
+        credentials: &AuthStorageData,
+    ) -> Option<Result<AuthCredential, String>> {
+        if !matches!(
+            provider_id,
+            OPENAI_CODEX_PROVIDER_ID
+                | ANTHROPIC_PROVIDER_ID
+                | GITHUB_COPILOT_PROVIDER_ID
+                | XAI_PROVIDER_ID
+        ) {
+            return None;
+        }
+        let credential = credentials.credential(provider_id)?;
+        if !matches!(
+            &credential,
+            AuthCredential::Oauth {
+                refresh: Some(refresh_token),
+                ..
+            } if !refresh_token.is_empty()
+        ) {
+            return None;
+        }
+        let outcome = self.exchange_refresh(provider_id, &credential);
+        if let Err(error) = &outcome {
+            log_oauth_refresh_failure("core.auth", provider_id, error);
+        } else {
+            get_logger("core.auth").info(
+                "oauth token refresh forced after a rejected access token",
+                serde_json::json!({ "provider": provider_id }),
+            );
+        }
+        Some(outcome)
+    }
+}
+
+/// One structured warn line for a failed token exchange: the silent-failure
+/// class of the revoked-session outage (refresh failures kept no trace).
+fn log_oauth_refresh_failure(component: &str, provider_id: &str, error: &str) {
+    get_logger(component).warn(
+        "oauth token refresh failed",
+        serde_json::json!({ "provider": provider_id, "error": error }),
+    );
 }
 
 #[cfg(test)]
@@ -486,6 +531,85 @@ mod tests {
                 .credential(OPENAI_CODEX_PROVIDER_ID)
                 .is_some(),
             "the failed refresh keeps the stored credential"
+        );
+    }
+
+    #[test]
+    fn a_locally_valid_credential_force_refreshes_and_resolves() {
+        // The revoked-session shape: the expiry is still future-dated, so
+        // only the forced refresh reaches the token endpoint.
+        let mut live = expired_codex_credential();
+        live.access = "rejected-access".to_string();
+        live.expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(i64::MAX)
+            + 3_600_000;
+        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &live);
+        assert_eq!(
+            auth.get_api_key(OPENAI_CODEX_PROVIDER_ID).as_deref(),
+            Some("rejected-access"),
+            "the locally-valid credential still serves"
+        );
+        let refreshed = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
+        assert!(matches!(
+            &refreshed,
+            Ok(AuthCredential::Oauth { access, .. }) if access == &account_jwt("acct-2")
+        ));
+        assert_eq!(
+            auth.get_api_key(OPENAI_CODEX_PROVIDER_ID).as_deref(),
+            Some(account_jwt("acct-2").as_str()),
+            "the refreshed credential resolves"
+        );
+    }
+
+    #[test]
+    fn a_rejected_force_refresh_carries_the_server_reason() {
+        // Nothing scripted: the exchange fails, the reason carries out,
+        // and the stored credential stands untouched.
+        let mut live = expired_codex_credential();
+        live.access = "rejected-access".to_string();
+        live.expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(i64::MAX)
+            + 3_600_000;
+        let mut auth = crate::auth::AuthStorage::in_memory_without_env(
+            &{
+                let mut data = crate::auth::types::AuthStorageData::default();
+                data.insert(OPENAI_CODEX_PROVIDER_ID, &live);
+                data
+            },
+            std::sync::Arc::new(ProviderOAuth::with_transports(
+                std::sync::Arc::new(ScriptedHttp(HashMap::new())),
+                std::sync::Arc::new(ScriptedProviderHttp(HashMap::new())),
+            )),
+        );
+        let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
+        let reason = outcome.expect_err("the failed exchange carries its reason");
+        assert!(
+            reason.contains("was not scripted"),
+            "the server-side reason carries out for the re-login surface: {reason}"
+        );
+        let stored = auth
+            .get_all()
+            .credential(OPENAI_CODEX_PROVIDER_ID)
+            .expect("the stored credential stands untouched");
+        assert!(matches!(
+            stored,
+            AuthCredential::Oauth { ref access, .. } if access == "rejected-access"
+        ));
+    }
+
+    #[test]
+    fn a_credential_without_a_refresh_token_has_no_forced_refresh() {
+        let mut without_refresh = expired_codex_credential();
+        without_refresh.refresh = None;
+        let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &without_refresh);
+        let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
+        assert_eq!(
+            outcome.unwrap_err(),
+            "the stored credential for openai-codex carries no refresh token"
         );
     }
 

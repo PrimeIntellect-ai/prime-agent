@@ -70,6 +70,199 @@ fn fast_policy() -> ProviderRetryPolicy {
     }
 }
 
+/// An auth failure consults the recovery seam once and the quick retry
+/// re-issues: the refreshed credential's turn settles without surfacing
+/// the first failure.
+#[tokio::test]
+async fn an_auth_failure_consults_the_recovery_seam_and_retries() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_emit = Arc::clone(&events);
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match index {
+                    0 => error_message(Some("auth"), Some(401), None),
+                    _ => ok_message(),
+                })
+            }
+        },
+        move |event| {
+            let events = Arc::clone(&events_for_emit);
+            async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the recovery seam is consulted exactly once"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the failed attempt plus one quick retry"
+    );
+    let end = events.lock().unwrap().last().expect("end event");
+    assert!(matches!(
+        end,
+        AutoRetryEvent::End {
+            success: true,
+            attempt: 1,
+            ..
+        }
+    ));
+}
+
+/// A rejected recovery grant ends the turn with the re-login sentence: no
+/// retry is spent, the final error carries the sentence.
+#[tokio::test]
+async fn a_rejected_recovery_ends_the_turn_with_the_re_login_sentence() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let events_for_emit = Arc::clone(&events);
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let mut seam = move |_message: &AssistantMessage| {
+        Box::pin(async move {
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::ReLoginRequired(
+                "Authentication failed for \"openai-codex\".\n\nRun /login to update credentials.".to_string(),
+            )
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(error_message(Some("auth"), Some(401), None))
+            }
+        },
+        move |event| {
+            let events = Arc::clone(&events_for_emit);
+            async move {
+                events.lock().unwrap().push(event);
+                Ok(())
+            }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a rejected grant spends no retry"
+    );
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("Authentication failed for \"openai-codex\".\n\nRun /login to update credentials."),
+        "the final assistant message carries the re-login sentence"
+    );
+    let end = events.lock().unwrap().last().expect("end event");
+    assert!(matches!(
+        end,
+        AutoRetryEvent::End {
+            success: false,
+            attempt: 0,
+            final_error: Some(sentence),
+            ..
+        } if sentence.contains("Run /login to update credentials")
+    ));
+}
+
+/// A second auth failure after a served recovery never re-consults the
+/// seam: the one-retry rule ends the episode.
+#[tokio::test]
+async fn a_second_auth_failure_never_consults_the_seam_again() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        || async { Ok(error_message(Some("auth"), Some(401), None)) },
+        |_| async { Ok(()) },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the seam runs once per episode; the second rejection settles"
+    );
+}
+
+/// A non-auth failure never consults the recovery seam.
+#[tokio::test]
+async fn a_non_auth_failure_never_consults_the_recovery_seam() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        || async { Ok(error_message(Some("rate_limit"), Some(429), None)) },
+        |_| async { Ok(()) },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Error);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the recovery seam is auth-scoped"
+    );
+}
+
 /// A `rate_limit` failure whose server-requested wait exceeds the cap
 /// parks the session when the park seam reports a park: the give-up
 /// status becomes the parked sentence (TS #2375).
@@ -112,6 +305,7 @@ async fn quota_reset_beyond_cap_parks_through_the_seam() {
         },
         |_| async { true },
         Some(&mut seam),
+        None,
     )
     .await
     .unwrap();
@@ -158,6 +352,7 @@ async fn quota_reset_beyond_cap_keeps_the_give_up_when_the_seam_declines() {
         },
         |_| async { true },
         Some(&mut seam),
+        None,
     )
     .await
     .unwrap();
@@ -205,6 +400,7 @@ async fn non_quota_exceeds_cap_never_consults_the_park_seam() {
         },
         |_| async { true },
         Some(&mut seam),
+        None,
     )
     .await
     .unwrap();
@@ -242,6 +438,7 @@ async fn transient_failure_is_retried_until_success_with_events() {
             }
         },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -317,6 +514,7 @@ async fn exhausted_retries_surface_the_final_error() {
             }
         },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -403,6 +601,7 @@ async fn stream_drop_retries_until_the_turn_completes() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -460,6 +659,7 @@ async fn stream_drop_exhausts_retries_surfacing_the_class() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -512,6 +712,7 @@ async fn permanent_failures_never_retry_but_disclose() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -561,6 +762,7 @@ async fn payment_failures_settle_once_with_the_disclosure() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -604,6 +806,7 @@ async fn safety_failures_are_permanent_never_retry_but_disclose() {
             }
         },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -658,6 +861,7 @@ async fn context_overflow_never_enters_the_retry_loop() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -688,6 +892,7 @@ async fn cancelled_wait_aborts_with_retry_cancelled() {
         },
         |_| async { false },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -716,6 +921,7 @@ async fn aborted_signal_racing_failure_stops_aborted() {
         || async { Ok(error_message(Some("server_error"), None, None)) },
         |_| async { Ok(()) },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -747,6 +953,7 @@ async fn server_retry_after_over_cap_ends_the_loop() {
             }
         },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -801,6 +1008,7 @@ async fn disabled_policy_never_retries_but_discloses() {
         },
         |_| async { true },
         None,
+        None,
     )
     .await
     .unwrap();
@@ -826,6 +1034,7 @@ async fn attempt_errors_propagate() {
         || async { Err(anyhow::anyhow!("turn crashed")) },
         |_| async { Ok(()) },
         |_| async { true },
+        None,
         None,
     )
     .await
@@ -864,6 +1073,7 @@ async fn unsupported_tool_failures_surface_with_the_disclosure() {
             }
         },
         |_| async { true },
+        None,
         None,
     )
     .await

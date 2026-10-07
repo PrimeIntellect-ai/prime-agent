@@ -86,6 +86,11 @@ pub fn main_with_runtime(args: &[String], runtime: &dyn mode::Runtime) -> i32 {
 fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String> {
     use std::io::IsTerminal;
 
+    // The structured log sink lands on stderr: provider-auth events
+    // (token refreshes, rejections) surface on the terminal, and in the
+    // daemon's worker stderr logs once sessions run through workers.
+    pa_core::logging::install_stderr_log_sink();
+
     // Telemetry reports the version `--version` prints: the beta channel
     // restamps only the packaged manifest, never the compiled-in version.
     pa_telemetry::set_version(crate::config::version());

@@ -168,6 +168,28 @@ impl AgentSessionEngine {
             Some(route) => route.target.model.context_window,
             None => model.context_window,
         };
+        // The auth-recovery seam (the revoked-session ruling, 2026-10-07):
+        // an auth-class failure force-refreshes the stored OAuth credential
+        // and rebinds the provider target before the one quick retry
+        // re-issues; a rejected grant ends the turn with the re-login
+        // sentence.
+        let auth_recovery_engine = self
+            .self_weak
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let auth_recovery: Option<
+            pa_core::session_engine::provider_auth::AuthRecoveryCallback,
+        > = Some(&mut move |_message: &pa_agent::types::AssistantMessage| {
+            let engine_weak = auth_recovery_engine.clone();
+            Box::pin(async move {
+                let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
+                else {
+                    return pa_core::session_engine::provider_auth::AuthRecoveryOutcome::Continue;
+                };
+                engine.recover_provider_auth().await
+            })
+        });
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -368,6 +390,7 @@ impl AgentSessionEngine {
                     }
                 },
                 park,
+                auth_recovery,
             ),
         );
         match result {

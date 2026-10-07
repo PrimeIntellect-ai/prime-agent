@@ -938,6 +938,10 @@ pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
     }
+    // The structured log sink lands on stderr, which the supervisor
+    // captures per worker (`worker-<id>.stderr.log`): provider-auth
+    // events (token refreshes, rejections) reach a durable log.
+    pa_core::logging::install_stderr_log_sink();
     let config = WorkerConfig::from_env()?;
     // Self-registration: the supervisor's roster survives its own restarts
     // because workers re-present their identity (liveness watch + backoff).

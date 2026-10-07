@@ -8,12 +8,13 @@ use std::future::Future;
 use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 
+use super::provider_auth::{AuthRecoveryCallback, AuthRecoveryOutcome};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
     is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_provider_auth_failure, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -69,6 +70,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut emit: E,
     mut wait: W,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -127,6 +129,30 @@ where
                 .await?;
             }
             return Ok(message);
+        }
+        // A credential rejection owns its one quick retry: the engine
+        // force-refreshes the stored OAuth credential and rebinds the
+        // request target before the retry re-issues (SANCTIONED
+        // DIVERGENCE, operator ruling 2026-10-07, the revoked-session
+        // outage: TS fails the turn on the provider's 401). A rejected
+        // grant ends the turn with the re-login sentence.
+        if is_provider_auth_failure(&message) {
+            let outcome = match auth_recovery.as_deref_mut() {
+                Some(recovery) => recovery(&message).await,
+                None => AuthRecoveryOutcome::Continue,
+            };
+            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = outcome {
+                let mut message = message;
+                message.error_message = Some(sentence);
+                emit(AutoRetryEvent::End {
+                    success: false,
+                    attempt: retries_performed,
+                    final_error: Some(final_error_of(&message)),
+                    restored_model: None,
+                })
+                .await?;
+                return Ok(message);
+            }
         }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.

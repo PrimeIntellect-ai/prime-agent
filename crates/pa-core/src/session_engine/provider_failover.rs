@@ -10,12 +10,13 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
+use super::provider_auth::{AuthRecoveryCallback, AuthRecoveryOutcome};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
     is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
-    is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    is_provider_auth_failure, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
@@ -100,6 +101,7 @@ pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     mut switch: S,
     mut restore: R,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -114,8 +116,8 @@ where
     RF: Future<Output = anyhow::Result<Option<String>>>,
 {
     if !failover.enabled || candidates.is_empty() {
-        // The pass-through moves the park seam: the loop below cannot
-        // reach (and must not reborrow) it.
+        // The pass-through moves the park and auth-recovery seams: the
+        // loop below cannot reach (and must not reborrow) them.
         return run_turn_with_auto_retry(
             quick_policy,
             context_window,
@@ -124,6 +126,7 @@ where
             emit,
             wait,
             park,
+            auth_recovery,
         )
         .await;
     }
@@ -194,6 +197,33 @@ where
                 .await?;
             }
             return Ok(message);
+        }
+        // A credential rejection owns its one retry: the engine
+        // force-refreshes the stored OAuth credential and rebinds the
+        // request target before the retry re-issues (SANCTIONED
+        // DIVERGENCE, operator ruling 2026-10-07, the revoked-session
+        // outage: TS fails the turn on the provider's 401). A rejected
+        // grant ends the episode with the re-login sentence.
+        if is_provider_auth_failure(&message) {
+            let outcome = match auth_recovery.as_deref_mut() {
+                Some(recovery) => recovery(&message).await,
+                None => AuthRecoveryOutcome::Continue,
+            };
+            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = outcome {
+                if switched {
+                    let _ = restore().await?;
+                }
+                let mut message = message;
+                message.error_message = Some(sentence);
+                emit(AutoRetryEvent::End {
+                    success: false,
+                    attempt: total_retries,
+                    final_error: Some(final_error_of(&message)),
+                    restored_model: None,
+                })
+                .await?;
+                return Ok(message);
+            }
         }
         total_retries += 1;
         retries_on_provider += 1;
@@ -505,6 +535,7 @@ mod tests {
                     }
                 }
             },
+            None,
             None,
         )
         .await
@@ -840,5 +871,91 @@ mod tests {
         assert!(harness.events.is_empty());
         assert!(harness.switches.is_empty());
         assert!(harness.restores.is_empty());
+    }
+
+    /// A rejected recovery grant ends the episode inside the chain: the
+    /// primary is restored when a backup had taken over, the sentence is
+    /// the final error, and no provider switch happens for the auth class.
+    #[tokio::test]
+    async fn a_rejected_recovery_ends_the_chain_with_the_re_login_sentence() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(Mutex::new(0usize));
+        let restores: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut seam = move |_message: &AssistantMessage| {
+            Box::pin(async move {
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::ReLoginRequired(
+                    "re-login sentence".to_string(),
+                )
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let restores_for_restore = Arc::clone(&restores);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let mut index = attempts.lock().unwrap();
+                        *index += 1;
+                        Ok(error_message(Some("auth"), Some(401), "token expired"))
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            {
+                let switches = Arc::clone(&switches);
+                move |next: &Model| {
+                    let switches = Arc::clone(&switches);
+                    let next = next.clone();
+                    async move {
+                        switches
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}/{}", next.provider, next.id));
+                        Ok(())
+                    }
+                }
+            },
+            {
+                let restores = Arc::clone(&restores_for_restore);
+                move || {
+                    let restores = Arc::clone(&restores);
+                    async move {
+                        restores.lock().unwrap().push(Some("primary/glm-5.3".to_string()));
+                        Ok(Some("primary/glm-5.3".to_string()))
+                    }
+                }
+            },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            1,
+            "a rejected grant spends no chain retries"
+        );
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("re-login sentence"),
+            "the final message carries the re-login sentence"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "an auth rejection never walks the provider chain"
+        );
+        assert!(
+            restores.lock().unwrap().is_empty(),
+            "no restore runs: the primary never switched"
+        );
     }
 }

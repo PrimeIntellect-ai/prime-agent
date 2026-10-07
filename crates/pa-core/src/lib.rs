@@ -62,6 +62,7 @@ pub mod cron;
 pub mod export_html;
 pub mod goals;
 pub mod kernel;
+pub mod logging;
 pub mod mcp;
 pub mod models;
 pub mod packages;

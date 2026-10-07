@@ -127,6 +127,15 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
         .and_then(|status| u16::try_from(status).ok())
 }
 
+/// Whether a failed assistant message is auth-classified: the
+/// `provider_stream_failure` diagnostic's `auth` kind — the server
+/// rejected the presented credential (a 401 and its token-expired
+/// subclasses).
+#[must_use]
+pub fn is_provider_auth_failure(message: &AssistantMessage) -> bool {
+    provider_stream_failure_kind(message).as_deref() == Some("auth")
+}
+
 /// The failure-scoped disclosure's gate. Lifecycle and faux queue
 /// failures and abort conversions stay silent (the 402 diagnosis: only
 /// a real provider failure must never settle silently).

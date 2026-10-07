@@ -91,6 +91,18 @@ pub trait OAuthIntegration: Send + Sync {
     fn api_key_for(&self, provider_id: &str, credential: &AuthCredential) -> Option<String>;
     /// Refresh an expired credential; `None` = refresh failed.
     fn refresh(&self, provider_id: &str, credentials: &AuthStorageData) -> Option<AuthCredential>;
+    /// Force-refresh after the server rejected a locally-valid token: no
+    /// expiry gate, and the failure reason survives for the re-login
+    /// surface. `None` = the integration has no forced-refresh support
+    /// (the default: hosts that only refresh on expiry).
+    fn refresh_forced(
+        &self,
+        provider_id: &str,
+        credentials: &AuthStorageData,
+    ) -> Option<Result<AuthCredential, String>> {
+        let _ = (provider_id, credentials);
+        None
+    }
 }
 
 /// No OAuth provider registry available (embedded hosts); stored OAuth
