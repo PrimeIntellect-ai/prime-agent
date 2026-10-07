@@ -315,9 +315,8 @@ impl Worker {
         } else {
             Lane::Steering
         };
-        let inputs = self.summary_inputs();
         let (id, queued, snapshot, target) = {
-            let mut core = self.core.lock().unwrap();
+            let (mut core, inputs) = self.summary_inputs();
             let pending = core.steering.len() + core.follow_up.len();
             if let Err(error) =
                 pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(

@@ -253,12 +253,8 @@ impl Worker {
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) async fn refresh_replaced_session_state(&self) {
-        let inputs = self.summary_inputs();
         let (rlm_depth, summary, child_script) = {
-            let mut core = self
-                .core
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (mut core, inputs) = self.summary_inputs();
             // The moved-to file's persisted depth wins (the replacement
             // carries no create-config depth).
             let rlm_depth = core

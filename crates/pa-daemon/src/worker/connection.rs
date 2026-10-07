@@ -801,9 +801,7 @@ impl Worker {
             .filter(|value| !value.is_null())
             .and_then(|value| serde_json::from_value::<DaemonResumeCursor>(value).ok());
 
-        let summary_inputs = self.summary_inputs();
-        let connection_inputs = self.connection_state_inputs();
-        let mut core = self.core.lock().unwrap();
+        let (mut core, summary_inputs, connection_inputs) = self.attach_inputs();
         // The connection-scoped registry (the fresh bots' release
         // findings): the attach's retention is keyed by the connection
         // token so the release on ANY return path (the guard's Drop)

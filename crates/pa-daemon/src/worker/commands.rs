@@ -404,8 +404,7 @@ impl Worker {
         if let Err(response) = self.require_created("get_state") {
             return response;
         }
-        let inputs = self.summary_inputs();
-        let core = self.core.lock().unwrap();
+        let (core, inputs) = self.summary_inputs();
         let summary = self.summary_locked(&core, inputs);
         response_success(
             None,
@@ -684,8 +683,7 @@ impl Worker {
         if name.trim().is_empty() {
             return response_failure(None, command, "Session name cannot be empty", None);
         }
-        let inputs = self.summary_inputs();
-        let mut core = self.core.lock().unwrap();
+        let (mut core, inputs) = self.summary_inputs();
         let previous = core
             .store
             .as_ref()

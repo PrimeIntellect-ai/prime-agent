@@ -11,12 +11,40 @@ use super::{
 use crate::types::SessionSummary;
 
 impl Worker {
-    pub(crate) fn summary_inputs(&self) -> SummaryInputs {
-        SummaryInputs::read(self.engine.as_ref(), &self.user_bash)
+    pub(crate) fn summary_inputs(
+        &self,
+    ) -> (std::sync::MutexGuard<'_, SessionCore>, SummaryInputs) {
+        SummaryInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
     }
 
-    pub(crate) fn connection_state_inputs(&self) -> ConnectionStateInputs {
-        ConnectionStateInputs::read(self.engine.as_ref(), &self.user_bash)
+    pub(crate) fn connection_state_inputs(
+        &self,
+    ) -> (std::sync::MutexGuard<'_, SessionCore>, ConnectionStateInputs) {
+        ConnectionStateInputs::lock(&self.core, self.engine.as_ref(), &self.user_bash)
+    }
+
+    pub(crate) fn attach_inputs(
+        &self,
+    ) -> (
+        std::sync::MutexGuard<'_, SessionCore>,
+        SummaryInputs,
+        ConnectionStateInputs,
+    ) {
+        loop {
+            let details = ModelDetails::read(self.engine.as_ref(), ModelDetailScope::Connection);
+            let core = self.core.lock().unwrap();
+            if self.engine.model_identity() == details.identity {
+                return (
+                    core,
+                    SummaryInputs::capture(
+                        self.engine.as_ref(),
+                        &self.user_bash,
+                        details.model.clone(),
+                    ),
+                    ConnectionStateInputs::capture(self.engine.as_ref(), &self.user_bash, details),
+                );
+            }
+        }
     }
 
     pub(crate) fn summary_locked(
@@ -297,12 +325,13 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
     if context.worker_token.is_empty() || context.roster_link.socket_path().as_os_str().is_empty() {
         return;
     }
-    let inputs = SummaryInputs::read(context.engine.as_ref(), &context.user_bash);
-    // The single roster consumer stamps the snapshot and its sequence in
-    // order, so an older snapshot never carries a newer sequence.
     let command = {
         let mut summary = {
-            let core = context.core.lock().unwrap();
+            let (core, inputs) = SummaryInputs::lock(
+                &context.core,
+                context.engine.as_ref(),
+                &context.user_bash,
+            );
             session_summary(&core, inputs)
         };
         // The embedded counter is the pre-stamp value: every sequence
@@ -331,10 +360,51 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
         .await;
 }
 
-/// The engine/user-bash values the summary family folds in: read OUTSIDE
-/// the core lock (the model metadata re-resolves the registry, and the
-/// core mutex the per-token emit path takes must not wait behind a
-/// resolve).
+/// Registry-derived values are resolved before taking the core lock, then
+/// checked against the cheap live selection under that lock. A model switch
+/// between the resolve and lock makes the caller retry, not ship a torn row.
+#[derive(Clone, Copy)]
+enum ModelDetailScope {
+    Summary,
+    Connection,
+}
+
+struct ModelDetails {
+    identity: (Option<String>, Option<String>),
+    model: Option<Value>,
+    available_thinking_levels: Option<Vec<String>>,
+    model_context_window: Option<u64>,
+}
+
+impl ModelDetails {
+    fn read(engine: &dyn SessionEngine, scope: ModelDetailScope) -> Self {
+        loop {
+            let identity = engine.model_identity();
+            let model = engine.model_metadata();
+            let (available_thinking_levels, model_context_window) = match scope {
+                ModelDetailScope::Summary => (None, None),
+                ModelDetailScope::Connection => (
+                    engine.supported_thinking_levels(),
+                    engine.model_context_window(),
+                ),
+            };
+            // Warm the engine's cached effective level while no core guard is
+            // held: an uncached level may also resolve the model registry.
+            let _ = engine.effective_thinking_level();
+            if engine.model_identity() == identity {
+                return Self {
+                    identity,
+                    model,
+                    available_thinking_levels,
+                    model_context_window,
+                };
+            }
+        }
+    }
+}
+
+/// Engine and user-bash values captured under the same core lock as the
+/// summary, after validating the registry-derived model against its selection.
 pub(crate) struct SummaryInputs {
     pub(crate) thinking_level: String,
     pub(crate) model: Option<Value>,
@@ -345,12 +415,30 @@ pub(crate) struct SummaryInputs {
 }
 
 impl SummaryInputs {
-    fn read(engine: &dyn SessionEngine, user_bash: &crate::user_bash::UserBash) -> Self {
+    fn lock<'a>(
+        core: &'a Mutex<SessionCore>,
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+    ) -> (std::sync::MutexGuard<'a, SessionCore>, Self) {
+        loop {
+            let details = ModelDetails::read(engine, ModelDetailScope::Summary);
+            let core = core.lock().unwrap();
+            if engine.model_identity() == details.identity {
+                return (core, Self::capture(engine, user_bash, details.model));
+            }
+        }
+    }
+
+    fn capture(
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+        model: Option<Value>,
+    ) -> Self {
         Self {
             thinking_level: engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            model: engine.model_metadata(),
+            model,
             model_fallback_message: engine.model_fallback_message(),
             bash_running: user_bash.is_running(),
             quota_parked: engine.is_quota_parked(),
@@ -359,8 +447,8 @@ impl SummaryInputs {
     }
 }
 
-/// The connection state's engine/user-bash values, read outside the core
-/// lock for the same reason as [`SummaryInputs`].
+/// The connection state's engine/user-bash values, captured alongside its
+/// core state; registry-derived values resolve before the lock.
 pub(crate) struct ConnectionStateInputs {
     model: Option<Value>,
     thinking_level: String,
@@ -371,18 +459,36 @@ pub(crate) struct ConnectionStateInputs {
 }
 
 impl ConnectionStateInputs {
-    fn read(engine: &dyn SessionEngine, user_bash: &crate::user_bash::UserBash) -> Self {
+    fn lock<'a>(
+        core: &'a Mutex<SessionCore>,
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+    ) -> (std::sync::MutexGuard<'a, SessionCore>, Self) {
+        loop {
+            let details = ModelDetails::read(engine, ModelDetailScope::Connection);
+            let core = core.lock().unwrap();
+            if engine.model_identity() == details.identity {
+                return (core, Self::capture(engine, user_bash, details));
+            }
+        }
+    }
+
+    fn capture(
+        engine: &dyn SessionEngine,
+        user_bash: &crate::user_bash::UserBash,
+        details: ModelDetails,
+    ) -> Self {
         Self {
-            model: engine.model_metadata(),
+            model: details.model,
             thinking_level: engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            available_thinking_levels: engine
-                .supported_thinking_levels()
+            available_thinking_levels: details
+                .available_thinking_levels
                 .unwrap_or_else(|| vec!["off".to_string()]),
             is_bash_running: user_bash.is_running(),
             goal: engine.goal_state_value(),
-            model_context_window: engine.model_context_window(),
+            model_context_window: details.model_context_window,
         }
     }
 }

@@ -54,11 +54,7 @@ impl Worker {
             return response;
         }
         let summary = {
-            let inputs = self.summary_inputs();
-            let core = self
-                .core
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (core, inputs) = self.summary_inputs();
             self.bind_store_artifact(&core);
             self.summary_locked(&core, inputs)
         };
