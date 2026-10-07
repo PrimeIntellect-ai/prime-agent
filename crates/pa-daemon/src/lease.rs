@@ -228,8 +228,8 @@ const THROUGH_STALE_SLACK: Duration = Duration::from_millis(500);
 /// How long a guard acquisition waits for a foreign holder.
 #[derive(Clone, Copy)]
 enum GuardWait {
-    /// The fast budget: the release and append paths hold the guard only
-    /// for sub-millisecond bookkeeping; a longer-busy guard fails fast.
+    /// The fast budget: the release path holds the guard only for
+    /// sub-millisecond bookkeeping; a longer-busy guard fails fast.
     Fast,
     /// Outlast the stale window: a holder killed mid-mutation can never
     /// release its guard, so the acquisition survives until the reclaim.
@@ -275,7 +275,7 @@ fn with_lease_guard<T>(
                 // Stale guard: a holder that died without cleanup. The
                 // bare guard carries no holder identity, so the lease's
                 // owner is the stand-in: steal only when the owner is
-                // provably dead (a live owner may hold the guard mid-append).
+                // provably dead (a live owner may hold the guard mid-release).
                 if crate::paths::mtime_age(&guard).is_some_and(|age| age > STALE_GUARD_AFTER)
                     && match read_owner(directory) {
                         Ok(Some(owner)) => !owner_alive(&owner),
@@ -363,22 +363,12 @@ impl SessionLease {
                 && canonical_session_path(path) == self.session_path,
             "session lease does not own append target"
         );
-        with_lease_guard(&self.directory, GuardWait::Fast, || {
-            let owner = read_owner(&self.directory)?;
-            anyhow::ensure!(
-                owner
-                    .as_ref()
-                    .is_some_and(|owner| owner.token == self.token)
-                    && !self.released.load(std::sync::atomic::Ordering::SeqCst),
-                "session lease lost ownership before append"
-            );
-            pa_core::session::window::append_cached(
-                path,
-                bytes,
-                pa_core::session::window::AppendOwnership::SessionLeaseHeld,
-            )?;
-            Ok(())
-        })
+        pa_core::session::window::append_cached(
+            path,
+            bytes,
+            pa_core::session::window::AppendOwnership::SessionLeaseHeld,
+        )?;
+        Ok(())
     }
 }
 
@@ -547,61 +537,6 @@ mod tests {
     }
 
     #[test]
-    fn final_owner_token_check_allows_exactly_one_racing_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        std::fs::write(&path, "{}\n").unwrap();
-        let stale = acquire_runtime_session_lease(&path, dir.path()).unwrap();
-        let directory = stale.directory.clone();
-        let replacement = LeaseOwner {
-            version: 1,
-            token: "replacement".to_owned(),
-            pid: std::process::id(),
-            process_start_id: get_process_start_id(std::process::id()),
-            active_session_id: None,
-            session_path: canonical_session_path(&path).to_string_lossy().to_string(),
-            created_at: crate::util::now_iso(),
-        };
-        std::fs::write(
-            directory.join("owner.json"),
-            serde_json::to_string_pretty(&replacement).unwrap() + "\n",
-        )
-        .unwrap();
-        let winner = SessionLease {
-            session_path: canonical_session_path(&path),
-            opened_path: path.clone(),
-            directory,
-            token: replacement.token,
-            released: std::sync::atomic::AtomicBool::new(false),
-        };
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
-        let path_a = path.clone();
-        let path_b = path.clone();
-        let barrier_a = barrier.clone();
-        let barrier_b = barrier.clone();
-        let stale = std::sync::Arc::new(stale);
-        let winner = std::sync::Arc::new(winner);
-        let stale_task = {
-            let stale = stale;
-            std::thread::spawn(move || {
-                barrier_a.wait();
-                stale.append(&path_a, b"stale\n")
-            })
-        };
-        let winner_task = {
-            let winner = winner;
-            std::thread::spawn(move || {
-                barrier_b.wait();
-                winner.append(&path_b, b"winner\n")
-            })
-        };
-        barrier.wait();
-        let results = [stale_task.join().unwrap(), winner_task.join().unwrap()];
-        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "{}\nwinner\n");
-    }
-
-    #[test]
     fn lease_conflicts_and_releases() {
         let dir = std::env::temp_dir().join(format!("pa-lease-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -755,31 +690,6 @@ mod tests {
         );
         std::fs::remove_file(&guard).unwrap();
         let _ = fs::remove_dir_all(&directory);
-    }
-
-    #[test]
-    fn append_fails_fast_behind_a_fresh_guard() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("session.jsonl");
-        std::fs::write(&path, "{}\n").unwrap();
-        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
-        let guard = format!("{}.guard", lease.directory.display());
-        std::fs::create_dir(&guard).unwrap();
-        let started = std::time::Instant::now();
-        let error = lease.append(&path, b"blocked\n").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("Could not coordinate session lease"),
-            "unexpected append error: {error}"
-        );
-        assert!(
-            started.elapsed() < STALE_GUARD_AFTER,
-            "append waited out the stale window: {:?}",
-            started.elapsed()
-        );
-        std::fs::remove_dir(&guard).unwrap();
-        lease.release();
     }
 
     #[test]
