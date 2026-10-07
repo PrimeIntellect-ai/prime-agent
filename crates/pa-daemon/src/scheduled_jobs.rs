@@ -80,7 +80,7 @@ impl QueueHooks {
 
     /// The failed-runnable cancel: the store cancels the dead session's whole
     /// job set by file, so the artifact never re-fires.
-    fn cancel_jobs_for_dead_target(&self, job: &AgentCronJob) {
+    fn cancel_jobs_for_dead_target(&self, job: &AgentCronJob) -> anyhow::Result<()> {
         self.store.cancel_jobs_for_session(
             &CancelJobsFilter {
                 active_session_id: None,
@@ -88,7 +88,8 @@ impl QueueHooks {
                 session_file: Some(job.session_file.clone()),
             },
             crate::util::now_ms(),
-        );
+        )?;
+        Ok(())
     }
 }
 
@@ -97,7 +98,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
         // A persisted job whose target is no longer live (killed — `archived` — or deleted)
         // cancels the session's jobs and skips: a fire can never revive a stopped session.
         if Self::persisted_target_gone(job) {
-            self.cancel_jobs_for_dead_target(job);
+            self.cancel_jobs_for_dead_target(job)?;
             return Ok(Some("skipped"));
         }
         let activity = self.activity();
@@ -260,19 +261,19 @@ impl ScheduledJobs {
         &self,
         binding: SessionBinding,
         artifact_dir: Option<PathBuf>,
-    ) {
+    ) -> anyhow::Result<()> {
         if let Some(dir) = artifact_dir {
-            let _ = std::fs::create_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
             self.store
                 .register_session_artifact(&binding.session_id, &dir);
         }
         if !binding.session_file.is_empty() {
-            self.store.rebind_session_jobs(&binding);
+            self.store.rebind_session_jobs(&binding)?;
         }
         let mut guard = self.scheduler.lock().await;
         if let Some(scheduler) = guard.as_ref() {
             scheduler.wake().await;
-            return;
+            return Ok(());
         }
         let scheduler = Arc::new(AgentCronScheduler::new(
             Arc::clone(&self.store),
@@ -280,6 +281,7 @@ impl ScheduledJobs {
         ));
         scheduler.start().await;
         *guard = Some(scheduler);
+        Ok(())
     }
 
     /// Re-arm the timer after a catalog mutation (TS `cronScheduler.wake`).
@@ -374,7 +376,7 @@ impl Worker {
     /// The killed close's cancel: the session's whole job set cancels by any of
     /// its three identities — durably, so the session's own heartbeats can
     /// never revive it.
-    pub(crate) async fn cancel_session_scheduled_jobs(&self) {
+    pub(crate) async fn cancel_session_scheduled_jobs(&self) -> anyhow::Result<()> {
         let (active_session_id, session_id, session_file) = {
             let core = self
                 .core
@@ -382,7 +384,7 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             let Some(store) = core.store.as_ref() else {
-                return;
+                return Ok(());
             };
             (
                 core.active_session_id.clone(),
@@ -397,18 +399,19 @@ impl Worker {
                 session_file: Some(session_file),
             },
             crate::util::now_ms(),
-        );
+        )?;
         for job in &cancelled {
             self.scheduled.remove_queued_heartbeat_follow_up(job);
         }
         if !cancelled.is_empty() {
             self.scheduled.wake().await;
         }
+        Ok(())
     }
 
     /// Only a subagent's RLM heartbeat jobs cancel here (the plain cron jobs
     /// survive the replacement); a top-level session cancels nothing.
-    pub(crate) async fn cancel_session_rlm_heartbeats(&self) {
+    pub(crate) async fn cancel_session_rlm_heartbeats(&self) -> anyhow::Result<()> {
         let (is_subagent, active_session_id) = {
             let core = self
                 .core
@@ -421,18 +424,19 @@ impl Worker {
             )
         };
         if !is_subagent {
-            return;
+            return Ok(());
         }
         let cancelled = self
             .scheduled
             .store()
-            .cancel_rlm_heartbeats_for_session(&active_session_id, crate::util::now_ms());
+            .cancel_rlm_heartbeats_for_session(&active_session_id, crate::util::now_ms())?;
         for job in &cancelled {
             self.scheduled.remove_queued_heartbeat_follow_up(job);
         }
         if !cancelled.is_empty() {
             self.scheduled.wake().await;
         }
+        Ok(())
     }
 
     /// The saved-session delete's cancel: cancel the deleted file's whole job
@@ -458,14 +462,16 @@ impl Worker {
         self.scheduled
             .store()
             .register_session_artifact(session_id, &dir);
-        self.scheduled.store().cancel_jobs_for_session(
+        if let Err(error) = self.scheduled.store().cancel_jobs_for_session(
             &pa_core::cron::store::CancelJobsFilter {
                 active_session_id: None,
                 session_id: None,
                 session_file: Some(session_file.to_string_lossy().to_string()),
             },
             crate::util::now_ms(),
-        );
+        ) {
+            eprintln!("failed to cancel deleted session jobs: {error}");
+        }
     }
 }
 
