@@ -8,9 +8,11 @@
 //! channel's installer (never a GitHub raw or workflow URL) owns the whole
 //! move, exec'd through the trusted absolute `/bin/sh` (never a
 //! `PATH`-resolved interpreter), kept beside the staged flow the
-//! `package update` self target still serves.
+//! `package update` self target still serves. The `homebrew` detector
+//! lets CLI and TUI refuse package-manager installs before that funnel.
 
 pub mod download;
+pub mod homebrew;
 pub mod install;
 pub mod installer;
 pub mod release;
