@@ -104,6 +104,7 @@ async fn exit_orphaned(worker: &Worker, absent_since: tokio::time::Instant) {
         agent_engine.dispose_kernel().await;
     }
     let _ = worker.record_recovery(false, "shutdown");
+    worker.release_session_lease();
     // The listener closes FIRST and the cleanup probes the path with the
     // owner's bind provably released (the TS graceful-shutdown sequence,
     // shared with `exit_after_close`), so both a REPLACED file and a

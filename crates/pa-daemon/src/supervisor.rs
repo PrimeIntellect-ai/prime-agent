@@ -459,6 +459,28 @@ impl Supervisor {
             });
         }
 
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || {
+                let journals = crate::journal::sweep_orphaned_journals(
+                    &supervisor.descriptor_dir,
+                    &supervisor.options.socket_path,
+                );
+                let leases = crate::lease::reclaim_dead_owner_leases(&supervisor.options.agent_dir);
+                let logs = crate::worker_stderr::prune_socket_logs(
+                    &supervisor.options.agent_dir,
+                    &supervisor.options.socket_path,
+                );
+                let leftovers =
+                    crate::ts_era::sweep_ts_era_leftovers(&supervisor.options.agent_dir);
+                if journals + leases + logs + leftovers > 0 {
+                    supervisor.log_line(&format!(
+                        "boot cleanup: removed {journals} orphaned recovery journal(s), {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
+                    ));
+                }
+            });
+        }
+
         // Update-prepare watchdog: aborts deadline- or self-expiry-breached
         // prepare transactions even when no command arrives to re-check.
         {

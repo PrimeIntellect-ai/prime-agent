@@ -276,7 +276,10 @@ impl Supervisor {
             socket_path: worker_socket.to_string_lossy().to_string(),
             recovery_journal_path: self
                 .descriptor_dir
-                .join(format!("{worker_id}.recovery.jsonl"))
+                .join(format!(
+                    "{worker_id}{}",
+                    crate::journal::RECOVERY_JOURNAL_SUFFIX
+                ))
                 .to_string_lossy()
                 .to_string(),
             orphan_process_journal_path: None,
@@ -362,6 +365,13 @@ impl Supervisor {
                 // would keep the session file while a retry mints a second worker over it.
                 let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
+                let recovery_journal_path = resident
+                    .descriptor
+                    .lock()
+                    .await
+                    .recovery_journal_path
+                    .clone();
+                let _ = std::fs::remove_file(&recovery_journal_path);
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
@@ -770,6 +780,13 @@ impl Supervisor {
                 ));
             }
             _ => {
+                let recovery_journal_path = resident
+                    .descriptor
+                    .lock()
+                    .await
+                    .recovery_journal_path
+                    .clone();
+                let _ = std::fs::remove_file(&recovery_journal_path);
                 let _ = std::fs::remove_file(&resident.descriptor_path);
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
@@ -908,3 +925,70 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
 
 /// How often the graceful-stop exit wait polls worker process liveness.
 const WORKER_EXIT_POLL: Duration = Duration::from_millis(250);
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn supervisor_in(dir: &Path) -> Arc<Supervisor> {
+        let agent_dir = dir.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        )
+    }
+
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let pid = child.id();
+        let _ = child.wait();
+        pid
+    }
+
+    #[tokio::test]
+    async fn the_provably_gone_retire_removes_the_recovery_journal() {
+        let dir = std::env::temp_dir().join(format!("pa-retire-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = supervisor_in(&dir);
+        let descriptor_dir = supervisor.descriptor_dir.clone();
+        let pid = reaped_pid();
+        let journal_path = descriptor_dir.join("w-gone.recovery.jsonl");
+        std::fs::write(&journal_path, "{}\n").expect("journal");
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-gone",
+            "pid": pid,
+            "socketPath": "/tmp/w-gone.sock",
+            "recoveryJournalPath": journal_path.to_string_lossy(),
+            "supervisorSocketPath": supervisor.options.socket_path.to_string_lossy(),
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-gone",
+            "createdAt": "2026-10-07T00:00:00Z",
+            "updatedAt": "2026-10-07T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let descriptor_path = descriptor_dir.join("w-gone.json");
+        persist_worker(&descriptor_path, &descriptor).expect("descriptor persisted");
+        let resident =
+            ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+
+        supervisor.retire_worker_after_stop(&resident).await;
+
+        assert!(
+            !journal_path.exists(),
+            "the journal dies with the descriptor"
+        );
+        assert!(!descriptor_path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
