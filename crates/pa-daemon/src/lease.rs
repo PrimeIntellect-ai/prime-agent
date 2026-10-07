@@ -340,7 +340,10 @@ impl SessionLease {
         // New appends are refused from the swap above; this only drains
         // writes already in flight.
         let drain_deadline = Instant::now() + APPEND_DRAIN_AFTER;
-        while self.append_in_flight.load(std::sync::atomic::Ordering::SeqCst) > 0
+        while self
+            .append_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
             && Instant::now() < drain_deadline
         {
             std::thread::yield_now();
