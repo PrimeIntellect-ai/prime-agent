@@ -932,5 +932,33 @@ class UnreadableWindowIdShotTests(AppTestCase):
         self.assertEqual(point, (110.0, 60.0))
 
 
+class WindowPointSnapshotTests(AppTestCase):
+    async def test_window_point_captures_one_observation(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_screenshot(attach=False)  # the shot: window id 4321, rect (100, 50, 400, 300)
+        new_observation = ax._observe(4242)  # the refresh that lands mid-read
+
+        class SwappingObservation:
+            """The old snapshot; a concurrent refresh publishes mid-read."""
+
+            @property
+            def window_rect(self):
+                # the refresh lands between the rect read and the id read
+                app._observation = new_observation
+                return (300.0, 50.0, 400.0, 300.0)  # the old window's origin
+
+            @property
+            def window_id(self):
+                return 9999  # the old window's id
+
+        app._observation = SwappingObservation()
+        # never the old window's rect with the new window's id: the captured
+        # snapshot rejects the stale window instead of misdirecting the click
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            app._window_point((10.0, 10.0))
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+
+
 if __name__ == "__main__":
     unittest.main()

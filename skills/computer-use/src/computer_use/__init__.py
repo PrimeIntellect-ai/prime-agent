@@ -1024,14 +1024,18 @@ class App:
                 f"point must be an (x, y) pair of numbers, got {point!r}",
                 {"point": repr(point)[:64]},
             )
-        rect = self._observation.window_rect if self._observation is not None else None
+        observation = self._observation
+        rect = observation.window_rect if observation is not None else None
         if rect is None:
             raise ComputerUseError(
                 "TRANSPORT_ERROR",
                 "no focused window observed; call get_ax_state() first",
             )
         shot = self._shot_size
-        current_window_id = self._observation.window_id
+        # the rect and the id come from the one captured snapshot: a
+        # concurrent refresh publishing between the reads must not let the
+        # stale-shot guard validate one window while scaling another's rect
+        current_window_id = observation.window_id
         if shot is not None and self._shot_window_id is not None:
             if current_window_id is None:
                 # a time-bounded observe could not read the window's
