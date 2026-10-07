@@ -786,14 +786,14 @@ class App:
             from . import inject
 
             self._refuse_secure_focus()
-            saved = _save_clipboard()
-            if saved is None:
-                raise ComputerUseError(
-                    "TRANSPORT_ERROR",
-                    "could not snapshot the clipboard; refusing to paste and risk the user's clipboard",
-                    {},
-                )
             with _PASTE_LOCK:
+                saved = _save_clipboard()
+                if saved is None:
+                    raise ComputerUseError(
+                        "TRANSPORT_ERROR",
+                        "could not snapshot the clipboard; refusing to paste and risk the user's clipboard",
+                        {},
+                    )
                 wrote = False
                 change_count: int | None = None
                 try:

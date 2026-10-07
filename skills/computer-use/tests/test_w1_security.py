@@ -656,6 +656,54 @@ class ClipboardSnapshotTests(AppTestCase):
         )
 
 
+class PasteLockSnapshotTests(AppTestCase):
+    async def test_the_snapshot_is_taken_while_the_paste_lock_is_held(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+
+        class RecordingLock:
+            """A lock stand-in that records whether it is currently held."""
+
+            def __init__(self) -> None:
+                self.held = False
+                self.toggle_history: list[bool] = []
+
+            def __enter__(self) -> "RecordingLock":
+                self.held = True
+                self.toggle_history.append(True)
+                return self
+
+            def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+                self.held = False
+                self.toggle_history.append(False)
+
+        lock = RecordingLock()
+        held_at_snapshot: list[bool] = []
+        env_save = computer_use._save_clipboard  # the environment fake, still called below
+
+        def recording_save() -> dict[str, Any]:
+            # the moment of the snapshot: was the paste lock already held?
+            held_at_snapshot.append(lock.held)
+            return env_save()
+
+        with mock.patch.object(computer_use, "_PASTE_LOCK", lock), mock.patch.object(
+            computer_use, "_save_clipboard", recording_save
+        ):
+            await app.paste("payload")
+
+        # the instrumented lock was actually acquired and released during the paste
+        self.assertEqual(lock.toggle_history, [True, False])
+        # the snapshot ran while the lock was held: save, write, paste, and
+        # restore are one lock-held transaction, so a concurrent paste can
+        # never snapshot or restore the other paste's payload
+        self.assertEqual(held_at_snapshot, [True])
+        # and the paste itself still completed its clipboard transaction
+        self.assertEqual(
+            env.clipboard_calls,
+            [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
+        )
+
+
 class SelectTextFailureModeTests(AppTestCase):
     async def test_missing_occurrence_raises_element_stale(self) -> None:
         env = self.make_env()
