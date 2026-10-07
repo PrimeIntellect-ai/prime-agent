@@ -455,6 +455,30 @@ impl SessionRegistry {
         files
     }
 
+    /// Check current descriptor paths without touching the filesystem. The scan
+    /// canonicalizes existing owners in the blocking pool; this catches workers
+    /// registered while that scan was in flight.
+    pub(crate) async fn owns_session_file_path(
+        &self,
+        session_file: &str,
+        canonical_file: &str,
+    ) -> bool {
+        for resident in self.list().await {
+            if resident.identity_quarantined() {
+                continue;
+            }
+            let descriptor = resident.descriptor.lock().await;
+            if descriptor
+                .session_file
+                .as_deref()
+                .is_some_and(|owned| owned == session_file || owned == canonical_file)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Every resident registered for one session file, order unspecified:
     /// a replacement window can briefly hold two; the caller classifies.
     pub(crate) async fn list_by_session_file(
