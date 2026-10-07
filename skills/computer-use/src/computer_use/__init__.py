@@ -814,6 +814,14 @@ class App:
                         # have moved while another paste held the lock
                         self._refuse_secure_focus()
                         self._guard()
+                        if not _clipboard_still_holds_payload(text):
+                            # a copy made during the gate rechecks displaces
+                            # the payload: never paste unrelated data
+                            raise ComputerUseError(
+                                "TRANSPORT_ERROR",
+                                "the clipboard changed during the paste; the payload was not pasted",
+                                {},
+                            )
                         inject._press_key(self._pid, "cmd+v")
                         time.sleep(_PASTE_SETTLE_SECONDS)
                     except ComputerUseError:

@@ -960,5 +960,28 @@ class WindowPointSnapshotTests(AppTestCase):
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
 
 
+class DisplacedPayloadTests(AppTestCase):
+    async def test_a_copy_during_the_gate_rechecks_aborts_the_paste(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        env.pasteboard_holds_payload = True
+        real_refuse = app._refuse_secure_focus
+        refuse_calls: list[int] = []
+
+        def copying_refuse() -> None:
+            refuse_calls.append(1)
+            if len(refuse_calls) >= 2:
+                # a copy lands during the pre-press gate recheck, after the
+                # payload verification has already passed
+                env.pasteboard_holds_payload = False
+            real_refuse()
+
+        with mock.patch.object(app, "_refuse_secure_focus", copying_refuse):
+            with self.assertRaises(errors.ComputerUseError) as caught:
+                await app.paste("payload")
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("clipboard changed during the paste", caught.exception.message)
+
+
 if __name__ == "__main__":
     unittest.main()
