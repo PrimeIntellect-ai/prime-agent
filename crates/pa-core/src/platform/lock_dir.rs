@@ -216,6 +216,37 @@ impl LockDir {
         }
     }
 
+    /// [`Self::acquire`] with a bounded retry: only a fresh foreign lock
+    /// (`WouldBlock`) is retried, sleeping `interval` between attempts;
+    /// any other error returns immediately, and the final `WouldBlock`
+    /// is returned after the last attempt.
+    ///
+    /// # Errors
+    ///
+    /// The last [`io::ErrorKind::WouldBlock`] when all attempts contend;
+    /// other I/O errors as-is.
+    pub fn acquire_retrying(
+        file: &Path,
+        stale_after: Duration,
+        attempts: u32,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        let mut attempt = 0;
+        loop {
+            match Self::acquire(file, stale_after) {
+                Ok(guard) => return Ok(guard),
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(interval);
+                }
+            }
+        }
+    }
+
     /// The mkdir is the acquisition signal: EEXIST is the only collision.
     #[cfg(unix)]
     fn create(path: &Path) -> io::Result<()> {

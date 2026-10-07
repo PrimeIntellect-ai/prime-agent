@@ -523,6 +523,49 @@ class HarnessStateTest(unittest.TestCase):
             titles = [entry.title for entry in HarnessState(real_path).entries["memory"].values()]
             self.assertEqual(titles, ["Seed", "Through alias"])
 
+    def test_concurrent_subprocess_creates_all_land(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness" / "harness_state.json"
+            start = Path(temp_dir) / "start"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            workers = []
+            for worker in range(8):
+                code = (
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "from rlm.harness import HarnessState\n"
+                    f"while not Path({str(start)!r}).exists():\n"
+                    "    time.sleep(0.005)\n"
+                    f"state = HarnessState({str(state_path)!r})\n"
+                    "for i in range(10):\n"
+                    f"    state.create('memory', f'note {worker} {{i}}', f'note {worker} {{i}}', id=f'm-{worker}-{{i}}')\n"
+                )
+                workers.append(
+                    subprocess.Popen([sys.executable, "-c", code], env=env)
+                )
+            start.write_text("", encoding="utf-8")
+            for worker in workers:
+                self.assertEqual(worker.wait(), 0)
+            entries = HarnessState(state_path).list("memory")
+            self.assertEqual(len(entries), 80)
+
+    def test_held_lock_dir_defers_writes_and_pins_the_shared_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness" / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create("memory", "Seed", "Creates the file.", id="seed")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            lock_dir.mkdir()
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    state.create("memory", "Second", "Blocked by the lock.", id="second")
+            finally:
+                lock_dir.rmdir()
+            self.assertIn(str(lock_dir), str(raised.exception))
+            entries = HarnessState(state_path).list("memory")
+            self.assertEqual([entry.id for entry in entries], ["seed"])
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

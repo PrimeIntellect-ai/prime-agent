@@ -283,8 +283,37 @@ pub fn save_harness_state(
     std::fs::create_dir_all(harness_state_dir)?;
     let state_path = get_harness_state_path(harness_state_dir);
     let content = format!("{}\n", serde_json::to_string_pretty(state)?);
-    crate::settings::storage::atomic_write(&state_path, &content)?;
+    crate::settings::storage::atomic_write_with(
+        &state_path,
+        &content,
+        crate::settings::storage::AtomicWriteOptions { fsync: true },
+    )?;
     Ok(state_path)
+}
+
+/// Locked read-modify-write of the harness state file: both writer sides
+/// (the kernel and refine) take `{file}.lock` around the reload and the save.
+///
+/// # Errors
+///
+/// Error when the directory cannot be created, the state lock cannot be acquired, or the atomic write fails.
+pub fn update_harness_state<R>(
+    harness_state_dir: &Path,
+    scope: HarnessScope,
+    update: impl FnOnce(&mut HarnessState) -> R,
+) -> anyhow::Result<(R, PathBuf)> {
+    std::fs::create_dir_all(harness_state_dir)?;
+    let state_path = get_harness_state_path(harness_state_dir);
+    let _lock = crate::platform::lock_dir::LockDir::acquire_retrying(
+        &state_path,
+        std::time::Duration::from_secs(10),
+        50,
+        std::time::Duration::from_millis(20),
+    )?;
+    let mut state = load_harness_state(harness_state_dir, scope);
+    let result = update(&mut state);
+    let written = save_harness_state(harness_state_dir, &state)?;
+    Ok((result, written))
 }
 
 #[must_use]
@@ -636,11 +665,8 @@ mod tests {
         );
     }
 
-    /// Served-path oracle (refinement.ts:404 passes only `{ mode }` — the
-    /// measured signal of record 20260928-172400): the save takes NO fsync
-    /// branch, landing exactly `to_string_pretty(state) + "\n"` bytes.
     #[test]
-    fn harness_save_takes_the_ts_default_no_sync() {
+    fn harness_save_takes_exactly_one_fsync() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = get_global_harness_state_dir(tmp.path());
         let mut state = empty_harness_state();
@@ -657,14 +683,41 @@ mod tests {
         let written = save_harness_state(&dir, &state).unwrap();
         assert_eq!(
             crate::settings::storage::opt_in_fsync_calls(),
-            before,
-            "the TS-default harness save must not sync"
+            before + 1,
+            "the harness save must flush the temp file before the rename"
         );
         assert_eq!(written, get_harness_state_path(&dir));
         assert_eq!(
             std::fs::read_to_string(get_harness_state_path(&dir)).unwrap(),
             expected
         );
+    }
+
+    #[test]
+    fn concurrent_update_harness_state_writes_all_land() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = get_global_harness_state_dir(tmp.path());
+        std::thread::scope(|scope| {
+            for worker in 0..8u32 {
+                let dir = &dir;
+                scope.spawn(move || {
+                    for i in 0..10u32 {
+                        let id = format!("m-{worker}-{i}");
+                        update_harness_state(dir, HarnessScope::Global, |state| {
+                            let memories = state.entries.get_mut(&RefinementKind::Memory).unwrap();
+                            memories.insert(
+                                id.clone(),
+                                entry(&id, RefinementKind::Memory, HarnessScope::Global, "a fact"),
+                            );
+                            memories.len()
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        let loaded = load_harness_state(&dir, HarnessScope::Global);
+        assert_eq!(loaded.entries[&RefinementKind::Memory].len(), 80);
     }
 
     #[test]

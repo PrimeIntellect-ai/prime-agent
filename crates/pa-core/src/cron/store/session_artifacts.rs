@@ -60,8 +60,9 @@ impl AgentCronJobStore {
             }
             recovered
         })
+        .unwrap_or_default()
     }
-    pub(crate) fn write_jobs_session_artifacts(&self, jobs: &[AgentCronJob]) {
+    pub(crate) fn write_jobs_session_artifacts(&self, jobs: &[AgentCronJob]) -> anyhow::Result<()> {
         let artifact_files = self
             .session_artifact_files
             .lock()
@@ -72,11 +73,11 @@ impl AgentCronJobStore {
         for job in jobs {
             if !registered.contains(&job.session_id) {
                 // Mirror the TS error contract.
-                return;
+                return Ok(());
             }
         }
         let paths: Vec<PathBuf> = artifact_files.values().cloned().collect();
-        with_state_locks(&paths, || {
+        let with_locks = with_state_locks(&paths, || {
             let current_by_session_id: HashMap<String, CronJobsState> = artifact_files
                 .iter()
                 .map(|(session_id, path)| (session_id.clone(), read_jobs_state(path)))
@@ -140,14 +141,15 @@ impl AgentCronJobStore {
                 }
             }
         });
+        with_locks.ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))
     }
 }
 
-/// Read one scheduled-jobs artifact file's job rows: a locked, read-only scan A missing or
+/// Read one scheduled-jobs artifact file's job rows. A missing or
 /// unparseable file reads as no jobs.
 #[must_use]
 pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
-    with_state_locks(&[path.to_path_buf()], || read_jobs_state(path).jobs)
+    read_jobs_state(path).jobs
 }
 
 #[cfg(test)]

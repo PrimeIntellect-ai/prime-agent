@@ -64,26 +64,29 @@ impl AgentCronJobStore {
                 }
             }
             dispatches
-        });
+        })
+        .unwrap_or_default();
         if changed && Self::heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
         dispatches
     }
 
-    pub(crate) fn write_jobs(&self, jobs: &[AgentCronJob]) {
+    pub(crate) fn write_jobs(&self, jobs: &[AgentCronJob]) -> anyhow::Result<()> {
         let previous_heartbeats = Self::heartbeat_catalog_signature(&self.read_jobs());
         if self.session_artifact_mode {
-            self.write_jobs_session_artifacts(jobs);
+            self.write_jobs_session_artifacts(jobs)?;
         } else {
             let path = self.require_file_path();
             with_state_locks(std::slice::from_ref(&path), || {
                 write_jobs_file(&path, jobs, true);
-            });
+            })
+            .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))?;
         }
         if Self::heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
+        Ok(())
     }
 
     pub(crate) fn require_file_path(&self) -> PathBuf {
@@ -257,7 +260,7 @@ pub(crate) fn recover_interrupted_in_state(
 }
 
 /// Cross-process state locks: lockfile with stale takeover, sorted by path.
-pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T) -> T {
+pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T) -> Option<T> {
     let mut unique: Vec<PathBuf> = paths.to_vec();
     unique.sort();
     unique.dedup();
@@ -269,41 +272,26 @@ pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T)
         // TS `withCronJobsStateLocks`: proper-lockfile, 100 attempts x
         // 10ms, 30s staleness takeover.
         let stale = std::time::Duration::from_millis(LOCK_STALE_MS);
-        let mut acquired = false;
-        let mut failure: Option<std::io::Error> = None;
-        for _ in 0..100 {
-            match crate::platform::lock_dir::LockDir::acquire(path, stale) {
-                Ok(guard) => {
-                    guards.push(guard);
-                    acquired = true;
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
+        match crate::platform::lock_dir::LockDir::acquire_retrying(
+            path,
+            stale,
+            100,
+            std::time::Duration::from_millis(10),
+        ) {
+            Ok(guard) => guards.push(guard),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "cron jobs state lock not acquired; skipped"
+                );
+                return None;
             }
-        }
-        if !acquired {
-            // TS throws when the lock is not acquired; the action still runs, but never silently: a
-            // concurrent writer may be mutating the file.
-            tracing::warn!(
-                error = failure.as_ref().map_or_else(
-                    || "lock still held after retries".to_string(),
-                    ToString::to_string,
-                ),
-                path = %path.display(),
-                "cron jobs state lock not acquired; running unlocked"
-            );
-            break;
         }
     }
     let result = action();
     drop(guards);
-    result
+    Some(result)
 }
 
 pub(crate) fn read_jobs_state(path: &Path) -> CronJobsState {

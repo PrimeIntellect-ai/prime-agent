@@ -101,7 +101,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = existing;
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
     pub fn pause_heartbeat(&self, active_session_id: &str, now: u64) -> Option<AgentCronJob> {
@@ -125,7 +125,7 @@ impl AgentCronJobStore {
                 paused_job
             })
             .collect();
-        self.write_jobs(&jobs);
+        let _ = self.write_jobs(&jobs);
         paused
     }
 
@@ -165,7 +165,7 @@ impl AgentCronJobStore {
                 resumed_job
             })
             .collect();
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(resumed)
     }
 
@@ -190,7 +190,7 @@ impl AgentCronJobStore {
                 cleared_job
             })
             .collect();
-        self.write_jobs(&jobs);
+        let _ = self.write_jobs(&jobs);
         cleared
     }
 
@@ -263,10 +263,10 @@ impl AgentCronJobStore {
                     }
                 })
                 .collect();
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
             return Ok(Some(updated_job));
         }
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(Some(updated_job))
     }
 }

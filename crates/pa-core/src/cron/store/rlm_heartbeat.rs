@@ -87,7 +87,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = self.read_jobs();
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -169,7 +169,7 @@ impl AgentCronJobStore {
             .collect();
         if matched {
             if let Some(updated_job) = &updated {
-                self.write_jobs(&jobs);
+                self.write_jobs(&jobs)?;
                 return Ok(Some(updated_job.clone()));
             }
             anyhow::bail!(
@@ -208,7 +208,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if deleted.is_some() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         deleted
     }
@@ -241,7 +241,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if !cancelled.is_empty() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         cancelled
     }

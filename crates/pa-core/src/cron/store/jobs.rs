@@ -62,7 +62,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = self.read_jobs();
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -99,7 +99,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if !rebound_jobs.is_empty() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         rebound_jobs
     }
@@ -136,7 +136,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if !cancelled.is_empty() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         cancelled
     }
@@ -161,7 +161,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if cancelled.is_some() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         cancelled
     }
@@ -216,7 +216,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if updated.is_some() {
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
         }
         Ok(updated)
     }
@@ -247,7 +247,7 @@ impl AgentCronJobStore {
             })
             .collect();
         if updated.is_some() {
-            self.write_jobs(&jobs);
+            let _ = self.write_jobs(&jobs);
         }
         updated
     }
@@ -520,6 +520,28 @@ mod tests {
         assert_eq!(once_done.status, JobStatus::Completed);
         store.record_skip_result(&job.id, now + 60_000).unwrap();
         assert!(store.list().iter().any(|job| job.last_skipped_at.is_some()));
+    }
+
+    #[test]
+    fn claim_due_skips_while_the_state_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = AgentCronJobStore::new(dir.path().join("jobs.json"));
+        let now = 1_700_000_000_000;
+        let job = store.create(&input("tick", "every 10m", now)).unwrap();
+        let path = store.require_file_path();
+        let before = std::fs::read(&path).unwrap();
+        {
+            let _held = crate::platform::lock_dir::LockDir::acquire(
+                &path,
+                std::time::Duration::from_secs(30),
+            )
+            .unwrap();
+            assert!(store.claim_due(now + 600_000, now + 600_000).is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        let dispatches = store.claim_due(now + 600_000, now + 600_000);
+        assert_eq!(dispatches.len(), 1);
+        assert_eq!(dispatches[0].job.id, job.id);
     }
 
     #[test]
