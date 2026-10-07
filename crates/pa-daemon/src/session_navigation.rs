@@ -366,15 +366,17 @@ impl Worker {
         }
         let navigation = self.navigation.clone();
         let payload = payload.clone();
-        // The blocking closure wraps the prepared result: its own error stays
-        // the empty join error (clippy::result_large_err), and the blocking
-        // pool's join unwrap lands in the match below.
+        // The closure boxes its error (clippy::result_large_err): the
+        // DaemonResponse unwraps in the match arms, not inside any closure.
         let prepared = match tokio::task::spawn_blocking(move || {
-            Ok(navigation.prepare_switch_session(&payload))
+            navigation
+                .prepare_switch_session(&payload)
+                .map_err(Box::new)
         })
         .await
         {
-            Ok(result) => result,
+            Ok(Ok(prepared)) => Ok(prepared),
+            Ok(Err(boxed)) => Err(*boxed),
             Err(error) => Err(response_failure(
                 None,
                 "switch_session",
@@ -394,11 +396,12 @@ impl Worker {
         let navigation = self.navigation.clone();
         let payload = payload.clone();
         let prepared = match tokio::task::spawn_blocking(move || {
-            Ok(navigation.prepare_import_jsonl(&payload))
+            navigation.prepare_import_jsonl(&payload).map_err(Box::new)
         })
         .await
         {
-            Ok(result) => result,
+            Ok(Ok(prepared)) => Ok(prepared),
+            Ok(Err(boxed)) => Err(*boxed),
             Err(error) => Err(response_failure(
                 None,
                 "import_jsonl",
