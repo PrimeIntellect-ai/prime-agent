@@ -1,5 +1,5 @@
-//! The RLM ledger test battery: grammar, replay, tombstone, seed, display,
-//! and usage-bucket families.
+//! The RLM ledger test battery: grammar, replay, tombstone, seed, and
+//! usage-bucket families.
 use super::*;
 use crate::session_usage::SessionUsageSummary;
 
@@ -90,6 +90,7 @@ fn spawn_rename_delete_replay_in_order() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "worker".into(),
+            ..Default::default()
         })
         .unwrap();
     ledger
@@ -131,6 +132,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             child: child_path.clone(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     assert!(ledger.edge_is_live("sub-1", &child_path));
@@ -155,6 +157,7 @@ fn edge_is_live_reflects_tombstones_and_files() {
             child: other_path,
             depth: 1,
             name: "w2".into(),
+            ..Default::default()
         })
         .unwrap();
     ledger
@@ -186,6 +189,7 @@ fn dead_child_or_parent_drops_from_live_edges() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(ledger.live_edges().unwrap().len(), 1);
@@ -223,6 +227,7 @@ fn moved_edge_paths_resolve_through_the_session_id() {
             child: recorded_child.into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
 
@@ -269,6 +274,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     let duplicate = ledger.append_spawn(&RlmSpawnInput {
@@ -277,6 +283,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         child: child.to_string_lossy().into(),
         depth: 1,
         name: "w".into(),
+        ..Default::default()
     });
     assert!(duplicate.is_err());
     let depth_zero = ledger.append_spawn(&RlmSpawnInput {
@@ -285,6 +292,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
         child: child.to_string_lossy().into(),
         depth: 0,
         name: "w".into(),
+        ..Default::default()
     });
     assert!(depth_zero.is_err());
     // A torn tail or bad line costs that record only; later appends still land.
@@ -299,6 +307,7 @@ fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
             child: dir.join("c4.jsonl").to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     let edges = ledger.edges(false).unwrap();
@@ -369,65 +378,78 @@ fn seeds_from_legacy_registries_once_and_atomically() {
     assert!(first.contains("\"op\":\"meta\""));
 }
 
+/// `append_complete` records one completion per child edge: a second call
+/// appends nothing, a re-spawn re-arms the verdict, and a tombstoned edge
+/// is never completed.
 #[test]
-fn display_entries_round_trip_and_tombstones_stick() {
-    let dir = temp_dir("display");
-    let child_dir = dir.join("sub-1");
-    fs::create_dir_all(&child_dir).unwrap();
-    let entry = RlmSubagentDisplayEntry {
-        type_tag: "rlm_subagent".into(),
+fn complete_records_are_once_per_child_edge() {
+    let dir = temp_dir("complete-once");
+    let ledger = ledger_for(&dir);
+    let parent = dir.join("parent.jsonl");
+    let child = dir.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&child, "{}").unwrap();
+    let spawn = || RlmSpawnInput {
         child_id: "sub-1".into(),
-        session_name: "w".into(),
-        session_dir: child_dir.to_string_lossy().into(),
-        session_file: dir.join("c.jsonl").to_string_lossy().into(),
-        rlm_parent_node_id: None,
-        prompt: Some("do work".into()),
-        spawn_code: None,
-        model: Some(json!({"provider": "p", "modelId": "m"})),
-        status: "running".into(),
-        created_at: 1,
+        parent: parent.to_string_lossy().into(),
+        child: child.to_string_lossy().into(),
+        depth: 1,
+        name: "w".into(),
+        ..Default::default()
     };
-    assert!(write_rlm_subagent_display(&entry).unwrap());
-    let read = read_rlm_subagent_display(&child_dir).unwrap();
-    assert_eq!(read.child_id, "sub-1");
-    assert_eq!(read.prompt.as_deref(), Some("do work"));
-    let mut tombstone = entry.clone();
-    tombstone.status = "deleted".into();
-    assert!(write_rlm_subagent_display(&tombstone).unwrap());
-    assert!(!write_rlm_subagent_display(&entry).unwrap());
-}
-
-#[test]
-fn display_entry_file_is_owner_only() {
-    let dir = temp_dir("display-mode");
-    let child_dir = dir.join("sub-1");
-    fs::create_dir_all(&child_dir).unwrap();
-    let entry = RlmSubagentDisplayEntry {
-        type_tag: "rlm_subagent".into(),
-        child_id: "sub-1".into(),
-        session_name: "w".into(),
-        session_dir: child_dir.to_string_lossy().into(),
-        session_file: dir.join("c.jsonl").to_string_lossy().into(),
-        rlm_parent_node_id: None,
-        prompt: None,
-        spawn_code: None,
-        model: None,
-        status: "running".into(),
-        created_at: 1,
-    };
-    assert!(write_rlm_subagent_display(&entry).unwrap());
-    // The TS display writer creates its temp 0o600; the rename carries
-    // that mode onto the visible file.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(child_dir.join("rlm-subagent.json"))
+    let complete_count = || {
+        fs::read_to_string(ledger.ledger_path())
             .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
-    }
+            .lines()
+            .filter(|line| line.contains(r#""op":"complete""#))
+            .count()
+    };
+    ledger.append_spawn(&spawn()).unwrap();
+    ledger
+        .append_complete("sub-1", &child.to_string_lossy())
+        .unwrap();
+    ledger
+        .append_complete("sub-1", &child.to_string_lossy())
+        .unwrap();
+    assert_eq!(complete_count(), 1);
+    assert!(ledger.edges(false).unwrap()[0].completed);
+    ledger.append_spawn(&spawn()).unwrap();
+    assert!(!ledger.edges(false).unwrap()[0].completed);
+    ledger
+        .append_complete("sub-1", &child.to_string_lossy())
+        .unwrap();
+    assert_eq!(complete_count(), 2);
+    assert!(ledger.edges(false).unwrap()[0].completed);
+    let gone = dir.join("gone.jsonl");
+    fs::write(&gone, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-2".into(),
+            parent: parent.to_string_lossy().into(),
+            child: gone.to_string_lossy().into(),
+            depth: 1,
+            name: "gone".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    ledger
+        .append_delete(
+            "sub-2",
+            &gone.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+        )
+        .unwrap();
+    ledger
+        .append_complete("sub-2", &gone.to_string_lossy())
+        .unwrap();
+    assert_eq!(complete_count(), 2);
+    let edges = ledger.edges(true).unwrap();
+    let gone = edges
+        .iter()
+        .find(|edge| edge.child_id == "sub-2")
+        .expect("the tombstoned edge");
+    assert!(gone.deleted.is_some());
+    assert!(!gone.completed);
 }
 
 fn usage_summary(cost: f64) -> crate::session_usage::SessionUsageSummary {
@@ -475,6 +497,7 @@ fn delete_amendment_carries_the_usage_snapshot() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     ledger
@@ -545,6 +568,7 @@ fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     for bad_cost in [-0.40, -0.0, f64::NAN, f64::INFINITY] {
@@ -592,6 +616,7 @@ fn tombstone_child_path_with_usage_snapshots_every_edge() {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                ..Default::default()
             })
             .unwrap();
         ledger
@@ -647,6 +672,7 @@ fn bucket_folds_own_snapshots_post_order_without_double_counting() {
                 child: child.to_string_lossy().into(),
                 depth,
                 name: "w".into(),
+                ..Default::default()
             })
             .unwrap();
     };
@@ -740,6 +766,7 @@ fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     ledger
@@ -841,6 +868,7 @@ fn bucket_bills_tombstoned_children_without_catalog_rows() {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                ..Default::default()
             })
             .unwrap();
     };
@@ -973,6 +1001,7 @@ fn bucket_skips_recreated_live_paths() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w".into(),
+            ..Default::default()
         })
         .unwrap();
     ledger
@@ -990,6 +1019,7 @@ fn bucket_skips_recreated_live_paths() {
             child: child.to_string_lossy().into(),
             depth: 1,
             name: "w2".into(),
+            ..Default::default()
         })
         .unwrap();
     let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();

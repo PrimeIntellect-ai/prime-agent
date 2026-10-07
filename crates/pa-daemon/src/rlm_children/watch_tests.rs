@@ -229,14 +229,16 @@ async fn sessions_with_fake_supervisor(
     kill_behavior: FakeKill,
     child: FakeChild,
 ) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
-    sessions_with_fake_child_subagents(
+    let (sessions, kill_rx, _socket) = sessions_with_fake_child_subagents(
+        &std::env::temp_dir(),
         follow_up_tx,
         idle_delay_ms,
         kill_behavior,
         child,
         Arc::new(FakeChildSubagents::default()),
     )
-    .await
+    .await;
+    (sessions, kill_rx)
 }
 
 /// The fake child's own subagents: whether one still runs (the child
@@ -251,12 +253,17 @@ struct FakeChildSubagents {
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
 /// subagents from `child_subagents` (a grandchild still running).
 async fn sessions_with_fake_child_subagents(
+    agent_dir: &std::path::Path,
     follow_up_tx: mpsc::UnboundedSender<Value>,
     idle_delay_ms: u64,
     kill_behavior: FakeKill,
     child: FakeChild,
     child_subagents: Arc<FakeChildSubagents>,
-) -> (SupervisorChildSessions, mpsc::UnboundedReceiver<Value>) {
+) -> (
+    SupervisorChildSessions,
+    mpsc::UnboundedReceiver<Value>,
+    std::path::PathBuf,
+) {
     let socket = std::env::temp_dir().join(format!(
         "pa-rlm-watch-{}.sock",
         uuid::Uuid::new_v4().simple()
@@ -272,13 +279,13 @@ async fn sessions_with_fake_child_subagents(
         child_subagents,
     )
     .await;
-    let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket));
+    let link = Arc::new(crate::supervisor_link::SupervisorLink::new(socket.clone()));
     let sessions = SupervisorChildSessions::new(
         link,
-        std::env::temp_dir(),
+        agent_dir.to_path_buf(),
         "parent-live".to_string(),
         std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-            std::env::temp_dir(),
+            agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
     );
@@ -289,7 +296,7 @@ async fn sessions_with_fake_child_subagents(
         cwd: Some(std::env::temp_dir().to_string_lossy().to_string()),
         ..ParentIdentity::with_default_depth()
     });
-    (sessions, kill_rx)
+    (sessions, kill_rx, socket)
 }
 
 async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
@@ -443,27 +450,64 @@ async fn child_updates_surface_through_the_sink() {
     );
 }
 
-/// A cancelled run's watcher settle leaves the display `running`, so a
-/// restart relists the child as `error` instead of `completed`.
+/// A cancelled run never lands the completed verdict, so a restart
+/// relists it as `error` (the settle watcher records a completion only
+/// for a `done` settle).
 #[tokio::test]
-async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle() {
+async fn a_cancelled_run_records_no_completion() {
+    let tmp = tempfile::tempdir().unwrap();
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
-    let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 500, FakeKill::Success, FakeChild::Healthy)
-            .await;
+    let (sessions, _kill_rx, socket) = sessions_with_fake_child_subagents(
+        tmp.path(),
+        follow_up_tx,
+        500,
+        FakeKill::Success,
+        FakeChild::Healthy,
+        Arc::new(FakeChildSubagents::default()),
+    )
+    .await;
     let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
     sessions.set_settle_hook(Arc::new(move || {
         let _ = hook_tx.send(());
     }));
     let handle = spawn_child(&sessions).await;
-    let display_file = Path::new(&handle.session_dir).join("rlm-subagent.json");
-    std::fs::write(
-        &display_file,
-        json!({ "type": "rlm_subagent", "childId": handle.rlm_child_id,
-                "sessionDir": handle.session_dir, "status": "running" })
-        .to_string(),
+    let sessions_dir = tmp.path().join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+    crate::descriptor::persist_supervisor_config(
+        &crate::descriptor::descriptor_dir(tmp.path(), &socket)
+            .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+        &crate::descriptor::PersistedSupervisorConfig {
+            version: 1,
+            socket_path: socket.to_string_lossy().to_string(),
+            default_session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+        },
     )
     .unwrap();
+    let ledger = crate::rlm_ledger::RlmSpawnLedger::new(tmp.path(), &sessions_dir, |_| {});
+    let child_file = sessions
+        .inner
+        .find_record(&handle.rlm_child_id)
+        .await
+        .expect("the spawned child's record")
+        .lock()
+        .await
+        .session_file
+        .clone()
+        .expect("child session file");
+    ledger
+        .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+            child_id: handle.rlm_child_id.clone(),
+            parent: tmp
+                .path()
+                .join("parent.jsonl")
+                .to_string_lossy()
+                .to_string(),
+            child: child_file.clone(),
+            depth: 1,
+            name: handle.name.clone(),
+            ..Default::default()
+        })
+        .unwrap();
     sessions.notify_turn_done();
     assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
     // One settle hook from the cancel, one from the watcher's settle tail.
@@ -473,9 +517,12 @@ async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle(
             .expect("both settle hooks fire")
             .expect("hook channel open");
     }
-    let display = crate::rlm_ledger::read_rlm_subagent_display(Path::new(&handle.session_dir))
-        .expect("display entry stays readable");
-    assert_eq!(display.status, "running");
+    let edges = ledger.edges(false).expect("ledger replay");
+    let edge = edges
+        .iter()
+        .find(|edge| edge.child_id == handle.rlm_child_id)
+        .expect("the child's edge");
+    assert!(!edge.completed, "a cancelled run stays uncompleted");
 }
 
 /// The `follow_up` carries exactly the TS failure row (`createRlmChildFailureMessage`).
@@ -707,7 +754,8 @@ async fn a_child_with_a_running_grandchild_keeps_the_parent_running() {
         running: AtomicBool::new(true),
         ..FakeChildSubagents::default()
     });
-    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+    let (sessions, _kill_rx, _socket) = sessions_with_fake_child_subagents(
+        &std::env::temp_dir(),
         follow_up_tx,
         0,
         FakeKill::Success,
@@ -749,7 +797,8 @@ async fn collect_with_a_timeout_waits_for_a_running_grandchild() {
         running: AtomicBool::new(true),
         ..FakeChildSubagents::default()
     });
-    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+    let (sessions, _kill_rx, _socket) = sessions_with_fake_child_subagents(
+        &std::env::temp_dir(),
         follow_up_tx,
         0,
         FakeKill::Success,

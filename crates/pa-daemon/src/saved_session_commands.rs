@@ -997,6 +997,7 @@ mod tombstone_usage_tests {
                 child: child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                ..Default::default()
             })
             .unwrap();
         let captured = tombstone_saved_session_delete(
@@ -1068,6 +1069,7 @@ mod tombstone_usage_tests {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                ..Default::default()
             })
             .unwrap();
         // The delete goes through a final-component symlink: the capture
@@ -1114,6 +1116,7 @@ mod tombstone_usage_tests {
                 child: fifo.to_string_lossy().into(),
                 depth: 1,
                 name: "w".into(),
+                ..Default::default()
             })
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);

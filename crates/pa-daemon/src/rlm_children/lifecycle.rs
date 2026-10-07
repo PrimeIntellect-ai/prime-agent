@@ -116,7 +116,7 @@ impl SupervisorChildSessionsInner {
                 metadata["prompt"] = json!(prompt);
             }
             // The resolved model rides the metadata so the supervisor's
-            // display entry carries it for passive hydration.
+            // spawn record carries it for passive hydration.
             if let Some((provider, model_id)) = model.split_once('/') {
                 metadata["model"] = json!({ "provider": provider, "modelId": model_id });
             }
@@ -469,31 +469,32 @@ impl SupervisorChildSessionsInner {
                 // notice's follow-up turn mints its own request.
                 self.record_child_return(record).await;
                 self.emit_child_update(record).await;
-                // Only a successful run completes the display (TS
+                // Only a successful run records its completion (TS
                 // `completeRlmSubagentRuntime`); a cancelled or failed run
-                // stays `running`, which a restart relists as `error`.
+                // never does, so a restart relists it as `error`.
                 let completed = {
                     let record = record.lock().await;
                     (record.settled_status == Some("done"))
-                        .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
+                        .then(|| (record.session_file.clone(), record.rlm_child_id.clone()))
                 };
-                if let Some((session_dir, child_id)) = completed {
+                if let Some((child, child_id)) = completed {
+                    let agent_dir = self.agent_dir.clone();
+                    let supervisor_socket = self.link.socket_path().clone();
                     if let Err(error) = tokio::task::spawn_blocking(move || {
-                        let Some(mut display) =
-                            crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
+                        let Some(ledger) =
+                            super::supervisor_spawn_ledger(&agent_dir, &supervisor_socket)
                         else {
                             return Ok(());
                         };
-                        if display.child_id != child_id || display.status != "running" {
+                        let Some(child) = child.as_deref() else {
                             return Ok(());
-                        }
-                        display.status = "completed".to_string();
-                        crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
+                        };
+                        ledger.append_complete(&child_id, child)
                     })
                     .await
                     .unwrap_or_else(|error| Err(anyhow!(error)))
                     {
-                        eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
+                        eprintln!("pa-daemon: RLM child ledger completion failed: {error:#}");
                     }
                 }
                 self.deliver_settle_notice(record).await;

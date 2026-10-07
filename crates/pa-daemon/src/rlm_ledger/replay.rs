@@ -18,6 +18,15 @@ pub(super) enum LedgerRecord {
         child: String,
         depth: u32,
         name: String,
+        prompt: Option<String>,
+        model: Option<Value>,
+        spawn_code: Option<String>,
+        rlm_parent_node_id: Option<String>,
+        created_at: Option<u64>,
+    },
+    Complete {
+        child_id: String,
+        child: String,
     },
     Rename {
         child_id: String,
@@ -109,7 +118,18 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
                 child,
                 depth: depth as u32,
                 name,
+                prompt: str_field(&record, "prompt"),
+                model: record.get("model").cloned(),
+                spawn_code: str_field(&record, "spawnCode"),
+                rlm_parent_node_id: str_field(&record, "rlmParentNodeId"),
+                created_at: record.get("createdAt").and_then(Value::as_u64),
             }))
+        }
+        "complete" => {
+            let (Some(child_id), Some(child)) = (child_id(), child()) else {
+                bail!("malformed RLM ledger line {line_no}: invalid complete record");
+            };
+            Ok(Some(LedgerRecord::Complete { child_id, child }))
         }
         "rename" => {
             let (Some(child_id), Some(child), Some(name)) =
@@ -156,6 +176,15 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
 pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
+}
+
+/// Resolve the edge a rename/delete/complete record joins: the canonical
+/// key, else the sole edge sharing its childId (see `sole_edge_by_child_id`).
+pub(super) fn edge_at(state: &ReplayState, child_id: &str, child: &str) -> Option<usize> {
+    match state.index.get(&edge_key(child_id, child)).copied() {
+        Some(at) => Some(at),
+        None => sole_edge_by_child_id(state, child_id),
+    }
 }
 
 pub(super) fn edge_key(child_id: &str, child: &str) -> String {

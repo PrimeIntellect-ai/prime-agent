@@ -393,6 +393,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
                 child: child_file.to_string_lossy().to_string(),
                 depth: 1,
                 name: format!("flash worker {index:03}"),
+                ..Default::default()
             })
             .expect("append spawn edge");
     }

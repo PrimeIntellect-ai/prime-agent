@@ -5,15 +5,20 @@
 //! children stay roster-visible after passivation. Mirrors the record
 //! grammar, bounds, and legacy-registry seeding of the TS
 //! `modes/daemon/rlm-ledger.ts`; unlike TS, replay logs and skips a
-//! malformed line instead of failing the whole read.
+//! malformed line instead of failing the whole read, and the spawn record
+//! carries the child's display metadata (prompt, model, spawnCode,
+//! rlmParentNodeId, createdAt) while a `complete` op records the
+//! successful-run verdict, so the per-child `rlm-subagent.json` display
+//! file TS kept beside the ledger does not exist here.
 //!
 //! Writers: the supervisor appends at admission moments (spawn at child
-//! create, rename at subagent rename, delete at subagent delete). Readers:
-//! every roster surface that must show non-resident children (`list --all`,
-//! the saved-session catalog). Appends are single small `O_APPEND` writes
-//! whose atomicity we rely on for cross-process interleaving; reads re-read
-//! the whole file behind a stat guard, so staleness is bounded to in-flight
-//! appends.
+//! create, rename at subagent rename, delete at subagent delete) and the
+//! worker appends `complete` when a child run settles successfully.
+//! Readers: every roster surface that must show non-resident children
+//! (`list --all`, the saved-session catalog). Appends are single small
+//! `O_APPEND` writes whose atomicity we rely on for cross-process
+//! interleaving; reads re-read the whole file behind a stat guard, so
+//! staleness is bounded to in-flight appends.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
@@ -32,19 +37,16 @@ use crate::util::now_iso;
 mod replay;
 
 use replay::{
-    canonicalize_dir, edge_key, file_identity, is_file, parse_ledger_line, sole_edge_by_child_id,
-    LedgerRecord, LivePathResolver, ReplaySnapshot, ReplayState,
+    canonicalize_dir, edge_at, edge_key, file_identity, is_file, parse_ledger_line, LedgerRecord,
+    LivePathResolver, ReplaySnapshot, ReplayState,
 };
 
 mod legacy_registry;
 
 pub(crate) use legacy_registry::read_legacy_registry;
+pub use legacy_registry::LegacyRlmSubagentEntry;
 #[cfg(test)]
 use legacy_registry::{legacy_registry_path, LEGACY_REGISTRY_HEADER_READ_MAX_BYTES};
-pub use legacy_registry::{
-    read_rlm_subagent_display, write_rlm_subagent_display, LegacyRlmSubagentEntry,
-    RlmSubagentDisplayEntry,
-};
 
 /// Ledger files live under `<agent-dir>/rlm-ledger/`, one per sessions dir.
 pub const RLM_LEDGER_DIR: &str = "rlm-ledger";
@@ -86,13 +88,29 @@ impl RlmLedgerDeleteReason {
 
 /// One live family edge after replay (last writer wins per childId+child).
 /// Edges are replay-ordered: the append order of the ledger file.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RlmLedgerEdge {
     pub child_id: String,
     pub parent: String,
     pub child: String,
     pub depth: u32,
     pub name: String,
+    /// The spawned task's prompt, capped to its display label;
+    /// `None` on records that predate the field.
+    pub prompt: Option<String>,
+    /// The resolved model at spawn, as `{"provider", "modelId"}`.
+    pub model: Option<Value>,
+    /// The spawn surface that admitted the child (`rlm.spawn`), for
+    /// display-grade hydration; `None` on older records.
+    pub spawn_code: Option<String>,
+    /// The parent node the spawn anchored to; `None` on older records.
+    pub rlm_parent_node_id: Option<String>,
+    /// The spawn's wall-clock start (ms since the epoch); a reseeded
+    /// child falls back to its file's ctime when absent.
+    pub created_at: Option<u64>,
+    /// Whether the child's run settled successfully (a `complete`
+    /// record landed); `false` on older records, so they reseed `error`.
+    pub completed: bool,
     pub deleted: Option<RlmLedgerDeleteReason>,
     /// The child's captured own usage at deletion, so a tombstoned child's
     /// spend stays billable; `None` on legacy tombstones and live edges.
@@ -100,13 +118,18 @@ pub struct RlmLedgerEdge {
 }
 
 /// Inputs for `append_spawn` (validated like a record the reader would refuse to read back).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RlmSpawnInput {
     pub child_id: String,
     pub parent: String,
     pub child: String,
     pub depth: u32,
     pub name: String,
+    pub prompt: Option<String>,
+    pub model: Option<Value>,
+    pub spawn_code: Option<String>,
+    pub rlm_parent_node_id: Option<String>,
+    pub created_at: Option<u64>,
 }
 
 /// The per-sessions-dir spawn ledger. Reads are guarded by a file stat snapshot; a missing ledger
@@ -196,7 +219,7 @@ impl RlmSpawnLedger {
                 );
             }
         }
-        self.append_record(&json!({
+        let mut record = json!({
             "v": 1,
             "op": "spawn",
             "at": now_iso(),
@@ -205,7 +228,23 @@ impl RlmSpawnLedger {
             "child": child_path_text,
             "depth": input.depth,
             "name": input.name,
-        }))
+        });
+        if let Some(prompt) = &input.prompt {
+            record["prompt"] = json!(prompt);
+        }
+        if let Some(model) = &input.model {
+            record["model"] = model.clone();
+        }
+        if let Some(spawn_code) = &input.spawn_code {
+            record["spawnCode"] = json!(spawn_code);
+        }
+        if let Some(rlm_parent_node_id) = &input.rlm_parent_node_id {
+            record["rlmParentNodeId"] = json!(rlm_parent_node_id);
+        }
+        if let Some(created_at) = input.created_at {
+            record["createdAt"] = json!(created_at);
+        }
+        self.append_record(&record)
     }
 
     /// Record a rename for a known child edge.
@@ -248,6 +287,35 @@ impl RlmSpawnLedger {
             }
         }
         Ok(())
+    }
+
+    /// Record a child run's successful settle: the durable `completed`
+    /// verdict a restarted parent's reseed reads back as `done`. A spawn
+    /// without it (a cancelled or failed run, or a pre-complete binary)
+    /// reseeds as `error`. One record per child: a later `spawn` at the
+    /// same edge resets the verdict, and an already-completed or
+    /// tombstoned edge keeps its current one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails (an oversized ledger) or
+    /// the complete record cannot be appended.
+    pub fn append_complete(&self, child_id: &str, child: &str) -> Result<()> {
+        let state = self.replay_cached()?;
+        let Some(at) = edge_at(&state, child_id, child) else {
+            return Ok(());
+        };
+        if state.edges[at].deleted.is_some() || state.edges[at].completed {
+            return Ok(());
+        }
+        let child_path = canonical_session_path(Path::new(child));
+        self.append_record(&json!({
+            "v": 1,
+            "op": "complete",
+            "at": now_iso(),
+            "childId": child_id,
+            "child": child_path.to_string_lossy(),
+        }))
     }
 
     /// Tombstone a child's edge.
@@ -674,29 +742,36 @@ impl RlmSpawnLedger {
                     child,
                     depth,
                     name,
+                    prompt,
+                    model,
+                    spawn_code,
+                    rlm_parent_node_id,
+                    created_at,
                 } => {
-                    let key = edge_key(&child_id, &child);
+                    let edge = RlmLedgerEdge {
+                        child_id,
+                        parent,
+                        child,
+                        depth,
+                        name,
+                        prompt,
+                        model,
+                        spawn_code,
+                        rlm_parent_node_id,
+                        created_at,
+                        ..Default::default()
+                    };
+                    let key = edge_key(&edge.child_id, &edge.child);
                     if let Some(at) = state.index.get(&key).copied() {
-                        state.edges[at] = RlmLedgerEdge {
-                            child_id,
-                            parent,
-                            child,
-                            depth,
-                            name,
-                            deleted: None,
-                            deleted_usage: None,
-                        };
+                        state.edges[at] = edge;
                     } else {
                         state.index.insert(key.clone(), state.edges.len());
-                        state.edges.push(RlmLedgerEdge {
-                            child_id,
-                            parent,
-                            child,
-                            depth,
-                            name,
-                            deleted: None,
-                            deleted_usage: None,
-                        });
+                        state.edges.push(edge);
+                    }
+                }
+                LedgerRecord::Complete { child_id, child } => {
+                    if let Some(at) = edge_at(&state, &child_id, &child) {
+                        state.edges[at].completed = true;
                     }
                 }
                 LedgerRecord::Rename {
@@ -704,10 +779,7 @@ impl RlmSpawnLedger {
                     child,
                     name,
                 } => {
-                    let key = edge_key(&child_id, &child);
-                    if let Some(&at) = state.index.get(&key) {
-                        state.edges[at].name = name;
-                    } else if let Some(at) = sole_edge_by_child_id(&state, &child_id) {
+                    if let Some(at) = edge_at(&state, &child_id, &child) {
                         state.edges[at].name = name;
                     }
                 }
@@ -717,12 +789,7 @@ impl RlmSpawnLedger {
                     reason,
                     usage,
                 } => {
-                    let key = edge_key(&child_id, &child);
-                    let at = match state.index.get(&key).copied() {
-                        Some(at) => Some(at),
-                        None => sole_edge_by_child_id(&state, &child_id),
-                    };
-                    if let Some(at) = at {
+                    if let Some(at) = edge_at(&state, &child_id, &child) {
                         state.edges[at].deleted = Some(reason);
                         // The snapshot is sticky: a re-tombstone without a usage
                         // block never clears it; a fresh capture replaces it.

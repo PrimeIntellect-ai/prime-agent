@@ -163,52 +163,48 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     let child_legacy = file_at(agent.join("session-artifacts/P/sub-legacy/sess-legacy.jsonl"));
     let child_three = file_at(agent.join("session-artifacts/P/sub-c/sess-c.jsonl"));
     let child_four = file_at(agent.join("session-artifacts/Q/sub-d/sess-d.jsonl"));
-    for (child_id, session_file, status, prompt) in [
-        ("sub-a", &child_one, "completed", Some("finished task")),
-        ("sub-b", &child_two, "running", None),
-    ] {
-        crate::rlm_ledger::write_rlm_subagent_display(
-            &crate::rlm_ledger::RlmSubagentDisplayEntry {
-                type_tag: "rlm_subagent".to_string(),
-                child_id: child_id.to_string(),
-                session_name: child_id.to_string(),
-                session_dir: Path::new(session_file)
-                    .parent()
-                    .unwrap()
-                    .display()
-                    .to_string(),
-                session_file: session_file.clone(),
-                rlm_parent_node_id: None,
-                prompt: prompt.map(str::to_string),
-                spawn_code: None,
-                model: None,
-                status: status.to_string(),
-                created_at: 1234,
-            },
-        )
-        .unwrap();
-    }
-    let spawn = |child_id: &str, parent: &str, child: &str| {
-        format!(
-            r#"{{"v":1,"op":"spawn","at":"2026-09-30T00:00:00Z","childId":"{child_id}","parent":"{parent}","child":"{child}","depth":1,"name":"{child_id}"}}"#
-        )
+    let spawn = |child_id: &str, parent: &str, child: &str, prompt: Option<&str>| {
+        let mut record = json!({
+            "v": 1,
+            "op": "spawn",
+            "at": "2026-09-30T00:00:00Z",
+            "childId": child_id,
+            "parent": parent,
+            "child": child,
+            "depth": 1,
+            "name": child_id,
+        });
+        if let Some(prompt) = prompt {
+            record["prompt"] = json!(prompt);
+        }
+        record.to_string()
+    };
+    let complete = |child_id: &str, child: &str| {
+        json!({
+            "v": 1,
+            "op": "complete",
+            "at": "2026-09-30T00:00:01Z",
+            "childId": child_id,
+            "child": child,
+        })
+        .to_string()
     };
     let ledger_path = crate::rlm_ledger::rlm_ledger_path(&agent, &daemon_sessions);
     std::fs::create_dir_all(ledger_path.parent().expect("ledger dir")).unwrap();
     std::fs::write(
         ledger_path,
         [
-            r#"{"v":1,"op":"meta","at":"2026-09-30T00:00:00Z"}"#,
-            spawn("sub-a", &parent_one, &child_one).as_str(),
-            r#"{"v":1,"op":"spawn","at":"#,
-            spawn("sub-b", &parent_one, &child_two).as_str(),
-            spawn("sub-legacy", &parent_one, &child_legacy).as_str(),
-            spawn("sub-c", &parent_one, &child_three).as_str(),
+            r#"{"v":1,"op":"meta","at":"2026-09-30T00:00:00Z"}"#.to_string(),
+            spawn("sub-a", &parent_one, &child_one, Some("finished task")),
+            r#"{"v":1,"op":"spawn","at":"#.to_string(),
+            spawn("sub-b", &parent_one, &child_two, None),
+            spawn("sub-legacy", &parent_one, &child_legacy, None),
+            spawn("sub-c", &parent_one, &child_three, None),
             format!(
                 r#"{{"v":1,"op":"delete","at":"2026-09-30T00:00:01Z","childId":"sub-c","child":"{child_three}","reason":"user"}}"#
-            )
-            .as_str(),
-            spawn("sub-d", &parent_two, &child_four).as_str(),
+            ),
+            complete("sub-a", &child_one),
+            spawn("sub-d", &parent_two, &child_four, None),
         ]
         .join("\n"),
     )
@@ -251,12 +247,12 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
             ("sub-b", "error", Some("sess-b"), Some("child agent")),
             (
                 "sub-legacy",
-                "completed",
+                "error",
                 Some("sess-legacy"),
                 Some("child agent")
             ),
         ],
-        "completed and interrupted children keep their display verdicts"
+        "a complete record settles done; a spawn without one reseeds error"
     );
 
     let legacy = sessions

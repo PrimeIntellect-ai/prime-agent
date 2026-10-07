@@ -300,16 +300,9 @@ fn ledger_child_records(
     supervisor_socket: &Path,
     parent_file: &Path,
 ) -> Vec<ChildRecord> {
-    let Some(sessions_dir) = crate::descriptor::load_supervisor_config(
-        &crate::descriptor::descriptor_dir(agent_dir, supervisor_socket)
-            .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
-        supervisor_socket,
-    )
-    .and_then(|config| config.default_session_dir) else {
+    let Some(ledger) = super::supervisor_spawn_ledger(agent_dir, supervisor_socket) else {
         return Vec::new();
     };
-    let ledger =
-        crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
     let edges = ledger.live_edges().unwrap_or_else(|error| {
         eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
         Vec::new()
@@ -324,10 +317,6 @@ fn ledger_child_records(
         let session_id = child
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned());
-        let display = child
-            .parent()
-            .and_then(crate::rlm_ledger::read_rlm_subagent_display)
-            .filter(|display| display.child_id == edge.child_id);
         records.push(ChildRecord {
             rlm_child_id: edge.child_id,
             session_name: edge.name,
@@ -337,9 +326,9 @@ fn ledger_child_records(
                 .parent()
                 .map(|dir| dir.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            model: display
+            model: edge
+                .model
                 .as_ref()
-                .and_then(|display| display.model.as_ref())
                 .and_then(|model| {
                     Some(format!(
                         "{}/{}",
@@ -348,32 +337,15 @@ fn ledger_child_records(
                     ))
                 })
                 .unwrap_or_default(),
-            label: rlm_child_label(
-                display
-                    .as_ref()
-                    .and_then(|display| display.prompt.as_deref())
-                    .unwrap_or_default(),
-            ),
-            started_at_ms: display.as_ref().map_or_else(
-                || {
-                    std::fs::metadata(&child)
-                        .ok()
-                        .and_then(|metadata| metadata.created().ok())
-                        .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map_or(0, |duration| duration.as_millis() as u64)
-                },
-                |display| display.created_at,
-            ),
-            settled_status: Some(
-                if display
-                    .as_ref()
-                    .is_some_and(|display| display.status == "running")
-                {
-                    "error"
-                } else {
-                    "done"
-                },
-            ),
+            label: rlm_child_label(edge.prompt.as_deref().unwrap_or_default()),
+            started_at_ms: edge.created_at.unwrap_or_else(|| {
+                std::fs::metadata(&child)
+                    .ok()
+                    .and_then(|metadata| metadata.created().ok())
+                    .and_then(|created| created.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |duration| duration.as_millis() as u64)
+            }),
+            settled_status: Some(if edge.completed { "done" } else { "error" }),
             settled: true,
             answer_preview: None,
             answer_captured: false,
@@ -392,4 +364,115 @@ fn ledger_child_records(
         });
     }
     records
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    struct ReseedFixture {
+        agent_dir: PathBuf,
+        socket: PathBuf,
+        sessions_dir: PathBuf,
+        parent: PathBuf,
+        child: PathBuf,
+    }
+
+    impl ReseedFixture {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("pa-registry-{name}-{}", uuid::Uuid::new_v4()));
+            let agent_dir = dir.join("agent");
+            let sessions_dir = agent_dir.join("sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            let socket = dir.join("daemon.sock");
+            let parent = sessions_dir.join("parent.jsonl");
+            let child = sessions_dir.join("child.jsonl");
+            std::fs::write(&parent, "{}\n").unwrap();
+            std::fs::write(&child, "{}\n").unwrap();
+            crate::descriptor::persist_supervisor_config(
+                &crate::descriptor::descriptor_dir(&agent_dir, &socket)
+                    .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+                &crate::descriptor::PersistedSupervisorConfig {
+                    version: 1,
+                    socket_path: socket.to_string_lossy().to_string(),
+                    default_session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+                },
+            )
+            .unwrap();
+            Self {
+                agent_dir,
+                socket,
+                sessions_dir,
+                parent,
+                child,
+            }
+        }
+
+        fn write_ledger(&self, records: &[Value]) {
+            let ledger = crate::rlm_ledger::rlm_ledger_path(&self.agent_dir, &self.sessions_dir);
+            std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+            let mut content = String::new();
+            for record in records {
+                content.push_str(&record.to_string());
+                content.push('\n');
+            }
+            std::fs::write(&ledger, content).unwrap();
+        }
+
+        fn records(&self) -> Vec<ChildRecord> {
+            ledger_child_records(&self.agent_dir, &self.socket, &self.parent)
+        }
+    }
+
+    fn spawn_record(fixture: &ReseedFixture) -> Value {
+        json!({
+            "v": 1,
+            "op": "spawn",
+            "at": "2026-10-07T00:00:00.000Z",
+            "childId": "sub-1",
+            "parent": fixture.parent.to_string_lossy(),
+            "child": fixture.child.to_string_lossy(),
+            "depth": 1,
+            "name": "worker",
+            "prompt": "summarize the corpus",
+            "model": {"provider": "prov", "modelId": "mid"},
+            "spawnCode": "rlm.spawn",
+            "rlmParentNodeId": "node-7",
+            "createdAt": 1_717_000_000_000_u64,
+        })
+    }
+
+    fn complete_record(fixture: &ReseedFixture) -> Value {
+        json!({
+            "v": 1,
+            "op": "complete",
+            "at": "2026-10-07T00:00:01.000Z",
+            "childId": "sub-1",
+            "child": fixture.child.to_string_lossy(),
+        })
+    }
+
+    #[test]
+    fn reseed_hydrates_child_metadata_from_the_spawn_ledger() {
+        let fixture = ReseedFixture::new("ledger-metadata");
+        fixture.write_ledger(&[spawn_record(&fixture), complete_record(&fixture)]);
+        let records = fixture.records();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.model, "prov/mid");
+        assert_eq!(record.label, "summarize the corpus");
+        assert_eq!(record.started_at_ms, 1_717_000_000_000);
+        assert_eq!(record.settled_status, Some("done"));
+    }
+
+    #[test]
+    fn reseed_without_a_complete_record_settles_error() {
+        let fixture = ReseedFixture::new("ledger-error");
+        fixture.write_ledger(&[spawn_record(&fixture)]);
+        let records = fixture.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].settled_status, Some("error"));
+    }
 }

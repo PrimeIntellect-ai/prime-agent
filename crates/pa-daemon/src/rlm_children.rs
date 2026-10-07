@@ -125,6 +125,27 @@ pub(crate) fn durable_child_selector(session_id: Option<&str>, rlm_child_id: &st
     session_id.unwrap_or(rlm_child_id).to_string()
 }
 
+/// The spawn ledger this parent engine's supervisor owns, resolved the
+/// way the reseed reads it: the persisted supervisor config's default
+/// sessions dir under the parent engine's agent dir. `None` when the
+/// supervisor config is absent.
+fn supervisor_spawn_ledger(
+    agent_dir: &Path,
+    supervisor_socket: &Path,
+) -> Option<crate::rlm_ledger::RlmSpawnLedger> {
+    let sessions_dir = crate::descriptor::load_supervisor_config(
+        &crate::descriptor::descriptor_dir(agent_dir, supervisor_socket)
+            .join(crate::descriptor::SUPERVISOR_CONFIG_FILE_NAME),
+        supervisor_socket,
+    )
+    .and_then(|config| config.default_session_dir)?;
+    Some(crate::rlm_ledger::RlmSpawnLedger::new(
+        agent_dir,
+        Path::new(&sessions_dir),
+        |_| {},
+    ))
+}
+
 /// One tracked child session.
 #[derive(Debug)]
 struct ChildRecord {

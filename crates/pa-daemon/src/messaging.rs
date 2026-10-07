@@ -655,8 +655,7 @@ mod tests {
             child: "/artifacts/parent/sub-kid1/sess-kid.jsonl".to_string(),
             depth: 1,
             name: "kid".to_string(),
-            deleted: None,
-            deleted_usage: None,
+            ..Default::default()
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

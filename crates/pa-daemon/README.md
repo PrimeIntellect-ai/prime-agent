@@ -75,9 +75,9 @@ present rows by agent id or session file are never overwritten - at
 subscribe, spawn-admission, and worker-stop moments, so subscribers see
 the full family, not just resident rows), cloud sandbox attach, session
 leases (`core/session-lease.ts` port). Daemon-owned RLM spawn ledger (`rlm_ledger.rs`):
-one append-only JSONL per sessions dir (spawn/rename/delete admissions with
-the TS `rlm-ledger.ts` record grammar, bounds, stat-guarded replay, and
-legacy-registry seeding) plus the per-child display files; family topology
+one append-only JSONL per sessions dir (spawn/rename/delete/complete records
+with the TS `rlm-ledger.ts` record grammar, bounds, stat-guarded replay, and
+legacy-registry seeding); family topology
 is read from the ledger, never re-derived from session files. Passive-RLM
 roster walk (`rlm_roster.rs`): `list --all` and the saved-session catalog
 merge non-resident ledger children (walk roots = saved + resident session

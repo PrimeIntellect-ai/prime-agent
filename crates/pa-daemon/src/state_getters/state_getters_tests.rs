@@ -507,6 +507,7 @@ async fn get_context_tree_lists_persisted_children() {
             child: deleted_dir.display().to_string(),
             depth: 1,
             name: "deleted-child".to_string(),
+            ..Default::default()
         })
         .unwrap();
     ledger

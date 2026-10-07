@@ -567,15 +567,15 @@ fn new_session_keeps_a_created_root_session_running() {
 /// reattached parent lists its child again and messaging it wakes the child.
 #[test]
 fn a_daemon_restart_relists_and_wakes_the_parents_child() {
-    restart_relists_child(0, "completed");
+    restart_relists_child(0, true);
 }
 
 #[test]
 fn a_daemon_restart_marks_a_still_running_child_as_failed() {
-    restart_relists_child(30_000, "running");
+    restart_relists_child(30_000, false);
 }
 
-fn restart_relists_child(delay_ms: u64, display_status: &str) {
+fn restart_relists_child(delay_ms: u64, completed: bool) {
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -651,7 +651,6 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
         .join(parent_session_id)
         .join(&child_id)
         .join(format!("{child_session_id}.jsonl"));
-    let display_file = child_file.parent().unwrap().join("rlm-subagent.json");
     if delay_ms > 0 {
         wait_until(&mut client, Duration::from_secs(30), |client| {
             let rows = rlm_children_rows(client, "g-running", &parent_id);
@@ -660,19 +659,29 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
                 .then_some(())
         });
     }
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let display: Value =
-            serde_json::from_slice(&std::fs::read(&display_file).expect("child display file"))
-                .expect("child display json");
-        if display["status"] == display_status {
-            break;
+    if completed {
+        let ledger_file =
+            pa_daemon::rlm_ledger::rlm_ledger_path(&agent_dir, &agent_dir.join("sessions"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let landed = std::fs::read_to_string(&ledger_file)
+                .ok()
+                .and_then(|ledger| {
+                    ledger.lines().find_map(|line| {
+                        let record: Value = serde_json::from_str(line).ok()?;
+                        (record["op"] == "complete" && record["childId"] == json!(child_id))
+                            .then_some(record)
+                    })
+                });
+            if landed.is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the child never recorded its completion"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
-        assert!(
-            Instant::now() < deadline,
-            "child display never completed: {display}"
-        );
-        std::thread::sleep(Duration::from_millis(100));
     }
 
     client.send_command("bye", &json!({ "type": "shutdown" }));
@@ -728,11 +737,7 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
         rows,
         json!([[
             child_id,
-            if display_status == "completed" {
-                "completed"
-            } else {
-                "error"
-            },
+            if completed { "completed" } else { "error" },
             child_session_id
         ]]),
         "the restarted parent must relist its ledger child with its persisted status"

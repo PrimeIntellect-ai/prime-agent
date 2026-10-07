@@ -617,9 +617,8 @@ impl Supervisor {
         Ok(resident)
     }
 
-    /// Record one RLM child admission: the spawn edge in the daemon-owned
-    /// ledger (durable topology) and the child's display file (hydration
-    /// metadata). No-op for top-level sessions.
+    /// Record one RLM child admission: the spawn edge with its hydration
+    /// metadata in the daemon-owned ledger. No-op for top-level sessions.
     pub(super) async fn record_rlm_child_admission(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -627,7 +626,6 @@ impl Supervisor {
     ) -> Result<()> {
         let DaemonCommand::Create {
             name,
-            config,
             runtime_metadata,
             ..
         } = command
@@ -663,19 +661,6 @@ impl Supervisor {
             .or(name.as_deref())
             .unwrap_or_default()
             .to_string();
-        let session_dir = config
-            .as_ref()
-            .and_then(|config| config.get("sessionDir"))
-            .and_then(Value::as_str)
-            .map_or_else(
-                || {
-                    Path::new(child)
-                        .parent()
-                        .map(|dir| dir.to_string_lossy().to_string())
-                        .unwrap_or_default()
-                },
-                str::to_string,
-            );
         let ledger = self.rlm_spawn_ledger_for(None).await?;
         ledger
             .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
@@ -683,48 +668,25 @@ impl Supervisor {
                 parent: parent.to_string(),
                 child: child.to_string(),
                 depth,
-                name: session_name.clone(),
+                name: session_name,
+                prompt: metadata
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .map(crate::rlm_child_model::rlm_child_label),
+                model: metadata.get("model").cloned(),
+                spawn_code: metadata
+                    .get("spawnCode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                rlm_parent_node_id: metadata
+                    .get("rlmParentNodeId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                created_at: metadata.get("createdAt").and_then(Value::as_u64),
             })
             .inspect_err(|error| {
                 self.log_line(&format!("failed to append RLM ledger spawn: {error:#}"));
             })?;
-        let display = crate::rlm_ledger::RlmSubagentDisplayEntry {
-            type_tag: "rlm_subagent".to_string(),
-            child_id,
-            session_name,
-            session_dir,
-            session_file: child.to_string(),
-            rlm_parent_node_id: metadata
-                .get("rlmParentNodeId")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            prompt: metadata
-                .get("prompt")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            spawn_code: metadata
-                .get("spawnCode")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            model: metadata.get("model").cloned(),
-            status: "running".to_string(),
-            created_at: metadata
-                .get("createdAt")
-                .and_then(Value::as_u64)
-                .unwrap_or_else(crate::util::now_ms),
-        };
-        let written =
-            crate::rlm_ledger::write_rlm_subagent_display(&display).inspect_err(|error| {
-                self.log_line(&format!(
-                    "failed to persist RLM subagent display entry: {error:#}"
-                ));
-            })?;
-        if !written {
-            self.log_line(&format!(
-                "skipped RLM subagent display entry for {}: deleted tombstone exists",
-                display.child_id
-            ));
-        }
         Ok(())
     }
 }

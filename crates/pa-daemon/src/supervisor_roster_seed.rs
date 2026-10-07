@@ -496,8 +496,7 @@ pub(crate) mod tests {
             child: child.to_string(),
             depth,
             name: name.to_string(),
-            deleted: None,
-            deleted_usage: None,
+            ..Default::default()
         }
     }
 
@@ -669,6 +668,7 @@ pub(crate) mod tests {
                 child: child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "lane".to_string(),
+                ..Default::default()
             })
             .expect("append spawn");
     }
@@ -971,8 +971,7 @@ pub(crate) mod tests {
                     child: child_file.to_string_lossy().to_string(),
                     depth: 1,
                     name: "w9".to_string(),
-                    deleted: None,
-                    deleted_usage: None,
+                    ..Default::default()
                 },
             );
             roster.write_seeded(candidate.summary, candidate.seeded_cwd)

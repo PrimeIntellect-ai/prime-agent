@@ -10,8 +10,7 @@ use serde_json::{json, Value};
 
 use crate::lease::canonical_session_path;
 use crate::rlm_ledger::{
-    read_legacy_registry, read_rlm_subagent_display, LegacyRlmSubagentEntry, RlmLedgerEdge,
-    RlmSpawnLedger,
+    read_legacy_registry, LegacyRlmSubagentEntry, RlmLedgerEdge, RlmSpawnLedger,
 };
 use crate::session_store::{read_session_info, SessionInfo};
 
@@ -123,22 +122,19 @@ fn inactive_lifecycle(info: &SessionInfo) -> &'static str {
     }
 }
 
-/// Hydration metadata for one live ledger edge: the child's display file first, then the parent's
-/// legacy registry for pre-ledger children (one registry read per parent, cached).
+/// Hydration metadata for one live ledger edge: the spawn record's own
+/// fields first, then the parent's legacy registry for pre-ledger children
+/// (one registry read per parent, cached).
 pub(crate) fn rlm_child_metadata(
     edge: &RlmLedgerEdge,
     registry_cache: &mut HashMap<PathBuf, Vec<LegacyRlmSubagentEntry>>,
 ) -> RlmChildMetadata {
-    if let Some(child_dir) = Path::new(&edge.child).parent() {
-        if let Some(display) = read_rlm_subagent_display(child_dir) {
-            if display.child_id == edge.child_id {
-                return RlmChildMetadata {
-                    spawn_code: display.spawn_code,
-                    rlm_parent_node_id: display.rlm_parent_node_id,
-                    parent_session_id: None,
-                };
-            }
-        }
+    if edge.spawn_code.is_some() || edge.rlm_parent_node_id.is_some() {
+        return RlmChildMetadata {
+            spawn_code: edge.spawn_code.clone(),
+            rlm_parent_node_id: edge.rlm_parent_node_id.clone(),
+            parent_session_id: None,
+        };
     }
     let parent = Path::new(&edge.parent).to_path_buf();
     let registry = registry_cache
@@ -262,8 +258,7 @@ mod tests {
                 child: child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "worker-a".to_string(),
-                deleted: None,
-                deleted_usage: None,
+                ..Default::default()
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -283,8 +278,7 @@ mod tests {
                 child: plain.to_string_lossy().to_string(),
                 depth: 1,
                 name: "worker-b".to_string(),
-                deleted: None,
-                deleted_usage: None,
+                ..Default::default()
             },
             info: plain_info,
             metadata: RlmChildMetadata::default(),
@@ -317,8 +311,7 @@ mod tests {
                 child: child.to_string_lossy().to_string(),
                 depth: 1,
                 name: "worker-c".to_string(),
-                deleted: None,
-                deleted_usage: None,
+                ..Default::default()
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -365,6 +358,7 @@ mod tests {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "w1".into(),
+                ..Default::default()
             })
             .unwrap();
         ledger
@@ -374,6 +368,7 @@ mod tests {
                 child: grandchild.to_string_lossy().into(),
                 depth: 2,
                 name: "w2".into(),
+                ..Default::default()
             })
             .unwrap();
         ledger
@@ -383,6 +378,7 @@ mod tests {
                 child: dead.to_string_lossy().into(),
                 depth: 1,
                 name: "gone".into(),
+                ..Default::default()
             })
             .unwrap();
         // A deleted child tombstones out of the walk.
@@ -456,6 +452,7 @@ mod tests {
                 child: child.to_string_lossy().into(),
                 depth: 1,
                 name: "worker".into(),
+                ..Default::default()
             })
             .unwrap();
         let walked = walk_passive_rlm_children(

@@ -18,7 +18,7 @@ use pa_types::daemon::{
 use serde_json::{json, Map, Value};
 
 use crate::lease::canonical_session_path;
-use crate::rlm_ledger::{read_rlm_subagent_display, RlmSpawnLedger};
+use crate::rlm_ledger::RlmSpawnLedger;
 use crate::util::iso_from_unix_ms;
 
 /// One resident worker's collected data for the roster: its durable
@@ -160,10 +160,10 @@ fn worker_row(
     }
 }
 
-/// Subagent rows (spec §8): the ledger's live edges are the topology; the
-/// per-child display file carries the durable status. A child whose display
-/// is absent reports `running` when its session is resident, `completed`
-/// otherwise (the TS passive-hydration split).
+/// Subagent rows (spec §8): the ledger's live edges are the topology, and
+/// the edge's `completed` flag the durable status (a `complete` record
+/// landed). An uncompleted child reports `running` when its session is
+/// resident, `completed` otherwise (the TS passive-hydration split).
 fn subagent_rows(
     agent_dir: &Path,
     ledger: &RlmSpawnLedger,
@@ -179,31 +179,21 @@ fn subagent_rows(
             .join("session-artifacts")
             .join(&parent_stem)
             .join(&edge.child_id);
-        let display = read_rlm_subagent_display(&child_dir);
-        let status = match display.as_ref().map(|entry| entry.status.as_str()) {
-            Some("completed") => UpdateRosterSubagentStatus::Completed,
-            Some("running") => UpdateRosterSubagentStatus::Running,
-            _ => {
-                if resident_files.contains(&canonical_session_path(Path::new(&edge.child))) {
-                    UpdateRosterSubagentStatus::Running
-                } else {
-                    UpdateRosterSubagentStatus::Completed
-                }
-            }
+        let status = if edge.completed {
+            UpdateRosterSubagentStatus::Completed
+        } else if resident_files.contains(&canonical_session_path(Path::new(&edge.child))) {
+            UpdateRosterSubagentStatus::Running
+        } else {
+            UpdateRosterSubagentStatus::Completed
         };
-        let session_file = display
-            .as_ref()
-            .map(|entry| entry.session_file.clone())
-            .filter(|file| !file.is_empty())
-            .unwrap_or_else(|| edge.child.clone());
         rows.push(UpdateRosterSubagent {
             child_id: edge.child_id.clone(),
-            session_id: file_stem(&session_file),
+            session_id: file_stem(&edge.child),
             parent_session_id: parent_stem,
             name: edge.name.clone(),
             status,
             depth: edge.depth,
-            session_file,
+            session_file: edge.child.clone(),
             display_file: child_dir
                 .join("rlm-subagent.json")
                 .to_string_lossy()
@@ -493,6 +483,7 @@ mod tests {
                 child_id: "child-c1".into(),
                 depth: 1,
                 name: "api-reviewer".into(),
+                ..Default::default()
             })
             .unwrap();
         (ledger, sessions_dir)
@@ -517,22 +508,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path();
         let (ledger, sessions_dir) = setup(agent_dir);
-        // A display entry pins the child's status.
-        let child_display = agent_dir
-            .join("session-artifacts")
-            .join("p1")
-            .join("child-c1");
-        std::fs::create_dir_all(&child_display).unwrap();
-        std::fs::write(
-            child_display.join("rlm-subagent.json"),
-            json!({
-                "type": "rlm_subagent", "childId": "child-c1", "sessionName": "api-reviewer",
-                "sessionDir": child_display.to_string_lossy(), "sessionFile": "/tmp/sessions/c1.jsonl",
-                "status": "completed", "createdAt": 1
-            })
-            .to_string(),
-        )
-        .unwrap();
+        // A complete record pins the child's status.
+        ledger
+            .append_complete("child-c1", &sessions_file(&sessions_dir, "c1"))
+            .unwrap();
         write_scheduled_jobs(
             agent_dir,
             "p1",
@@ -604,7 +583,7 @@ mod tests {
             Some(&"active-p1".to_string())
         );
 
-        // Subagents: the ledger edge + the display status.
+        // Subagents: the ledger edge + its completion verdict.
         assert_eq!(roster.subagents.len(), 1);
         let sub = &roster.subagents[0];
         assert_eq!(sub.child_id, "child-c1");

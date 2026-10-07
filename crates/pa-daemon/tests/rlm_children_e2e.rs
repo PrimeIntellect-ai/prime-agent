@@ -268,7 +268,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         .join("parent-session-uuid")
         .join(&handle.rlm_child_id);
     assert_eq!(handle.session_dir, expected_dir.to_string_lossy());
-    // Same layout, alongside the per-child display file the passive roster reads.
+    // Same layout; the ledger's spawn record carries the display metadata.
     let child_files: Vec<std::fs::DirEntry> = std::fs::read_dir(&expected_dir)
         .expect("child session dir")
         .filter_map(std::result::Result::ok)
@@ -282,18 +282,25 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
         .collect();
     assert_eq!(child_files.len(), 1, "one session file in the child dir");
     assert!(child_files[0].path().to_string_lossy().ends_with(".jsonl"));
-    let display: Value = serde_json::from_str(
-        &std::fs::read_to_string(expected_dir.join("rlm-subagent.json")).expect("display file"),
-    )
-    .expect("parse display file");
-    assert_eq!(display["type"], "rlm_subagent");
-    assert_eq!(display["childId"], handle.rlm_child_id);
-    assert_eq!(display["sessionName"], "worker-a");
-    assert_eq!(display["status"], "running");
+    let ledger_file =
+        pa_daemon::rlm_ledger::rlm_ledger_path(&agent_dir, &agent_dir.join("sessions"));
+    let spawn_record: Value = wait_until(Duration::from_secs(10), || {
+        std::fs::read_to_string(&ledger_file)
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let record: Value = serde_json::from_str(line).ok()?;
+                (record["op"] == "spawn" && record["childId"] == json!(handle.rlm_child_id))
+                    .then_some(record)
+            })
+    });
+    assert_eq!(spawn_record["name"], "worker-a");
+    assert_eq!(spawn_record["prompt"], "ship the lane");
     assert_eq!(
-        display["model"],
+        spawn_record["model"],
         json!({ "provider": "scripted", "modelId": "faux-1" })
     );
+    assert!(spawn_record["createdAt"].as_u64().is_some());
     // The child session header records the recursion identity (TS parity:
     // parentSession + rlmDepth).
     let header: Value = {
@@ -347,6 +354,30 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     assert_eq!(entry.session_name, "worker-a");
     assert_eq!(entry.label.as_deref(), Some("ship the lane"));
     assert!(entry.session_dir.ends_with(&handle.rlm_child_id));
+    let complete_record = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let found = std::fs::read_to_string(&ledger_file)
+                .ok()
+                .and_then(|content| {
+                    content.lines().find_map(|line| {
+                        let record: Value = serde_json::from_str(line).ok()?;
+                        (record["op"] == "complete"
+                            && record["childId"] == json!(handle.rlm_child_id))
+                        .then_some(record)
+                    })
+                });
+            if let Some(record) = found {
+                break record;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the settle tail never recorded the completion"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    assert_eq!(complete_record["child"], spawn_record["child"]);
 
     // The kickoff row (TS `spawnMessage`): the task prompt lands as the
     // parent-attributed `agent_message` custom row — never a user row —
