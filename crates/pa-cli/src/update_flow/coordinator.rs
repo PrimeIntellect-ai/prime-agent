@@ -550,20 +550,22 @@ async fn finish_failure(
     // surviving squatter after the bounded attempt surfaces as the same
     // honest Failed as before.
     // The rejected successor, still running from the failed spawn, is
-    // stopped HERE by a CRASH-ORACLE KILL of the pid this coordinator
-    // spawned - never an RPC to the socket: the graceful Shutdown
-    // command tombstones the child's roster-adopted workers (durable stop
-    // intent; macroscope's finding), while a forced kill is the crash
-    // path the protocol already trusts - the adopted workers die with the
-    // supervisor, their recovery journals persist, and the roster'd
-    // rollback boot below re-adopts them (cursor's squatter finding: the
-    // socket frees for the rollback). No RPC also means a competing
-    // daemon that answered the socket is never touched (macroscope's
-    // second finding); a live competitor keeps the rollback's honest
-    // Failed.
+    // stopped HERE by an identity-verified DIRECT SIGKILL of the pid this
+    // coordinator spawned - never an RPC to the socket, and never a
+    // SIGTERM: the graceful Shutdown AND the TERM signal drain both
+    // persist worker stop tombstones (durable stop intent; macroscope's
+    // finding), while the direct kill is the crash path the protocol
+    // already trusts - the adopted workers die with the supervisor,
+    // their recovery journals persist, and the roster'd rollback boot
+    // below re-adopts them (cursor's squatter finding: the socket frees
+    // for the rollback). The start-id check means a reused pid is never
+    // signaled. No RPC also means a competing daemon that answered the
+    // socket is never touched; a live competitor keeps the rollback's
+    // honest Failed.
     if let Some(rejected) = &failure.rejected {
-        let killed = crate::daemon_discovery::kill::force_kill_daemon(
+        let killed = crate::daemon_discovery::kill::force_kill_identity_crash(
             u32::try_from(rejected.pid).unwrap_or(0),
+            rejected.process_start_id.as_deref(),
         );
         if killed {
             let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {

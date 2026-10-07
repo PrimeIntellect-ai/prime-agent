@@ -17,6 +17,45 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// process is confirmed gone (zombies count as dead — [`is_process_alive`]).
 /// Deliberate TS divergence (TS fires SIGKILL and returns without verifying):
 /// a stop path must not claim a stop a D-state process never performed.
+/// The crash-oracle kill for a process whose identity this caller holds:
+/// a DIRECT SIGKILL, never a SIGTERM first (the supervisor's signal drain
+/// handles TERM as a graceful stop that persists worker stop tombstones -
+/// the adopted sessions would be stopped permanently instead of left for
+/// the crash recovery), verified against the process start id before the
+/// signal so a reused pid is never killed (the crash-oracle rollback
+/// path; macroscope's findings). Returns false - killing nothing - when
+/// the identity no longer matches or the process is already gone.
+pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> bool {
+    let identity_matches = || {
+        if !is_alive(pid) {
+            return false;
+        }
+        match start_id {
+            // No start id to pin: the pid alone decides (the caller holds
+            // no better identity).
+            None => true,
+            // A start-id mismatch is a reused pid: never signaled.
+            Some(expected) => process_start_id(pid).as_deref() == Some(expected),
+        }
+    };
+    if !identity_matches() {
+        return false;
+    }
+    let _ = kill_pid(pid as i32, Signal::Kill);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        // Confirmed death only while the identity still matches: a reused
+        // pid alive under the same number is NOT our process's death.
+        if !identity_matches() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
 pub(crate) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
