@@ -120,8 +120,8 @@ impl CloudFamilyDelivery for TestDelivery {
         // The receiver admits idempotently by request id: the record is
         // the reconciliation truth, and a later crash cannot undo it.
         let receipt = CloudAgentMessageReceipt {
-            id: format!("agentmsg_{}", message.request_id),
-            delivery_status: CloudAgentMessageDeliveryStatus::Delivered,
+            id: Some(format!("agentmsg_{}", message.request_id)),
+            delivery_status: Some(CloudAgentMessageDeliveryStatus::Delivered),
             rest: {
                 let mut map = serde_json::Map::new();
                 map.insert("message".to_string(), json!(message.message));
@@ -283,9 +283,12 @@ async fn send_resolves_answered_only_after_receiver_admission() {
     };
     assert_eq!(
         receipt.delivery_status,
-        CloudAgentMessageDeliveryStatus::Delivered
+        Some(CloudAgentMessageDeliveryStatus::Delivered)
     );
-    assert!(receipt.id.starts_with("agentmsg_msgreq_"));
+    assert!(receipt
+        .id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("agentmsg_msgreq_")));
 }
 
 #[tokio::test]
@@ -800,8 +803,8 @@ async fn crash_after_receiver_admission_reconciles_through_the_seam() {
             request_id: event.request_id().to_string(),
             ok: true,
             receipt: Some(CloudAgentMessageReceipt {
-                id: format!("agentmsg_{}", event.request_id()),
-                delivery_status: CloudAgentMessageDeliveryStatus::Delivered,
+                id: Some(format!("agentmsg_{}", event.request_id())),
+                delivery_status: Some(CloudAgentMessageDeliveryStatus::Delivered),
                 rest: {
                     let mut map = serde_json::Map::new();
                     map.insert("message".to_string(), json!("hello"));

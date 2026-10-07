@@ -37,6 +37,22 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   color rendering, export CSS generation, custom-theme discovery — belongs
   to the consuming crates.
 
+- `daemon::cloud`: the cloud session wire vocabulary (TS `protocol.ts`,
+  protocol v3, `origin/feat/direct-cloud-sandbox @ 193d42bf`): the frame
+  union (`hello`/`snapshot`/`subscribe`/`events`/`submit`/`get_command`/
+  `command`/`ack`/`inference_*`), the 16-kind command-request union, the
+  12-kind event union, receipts, cursors, roster rows, session state,
+  model metadata, digests, the canonical-JSON codec
+  (JavaScript `String(number)` rendering, JS `.length` UTF-16 bounds), and
+  the TS-exact runtime validators. The family slice (family wire types,
+  family validators) is PR #3145's; the base slice embeds the family kinds
+  and delegates their validation to the family validators, so the family
+  surface stays owned in one place. Nothing here transports, journals,
+  gates capability advertising, or spawns sessions: the gateway,
+  executor, tunnel, and guest wiring belong to pa-daemon/pa-core.
+  TS-recorded golden corpus: `tests/golden/cloud_protocol/`
+  (regenerate with `tests/golden/cloud_protocol/harness.mjs`).
+
 - `daemon::update_flow`: the update-flow state machine's shared vocabulary:
   the coordinator FSM states + legal
   transition table, `UpdateId`, the on-disk artifact schemas (`intent.json`,

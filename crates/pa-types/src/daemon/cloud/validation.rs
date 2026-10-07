@@ -10,6 +10,11 @@ use super::{
     CLOUD_MAX_TIMESTAMP_CHARS,
 };
 
+use super::checks::{
+    expect_fields, expect_integer, expect_one_of, expect_string, first_problem, optional_string,
+    record_field,
+};
+
 // ---------------------------------------------------------------------------
 
 /// TS `familyInfoProblem`.
@@ -378,72 +383,4 @@ pub fn cloud_send_message_problem(value: &Value, label: &str) -> Option<String> 
             .and_then(|from| cloud_agent_message_sender_problem(from, &format!("{label}.from"))),
         from_relationship,
     ])
-}
-
-fn first_problem<const N: usize>(problems: [Option<String>; N]) -> Option<String> {
-    problems.into_iter().flatten().next()
-}
-
-fn expect_fields(value: &Value, fields: &[&str]) -> Option<String> {
-    value
-        .as_object()
-        .and_then(|map| {
-            map.keys()
-                .find(|key| !fields.contains(&key.as_str()))
-                .cloned()
-        })
-        .map(|key| format!("unexpected field: {key}"))
-}
-
-fn expect_string(
-    value: Option<&Value>,
-    label: &str,
-    max_length: usize,
-    min_length: usize,
-) -> Option<String> {
-    match value.and_then(Value::as_str) {
-        Some(text)
-            if string_utf16_units(text) >= min_length && string_utf16_units(text) <= max_length =>
-        {
-            None
-        }
-        _ => Some(format!(
-            "{label} must be a string of {min_length}-{max_length} characters"
-        )),
-    }
-}
-
-fn optional_string(value: Option<&Value>, label: &str, max_length: usize) -> Option<String> {
-    match value {
-        None => None,
-        Some(Value::String(text)) if !text.is_empty() && string_utf16_units(text) <= max_length => {
-            None
-        }
-        _ => Some(format!(
-            "{label} must be a string of 1-{max_length} characters when present"
-        )),
-    }
-}
-
-fn expect_integer(value: Option<&Value>, label: &str, minimum: i64) -> Option<String> {
-    match value.and_then(Value::as_i64) {
-        Some(number) if number >= minimum => None,
-        _ => Some(format!("{label} must be an integer of at least {minimum}")),
-    }
-}
-
-fn expect_one_of(value: Option<&Value>, label: &str, allowed: &str) -> Option<String> {
-    match value.and_then(Value::as_str) {
-        Some(text) if allowed.split(", ").any(|item| item == text) => None,
-        _ => Some(format!("{label} must be one of {allowed}")),
-    }
-}
-
-/// TS `.length`: UTF-16 code units (astral characters count as two).
-fn string_utf16_units(text: &str) -> usize {
-    text.encode_utf16().count()
-}
-
-fn record_field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    value.get(key)
 }
