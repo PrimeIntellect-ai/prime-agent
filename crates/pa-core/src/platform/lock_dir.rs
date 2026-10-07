@@ -82,6 +82,8 @@ mod rename_noreplace {
     /// `include/uapi/linux/fs.h`: fail with EEXIST instead of replacing
     /// the target.
     const RENAME_NOREPLACE: libc::c_uint = 1;
+    /// `include/uapi/linux/fs.h`: atomically swap the two paths.
+    const RENAME_EXCHANGE: libc::c_uint = 2;
 
     pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
         let from_c = CString::new(from.as_os_str().as_bytes())?;
@@ -96,6 +98,29 @@ mod rename_noreplace {
                 libc::AT_FDCWD,
                 to_c.as_ptr(),
                 RENAME_NOREPLACE,
+            )
+        };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// `renameat2(RENAME_EXCHANGE)`: atomically swap the entries at the
+    /// two paths - the stale reclaim's blocking placeholder dance. Both
+    /// paths must exist (ENOENT otherwise); the public lock path is
+    /// never vacated.
+    pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+        let a_c = CString::new(a.as_os_str().as_bytes())?;
+        let b_c = CString::new(b.as_os_str().as_bytes())?;
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                a_c.as_ptr(),
+                libc::AT_FDCWD,
+                b_c.as_ptr(),
+                RENAME_EXCHANGE,
             )
         };
         if result == -1 {
@@ -284,6 +309,19 @@ pub struct LockDir {
     #[cfg(unix)]
     dir: Option<fs::File>,
     owner: Option<String>,
+}
+
+/// The outcome of a Linux stale-incumbent reclaim attempt.
+#[cfg(target_os = "linux")]
+enum StaleClaim {
+    /// The judged incumbent was claimed and removed: retry.
+    Removed,
+    /// The incumbent vanished before the exchange: retry.
+    Vanished,
+    /// A live successor holds the path: contention, never the floor.
+    Successor,
+    /// No `renameat2` here: the caller runs the floor sequence.
+    Unsupported,
 }
 
 impl LockDir {
@@ -601,75 +639,79 @@ impl LockDir {
         }
     }
 
-    /// Claim the stale incumbent judged at `path` under a private name
-    /// and remove it there, when the claimed inode is the snapshotted
-    /// `incumbent`. Returns `Ok(())` when the incumbent is gone (the
-    /// caller retries the acquisition), `WouldBlock` when the path no
-    /// longer holds the judged incumbent (a successor replaced it: the
-    /// claim is restored untouched and the caller treats it as
-    /// contention), any claim-unsupported error as the floor signal
-    /// (`WouldBlock` too, so the floor sequence runs), and other errors
-    /// as-is.
+    /// Reclaim the stale incumbent judged at `path`, atomically and
+    /// without ever vacating the public path: the incumbent is EXCHANGED
+    /// with a private empty placeholder (`renameat2(RENAME_EXCHANGE)`),
+    /// so the public path continuously holds either the incumbent or
+    /// the placeholder - a third process can never acquire the gap, and
+    /// a claimed successor (the incumbent replaced between the snapshot
+    /// and the exchange) is swapped back home with a second exchange,
+    /// which cannot fail while both paths exist. The removal happens only
+    /// at the private name and only after the exchanged inode matches
+    /// the snapshotted `incumbent`; a mismatch never removes anything.
     #[cfg(target_os = "linux")]
-    fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<()> {
+    fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<StaleClaim> {
+        // The cheap pre-check: a successor that already replaced the
+        // incumbent is detected without moving anything.
+        if identity_at(path) != incumbent {
+            return Ok(StaleClaim::Successor);
+        }
         let Some(parent) = path.parent() else {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "lock path has no parent",
-            ));
+            return Ok(StaleClaim::Unsupported);
         };
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |age| age.as_nanos());
         let pid = std::process::id();
         for attempt in 0..8 {
-            let claim = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
-            match move_without_replacing(path, &claim) {
+            let placeholder = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
+            if let Err(error) = fs::create_dir(&placeholder) {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    continue;
+                }
+                return Err(error);
+            }
+            match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
-                    if identity_at(&claim) == incumbent {
-                        // The judged stale incumbent, claimed: remove it
-                        // from the private name where nothing can replace
-                        // it (owner file first, then the directory).
-                        if let Err(error) = remove_candidate_dir(&claim) {
-                            // A vanished claim cannot be restored; treat
-                            // the incumbent as reclaimed.
+                    if identity_at(&placeholder) == incumbent {
+                        // The judged stale incumbent, held at the private
+                        // name: remove it there (owner file first). The
+                        // placeholder itself still blocks the public
+                        // path - remove it too so the caller's retry
+                        // sees an empty path (a failed removal here is a
+                        // real error: the retry would only contend with
+                        // our own artifact).
+                        if let Err(error) = remove_candidate_dir(&placeholder) {
                             if error.kind() != io::ErrorKind::NotFound {
                                 return Err(error);
                             }
                         }
-                        return Ok(());
+                        fs::remove_dir(path)?;
+                        return Ok(StaleClaim::Removed);
                     }
-                    // Not the judged incumbent: a successor holds the
-                    // claimed directory. Restore it without clobbering a
-                    // newer occupant of the vacated path; a failed restore
-                    // (a third party took the path in the microsecond
-                    // gap) leaves the claim in place - the documented
-                    // floor, the same one as the release's restore arm.
-                    match move_without_replacing(&claim, path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                        Err(error) => return Err(error),
-                    }
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    ));
+                    // The exchanged directory is NOT the judged incumbent:
+                    // a live successor. Swap it home (both paths exist, so
+                    // the exchange cannot fail on occupancy) and remove the
+                    // placeholder, now back at its private name.
+                    rename_noreplace::exchange(path, &placeholder)?;
+                    let _ = fs::remove_dir(&placeholder);
+                    return Ok(StaleClaim::Successor);
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let _ = fs::remove_dir(&placeholder);
+                    return Ok(StaleClaim::Vanished);
+                }
                 Err(error) if Self::rename_noreplace_unsupported(&error) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "no no-replace rename for the stale reclaim",
-                    ));
+                    let _ = fs::remove_dir(&placeholder);
+                    return Ok(StaleClaim::Unsupported);
                 }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let _ = fs::remove_dir(&placeholder);
+                    return Err(error);
+                }
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "all stale-reclaim claim names are taken",
-        ))
+        Ok(StaleClaim::Successor)
     }
 
     /// True when a no-replace rename failed because the kernel or
@@ -888,23 +930,27 @@ impl LockDir {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    // Airtight reclaim where renameat2 exists: claim the
-                    // stale incumbent under a private name with one
-                    // atomic rename, and remove it from there only when
-                    // the claimed inode is the one this judge snapshotted.
-                    // A successor that replaced the incumbent between the
-                    // snapshot and the claim is restored untouched - its
-                    // owner file and directory are never removed. On the
-                    // mounts without renameat2 the claim itself reports
-                    // unsupported and the floor sequence below runs.
+                    // Airtight reclaim where renameat2 exists: exchange
+                    // the stale incumbent with a blocking placeholder and
+                    // remove it from the private name only on a claimed-
+                    // inode == snapshot match; a live successor is swapped
+                    // home untouched and reported as contention. Only the
+                    // Unsupported outcome falls to the floor sequence
+                    // below - the enum makes a fall-through on any other
+                    // outcome unrepresentable.
                     let incumbent = {
                         use std::os::unix::fs::MetadataExt;
                         Some((metadata.dev(), metadata.ino()))
                     };
-                    match Self::claim_stale_incumbent(path, incumbent) {
-                        Ok(()) => return Ok(()),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(error) => return Err(error),
+                    match Self::claim_stale_incumbent(path, incumbent)? {
+                        StaleClaim::Removed | StaleClaim::Vanished => return Ok(()),
+                        StaleClaim::Successor => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                format!("Lock file is already being held: {}", path.display()),
+                            ));
+                        }
+                        StaleClaim::Unsupported => {}
                     }
                 }
                 // The floor reclaim (no no-replace rename): remove the
