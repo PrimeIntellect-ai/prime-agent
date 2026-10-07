@@ -163,11 +163,16 @@ def _focused_index(app_services: Any, app_element: Any, refs: list[Any], timeout
 
 
 def _live_fingerprint(ref: Any) -> tuple[str | None, str | None]:
-    """Read one live element's current (role, title) for freshness checking."""
+    """Read one live element's current (role, title) for freshness checking.
+
+    Both values carry the same cap as the snapshot's stored strings, so a
+    long attribute compares equal instead of reading as stale on every
+    action against an unchanged element.
+    """
     app_services = _require_mac().app_services
     return (
-        _text(_copy_value(app_services, ref, "AXRole")),
-        _text(_copy_value(app_services, ref, "AXTitle")),
+        _cap(_text(_copy_value(app_services, ref, "AXRole"))),
+        _cap(_text(_copy_value(app_services, ref, "AXTitle"))),
     )
 
 
@@ -462,10 +467,13 @@ def _describe(app_services: Any, element: Any, deadline: float | None = None) ->
             return False, None
         return _read_subrole(app_services, element, _remaining_seconds(deadline))
 
-    role = _cap(_text(read("AXRole")))
+    role_ok, role = read_attribute("AXRole")
+    role = _cap(role)
     subrole_ok, subrole = read_subrole()
     subrole = _cap(subrole)
-    if not subrole_ok and role == _SECURE_ROLE:
+    if not subrole_ok and (not role_ok or role == _SECURE_ROLE):
+        # an unreadable subrole fails closed whenever the role could be a
+        # text field, including when the role itself could not be read
         subrole = _SECURE_SUBROLE
     value = None if subrole == _SECURE_SUBROLE else _cap(_text(read("AXValue")))
     return {

@@ -1032,7 +1032,16 @@ class App:
             )
         shot = self._shot_size
         current_window_id = self._observation.window_id
-        if shot is not None and current_window_id is not None and self._shot_window_id is not None:
+        if shot is not None and self._shot_window_id is not None:
+            if current_window_id is None:
+                # a time-bounded observe could not read the window's
+                # identity: the shot cannot be verified against the focus
+                raise ComputerUseError(
+                    "TRANSPORT_ERROR",
+                    "the focused window's identity is unreadable; call get_ax_state() and "
+                    "retake the screenshot before clicking image coordinates",
+                    {},
+                )
             if current_window_id != self._shot_window_id:
                 raise ComputerUseError(
                     "TRANSPORT_ERROR",

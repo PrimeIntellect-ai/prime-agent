@@ -564,5 +564,47 @@ class RoleUnsupportedRegressionTests(unittest.TestCase):
             self.assertIsNone(ax._focused_is_secure(4242))
 
 
+class LiveFingerprintCapTests(unittest.TestCase):
+    def test_live_fingerprint_caps_role_and_title_like_the_snapshot(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (0, "R" * (ax._MAX_ATTRIBUTE_CHARS + 50))
+                if attribute == "AXTitle":
+                    return (0, "T" * (ax._MAX_ATTRIBUTE_CHARS + 50))
+                return (0, None)
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            live_role, live_title = ax._live_fingerprint("ref")
+        self.assertEqual(live_role, ax._cap("R" * (ax._MAX_ATTRIBUTE_CHARS + 50)))
+        self.assertEqual(live_title, ax._cap("T" * (ax._MAX_ATTRIBUTE_CHARS + 50)))
+
+
+class UnreadableRoleValueTests(unittest.TestCase):
+    def test_an_unreadable_role_and_subrole_fail_closed_as_secure(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute in ("AXRole", "AXSubrole"):
+                    return (-25204, None)  # both reads cannot complete
+                if attribute == "AXValue":
+                    return (0, "hunter2")
+                return (0, None)
+
+        described = ax._describe(Services(), "element")
+        self.assertEqual(described["subrole"], "AXSecureTextField")
+        self.assertIsNone(described["value"])
+
+
 if __name__ == "__main__":
     unittest.main()

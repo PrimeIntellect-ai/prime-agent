@@ -888,5 +888,49 @@ class TruncatedDiffWarningTests(AppTestCase):
         self.assertIn("TRUNCATED: the observation stopped at its element/depth/time bounds, some controls are hidden", text)
 
 
+class CappedTitleStaleTests(AppTestCase):
+    async def test_a_capped_title_element_is_not_always_stale(self) -> None:
+        real_fingerprint = ax._live_fingerprint
+        env = self.make_env()
+        app = await env.get_app()
+        long_title = "T" * (ax._MAX_ATTRIBUTE_CHARS + 50)
+        app._observation = fakes.observation(
+            [{"role": "AXButton", "title": ax._cap(long_title), "children": []}], focused_index=0
+        )
+        live_services = types.SimpleNamespace(
+            kAXErrorSuccess=0,
+            AXUIElementSetMessagingTimeout=lambda element, seconds: None,
+            AXUIElementCopyAttributeValue=lambda element, attribute, unused: (
+                0,
+                {"AXRole": "AXButton", "AXTitle": long_title}[attribute],
+            ),
+        )
+        with mock.patch.object(
+            ax, "_require_mac", lambda: types.SimpleNamespace(app_services=live_services)
+        ), mock.patch.object(ax, "_live_fingerprint", real_fingerprint):
+            element, ref = app._element(0)
+        self.assertEqual(element["title"], ax._cap(long_title))
+
+
+class UnreadableWindowIdShotTests(AppTestCase):
+    async def test_an_unreadable_window_id_refuses_to_scale_the_old_shot(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_screenshot(attach=False)
+        self.assertEqual(app._shot_window_id, 4321)
+        app._observation = ax._observe(4242)._replace(window_id=None)
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            app._window_point((10.0, 10.0))
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+
+    async def test_a_matching_window_id_still_scales_the_shot(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_screenshot(attach=False)
+        self.assertEqual(app._shot_window_id, 4321)
+        point = app._window_point((10.0, 10.0))
+        self.assertEqual(point, (110.0, 60.0))
+
+
 if __name__ == "__main__":
     unittest.main()
