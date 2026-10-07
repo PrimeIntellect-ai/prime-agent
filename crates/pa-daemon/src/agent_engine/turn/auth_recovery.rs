@@ -68,14 +68,11 @@ impl AgentSessionEngine {
             }
         })
         .await;
-        let outcome = match forced {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(
-                    &provider,
-                    "the refresh task failed",
-                ))
-            }
+        let Ok(outcome) = forced else {
+            return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(
+                &provider,
+                "the refresh task failed",
+            ));
         };
         match outcome {
             StoreOutcome::NotApplicable => return AuthRecoveryOutcome::Continue,

@@ -326,8 +326,7 @@ mod tests {
             refresh: Some("r-old".to_string()),
             expires: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(i64::MAX)
+                .map_or(i64::MAX, |d| d.as_millis() as i64)
                 + 3_600_000,
             account_id: Some("acct-1".to_string()),
             enterprise_url: None,
