@@ -44,10 +44,12 @@ impl AgentSessionEngine {
         let provider = target.model.provider.clone();
         let agent_dir = self.config.agent_dir.clone();
         let served_key = target.api_key.clone();
+        let closure_provider = provider.clone();
         let forced = tokio::task::spawn_blocking(move || {
             let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
-            let Some(pa_core::auth::AuthCredential::Oauth { access, refresh, .. }) =
-                auth.get_all().credential(&provider)
+            let Some(pa_core::auth::AuthCredential::Oauth {
+                access, refresh, ..
+            }) = auth.get_all().credential(&closure_provider)
             else {
                 return StoreOutcome::NotApplicable;
             };
@@ -60,7 +62,7 @@ impl AgentSessionEngine {
             if served_key.as_deref() != Some(access.as_str()) {
                 return StoreOutcome::Fresher;
             }
-            match auth.force_refresh_oauth(&provider) {
+            match auth.force_refresh_oauth(&closure_provider) {
                 Ok(_) => StoreOutcome::Refreshed,
                 Err(reason) => StoreOutcome::Rejected(reason),
             }
@@ -78,9 +80,7 @@ impl AgentSessionEngine {
         match outcome {
             StoreOutcome::NotApplicable => return AuthRecoveryOutcome::Continue,
             StoreOutcome::Rejected(reason) => {
-                return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(
-                    &provider, &reason,
-                ));
+                return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(&provider, &reason));
             }
             StoreOutcome::Fresher | StoreOutcome::Refreshed => {}
         }

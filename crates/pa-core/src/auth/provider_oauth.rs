@@ -185,9 +185,7 @@ impl crate::auth::OAuthIntegration for ProviderOAuth {
         ) {
             return None;
         }
-        let Some(credential) = credentials.credential(provider_id) else {
-            return None;
-        };
+        let credential = credentials.credential(provider_id)?;
         // The expiry-gated path keeps a failed credential for a later
         // retry; the failure is logged, never surfaced.
         let outcome = self.exchange_refresh(provider_id, &credential);
@@ -611,8 +609,16 @@ mod tests {
     #[test]
     fn a_credential_without_a_refresh_token_has_no_forced_refresh() {
         let without_refresh = AuthCredential::Oauth {
+            access: "stale-access".to_string(),
             refresh: None,
-            ..expired_codex_credential()
+            expires: 1,
+            account_id: Some("acct-1".to_string()),
+            enterprise_url: None,
+            endpoint: None,
+            token_endpoint: None,
+            client_id: None,
+            resource: None,
+            issuer: None,
         };
         let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &without_refresh);
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
