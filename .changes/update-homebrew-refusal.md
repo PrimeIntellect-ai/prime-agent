@@ -1,0 +1,1 @@
+- `prime-agent update` on a Homebrew-managed install (Cellar formula or Caskroom cask) no longer attempts an installer self-update: it now refuses and points at `brew upgrade prime-agent` (or `brew upgrade --cask prime-agent`).
