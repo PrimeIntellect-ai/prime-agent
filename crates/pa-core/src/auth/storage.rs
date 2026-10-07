@@ -236,7 +236,11 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         let current = fs::read_to_string(&self.auth_path).ok();
         let ((), next) = update(current)?;
         if let Some(next) = next {
-            super::super::settings::storage::atomic_write(&self.auth_path, &next)?;
+            super::super::settings::storage::atomic_write_with(
+                &self.auth_path,
+                &next,
+                super::super::settings::storage::AtomicWriteOptions { fsync: true },
+            )?;
         }
         drop(guard);
         Ok(())
@@ -307,10 +311,10 @@ mod tests {
         assert!(data.credential("prime-inference").is_some());
     }
 
-    /// The auth save goes through the real `with_lock` writer and takes NO fsync branch landing the
-    /// exact document bytes.
+    /// The auth save goes through the real `with_lock` writer and takes exactly one fsync branch
+    /// landing the exact document bytes.
     #[test]
-    fn auth_write_takes_the_ts_default_no_sync() {
+    fn auth_write_takes_exactly_one_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
         let document = r#"{ "prime-inference": { "type": "api_key", "key": "sk" } }"#;
@@ -320,8 +324,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             crate::settings::storage::opt_in_fsync_calls(),
-            before,
-            "the TS-default auth write must not sync"
+            before + 1,
+            "the auth write must flush the temp file before the rename"
         );
         assert_eq!(
             fs::read_to_string(dir.path().join("auth.json")).unwrap(),
