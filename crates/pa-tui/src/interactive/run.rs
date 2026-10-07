@@ -1294,6 +1294,12 @@ async fn run_interactive_surface(
             None
         };
         tokio::select! {
+            // Input outranks the timers: a queued key must win any tie with an
+            // expired quiet tick, or Enter can accept a completion materialized in
+            // the same instant instead of submitting the typed command. Biased
+            // polling resolves ties in source order, and the events arm drains
+            // its backlog each pass, so no lower arm starves.
+            biased;
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and forever; while the
                 // reconnect driver owns the run (§10.2) that always-ready arm would hot-spin the
