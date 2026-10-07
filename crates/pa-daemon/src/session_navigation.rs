@@ -21,6 +21,7 @@ pub(crate) struct PreparedReplacement {
 
 /// The navigation surface: the prepare and swap phases of the replacement
 /// flow the three commands share.
+#[derive(Clone)]
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -361,7 +362,12 @@ impl Worker {
         if let Err(response) = self.require_created("switch_session") {
             return response;
         }
-        let prepared = self.navigation.prepare_switch_session(payload);
+        let navigation = self.navigation.clone();
+        let payload = payload.clone();
+        let prepared = tokio::task::spawn_blocking(move || navigation.prepare_switch_session(&payload))
+            .await
+            .map_err(|error| response_failure(None, "switch_session", &error.to_string(), None))
+            .and_then(|result| result);
         self.run_session_replacement("switch_session", prepared)
             .await
     }
@@ -371,7 +377,12 @@ impl Worker {
         if let Err(response) = self.require_created("import_jsonl") {
             return response;
         }
-        let prepared = self.navigation.prepare_import_jsonl(payload);
+        let navigation = self.navigation.clone();
+        let payload = payload.clone();
+        let prepared = tokio::task::spawn_blocking(move || navigation.prepare_import_jsonl(&payload))
+            .await
+            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))
+            .and_then(|result| result);
         self.run_session_replacement("import_jsonl", prepared).await
     }
 }
