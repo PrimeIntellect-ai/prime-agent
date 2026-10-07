@@ -1,0 +1,1 @@
+- A parent session's usage and cost totals include its subagents' usage again: child usage attribution rows are written to the parent's transcript file, so live totals count child cost and a resumed parent keeps it, matching the TypeScript version.
