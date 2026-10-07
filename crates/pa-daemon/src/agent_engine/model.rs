@@ -398,6 +398,26 @@ impl AgentSessionEngine {
             .get_api_key_and_headers(model, model.headers.as_ref())
             .api_key
     }
+
+    /// The primary target a failover episode restores: the captured model
+    /// with the request auth RE-RESOLVED from the store (a credential
+    /// rotated — and reloaded — during the failover serves from the store,
+    /// never the pre-failover capture; the capture only backs a resolution
+    /// that yields nothing).
+    pub(crate) fn restored_primary_target(
+        &self,
+        primary: &Model,
+        captured_api_key: Option<String>,
+        captured_headers: Option<std::collections::BTreeMap<String, String>>,
+    ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
+        let (api_key, headers) = self.resolve_request_key_and_headers(primary);
+        pa_core::session_engine::provider_adapter::ProviderTarget {
+            service_tier: *self.service_tier.read().expect("service tier lock"),
+            api_key: api_key.or(captured_api_key),
+            model: primary.clone(),
+            headers: headers.or(captured_headers),
+        }
+    }
 }
 
 /// The last persisted `rlm_max_depth_state` custom entry in a session

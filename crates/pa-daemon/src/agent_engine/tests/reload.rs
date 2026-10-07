@@ -348,3 +348,51 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
         "the saved session target's request auth rebinds from the store"
     );
 }
+
+/// A failover's primary restore re-resolves the request auth from the
+/// store: a credential rotated (and reloaded) during the failover serves
+/// from the store, never the pre-failover capture; the capture only backs
+/// a resolution that yields nothing.
+#[test]
+fn restored_primary_target_serves_the_store_auth() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "fresh-access");
+    let engine = credential_backed_engine(dir.path());
+    let primary = engine.resolve_model().expect("the primary resolves");
+    let restored =
+        engine.restored_primary_target(&primary, Some("stale-capture".to_string()), None);
+    assert_eq!(
+        restored.api_key.as_deref(),
+        Some("fresh-access"),
+        "the restored primary serves the stored credential"
+    );
+    assert_eq!(
+        restored.model.id, primary.id,
+        "the restore keeps the primary model"
+    );
+
+    // A provider with nothing configured anywhere: the capture backs the
+    // restore, not an empty key.
+    let ghost: pa_types::ai::Model =
+        pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
+            "id": "ghost-1",
+            "name": "Ghost 1",
+            "api": "openai-completions",
+            "provider": "ghost",
+            "baseUrl": "http://127.0.0.1:9",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000,
+            "maxTokens": 4096,
+        }))
+        .expect("the ghost model converts");
+    let restored = engine.restored_primary_target(&ghost, Some("stale-capture".to_string()), None);
+    assert_eq!(
+        restored.api_key.as_deref(),
+        Some("stale-capture"),
+        "a resolution that yields nothing falls back to the capture"
+    );
+}

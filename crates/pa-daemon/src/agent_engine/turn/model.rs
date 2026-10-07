@@ -340,17 +340,18 @@ impl AgentSessionEngine {
                             // fenced helper (no provider-slot lock held
                             // across the route read).
                             if !self.install_armed_route_target() {
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(ProviderTarget {
-                                    service_tier: *self
-                                        .service_tier
-                                        .read()
-                                        .expect("service tier lock"),
-                                    api_key: primary_api_key,
-                                    model: primary_model.clone(),
-                                    headers: primary_headers,
-                                });
+                                // The primary's request auth re-resolves at
+                                // restore: a credential rotated (and
+                                // reloaded) during the failover serves from
+                                // the store, never the pre-failover
+                                // capture.
+                                let target = self.restored_primary_target(
+                                    &primary_model,
+                                    primary_api_key,
+                                    primary_headers,
+                                );
+                                *self.provider_target.write().expect("provider target lock") =
+                                    Some(target);
                             }
                         }
                         agent.set_model(agent_model).await;
