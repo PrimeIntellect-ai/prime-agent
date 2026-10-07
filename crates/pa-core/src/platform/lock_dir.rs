@@ -402,8 +402,11 @@ pub struct LockDir {
     /// miss would wedge the path's registry entry in place forever).
     /// The key is the canonical spelling - aliases of the held directory
     /// share it, so the same-process check cannot be bypassed by an
-    /// equivalent path.
-    held_key: Option<PathBuf>,
+    /// equivalent path. Held in a mutex and TAKEN by whichever of
+    /// `release` or `Drop` runs first - never unregistered twice (a
+    /// repeat unregister after a same-process re-acquire would remove
+    /// the NEW holder's entry, cursor's finding).
+    held_key: Mutex<Option<PathBuf>>,
     /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
     /// `lock.mtime`: the updater records the exact value its `utimes` call
     /// wrote, and its `isMtimeOurs` equality - a lock whose observed mtime
@@ -717,6 +720,7 @@ impl LockDir {
         if let Some(key) = &held_key {
             register_locally_held(key);
         }
+        let held_key = Mutex::new(held_key);
         Ok(LockDir {
             owner: owner_record.map(str::to_string),
             owned,
@@ -1512,11 +1516,17 @@ impl LockDir {
         // A released guard no longer holds the path: the registry entry
         // must not answer contention for a later same-process acquire that
         // legitimately retakes the freed path while this guard object is
-        // still alive (macroscope's finding). The plain Drop unregisters
-        // again - a second `HashSet::remove` is a no-op.
+        // still alive (macroscope's finding). The key is TAKEN here -
+        // never unregistered twice (a repeat would remove a later
+        // holder's entry, cursor's finding).
         #[cfg(unix)]
-        if let Some(key) = &self.held_key {
-            unregister_locally_held(key);
+        if let Some(key) = self
+            .held_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            unregister_locally_held(&key);
         }
     }
 
@@ -1730,10 +1740,17 @@ impl Drop for LockDir {
         // Unregistered by the STORED registration key: the lock directory
         // may already be gone (a guarded removal released it, a takeover
         // replaced it), and a recomputed canonical key would miss - the
-        // entry would wedge the path's same-process check forever.
+        // entry would wedge the path's same-process check forever. The key
+        // is TAKEN - a `release` that already unregistered leaves nothing,
+        // and a later holder's entry is never removed.
         #[cfg(unix)]
-        if let Some(key) = &self.held_key {
-            unregister_locally_held(key);
+        if let Some(key) = self
+            .held_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            unregister_locally_held(&key);
         }
         #[cfg(not(unix))]
         let _ = &self.held_key;
