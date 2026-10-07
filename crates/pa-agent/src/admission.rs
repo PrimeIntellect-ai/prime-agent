@@ -778,6 +778,7 @@ mod tests {
             vec!["notice".to_string()],
             "the injected batch stayed queued for the pump"
         );
+        gate.send_replace(true);
         let pumped = agent.admit_queued_turn();
         assert_eq!(pumped, QueuedAdmission::Admitted);
         agent.wait_for_idle().await;
