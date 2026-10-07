@@ -868,3 +868,66 @@ async fn a_busy_session_holds_one_pending_watch_notice_per_watch() {
         "{types:?}"
     );
 }
+
+/// The installed watch sink's admission gate is the completion sink's
+/// two-arm shape: a live session admits the quiet steering row, a closed
+/// session refuses, and a DISPOSED engine refuses too — the kernel-side
+/// `bash.progress` caller holds the sink without the engine and can fire
+/// a late notice inside the teardown window the `bash.completed` sink
+/// refuses.
+#[tokio::test]
+async fn the_watch_sink_never_admits_once_the_engine_is_dropped() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let engine = std::sync::Arc::new(
+        crate::agent_engine::AgentSessionEngine::new(crate::agent_engine::AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap(),
+    );
+    engine.register_arc();
+    let core = Arc::new(Mutex::new(SessionCore::test_core(None, "/tmp".to_string())));
+    let digest = Arc::new(AgentMessageDigest::new(
+        Arc::clone(&core),
+        Arc::new(Mutex::new(None)),
+        Arc::new(tokio::sync::Notify::new()),
+    ));
+    let weak = std::sync::Arc::downgrade(&engine);
+    let sink = watch_notice_sink(weak.clone(), Arc::clone(&digest));
+
+    // Live session: the push lane gains the quiet steering row. Each
+    // arm uses its own watch key so a wrongly-admitted notice appends
+    // a fresh row instead of coalescing into the pending one.
+    sink("job-live", "[watch-job pid:1] output +10 bytes (0..10)");
+    assert_eq!(core.lock().unwrap().steering.len(), 1);
+
+    // Closed session: the gate refuses the notice.
+    engine.mark_session_closed();
+    sink("job-closed", "[watch-job pid:1] output +10 bytes (10..20)");
+    assert_eq!(core.lock().unwrap().steering.len(), 1);
+
+    // Disposed engine (a late kernel notice racing the teardown): the
+    // sink refuses like the completion sink refuses its window.
+    engine.clear_session_closed();
+    drop(engine);
+    assert!(weak.upgrade().is_none(), "the engine Arc did not drop");
+    sink("job-dropped", "[watch-job pid:1] output +20 bytes (20..40)");
+    assert_eq!(
+        core.lock().unwrap().steering.len(),
+        1,
+        "a notice was admitted after the engine dropped"
+    );
+}

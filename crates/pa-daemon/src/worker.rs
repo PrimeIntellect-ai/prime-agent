@@ -649,7 +649,7 @@ impl Worker {
                 // worker owns the inbox (its store), the lane pin, and the
                 // digest-aware notice routing; the engine's kernel handlers
                 // call through these closures. The watch sink carries the
-                // same closed-session gate the completion sink holds.
+                // same admission gate the completion sink holds.
                 let inbox_digest = Arc::clone(&agent_digest);
                 let list: crate::agent_inbox_host::InboxListFn =
                     Arc::new(move || inbox_digest.inbox_snapshot());
@@ -664,21 +664,10 @@ impl Worker {
                     read,
                     configure,
                 });
-                let watch_engine = std::sync::Arc::downgrade(concrete);
-                let watch_digest = Arc::clone(&agent_digest);
-                let watch_sink: crate::agent_inbox_host::WatchNoticeSink =
-                    std::sync::Arc::new(move |watch, content| {
-                        // A closed session never admits notices; the
-                        // digest-aware routing itself lives worker-side.
-                        if watch_engine
-                            .upgrade()
-                            .is_some_and(|engine| engine.session_is_closed())
-                        {
-                            return;
-                        }
-                        watch_digest.emit_watch_notice(watch, content);
-                    });
-                concrete.set_watch_notice_sink(watch_sink);
+                concrete.set_watch_notice_sink(watch_notice_sink(
+                    std::sync::Arc::downgrade(concrete),
+                    Arc::clone(&agent_digest),
+                ));
             }
             // The live roster activity feed (TS `observeRosterEvent`): busy
             // flips and trigger events coalesce into `worker_roster_delta`
@@ -1027,6 +1016,27 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
 /// policy marks the admission class and `queue_visible` the invisible shape.
 fn is_injected_prompt_item(item: &QueuedItem) -> bool {
     item.policy == TurnPolicy::Injected && !item.queue_visible && !is_rlm_child_status_item(item)
+}
+
+/// The worker's watch-notice sink (swarm PR E): the completion sink's
+/// admission gate, verbatim — a disposed engine never admits a notice
+/// (the kernel-side `bash.progress` caller holds the sink without the
+/// engine and can fire a late notice inside the same teardown window
+/// `bash.completed` refuses), a closed session neither — then the
+/// worker-owned digest-aware routing.
+fn watch_notice_sink(
+    engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
+    digest: Arc<AgentMessageDigest>,
+) -> crate::agent_inbox_host::WatchNoticeSink {
+    std::sync::Arc::new(move |watch, content| {
+        let Some(engine) = engine.upgrade() else {
+            return;
+        };
+        if engine.session_is_closed() {
+            return;
+        }
+        digest.emit_watch_notice(watch, content);
+    })
 }
 
 #[cfg(test)]
