@@ -2106,13 +2106,26 @@ pub fn check_task_success(
                         ledger["state"].as_str().unwrap_or("unset")
                     ));
                 }
-                for id in ["task-a", "task-b"] {
-                    if ledger_node(Some(ledger), id)
+                // The parent prompt names both step markers, so a
+                // hallucinated ANSWER would pass on node status alone; each
+                // task's marker must appear in that task's own captured
+                // answer, the same cross-check the builder arm runs on the
+                // collector preview.
+                for (id, marker) in [("task-a", TASK_MARKER_A), ("task-b", TASK_MARKER_B)] {
+                    let node = ledger_node(Some(ledger), id);
+                    if node
                         .and_then(|node| node.get("status"))
                         .and_then(Value::as_str)
                         != Some("done")
                     {
                         problems.push(format!("ledger {id} node is not done"));
+                    }
+                    if !node
+                        .and_then(|node| node.get("answer_preview"))
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| contains_marker(text, marker))
+                    {
+                        problems.push(format!("{marker} missing from the {id} answer preview"));
                     }
                 }
                 let watcher = ledger_node(Some(ledger), "watcher");

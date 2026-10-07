@@ -201,8 +201,8 @@ fn resident_ledger() -> Value {
                 "lifecycle": "resident",
                 "instances": [instance_fixture(-1, "cancelled", json!({}))]
             })),
-            node_fixture("task-a", "done", json!({ "instances": [instance_fixture(-1, "done", json!({ "duration_ms": 5_000 }))] })),
-            node_fixture("task-b", "done", json!({ "instances": [instance_fixture(-1, "done", json!({ "duration_ms": 4_000 }))] }))
+            node_fixture("task-a", "done", json!({ "answer_preview": "STEP swt-1", "instances": [instance_fixture(-1, "done", json!({ "duration_ms": 5_000 }))] })),
+            node_fixture("task-b", "done", json!({ "answer_preview": "STEP swt-2", "instances": [instance_fixture(-1, "done", json!({ "duration_ms": 4_000 }))] }))
         ],
         "events": [
             event_fixture(1, "run_started", json!({})),
@@ -222,6 +222,26 @@ fn resident_ledger() -> Value {
             event_fixture(15, "run_stopped", json!({ "detail": "stopped; 1 node(s) cancelled" }))
         ],
         "usage": { "spawns": 3, "settled": 2, "tool_uses": 2, "max_parallel": 8, "running": 0 }
+    }))
+}
+
+fn watcher_ledger(task_previews: [Value; 2]) -> Value {
+    let task_nodes: Vec<Value> = ["task-a", "task-b"]
+        .into_iter()
+        .zip(task_previews)
+        .map(|(id, preview)| node_fixture(id, "done", json!({ "answer_preview": preview })))
+        .collect();
+    status_ledger_fixture(json!({
+        "spec_id": "factory-dag-eval-resident-watcher",
+        "state": "stopped",
+        "nodes": [
+            node_fixture("watcher", "cancelled", json!({
+                "lifecycle": "resident",
+                "instances": [instance_fixture(-1, "cancelled", json!({}))]
+            })),
+            task_nodes[0].clone(),
+            task_nodes[1].clone()
+        ]
     }))
 }
 
@@ -1164,6 +1184,80 @@ fn checks_the_resident_teardown_tasks_settled_watcher_cancelled() {
         .problems
         .iter()
         .any(|problem| problem.contains("watcher node is not cancelled")));
+}
+
+#[test]
+fn the_watcher_ledger_checks_each_task_marker_in_its_own_nodes_preview() {
+    // The parent prompt names both step markers, so the ANSWER line can be
+    // hallucinated: the cross-check that catches it is each task's own
+    // captured answer. A done node with an empty preview, a marker parked in
+    // the wrong task's preview, and a substring hit of a different marker
+    // must all fail.
+    let factory = by_kind(ReferenceFactoryKind::ResidentWatcher);
+    let good = answer(&json!({
+        "markers": ["swt-1", "swt-2"],
+        "stopped": ["watcher"],
+        "state": "stopped"
+    }));
+
+    // A hallucinated ANSWER over done-but-silent children must fail.
+    let silent = watcher_ledger([json!(null), json!(null)]);
+    let outcome = check(&factory, good.as_ref(), Some(&silent));
+    assert!(
+        !outcome.ok,
+        "the empty-capture trap must fail the check: {outcome:?}"
+    );
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-1 missing from the task-a answer preview")));
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-2 missing from the task-b answer preview")));
+
+    // Each marker must sit in its own task's preview: swapped children fail.
+    let swapped = watcher_ledger([json!("STEP swt-2"), json!("STEP swt-1")]);
+    let outcome = check(&factory, good.as_ref(), Some(&swapped));
+    assert!(
+        !outcome.ok,
+        "a marker parked in the wrong task's preview must fail: {outcome:?}"
+    );
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-1 missing from the task-a answer preview")));
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-2 missing from the task-b answer preview")));
+
+    // A substring hit of a different marker is not a captured step answer:
+    // swt-1 must not count as present merely because swt-12 is.
+    let substring = watcher_ledger([json!("STEP swt-12"), json!("STEP swt-2")]);
+    let outcome = check(&factory, good.as_ref(), Some(&substring));
+    assert!(
+        !outcome.ok,
+        "the substring trap must fail the check: {outcome:?}"
+    );
+    assert!(outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-1 missing from the task-a answer preview")));
+    // The substring trap fails exactly the planted marker: swt-2 stands.
+    assert!(!outcome
+        .problems
+        .iter()
+        .any(|problem| problem.contains("swt-2 missing from the task-b answer preview")));
+
+    // The honest ledger passes: each preview carries its own step marker.
+    let honest = watcher_ledger([json!("STEP swt-1"), json!("STEP swt-2")]);
+    let outcome = check(&factory, good.as_ref(), Some(&honest));
+    assert!(
+        outcome.ok,
+        "each task carrying its own marker passes: {:?}",
+        outcome.problems
+    );
 }
 
 #[test]
