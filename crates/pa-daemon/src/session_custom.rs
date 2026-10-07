@@ -1000,17 +1000,17 @@ mod tests {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir =
-            std::env::temp_dir().join(format!("pa-worker-sc-reload-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // A TempDir keeps the worker's files from piling up in /tmp.
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir_path = dir.path().to_path_buf();
         let config = crate::worker::WorkerConfig {
-            socket_path: dir.join("worker.sock"),
+            socket_path: dir_path.join("worker.sock"),
             supervisor_socket_path: std::path::PathBuf::new(),
             token: "token".to_string(),
             worker_instance_id: String::new(),
             active_session_id: "custom-session".to_string(),
-            agent_dir: dir.join("agent"),
-            recovery_journal_path: dir.join("recovery.jsonl"),
+            agent_dir: dir_path.join("agent"),
+            recovery_journal_path: dir_path.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
         };

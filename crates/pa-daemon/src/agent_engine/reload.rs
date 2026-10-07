@@ -29,12 +29,30 @@ impl AgentSessionEngine {
     /// request key and headers re-resolve, never the model, and the
     /// refresh lands in place on the CURRENT slot contents (a racing
     /// `set_model`, image-route swap, or retirement is never clobbered by
-    /// an older snapshot). A routed episode's armed target refreshes from
-    /// the same store, or the next model-turn attempt would reinstall the
-    /// stale credentials. The MCP manager re-reads its settings and the
-    /// shared auth store (the same reload the connections view applies
-    /// on open).
+    /// an older snapshot). A routed episode's armed target and its saved
+    /// session-target fallback refresh from the same store, or the next
+    /// model-turn attempt would reinstall the stale credentials. The MCP
+    /// manager re-reads its settings and the shared auth store (the same
+    /// reload the connections view applies on open).
     pub(crate) fn reload_live_inputs(&self) {
+        // The armed route refreshes FIRST, the live slot SECOND: the
+        // route lock fences the route's clone-and-install against this
+        // refresh order (an attempt either installs the refreshed route
+        // or lands before the slot refresh — never over it), and the
+        // route's saved session target is the fallback a later
+        // `clear_image_route` restores when resolution fails, so its auth
+        // re-binds from the same store read.
+        if let Some(route) = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            self.refresh_request_auth(&mut route.target);
+            if let Some(saved) = route.session_target.as_mut() {
+                self.refresh_request_auth(saved);
+            }
+        }
         let live_model = self
             .provider_target
             .read()
@@ -66,14 +84,6 @@ impl AgentSessionEngine {
                     }
                 }
             }
-        }
-        if let Some(route) = self
-            .image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_mut()
-        {
-            self.refresh_request_auth(&mut route.target);
         }
         let mut manager = self
             .mcp

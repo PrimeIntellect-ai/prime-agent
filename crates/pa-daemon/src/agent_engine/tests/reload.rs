@@ -280,6 +280,7 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
     write_two_model_provider(&agent_dir);
     write_oauth_credential(&agent_dir, "fresh-access");
     let engine = credential_backed_engine(dir.path());
+    let session_model = engine.resolve_model().expect("the pinned model resolves");
     let routed: pa_types::ai::Model =
         pa_core::session_engine::provider_adapter::json_round_trip(&serde_json::json!({
             "id": "mock-vision",
@@ -312,7 +313,14 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
                 model: override_model,
                 thinking_level: pa_agent::types::ThinkingLevel::default(),
             },
-            session_target: None,
+            // The saved session target a failing route clear restores: it
+            // carries the pre-login key and must re-bind with the rest.
+            session_target: Some(ProviderTarget {
+                service_tier: None,
+                api_key: Some("stale-session-access".to_string()),
+                model: session_model,
+                headers: None,
+            }),
         });
     engine.reload_live_inputs();
     let armed = engine
@@ -329,5 +337,14 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
         armed.target.api_key.as_deref(),
         Some("fresh-access"),
         "the armed route's request auth rebinds from the store"
+    );
+    let saved = armed
+        .session_target
+        .as_ref()
+        .expect("the saved session target stays");
+    assert_eq!(
+        saved.api_key.as_deref(),
+        Some("fresh-access"),
+        "the saved session target's request auth rebinds from the store"
     );
 }

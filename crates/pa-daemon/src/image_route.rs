@@ -153,6 +153,11 @@ impl AgentSessionEngine {
     /// Apply the armed route to a model turn (after the session build, so
     /// the build-time target cannot clobber it): the provider target and
     /// the agent's per-run override swap to the routed image model.
+    ///
+    /// The route lock is held through the slot write: a `/reload` that
+    /// refreshes the armed route's auth and then the slot's can never be
+    /// overtaken by an older clone of this route installing itself after
+    /// the refresh — the clone and its install are one critical section.
     pub(crate) fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
         let mut slot = self
             .image_route
@@ -170,7 +175,6 @@ impl AgentSessionEngine {
                 .clone_from(&self.provider_target.read().expect("provider target lock"));
         }
         let route = route.clone();
-        drop(slot);
         agent.set_model_override(Some(route.agent_override));
         *self.provider_target.write().expect("provider target lock") = Some(route.target);
     }
