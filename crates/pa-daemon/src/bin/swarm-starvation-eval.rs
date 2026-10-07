@@ -1229,6 +1229,64 @@ mod tests {
     }
 
     #[test]
+    fn unattributed_arrivals_count_as_one_reporter_between_them() {
+        // Three arrivals carry no sender id: they may all be one child that
+        // re-sent, so the gate must not credit them as three distinct
+        // children. The unverifiable arrivals count as one reporter between
+        // them and the row fails closed instead of passing an unattributed
+        // crew off as the configured size.
+        let (seed, size, trial) = (1, 3, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 3);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "custom", "customType": "agent_message", "content": "[agent-message from a child]\n\nREPORT" }),
+                    json!({ "role": "custom", "customType": "agent_message", "content": "[agent-message from a child]\n\nREPORT" }),
+                    json!({ "role": "custom", "customType": "agent_message", "content": "[agent-message from a child]\n\nREPORT" }),
+                    json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 3, 15.0);
+
+        run(&daemon.socket, &config).expect("the unattributed-crew trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        // Three arrival rows, none attributable to a distinct child: the
+        // unattributed arrivals prove at most one reporter between them.
+        assert_eq!(rows[0]["arrivals"], 3, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "partial crew: 1 of 3 children reported",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+    }
+
+    #[test]
     fn a_full_distinct_crew_with_a_duplicate_row_still_passes_the_gate() {
         // Both children reported; one re-sent its REPORT afterwards. The
         // distinct-sender count must not over-fire on the duplicate row —
