@@ -1508,11 +1508,11 @@ mod tests {
     #[test]
     fn pending_message_queue_all_mode_flattens() {
         let mut queue = PendingMessageQueue::new(QueueMode::All);
-        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("a")));
-        queue.enqueue(AgentMessageBatch::Batch(vec![
-            AgentMessage::user("b"),
-            AgentMessage::user("c"),
-        ]));
+        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("a")), false);
+        queue.enqueue(
+            AgentMessageBatch::Batch(vec![AgentMessage::user("b"), AgentMessage::user("c")]),
+            false,
+        );
         let drained = queue.drain();
         assert_eq!(drained.len(), 3);
         assert!(!queue.has_items());
@@ -1521,11 +1521,11 @@ mod tests {
     #[test]
     fn pending_message_queue_one_at_a_time_keeps_batches() {
         let mut queue = PendingMessageQueue::new(QueueMode::OneAtATime);
-        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("a")));
-        queue.enqueue(AgentMessageBatch::Batch(vec![
-            AgentMessage::user("b"),
-            AgentMessage::user("c"),
-        ]));
+        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("a")), false);
+        queue.enqueue(
+            AgentMessageBatch::Batch(vec![AgentMessage::user("b"), AgentMessage::user("c")]),
+            false,
+        );
         let drained = queue.drain();
         assert_eq!(drained.len(), 1);
         assert!(queue.has_items());
@@ -1535,8 +1535,14 @@ mod tests {
     #[test]
     fn remove_where_drops_matching_batches() {
         let mut queue = PendingMessageQueue::new(QueueMode::OneAtATime);
-        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("drop-me")));
-        queue.enqueue(AgentMessageBatch::Single(AgentMessage::user("keep-me")));
+        queue.enqueue(
+            AgentMessageBatch::Single(AgentMessage::user("drop-me")),
+            false,
+        );
+        queue.enqueue(
+            AgentMessageBatch::Single(AgentMessage::user("keep-me")),
+            false,
+        );
         let removed = queue.remove_where(&|m| matches!(m, AgentMessage::Standard(crate::types::Message::User(u)) if matches!(&u.content, crate::types::UserContent::Text(t) if t.contains("drop"))));
         assert_eq!(removed.len(), 1);
         assert!(queue.has_items());
