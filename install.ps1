@@ -792,11 +792,10 @@ if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInsta
 }
 if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
-    # THE WATCHDOG: the pre-warm runs as a WATCHED child of this shell -
-    # the payload exe directly (watching the .cmd shim would mean cmd.exe
-    # and its quoting), bounded, tree-killed on expiry, and degraded to
-    # the honest note the offline arm below prints. Never fatal: the
-    # payload is already published.
+    # THE WATCHDOG: the pre-warm runs as a WATCHED child - the payload
+    # exe directly (watching the .cmd shim would mean cmd.exe and its
+    # quoting), bounded, and degraded to the honest note the offline arm
+    # below prints on expiry. Never fatal: the payload is published.
     $prewarmBoundSec = 300
     $prewarmExe = Join-Path $share 'prime-agent.exe'
     $prewarm = $null
@@ -815,13 +814,12 @@ if ($uvKnown) {
         }
     } else {
         # The tree kill runs from the absolute System32 path (a bare name
-        # must never resolve a planted exe), and its result decides the
-        # honest wording: a tree that could not be stopped must not be
-        # reported as stopped.
+        # must never resolve a planted exe). Only the OBSERVED exit counts
+        # as stopped: a taskkill exit code is a request's receipt, not a
+        # dead tree.
         & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $prewarm.Id /T /F *> $null
-        $prewarmStopped = ($LASTEXITCODE -eq 0)
         $null = $prewarm.WaitForExit(15000)
-        if ($prewarm.HasExited) { $prewarmStopped = $true }
+        $prewarmStopped = $prewarm.HasExited
         $prewarmDetail = "the watchdog stopped it at ${prewarmBoundSec}s"
         if (-not $prewarmStopped) { $prewarmDetail = 'the watchdog could not stop it (it may still be running)' }
         Step-Fail 'preparing the Python kernel' $prewarmDetail

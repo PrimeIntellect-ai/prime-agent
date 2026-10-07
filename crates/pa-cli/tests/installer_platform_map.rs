@@ -1201,7 +1201,7 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
         .find("# --- the PATH add")
         .expect("the PATH-add section follows");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 10] = [
+    let markers: [(&str, &str); 9] = [
         (
             "the watchdog bound (the pre-warm may take minutes on a slow link, never forever)",
             "$prewarmBoundSec = 300",
@@ -1223,16 +1223,12 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
             "& (Join-Path $env:SystemRoot 'System32\\taskkill.exe') /PID $prewarm.Id /T /F",
         ),
         (
-            "the tree kill's own result is read (a failed kill is not reported as a stop)",
-            "$prewarmStopped = ($LASTEXITCODE -eq 0)",
-        ),
-        (
             "the expiry arm reaps the killed child",
             "$prewarm.WaitForExit(15000)",
         ),
         (
-            "the reap's verdict feeds the same honest wording",
-            "if ($prewarm.HasExited) { $prewarmStopped = $true }",
+            "the observed exit is the only proof of a stop (a kill's exit code is a request's receipt, not a dead tree)",
+            "$prewarmStopped = $prewarm.HasExited",
         ),
         (
             "the honest expiry note names the wait",
@@ -1344,8 +1340,8 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
         .expect("the verify section follows the pre-warm");
     let block = &script[start..end];
 
-    let (status, flow, terminated, child_pid) = drive_sh_prewarm_block(block, "2");
-    let status = status.unwrap_or_else(|| {
+    let drive = drive_sh_prewarm_block(block, "2");
+    let status = drive.status.unwrap_or_else(|| {
         panic!("the pre-warm block ran past its watchdog - a hung launcher held the whole install")
     });
     assert!(
@@ -1353,37 +1349,41 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
         "the install continues past a bounded pre-warm: {status:?}"
     );
     assert!(
-        flow.contains("fail Preparing the Python kernel"),
-        "the watchdog records the stopped step: {flow}"
+        drive.flow.contains("fail Preparing the Python kernel"),
+        "the watchdog records the stopped step: {}",
+        drive.flow
     );
     assert!(
-        flow.contains("the first session bootstraps the kernel itself and needs the network once"),
-        "the honest degradation note (the offline note's own phrase): {flow}"
+        drive
+            .flow
+            .contains("the first session bootstraps the kernel itself and needs the network once"),
+        "the honest degradation note (the offline note's own phrase): {}",
+        drive.flow
     );
     assert!(
-        flow.contains("flow-continued"),
-        "the install proceeds after the pre-warm: {flow}"
+        drive.flow.contains("flow-continued"),
+        "the install proceeds after the pre-warm: {}",
+        drive.flow
     );
     assert!(
-        terminated,
+        drive.terminated,
         "the watchdog TERMed the hung launcher before degrading"
     );
-    // The launcher's persistent child is swept with it (where pkill, the
-    // sweep's own tool, exists): the install must not continue while a
-    // pre-warm child still runs.
+    // The whole fixture tree dies with the launcher (where the walk's own
+    // pgrep exists): the install must not continue while a pre-warm
+    // descendant still runs.
     if Command::new("sh")
         .arg("-c")
-        .arg("command -v pkill >/dev/null 2>&1")
+        .arg("command -v pgrep >/dev/null 2>&1")
         .status()
         .is_ok_and(|status| status.success())
     {
-        let child = child_pid.expect("the fake launcher published its child");
-        let alive = Command::new("sh")
-            .arg("-c")
-            .arg(format!("kill -0 {child} 2>/dev/null"))
-            .status()
-            .is_ok_and(|status| status.success());
-        assert!(!alive, "the launcher's child was swept with it");
+        for (pid, still_alive) in &drive.tree {
+            assert!(
+                !still_alive,
+                "the launcher tree was swept with it (pid {pid} survives)"
+            );
+        }
     }
 }
 
@@ -1395,22 +1395,43 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
 /// the suite. Returns the harness exit status (None on the guard), the
 /// transcript the stubs wrote, and whether the launcher's TERM trap
 /// fired.
-fn drive_sh_prewarm_block(
-    block: &str,
-    bound: &str,
-) -> (Option<std::process::ExitStatus>, String, bool, Option<u32>) {
+#[derive(Default)]
+struct PrewarmDrive {
+    status: Option<std::process::ExitStatus>,
+    flow: String,
+    terminated: bool,
+    tree: Vec<(u32, bool)>,
+}
+
+fn drive_sh_prewarm_block(block: &str, bound: &str) -> PrewarmDrive {
     let dir = tempfile::tempdir().expect("scratch dir");
     let transcript = dir.path().join("transcript");
     let sentinel = dir.path().join("terminated");
     let launcher_pid = dir.path().join("launcher.pid");
     let child_pid_file = dir.path().join("child.pid");
+    let grandchild_pid_file = dir.path().join("grandchild.pid");
     let launcher = dir.path().join("launcher");
     let child = dir.path().join("prewarm-child");
+    // The grandchild detaches the way the product's own uv grandchild
+    // would (its own session when setsid exists), so only a parent-link
+    // walk can find it.
+    let setsid = if std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v setsid >/dev/null 2>&1")
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        "setsid"
+    } else {
+        ""
+    };
     std::fs::write(
         &child,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid_file}\nwhile :; do sleep 1; done\n",
-            pid_file = child_pid_file.display()
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid_file}\n{setsid} sleep 60 &\nprintf '%s\\n' \"$!\" > {grandchild}\nwhile :; do sleep 1; done\n",
+            pid_file = child_pid_file.display(),
+            setsid = setsid,
+            grandchild = grandchild_pid_file.display()
         ),
     )
     .expect("write the launcher's child");
@@ -1473,23 +1494,43 @@ fn drive_sh_prewarm_block(
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
-    // Best-effort cleanup of the fake launcher and its child if the
-    // block never killed them (the red shape leaves them looping).
+    // Liveness is measured BEFORE the cleanup kill, or the caller's
+    // tree assertions would be vacuous.
     let read_pid = |path: &std::path::Path| {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|text| text.trim().parse::<u32>().ok())
     };
-    let hung_pid = read_pid(&launcher_pid);
-    let child_pid = read_pid(&child_pid_file);
-    for pid in [hung_pid, child_pid].into_iter().flatten() {
-        let _ = Command::new("sh")
+    let alive = |pid: u32| {
+        Command::new("sh")
             .arg("-c")
-            .arg(format!("kill -9 {pid} 2>/dev/null"))
-            .status();
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let tree = [
+        read_pid(&launcher_pid),
+        read_pid(&child_pid_file),
+        read_pid(&grandchild_pid_file),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|pid| (pid, alive(pid)))
+    .collect::<Vec<_>>();
+    // Best-effort cleanup: the red shape leaves the fixture looping.
+    for (pid, still_alive) in &tree {
+        if *still_alive {
+            let _ = Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 {pid} 2>/dev/null"))
+                .status();
+        }
     }
-    let flow = std::fs::read_to_string(&transcript).unwrap_or_default();
-    let terminated =
-        std::fs::read_to_string(&sentinel).is_ok_and(|text| text.trim() == "terminated");
-    (status, flow, terminated, child_pid)
+    PrewarmDrive {
+        status,
+        flow: std::fs::read_to_string(&transcript).unwrap_or_default(),
+        terminated: std::fs::read_to_string(&sentinel)
+            .is_ok_and(|text| text.trim() == "terminated"),
+        tree,
+    }
 }

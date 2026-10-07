@@ -79,6 +79,11 @@ pub(crate) struct BootstrapVersion {
 /// Python download alone is tens of MB), short of a hang.
 const DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS: u64 = 600_000;
 
+/// The grace for the post-bound reap and the post-exit drain join: a
+/// request (kill, EOF) is not a completed wait, and neither may turn the
+/// bound into a new unbounded one.
+const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The bound on one bootstrap child, overridable for slow links through
 /// `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS`.
 fn resolve_bootstrap_child_timeout_ms() -> u64 {
@@ -129,10 +134,10 @@ async fn run_async(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // The bound's kill reaches uv's own children (build backends) only
-        // through a group kill: the child leads its own process group on
-        // Unix. Windows keeps the hidden-window shape (the creation flags
-        // replace each other); `taskkill /T` walks its tree.
+        // The child leads its own process group on Unix so the bound's
+        // group kill reaches its descendants; Windows keeps the hidden
+        // window shape (the creation flags replace each other) and
+        // `taskkill /T` walks the tree.
         #[cfg(unix)]
         crate::platform::process::set_new_process_group(&mut spawn);
         crate::platform::process::set_no_window(&mut spawn);
@@ -149,23 +154,43 @@ async fn run_async(
         let deadline = std::time::Instant::now() + bound;
         // EOF lands when the child dies; a descendant that inherited the
         // pipes must not trade the bound for a new hang on the exit path.
-        let drain_grace = std::time::Duration::from_secs(5);
+        let drain_grace = REAP_GRACE;
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if std::time::Instant::now() >= deadline => {
-                    // The whole child tree, never just the pid, and never
-                    // the drains: a descendant that inherited the pipes can
-                    // outlive the kill, and joining it would hang the very
-                    // wait this bound exists to end.
-                    let _ = crate::platform::process::kill_process_group_or_pid(child.id() as i32);
-                    let _ = child.wait();
+                    // A kill request is not a dead child: the reap gets its
+                    // own grace (a child that cannot be killed must not
+                    // defeat the bound here either), the verdict reports
+                    // what was proven, and the drains are never joined -
+                    // a descendant that inherited the pipes can outlive
+                    // the kill.
+                    let killed =
+                        crate::platform::process::kill_process_group_or_pid(child.id() as i32);
+                    let reap_deadline = std::time::Instant::now() + REAP_GRACE;
+                    let mut reaped = false;
+                    while std::time::Instant::now() < reap_deadline {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                reaped = true;
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                            Err(_) => break,
+                        }
+                    }
                     drop(drains);
+                    let outcome = match (killed, reaped) {
+                        (true, true) => "was terminated",
+                        (true, false) => "was sent a kill that did not complete",
+                        (false, _) => "could not be killed",
+                    };
                     return Err(anyhow!(
-                        "{} {} did not finish within {}ms and was terminated",
+                        "{} {} did not finish within {}ms and {}",
                         command,
                         args.join(" "),
-                        bound.as_millis()
+                        bound.as_millis(),
+                        outcome
                     ));
                 }
                 Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),

@@ -3067,14 +3067,11 @@ if uv_on_path \
   step_start "Preparing the Python kernel"
   # THE WATCHDOG (the --version probe's own shape - never the `timeout`
   # command: on Windows it is timeout.exe, which waits for a keypress, and
-  # macOS ships none): a runner child publishes the launcher pid and a
-  # done marker; the poll loop bounds the wait; expiry TERMs then KILLs
-  # the launcher and its children, and the pre-warm degrades to the
-  # honest note the offline arm below prints. The pre-warm is best-effort
-  # - never fatal, the payload is already published.
+  # macOS ships none). The pre-warm is best-effort - never fatal, the
+  # payload is already published; on expiry the launcher's whole
+  # descendant tree is stopped and the pre-warm degrades to the honest
+  # note the offline arm below prints.
   prewarm_bound_s="${prewarm_bound_s:-300}"
-  # The bound comes from the caller's environment: validate before the
-  # loop relies on it (a malformed override would disable the watchdog).
   case "$prewarm_bound_s" in
     ''|*[!0-9]*) prewarm_bound_s=300 ;;
   esac
@@ -3097,24 +3094,46 @@ if uv_on_path \
   prewarm_runner=$!
   prewarm_waited=0
   prewarm_timed_out=""
+  # pgrep feeds the descendant walk below.
+  prewarm_pgrep="no"
+  command -v pgrep >/dev/null 2>&1 && prewarm_pgrep="yes"
   while [ ! -f "$prewarm_done" ]; do
     prewarm_waited=$((prewarm_waited + 1))
     if [ "$prewarm_waited" -gt "$prewarm_bound_s" ]; then
       prewarm_timed_out="yes"
       prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
       if [ -n "$prewarm_pid" ]; then
-        # The launcher's own children (the product's uv) are swept while
-        # their parent link still names them - after the launcher dies
-        # they reparent and no sweep can find them. Best-effort: pkill
-        # is not everywhere, and the product's own bounded wait is the
-        # backstop.
-        command -v pkill >/dev/null 2>&1 \
-          && pkill -TERM -P "$prewarm_pid" 2>/dev/null || true
-        command -v pkill >/dev/null 2>&1 \
-          && pkill -KILL -P "$prewarm_pid" 2>/dev/null || true
-        kill "$prewarm_pid" 2>/dev/null || true
+        # THE DESCENDANT WALK: collect the launcher's whole tree by parent
+        # links BEFORE killing anything (after the launcher dies its
+        # descendants reparent and no sweep can find them). A descendant
+        # that leads its own process group (the product's uv) is
+        # group-killed with its own subtree.
+        prewarm_tree="$prewarm_pid"
+        prewarm_seen=""
+        prewarm_frontier="$prewarm_pid"
+        if [ "$prewarm_pgrep" = "yes" ]; then
+          while [ -n "$prewarm_frontier" ]; do
+            prewarm_next=""
+            for prewarm_node in $prewarm_frontier; do
+              case " $prewarm_seen " in
+                *" $prewarm_node "*) continue ;;
+              esac
+              prewarm_seen="$prewarm_seen $prewarm_node"
+              for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
+                prewarm_next="$prewarm_next $prewarm_child"
+              done
+            done
+            prewarm_frontier="$prewarm_next"
+          done
+          prewarm_tree="$prewarm_pid$prewarm_seen"
+        fi
+        for prewarm_node in $prewarm_tree; do
+          kill -TERM "-$prewarm_node" 2>/dev/null || kill -TERM "$prewarm_node" 2>/dev/null || true
+        done
         sleep 1
-        kill -9 "$prewarm_pid" 2>/dev/null || true
+        for prewarm_node in $prewarm_tree; do
+          kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+        done
       else
         kill -9 "$prewarm_runner" 2>/dev/null || true
       fi
@@ -3124,9 +3143,20 @@ if uv_on_path \
   done
   wait "$prewarm_runner" 2>/dev/null || true
   if [ -n "$prewarm_timed_out" ]; then
-    step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
-    note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and was stopped;"
-    note "  the first session bootstraps the kernel itself and needs the network once."
+    # Only a proven-dead launcher counts as stopped: the kill above is a
+    # request, not a verdict.
+    prewarm_alive="no"
+    [ -n "$prewarm_pid" ] && kill -0 "$prewarm_pid" 2>/dev/null && prewarm_alive="yes"
+    if [ "$prewarm_alive" = "yes" ]; then
+      step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
+      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s; the launcher tree could"
+      note "  not be stopped and may still be running - the first session bootstraps the kernel itself"
+      note "  and needs the network once."
+    else
+      step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
+      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and was stopped;"
+      note "  the first session bootstraps the kernel itself and needs the network once."
+    fi
   elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then
     step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
