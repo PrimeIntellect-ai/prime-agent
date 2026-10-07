@@ -96,11 +96,8 @@ pub fn repair_jsonl_damage(file_path: &Path) {
     }
     use std::io::{BufRead, Write};
 
-    let temp = std::path::PathBuf::from(format!(
-        "{}.tmp{}",
-        file_path.display(),
-        std::process::id()
-    ));
+    let temp =
+        std::path::PathBuf::from(format!("{}.tmp{}", file_path.display(), std::process::id()));
     let _ = (|| -> std::io::Result<()> {
         let source = std::fs::File::open(file_path)?;
         let mut reader = std::io::BufReader::new(source);

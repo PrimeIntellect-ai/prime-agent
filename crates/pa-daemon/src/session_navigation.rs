@@ -366,10 +366,11 @@ impl Worker {
         }
         let navigation = self.navigation.clone();
         let payload = payload.clone();
-        let prepared = tokio::task::spawn_blocking(move || navigation.prepare_switch_session(&payload))
-            .await
-            .map_err(|error| response_failure(None, "switch_session", &error.to_string(), None))
-            .and_then(|result| result);
+        let prepared =
+            tokio::task::spawn_blocking(move || navigation.prepare_switch_session(&payload))
+                .await
+                .map_err(|error| response_failure(None, "switch_session", &error.to_string(), None))
+                .and_then(|result| result);
         self.run_session_replacement("switch_session", prepared)
             .await
     }
@@ -381,10 +382,11 @@ impl Worker {
         }
         let navigation = self.navigation.clone();
         let payload = payload.clone();
-        let prepared = tokio::task::spawn_blocking(move || navigation.prepare_import_jsonl(&payload))
-            .await
-            .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))
-            .and_then(|result| result);
+        let prepared =
+            tokio::task::spawn_blocking(move || navigation.prepare_import_jsonl(&payload))
+                .await
+                .map_err(|error| response_failure(None, "import_jsonl", &error.to_string(), None))
+                .and_then(|result| result);
         self.run_session_replacement("import_jsonl", prepared).await
     }
 }
