@@ -200,7 +200,11 @@ impl SocketLease {
     }
 
     /// Claim the socket file at `path` under a private name in its own
-    /// directory: a short, basename-independent name keeps the claim
+    /// directory. On filesystems without a no-replace rename (NFS, FUSE)
+    /// the claim fails and the cleanup no-ops: the leftover socket file
+    /// is self-healing - the next bind's stale-socket prepare removes a
+    /// file nothing serves, so unlike the lock directory it never blocks
+    /// a startup. A short, basename-independent name keeps the claim
     /// probeable through the `AF_UNIX` address budget no matter how long
     /// the original basename is, and the full-nanosecond process-unique
     /// suffix never wraps. The claim is a no-replace rename, so a live
@@ -361,10 +365,21 @@ impl SocketLease {
 /// identity check and the removal cannot have its own lock unlinked.
 #[cfg(target_os = "linux")]
 fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
-    let Some(claim) = claim_lock_dir_under_private_name(lock_path) else {
-        // Nothing at the path is ours to release, or no free claim name
-        // could be found.
-        return;
+    let claim = match claim_lock_dir_under_private_name(lock_path) {
+        Ok(claim) => claim,
+        Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
+            // The filesystem has no no-replace rename (NFS, FUSE and
+            // similar - the same mounts where the acquisition fell back
+            // to the mkdir protocol): fall back to the identity-checked
+            // release, with proper-lockfile's residual check-then-act
+            // window as the floor, instead of silently leaving the fresh
+            // lock behind a clean shutdown.
+            if lock_identity_matches(lock_path, identity) {
+                let _ = std::fs::remove_dir(lock_path);
+            }
+            return;
+        }
+        Err(_) => return,
     };
     if lock_identity_matches(&claim, identity) {
         // The private name cannot be anyone else's lock: unlinking it
@@ -385,21 +400,31 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
 /// rename never overwrites a preserved claim. A taken name regenerates
 /// the suffix instead.
 #[cfg(target_os = "linux")]
-fn claim_lock_dir_under_private_name(lock_path: &Path) -> Option<std::path::PathBuf> {
-    let parent = lock_path.parent()?;
+fn claim_lock_dir_under_private_name(lock_path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let parent = lock_path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock path has no parent")
+    })?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |age| age.as_nanos());
     let pid = std::process::id();
+    let mut collision: Option<std::io::Error> = None;
     for attempt in 0..8 {
         let claim = parent.join(format!(".r{pid:x}{nanos:x}{attempt:x}"));
         match pa_core::platform::move_without_replacing(lock_path, &claim) {
-            Ok(()) => return Some(claim),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return None,
+            Ok(()) => return Ok(claim),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                collision = collision.or(Some(error));
+            }
+            Err(error) => return Err(error),
         }
     }
-    None
+    Err(collision.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "all lock claim names are taken",
+        )
+    }))
 }
 
 /// Put a claimed successor's lock back without ever clobbering a newer

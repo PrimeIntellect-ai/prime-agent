@@ -441,9 +441,13 @@ impl LockDir {
     /// filesystem does not implement it (EINVAL: the flag is unknown
     /// here; ENOSYS: no renameat2 at all; EOPNOTSUPP: the filesystem
     /// rejects the flag - NFS, FUSE and similar mounts) - the mkdir
-    /// protocol is the compatible fallback.
+    /// protocol is the compatible fallback. Public because the daemon's
+    /// lease release needs the same classification to fall back from
+    /// its no-replace claim to the identity-checked release on the same
+    /// mounts where the acquisition fell back to mkdir.
     #[cfg(target_os = "linux")]
-    fn rename_noreplace_unsupported(error: &io::Error) -> bool {
+    #[must_use]
+    pub fn rename_noreplace_unsupported(error: &io::Error) -> bool {
         matches!(
             error.raw_os_error(),
             Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
