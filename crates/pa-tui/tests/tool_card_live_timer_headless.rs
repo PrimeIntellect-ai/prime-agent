@@ -109,10 +109,12 @@ impl MockSupervisor {
                     // reader loop keeps answering the client's post-attach
                     // requests): start the call, stay silent while it
                     // executes, then land the final result and end the
-                    // turn.
+                    // turn. The events queue on the socket behind the
+                    // attach response, so the client consumes them in
+                    // order (the same shape as the quiet-tick stream
+                    // mock) — no readiness sleep to race.
                     let mut event_writer = writer.try_clone().expect("clone event socket");
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
                         write_json(
                             &mut event_writer,
                             &json!({
@@ -289,9 +291,20 @@ fn a_running_tool_card_ticks_and_settles_to_the_final_duration() {
         .build()
         .expect("tokio runtime");
     // No input during the run: the loader's own phase wake repaints the
-    // running card, and the live timer rides those paints.
+    // running card, and the live timer rides those paints. The plan holds
+    // on observable conditions, not wall-clock guesses: the first live
+    // tick, then the settled card's static row.
     let plan = HeadlessPlan {
-        steps: vec![HeadlessStep::WaitMs(2200)],
+        steps: vec![
+            HeadlessStep::WaitRender {
+                needle: "Elapsed ".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::WaitRender {
+                needle: "Took ".to_string(),
+                timeout_ms: 5000,
+            },
+        ],
         width: 100,
         height: 40,
     };
