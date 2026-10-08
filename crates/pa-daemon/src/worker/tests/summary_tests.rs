@@ -1,6 +1,17 @@
 //! Worker summary/wire unit tests.
 use super::*;
 
+fn inputs() -> SummaryInputs {
+    SummaryInputs {
+        thinking_level: "default".to_string(),
+        model: None,
+        model_fallback_message: None,
+        bash_running: false,
+        quota_parked: false,
+        subagents_running: false,
+    }
+}
+
 #[test]
 fn sender_child_edge_decides_the_relationship_label() {
     let true_child = json!({
@@ -61,24 +72,10 @@ fn sender_child_edge_decides_the_relationship_label() {
 #[test]
 fn summary_lifecycle_is_message_based() {
     let empty = SessionCore::test_core(None, "/tmp".to_string());
-    assert_eq!(
-        session_summary(
-            &empty, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .lifecycle,
-        "draft"
-    );
+    assert_eq!(session_summary(&empty, inputs()).lifecycle, "draft");
     let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
     subagent.runtime_kind = "subagent".to_string();
-    assert_eq!(
-        session_summary(
-            &subagent, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
+    assert_eq!(session_summary(&subagent, inputs()).lifecycle, "live");
     // The busy-flip roster delta fires before the store flushes the admitted
     // prompt; a busy turn is live at that wire moment.
     let mut busy = SessionCore::test_core(None, "/tmp".to_string());
@@ -86,48 +83,26 @@ fn summary_lifecycle_is_message_based() {
     busy.running_tool_calls.insert("call-1".to_string());
     // `isRunningTools` is the streaming gate over the in-flight tool
     // set.
-    assert!(
-        session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .is_running_tools
-    );
+    assert!(session_summary(&busy, inputs()).is_running_tools);
     busy.running_tool_calls.clear();
-    assert!(
-        !session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .is_running_tools
-    );
+    assert!(!session_summary(&busy, inputs()).is_running_tools);
     busy.running_tool_calls.insert("call-1".to_string());
     busy.busy = false;
-    assert!(
-        !session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .is_running_tools
-    );
+    assert!(!session_summary(&busy, inputs()).is_running_tools);
     // The user bash state rides the summary as its own flag.
     assert_eq!(
         session_summary(
-            &busy, "default", None, None, /*bash_running=*/ true,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
+            &busy,
+            SummaryInputs {
+                bash_running: true,
+                ..inputs()
+            },
         )
         .is_bash_running,
         Some(true)
     );
     busy.busy = true;
-    assert_eq!(
-        session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false, /*subagents_running=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
+    assert_eq!(session_summary(&busy, inputs()).lifecycle, "live");
     let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -140,19 +115,7 @@ fn summary_lifecycle_is_message_based() {
     }));
     session.rewrite().unwrap();
     let with_message = SessionCore::test_core(Some(session), "/tmp".to_string());
-    assert_eq!(
-        session_summary(
-            &with_message,
-            "default",
-            None,
-            None,
-            /*bash_running=*/ false,
-            /*quota_parked=*/ false,
-            /*subagents_running=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
+    assert_eq!(session_summary(&with_message, inputs()).lifecycle, "live");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -166,12 +129,10 @@ fn running_subagents_keep_an_idle_session_working() {
     let summary = |subagents_running| {
         serde_json::to_value(session_summary(
             &core,
-            "default",
-            None,
-            None,
-            /*bash_running=*/ false,
-            /*quota_parked=*/ false,
-            subagents_running,
+            SummaryInputs {
+                subagents_running,
+                ..inputs()
+            },
         ))
         .unwrap()
     };
@@ -249,10 +210,7 @@ fn live_summary_usage_is_the_catalog_fold() {
         "the fixture must serve a windowed open"
     );
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
-    let summary = session_summary(
-        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
-        /*subagents_running=*/ false,
-    );
+    let summary = session_summary(&core, inputs());
     // The live row equals the saved row, whole-object.
     let catalog = crate::session_store::read_session_info(&path)
         .unwrap()
@@ -292,10 +250,7 @@ fn pathless_summary_usage_folds_the_in_memory_entries() {
         },
     }));
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
-    let summary = session_summary(
-        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
-        /*subagents_running=*/ false,
-    );
+    let summary = session_summary(&core, inputs());
     assert_eq!(
         json!(summary.usage),
         json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 })

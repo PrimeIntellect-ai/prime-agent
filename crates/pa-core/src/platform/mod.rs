@@ -3,11 +3,13 @@
 //! signatures; session-engine call sites never branch on `cfg` themselves.
 
 pub mod browser;
+pub mod fs;
 pub mod lock_dir;
 pub mod perms;
 pub mod process;
 pub mod shell;
 
+pub use fs::fsync;
 pub use lock_dir::LockDir;
 pub use perms::{
     file_mode, is_executable, is_executable_by_process, is_readable_writable, restrict_dir,
