@@ -9,6 +9,21 @@ fn char_press(c: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
 }
 
+/// The kitty CSI-u form of a key: the reassembled event carries the vendored `KITTY_CSI_U`
+/// origin bit, like the unsplit crossterm parse.
+fn csi_u(code: KeyCode) -> Event {
+    Event::Key(KeyEvent::new_with_kind_and_state(
+        code,
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+        KeyEventState::KITTY_CSI_U,
+    ))
+}
+
+fn csi_u_char(c: char) -> Event {
+    csi_u(KeyCode::Char(c))
+}
+
 /// The guard's view of a reader run: one feed per event on a 1 ms clock, then one deadline flush.
 fn run_guard(events: Vec<Event>) -> Vec<GuardOutput> {
     let mut guard = SequenceGuard::default();
@@ -109,7 +124,8 @@ enum ModelParse {
 }
 
 /// crossterm 0.28.1's byte parser, the forms the projection corpus reaches (plain bytes, SGR/X10
-/// mouse, CSI keys, kitty CSI-u).
+/// mouse, CSI keys, kitty CSI-u). The CSI-u events carry the vendored `KITTY_CSI_U` origin bit,
+/// like the patched parser they model.
 fn model_parse(buf: &[u8], more: bool) -> ModelParse {
     if buf[0] != 0x1b {
         if buf[0] >= 0x80 {
@@ -315,21 +331,72 @@ fn model_parse(buf: &[u8], more: bool) -> ModelParse {
                             code,
                             KeyModifiers::NONE,
                             KeyEventKind::Press,
-                            KeyEventState::KEYPAD,
+                            KeyEventState::KEYPAD | KeyEventState::KITTY_CSI_U,
                         )));
                     }
                     match codepoint {
-                        27 => ModelParse::Event(Event::Key(KeyEvent::new(KeyCode::Esc, modifiers))),
+                        27 => ModelParse::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+                            KeyCode::Esc,
+                            modifiers,
+                            KeyEventKind::Press,
+                            KeyEventState::KITTY_CSI_U,
+                        ))),
                         // `\r` maps to Enter before the char row (crossterm's
                         // own match), so `CSI 13;2u` projects Enter+SHIFT.
-                        13 => {
-                            ModelParse::Event(Event::Key(KeyEvent::new(KeyCode::Enter, modifiers)))
-                        }
-                        c => ModelParse::Event(Event::Key(KeyEvent::new(
+                        13 => ModelParse::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+                            KeyCode::Enter,
+                            modifiers,
+                            KeyEventKind::Press,
+                            KeyEventState::KITTY_CSI_U,
+                        ))),
+                        c => ModelParse::Event(Event::Key(KeyEvent::new_with_kind_and_state(
                             KeyCode::Char(char::from_u32(c).expect("corpus")),
                             modifiers,
+                            KeyEventKind::Press,
+                            KeyEventState::KITTY_CSI_U,
                         ))),
                     }
+                }
+                // The xterm modifyOtherKeys form `27;<mods>;<key>~` (the vendored
+                // `parse_csi_modify_other_keys`): the legacy encoding Ghostty sends for
+                // modified function keys.
+                b'~' if payload.starts_with(b"27;") => {
+                    let text = std::str::from_utf8(&payload[..payload.len() - 1])
+                        .expect("corpus is ascii");
+                    let mut fields = text.split(';');
+                    if fields.next() != Some("27") {
+                        return ModelParse::Invalid;
+                    }
+                    let Ok(mask) = fields.next().unwrap_or_default().parse::<u8>() else {
+                        return ModelParse::Invalid;
+                    };
+                    let Ok(codepoint) = fields.next().unwrap_or_default().parse::<u32>() else {
+                        return ModelParse::Invalid;
+                    };
+                    if fields.next().is_some() {
+                        return ModelParse::Invalid;
+                    }
+                    let modifiers = parse_modifiers(mask);
+                    let code = match char::from_u32(codepoint) {
+                        Some('\r') => KeyCode::Enter,
+                        Some('\x1b') => KeyCode::Esc,
+                        Some('\t') => {
+                            if modifiers.contains(KeyModifiers::SHIFT) {
+                                KeyCode::BackTab
+                            } else {
+                                KeyCode::Tab
+                            }
+                        }
+                        Some('\x7f') => KeyCode::Backspace,
+                        Some(c) => KeyCode::Char(c),
+                        None => return ModelParse::Invalid,
+                    };
+                    ModelParse::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+                        code,
+                        modifiers,
+                        KeyEventKind::Press,
+                        KeyEventState::empty(),
+                    )))
                 }
                 b'~' if payload == b"200~" || payload == b"201~" => ModelParse::Invalid,
                 _ => ModelParse::Invalid,
@@ -639,13 +706,13 @@ fn a_split_modified_nav_key_keeps_its_modifiers() {
 #[test]
 fn a_split_kitty_esc_press_stays_the_escape_key() {
     let outputs = run_guard(read_projection(b"\x1b[27u", &[1]));
-    assert_eq!(leaks(&outputs), vec![esc_press()]);
+    assert_eq!(leaks(&outputs), vec![csi_u(KeyCode::Esc)]);
 }
 
 #[test]
 fn a_split_csi_u_printable_arrives_as_the_character() {
     let outputs = run_guard(read_projection(b"\x1b[97u", &[1]));
-    assert_eq!(leaks(&outputs), vec![char_press('a')]);
+    assert_eq!(leaks(&outputs), vec![csi_u_char('a')]);
 }
 
 #[test]
@@ -780,7 +847,7 @@ fn a_split_keypad_csi_u_arrives_as_the_key() {
             KeyCode::Char('0'),
             KeyModifiers::NONE,
             KeyEventKind::Press,
-            KeyEventState::KEYPAD,
+            KeyEventState::KEYPAD | KeyEventState::KITTY_CSI_U,
         ))]
     );
     let outputs = run_guard(read_projection(b"\x1b[57414u", &[1]));
@@ -790,7 +857,7 @@ fn a_split_keypad_csi_u_arrives_as_the_key() {
             KeyCode::Enter,
             KeyModifiers::NONE,
             KeyEventKind::Press,
-            KeyEventState::KEYPAD,
+            KeyEventState::KEYPAD | KeyEventState::KITTY_CSI_U,
         ))]
     );
     // The rest of the functional range stays consumed (TS drops it too, and no surface dispatches
@@ -856,7 +923,8 @@ fn a_split_alt_ctrl_digit_reconstructs_the_combo() {
 }
 
 /// A split kitty shift+enter (`CSI 13;2u`) reassembles into exactly the Enter+SHIFT event the
-/// unsplit parse delivers, at every read boundary (operator directive 2026-09-24).
+/// unsplit parse delivers, at every read boundary (operator directive 2026-09-24) — the vendored
+/// `KITTY_CSI_U` origin bit included.
 #[test]
 fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
     for split in [1usize, 2, 5, 8] {
@@ -864,9 +932,11 @@ fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
         let outputs = run_guard(events.clone());
         assert_eq!(
             leaks(&outputs),
-            vec![Event::Key(KeyEvent::new(
+            vec![Event::Key(KeyEvent::new_with_kind_and_state(
                 KeyCode::Enter,
-                KeyModifiers::SHIFT
+                KeyModifiers::SHIFT,
+                KeyEventKind::Press,
+                KeyEventState::KITTY_CSI_U,
             ))],
             "split at {split}: {events:?} as {outputs:?}"
         );
@@ -882,6 +952,53 @@ fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
             KeyCode::Enter,
             KeyModifiers::SHIFT
         ))]
+    );
+}
+
+/// The xterm modifyOtherKeys shift+enter (`CSI 27;2;13~` — Ghostty's LEGACY encoding for the
+/// key, sent whenever the kitty flags are not active on the current screen) reassembles into
+/// the same Enter+SHIFT event at every read boundary — the pre-fix guard dropped it whole.
+#[test]
+fn a_split_modify_other_keys_shift_enter_arrives_as_the_shift_enter_key() {
+    for split in [1usize, 2, 4, 8] {
+        let events = read_projection(b"\x1b[27;2;13~", &[split]);
+        let outputs = run_guard(events.clone());
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT
+            ))],
+            "split at {split}: {events:?} as {outputs:?}"
+        );
+    }
+}
+
+/// The composed seam: the modifyOtherKeys shift+enter decodes to the `shift+enter` key id and
+/// lands in the editor as a newline — the legacy terminal's Shift+Enter never submits and
+/// never vanishes.
+#[test]
+fn a_modify_other_keys_shift_enter_inserts_a_newline_in_the_editor() {
+    let outputs = run_guard(read_projection(b"\x1b[27;2;13~", &[1]));
+    let key = leaks(&outputs)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::Key(key) => Some(key),
+            _ => None,
+        })
+        .expect("the shift+enter key");
+    let id = crate::keys::key_event_to_id(&key).expect("the key id");
+    assert_eq!(id, "shift+enter");
+    let mut editor = crate::editor::Editor::new();
+    editor.handle_input("a");
+    editor.handle_input(&id);
+    assert_eq!(editor.get_lines(), vec!["a", ""]);
+    assert!(
+        editor
+            .take_events()
+            .into_iter()
+            .all(|event| !matches!(event, crate::editor::EditorEvent::Submitted(_))),
+        "the newline press never submits"
     );
 }
 

@@ -252,6 +252,11 @@ pub(crate) fn draw(
     if crate::altscreen::take_first_draw_mount() {
         let mut out = std::io::stdout();
         crate::altscreen::enter_queued(&mut out)?;
+        // The deferred kitty flags push lands HERE — after the alternate-screen enter, on
+        // the screen the app runs on (the flags stack is per-screen in Ghostty; a push
+        // written at setup time would arm the primary screen and leave the alternate
+        // screen in legacy mode).
+        crate::enhanced_keys::mount_push(&mut out)?;
         crossterm::queue!(
             out,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),

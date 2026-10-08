@@ -5,7 +5,7 @@
 //! kitty protocol flag disambiguates, and the irreducible folds are documented divergences (see
 //! `ctrl_char_id`, the term-enhanced-keys rows).
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventState, KeyModifiers};
 use ratatui::crossterm::event as ct;
 
 pub type KeyId = String;
@@ -54,7 +54,15 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
             if alt {
                 if c == '\r' || c == '\n' {
-                    return Some("alt+enter".into());
+                    // The same ESC-CR split as the Enter arm below: the raw bytes are the
+                    // kitty-mode shift+enter custom mapping (a real alt+enter carries the
+                    // CSI-u origin bit).
+                    if key.state.contains(KeyEventState::KITTY_CSI_U)
+                        || !crate::enhanced_keys::kitty_active()
+                    {
+                        return Some("alt+enter".into());
+                    }
+                    return Some("shift+enter".into());
                 }
                 if c == ' ' {
                     return Some("alt+space".into());
@@ -126,7 +134,17 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 return Some(s);
             }
             if alt {
-                "alt+enter"
+                // TS parseKey: the raw `ESC CR` bytes are a terminal's custom shift+enter
+                // mapping (Kitty's `map shift+enter send_text all \e\r`) while the kitty
+                // protocol is active — the real alt+enter arrives as the CSI-u form
+                // (`CSI 13;3u`), which the vendored `KITTY_CSI_U` origin bit marks. In
+                // legacy mode the same bytes stay alt+enter.
+                if key.state.contains(KeyEventState::KITTY_CSI_U)
+                    || !crate::enhanced_keys::kitty_active()
+                {
+                    return Some("alt+enter".into());
+                }
+                return Some("shift+enter".into());
             } else if shift {
                 "shift+enter"
             } else {
@@ -469,6 +487,37 @@ mod tests {
         let kb = crate::keybindings::KeybindingsManager::new();
         assert!(kb.matches("shift+enter", "tui.input.newLine"));
         assert!(!kb.matches("shift+enter", "tui.input.submit"));
+    }
+
+    /// The raw `ESC CR` bytes (a terminal's `map shift+enter send_text all \e\r` custom
+    /// mapping) are the shift+enter id while the kitty protocol is active; the real
+    /// alt+enter — the CSI-u form `CSI 13;3u`, which the vendored `KITTY_CSI_U` origin bit
+    /// marks — keeps the alt+enter id in both modes.
+    #[test]
+    fn esc_cr_bytes_map_to_shift_enter_under_kitty() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Legacy mode: the same bytes are alt+enter (TS `parseKey`'s `!_kittyProtocolActive`
+        // branch).
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let esc_cr = KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT);
+        assert_eq!(key_event_to_id(&esc_cr).as_deref(), Some("alt+enter"));
+
+        crate::enhanced_keys::set_kitty_active_for_tests(true);
+        assert_eq!(key_event_to_id(&esc_cr).as_deref(), Some("shift+enter"));
+        // The CSI-u form of alt+enter keeps its own identity under kitty.
+        let csi_u_alt_enter = KeyEvent::new_with_kind_and_state(
+            KeyCode::Enter,
+            KeyModifiers::ALT,
+            crossterm::event::KeyEventKind::Press,
+            KeyEventState::KITTY_CSI_U,
+        );
+        assert_eq!(
+            key_event_to_id(&csi_u_alt_enter).as_deref(),
+            Some("alt+enter")
+        );
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
     }
 
     /// Super-modified SPECIAL keys keep their super identity (Bugbot round-1 fix): an unbound Cmd

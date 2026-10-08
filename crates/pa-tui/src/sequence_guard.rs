@@ -524,6 +524,12 @@ fn tilde_key(body: &[u8]) -> Option<Event> {
     let text = std::str::from_utf8(body).ok()?;
     let mut fields = text.split(';');
     let first: u8 = fields.next()?.parse().ok()?;
+    // The xterm modifyOtherKeys form `27;<mods>;<key>~` — the legacy encoding Ghostty sends
+    // for modified function keys (shift+enter, ...): the same event the unsplit crossterm
+    // parse delivers (the vendored `parse_csi_modify_other_keys`).
+    if first == 27 {
+        return modify_other_keys_tilde(&mut fields);
+    }
     let (modifiers, kind) = match fields.next() {
         Some(mods_field) => {
             let mut parts = mods_field.split(':');
@@ -641,11 +647,47 @@ fn csi_u_key(body: &[u8]) -> Option<Event> {
             modifiers.set(KeyModifiers::SHIFT, false);
         }
     }
+    // The reassembled CSI-u form keeps its origin: the vendored `KITTY_CSI_U` bit mirrors
+    // the unsplit crossterm parse, so a split report behaves like an unsplit one in the
+    // enhanced-key filters and the key ids.
     Some(Event::Key(KeyEvent::new_with_kind_and_state(
         code,
         modifiers,
         kind,
-        state_from_keycode | lock_state,
+        state_from_keycode | lock_state | KeyEventState::KITTY_CSI_U,
+    )))
+}
+
+/// The xterm modifyOtherKeys tilde form's fields (after the `27;` marker): the one-indexed
+/// modifier mask and the key's keysym, the same event crossterm's vendored parse delivers
+/// for the unsplit sequence. The four-field text form is not handled (TS's regex does not
+/// admit it either).
+fn modify_other_keys_tilde(fields: &mut std::str::Split<'_, char>) -> Option<Event> {
+    let mask: u8 = fields.next()?.parse().ok()?;
+    let codepoint: u32 = fields.next()?.parse().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    let modifiers = parse_modifiers(mask);
+    let code = match char::from_u32(codepoint) {
+        Some('\r') => KeyCode::Enter,
+        Some('\x1b') => KeyCode::Esc,
+        Some('\t') => {
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                KeyCode::BackTab
+            } else {
+                KeyCode::Tab
+            }
+        }
+        Some('\x7f') => KeyCode::Backspace,
+        Some(c) => KeyCode::Char(c),
+        None => return None,
+    };
+    Some(Event::Key(KeyEvent::new_with_kind_and_state(
+        code,
+        modifiers,
+        KeyEventKind::Press,
+        KeyEventState::empty(),
     )))
 }
 

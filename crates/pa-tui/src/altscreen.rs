@@ -50,6 +50,22 @@ pub(crate) fn take_first_draw_mount() -> bool {
     MOUNT_ARMED.swap(false, Ordering::SeqCst)
 }
 
+/// Whether the first-draw mount is still pending: the alternate screen is armed but not
+/// yet entered, so a per-screen mode (the kitty keyboard flags — Ghostty keeps the stack
+/// per screen and a fresh alternate screen starts empty) must queue for the mount instead
+/// of arming the primary screen's state.
+pub(crate) fn mount_pending() -> bool {
+    MOUNT_ARMED.load(Ordering::SeqCst) && !ACTIVE.load(Ordering::SeqCst)
+}
+
+/// The mount states for unit tests of the kitty-push deferral (see
+/// [`crate::enhanced_keys`]); the caller restores both before releasing the test lock.
+#[cfg(test)]
+pub(crate) fn set_for_tests(active: bool, armed: bool) {
+    ACTIVE.store(active, Ordering::SeqCst);
+    MOUNT_ARMED.store(armed, Ordering::SeqCst);
+}
+
 static MOUNT_ARMED: AtomicBool = AtomicBool::new(false);
 
 /// Leave the alternate screen. A no-op when the screen is not active, so a teardown that runs
