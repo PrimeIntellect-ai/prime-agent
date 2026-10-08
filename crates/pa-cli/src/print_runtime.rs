@@ -234,7 +234,8 @@ fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
-    let (parts, initial_lease) = build_headless_engine_parts_with_lease(options, "rpc").await?;
+    let mut initial_lease = None;
+    let parts = build_headless_engine_parts(options, "rpc", &mut initial_lease).await?;
     if let Some(goal) = &config.initial_goal {
         parts
             .engine
@@ -363,17 +364,42 @@ impl From<HeadlessEngine> for pa_daemon::rpc::session::RpcEngineHandle {
 }
 
 fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
+    with_print_runtime(options, |options, lease| {
+        Box::pin(print_mode_main(options, lease))
+    })
+}
+
+/// Own the print lease through runtime shutdown, including errors and unwinding.
+/// The operation seam lets the regression exercise a writer pending at shutdown.
+fn with_print_runtime<Context>(
+    context: &Context,
+    run: impl for<'a> FnOnce(
+        &'a Context,
+        &'a mut Option<pa_daemon::lease::SessionLease>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<i32, String>> + 'a>,
+    >,
+) -> Result<i32, String> {
+    // Declared first so unwinding also stops all runtime tasks before release.
+    let mut lease = None;
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|error| error.to_string())?;
-    rt.block_on(print_mode_main(options))
+    let result = rt.block_on(run(context, &mut lease));
+    // Runtime Drop joins blocking writers and cancels async host tasks. Engine
+    // Drop alone cannot do that: detached host requests retain session writers.
+    drop(rt);
+    result
 }
 
-async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
+async fn print_mode_main(
+    options: &RunOptions,
+    lease: &mut Option<pa_daemon::lease::SessionLease>,
+) -> Result<i32, String> {
     // `print` or `json`: the telemetry execution mode is the app mode (TS
     // main.ts `executionMode: appMode`).
-    let headless = build_headless_engine(options, options.app_mode.as_str()).await?;
+    let headless = build_headless_engine_parts(options, options.app_mode.as_str(), lease).await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
     // branch keeps its persisted goal. Depth 0 only — the print session is a root.
@@ -408,34 +434,23 @@ struct HeadlessEngine {
     provider_target: ProviderTargetSlot,
 }
 
+/// Transfer the opened lease to its mode before fallible engine assembly.
 async fn build_headless_engine_parts(
     options: &RunOptions,
     execution_mode: &str,
+    lease: &mut Option<pa_daemon::lease::SessionLease>,
 ) -> Result<HeadlessEngine, String> {
-    let (engine, lease) = build_headless_engine_parts_with_lease(options, execution_mode).await?;
-    std::mem::forget(lease);
-    Ok(engine)
-}
-
-/// The same assembly, returning the opened session's runtime lease alongside (long-lived
-/// connections hold it on the engine handle).
-async fn build_headless_engine_parts_with_lease(
-    options: &RunOptions,
-    execution_mode: &str,
-) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
     // Every headless mode discloses immediately (TS main: only the
     // interactive `deferTelemetryNoticeForOnboarding` holds the notice
     // back behind onboarding; `--list-models` never reaches this
     // assembly, matching the TS exit before its diagnostics report).
     crate::telemetry_notice::print_if_due(&options.config);
-    let (session_manager, lease) = select_session_manager_with_lease(options)?;
+    let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
+    *lease = opened_lease;
     if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        let engine =
-            build_faux_engine_with(options, &script, session_manager, execution_mode).await?;
-        return Ok((engine, lease));
+        return build_faux_engine_with(options, &script, session_manager, execution_mode).await;
     }
-    let engine = build_headless_engine_with(options, session_manager, execution_mode).await?;
-    Ok((engine, lease))
+    build_headless_engine_with(options, session_manager, execution_mode).await
 }
 
 /// The session-manager selection every engine build shares, returning the opened session's runtime
@@ -786,14 +801,6 @@ fn headless_image_model_router(
     }
 }
 
-/// The engine alone (callers that do not drive session commands).
-async fn build_headless_engine(
-    options: &RunOptions,
-    execution_mode: &str,
-) -> Result<HeadlessEngine, String> {
-    build_headless_engine_parts(options, execution_mode).await
-}
-
 /// The session header line: the session file's `type: "session"` entry in the
 /// TS wire shape and field order.
 async fn session_header_json(
@@ -967,9 +974,8 @@ fn select_headless_session(options: &RunOptions) -> Result<HeadlessSession, Stri
 }
 
 /// The in-process session manager for the selected session. The opened
-/// session's runtime lease returns alongside (a long-lived connection
-/// holds it on the engine handle; the one-shot modes forget it for the
-/// process lifetime).
+/// session's runtime lease returns alongside: the driving mode owns it for
+/// its run's lifetime.
 fn build_session_manager_with_lease(
     options: &RunOptions,
 ) -> Result<
@@ -1540,6 +1546,96 @@ async fn build_faux_engine_with(
 
 #[cfg(test)]
 mod tests {
+
+    /// Runtime cancellation unblocks a pending writer; ownership must remain
+    /// held until that blocking writer finishes, even on errors or unwinding.
+    #[test]
+    fn print_lease_outlives_runtime_writers_on_every_return_path() {
+        #[derive(Clone, Copy)]
+        enum Outcome {
+            Success,
+            Error,
+            Panic,
+        }
+        struct Fixture {
+            session_path: std::path::PathBuf,
+            agent_dir: std::path::PathBuf,
+            outcome: Outcome,
+        }
+        struct UnblockWriter(std::sync::mpsc::Sender<()>);
+        impl Drop for UnblockWriter {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        for outcome in [Outcome::Success, Outcome::Error, Outcome::Panic] {
+            let home = tempfile::TempDir::new().unwrap();
+            let fixture = Fixture {
+                session_path: home.path().join("session.jsonl"),
+                agent_dir: home.path().join("agent"),
+                outcome,
+            };
+            let held_at_write = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer_observation = std::sync::Arc::clone(&held_at_write);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::with_print_runtime(&fixture, |fixture, lease| {
+                    Box::pin(async move {
+                        *lease = Some(
+                            pa_daemon::lease::acquire_runtime_session_lease(
+                                &fixture.session_path,
+                                &fixture.agent_dir,
+                            )
+                            .unwrap(),
+                        );
+                        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+                        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                        tokio::spawn(async move {
+                            let _unblock = UnblockWriter(cancel_tx);
+                            let _ = ready_tx.send(());
+                            std::future::pending::<()>().await;
+                        });
+                        ready_rx.await.unwrap();
+                        let session_path = fixture.session_path.clone();
+                        let agent_dir = fixture.agent_dir.clone();
+                        let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = writer_ready_tx.send(());
+                            cancel_rx.recv().unwrap();
+                            writer_observation.store(
+                                pa_daemon::lease::live_lease_owner(&agent_dir, &session_path)
+                                    .is_some(),
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
+                            std::fs::write(&session_path, "writer settled\n").unwrap();
+                        });
+                        writer_ready_rx.await.unwrap();
+                        match fixture.outcome {
+                            Outcome::Success => Ok(0),
+                            Outcome::Error => Err("failed after lease acquisition".to_string()),
+                            Outcome::Panic => panic!("unwind after lease acquisition"),
+                        }
+                    })
+                })
+            }));
+            match outcome {
+                Outcome::Success => assert_eq!(result.unwrap(), Ok(0)),
+                Outcome::Error => assert_eq!(
+                    result.unwrap(),
+                    Err("failed after lease acquisition".to_string())
+                ),
+                Outcome::Panic => assert!(result.is_err()),
+            }
+            assert!(held_at_write.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                std::fs::read_to_string(&fixture.session_path).unwrap(),
+                "writer settled\n"
+            );
+            assert!(
+                pa_daemon::lease::live_lease_owner(&fixture.agent_dir, &fixture.session_path)
+                    .is_none()
+            );
+        }
+    }
 
     /// The settle restores the captured session target only while the slot still holds the route;
     /// a mid-run `/model` switch rewrote the slot, and stays.
