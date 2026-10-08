@@ -60,15 +60,17 @@ pub struct SystemPromptBreakdown {
     pub cached_prefix_len: usize,
 }
 
-/// Inputs for one session's prompt. Static inputs (`custom_prompt`, `model`)
-/// select the cached prefix; everything else feeds the dynamic tail.
+/// Inputs for one session's prompt. Static inputs (`custom_prompt`,
+/// `model_prompt_extras`) select the cached prefix; everything else feeds
+/// the dynamic tail.
 #[derive(Debug, Default)]
 pub struct BuildSystemPromptOptions<'a> {
     /// Replaces the layered static prefix with user text. The dynamic tail
     /// still applies.
     pub custom_prompt: Option<String>,
-    /// Resolved model selector (`provider/id`), selecting per-model blocks.
-    pub model: Option<&'a str>,
+    /// Per-model additions resolved by the model-prompts rule map; a
+    /// static prefix input, dropped when `custom_prompt` replaces it.
+    pub model_prompt_extras: Option<&'a str>,
     /// Whether the resolved model accepts image input, when known.
     pub vision_capable: Option<bool>,
     /// Active tools. Tool schemas carry tool descriptions outside the prompt.
@@ -127,12 +129,11 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
                 layers::layer_source("opinionated").unwrap_or_default(),
                 layers::OPINIONATED_LAYER.trim().to_string(),
             ));
-            let per_model = layers::per_model_text(options.model);
-            if !per_model.is_empty() {
+            if let Some(extras) = options.model_prompt_extras {
                 segments.push(PromptSegment::static_segment(
-                    "per-model",
-                    layers::layer_source("per-model").unwrap_or_default(),
-                    per_model.join("\n\n"),
+                    "model-prompts",
+                    layers::layer_source("model-prompts").unwrap_or_default(),
+                    extras.to_string(),
                 ));
             }
         }
@@ -424,7 +425,6 @@ mod tests {
         BuildSystemPromptOptions {
             cwd: "/w".to_string(),
             messages_path: Some("/log.jsonl".to_string()),
-            model: Some("mock/mock-1"),
             skills: vec![
                 skill("web-search", Some("websearch")),
                 skill("refine", Some("refine")),
@@ -453,7 +453,12 @@ mod tests {
         );
         assert_eq!(
             &prompt[..breakdown.cached_prefix_len],
-            layers::static_prefix(Some("mock/mock-1"))
+            format!(
+                "{}\n\n{}\n\n{}",
+                layers::CORE_LAYER.trim(),
+                layers::USAGE_LAYER.trim(),
+                layers::OPINIONATED_LAYER.trim()
+            )
         );
         let tail = &prompt[breakdown.cached_prefix_len..];
         assert!(tail.contains("Working directory: /w"));
@@ -489,6 +494,7 @@ mod tests {
     fn custom_prompt_replaces_layers_keeps_tail() {
         let mut options = base_options();
         options.custom_prompt = Some("Be terse.".to_string());
+        options.model_prompt_extras = Some("Tier-2 guidance.");
         options.context_files = vec![("AGENTS.md".to_string(), "Rule one.".to_string())];
         let breakdown = system_prompt_breakdown(&options);
         let prompt = &breakdown.assembled;
@@ -498,6 +504,7 @@ mod tests {
         assert!(prompt.contains("Working directory: /w"));
         assert!(prompt.contains("Current date: "));
         assert!(!prompt.contains("# prime-agent harness"));
+        assert!(!prompt.contains("Tier-2 guidance."));
     }
 
     #[test]
@@ -523,25 +530,19 @@ mod tests {
     }
 
     #[test]
-    fn per_model_blocks_extend_the_cached_prefix() {
-        // The shipped map has no blocks, so a model-mapped block can only be
-        // verified through the parser; assert the composition contract here:
-        // any per-model text lands inside the cached prefix.
-        let breakdown = system_prompt_breakdown(&base_options());
-        let static_segments = breakdown
+    fn model_prompt_extras_form_the_last_static_segment() {
+        let mut options = base_options();
+        options.model_prompt_extras = Some("Tier-2 guidance.");
+        let breakdown = system_prompt_breakdown(&options);
+        let names: Vec<&str> = breakdown
             .segments
             .iter()
-            .filter(|segment| segment.kind == SegmentKind::Static);
-        for segment in static_segments {
-            assert_eq!(
-                breakdown
-                    .assembled
-                    .find(&segment.text)
-                    .map(|at| at < breakdown.cached_prefix_len),
-                Some(true),
-                "static segment {} sits inside the cached prefix",
-                segment.name
-            );
-        }
+            .map(|segment| segment.name)
+            .collect();
+        assert_eq!(
+            names[..5],
+            ["core", "usage", "opinionated", "model-prompts", "packages"],
+            "extras are the last static segment, directly before the dynamic tail"
+        );
     }
 }

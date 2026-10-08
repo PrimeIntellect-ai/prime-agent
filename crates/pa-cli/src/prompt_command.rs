@@ -58,7 +58,12 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     match assemble_breakdown(&cwd, parsed.model.as_deref()) {
-        Ok(breakdown) => {
+        Ok((breakdown, errors)) => {
+            // Rule-map problems never hide the dump: the errors go to
+            // stderr, the effective prompt still prints.
+            for error in &errors {
+                eprintln!("Error: {error}");
+            }
             if parsed.json {
                 print_json(&breakdown);
             } else {
@@ -76,8 +81,9 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
 fn assemble_breakdown(
     cwd: &std::path::Path,
     model: Option<&str>,
-) -> anyhow::Result<pa_core::prompts::SystemPromptBreakdown> {
+) -> anyhow::Result<(pa_core::prompts::SystemPromptBreakdown, Vec<String>)> {
     let agent_dir = get_agent_dir();
+    let model_prompts = pa_core::prompts::model_prompts::load_model_prompts(model, &agent_dir);
     let settings = SettingsManager::create(cwd, &agent_dir);
     // MCP gating: auth-gated built-in integrations drop their skills; enabled persistent generic
     // servers add the prompt MCP guidance.
@@ -100,12 +106,11 @@ fn assemble_breakdown(
         system_prompt: None,
         ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir)
     })?;
-    Ok(pa_core::prompts::system_prompt::system_prompt_breakdown(
+    let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
             cwd: cwd.display().to_string(),
             // A dump has no session file; the tail states the value it uses.
             messages_path: None,
-            model,
             custom_prompt: resources.system_prompt.clone(),
             context_files: resources
                 .agents_files
@@ -119,9 +124,11 @@ fn assemble_breakdown(
             allow_recursion: Some(true),
             generic_mcp_servers: generic_servers,
             rlm_depth: Some(0),
+            model_prompt_extras: model_prompts.extras.as_deref(),
             ..Default::default()
         },
-    ))
+    );
+    Ok((breakdown, model_prompts.errors))
 }
 
 fn print_text(breakdown: &pa_core::prompts::SystemPromptBreakdown) {
@@ -216,7 +223,8 @@ mod tests {
     #[test]
     fn assembles_the_layered_prompt_for_a_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let breakdown = assemble_breakdown(dir.path(), Some("mock/mock-1")).unwrap();
+        let (breakdown, errors) = assemble_breakdown(dir.path(), Some("mock/mock-1")).unwrap();
+        assert!(errors.is_empty());
         assert!(breakdown.assembled.starts_with("# prime-agent harness"));
         assert!(breakdown
             .assembled
