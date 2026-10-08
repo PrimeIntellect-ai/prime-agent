@@ -3075,7 +3075,12 @@ if uv_on_path \
     ''|*[!0-9]*) prewarm_bound_s=300 ;;
   esac
   [ "$prewarm_bound_s" -gt 0 ] || prewarm_bound_s=300
-  prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX")"
+  # The scratch is best-effort exactly like the pre-warm it serves: an
+  # unwritable TMPDIR must SKIP the step, never abort the install under
+  # `set -e` - at this point the payload is already published, so the
+  # verify and the summary below must still run. The guarded body keeps
+  # its own indentation: a reviewed surface this guard wraps, not edits.
+  if prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX" 2>/dev/null)"; then
   prewarm_out="$prewarm_scratch/out"
   prewarm_done="$prewarm_scratch/done"
   prewarm_pid_file="$prewarm_scratch/pid"
@@ -3173,6 +3178,11 @@ if uv_on_path \
     note "$(cat "$prewarm_out" 2>/dev/null || true)"
   fi
   rm -rf "$prewarm_scratch"
+  else
+    step_fail "Preparing the Python kernel" "skipped (no scratch directory)"
+    note "! The kernel pre-warm was skipped (its scratch directory could not be created);"
+    note "  the first session bootstraps the kernel itself and needs the network once."
+  fi
 else
   note "! The kernel pre-warm was skipped (no uv); the first session sets the"
   note "  kernel up itself and needs the network once."

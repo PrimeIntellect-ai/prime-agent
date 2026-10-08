@@ -1139,6 +1139,38 @@ async fn bootstrap_children_forward_piped_output_through_the_reporter() {
     );
 }
 
+/// The lossy-drain pin (the macroscope finding): a child that emits
+/// non-UTF-8 bytes mid-stream is forwarded mangled, never allowed to end
+/// the drain - the lines after the bad bytes still reach the reporter and
+/// the bootstrap still completes (`BufRead::lines` errors on the bad line
+/// and drops every diagnostic after it).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_non_utf8_child_line_never_stops_the_drain() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n         echo BEFORE_MARKER\n         printf '\\377\\376BAD\\n'\n         echo AFTER_MARKER\n         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let drained = reports.lock().unwrap().join("\n");
+    assert!(
+        drained.contains("AFTER_MARKER"),
+        "the drain survives the non-UTF-8 line: {drained:?}"
+    );
+    assert!(
+        drained.contains("BEFORE_MARKER"),
+        "the drain forwards the lines before it too: {drained:?}"
+    );
+}
+
 /// The bound pin: a child that never exits is tree-killed at the bound -
 /// the child AND its descendants (the fake uv leaves a sleeping one) -
 /// and the bootstrap reports the honest failure instead of waiting.

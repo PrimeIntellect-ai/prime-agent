@@ -97,6 +97,9 @@ fn resolve_bootstrap_child_timeout_ms() -> u64 {
 
 /// Forward one piped child stream line by line through the progress
 /// reporter; the pipe is drained to EOF whatever the reporter does.
+/// Lines are read byte-delimited and decoded lossily: a child that emits
+/// non-UTF-8 bytes (locale noise, a raw progress escape) is forwarded
+/// mangled, never allowed to end the drain mid-stream.
 fn drain_child_stream<R: std::io::Read + Send + 'static>(
     pipe: Option<R>,
     report: Option<KernelBootstrapProgressHandler>,
@@ -105,8 +108,23 @@ fn drain_child_stream<R: std::io::Read + Send + 'static>(
         let Some(mut pipe) = pipe.map(std::io::BufReader::new) else {
             return;
         };
-        for line in std::io::BufRead::lines(&mut pipe) {
-            let Ok(line) = line else { break };
+        let mut bytes: Vec<u8> = Vec::new();
+        loop {
+            bytes.clear();
+            match std::io::BufRead::read_until(&mut pipe, b'\n', &mut bytes) {
+                // EOF and a genuine read error both end the drain; the
+                // lossy decode below is what keeps encoding errors from
+                // ending it.
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let mut line = String::from_utf8_lossy(&bytes).into_owned();
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
             match &report {
                 Some(handler) => handler(&line),
                 None => eprintln!("{line}"),

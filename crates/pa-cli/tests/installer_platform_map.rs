@@ -1421,6 +1421,63 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
     );
 }
 
+/// The mktemp guard (the macroscope finding): the pre-warm is best-effort
+/// end to end - a machine whose TMPDIR cannot host the scratch directory
+/// (unwritable, full) must still finish the install, not abort under
+/// `set -e` after the payload is published. The gate block is extracted
+/// from the shipped script and driven under `sh` WITH `set -e` (as
+/// shipped) and a dead TMPDIR; the launcher must never run.
+#[test]
+fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
+    let script =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    let gate = script
+        .find("# THE PRE-WARM GATE")
+        .expect("the pre-warm gate exists");
+    let start = script[gate..]
+        .find("if uv_on_path")
+        .map(|at| gate + at)
+        .expect("the gate's guard if opens the block");
+    let end = script
+        .find("# --- verify: the launcher must answer --version")
+        .expect("the verify section follows the pre-warm");
+    let block = &script[start..end];
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let transcript = dir.path().join("transcript");
+    let dead_tmpdir = dir.path().join("no-such-dir");
+    let harness = format!(
+        "#!/bin/sh\n         set -e\n         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n         uv_on_path() {{ return 0; }}\n         launcher='never-run'\n         TMPDIR={dead_tmpdir}\n         export TMPDIR\n         {block}\
+         printf 'flow-continued\\n' >> {transcript}\n         exit 0\n",
+        transcript = transcript.display(),
+        dead_tmpdir = dead_tmpdir.display(),
+        block = block,
+    );
+    let harness_path = dir.path().join("harness.sh");
+    std::fs::write(&harness_path, harness).expect("write the harness");
+    let out = Command::new("/bin/sh")
+        .arg(&harness_path)
+        .output()
+        .expect("run the harness");
+    let flow = std::fs::read_to_string(&transcript).unwrap_or_default();
+    assert!(
+        out.status.success(),
+        "the install survives a scratch that cannot be made (set -e, as shipped): {out:?} flow: {flow}"
+    );
+    assert!(
+        flow.contains("fail Preparing the Python kernel skipped"),
+        "the skip is recorded on the started step: {flow}"
+    );
+    assert!(
+        flow.contains("the first session bootstraps the kernel itself and needs the network once"),
+        "the honest degradation note rides the skip: {flow}"
+    );
+    assert!(
+        flow.contains("flow-continued"),
+        "the install proceeds after the skipped pre-warm: {flow}"
+    );
+}
+
 /// Drives the pre-warm block under `sh` with a three-level hanging
 /// fixture, bounded by a kill guard (`None` on the guard). Liveness is
 /// measured before the cleanup kill; `hermetic_path` replaces PATH for
