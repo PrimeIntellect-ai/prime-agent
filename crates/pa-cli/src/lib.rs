@@ -133,6 +133,13 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
 
     let app_mode = mode::AppMode::resolve(&parsed, std::io::stdin().is_terminal());
 
+    // The Windows console's UTF-8 codepages + VT bit (the 2026-10-08
+    // broken-icons report: this process writes UTF-8 bytes through std,
+    // and conhost decodes them with the console's OUTPUT CODEPAGE). The
+    // TUI's own mounts call it too; the init is idempotent and a no-op on
+    // non-console stdout (pipes, CI) and non-Windows hosts.
+    pa_types::platform::console_init();
+
     if public_command.attach_agent.is_some() && app_mode != mode::AppMode::Interactive {
         return Err("attach requires an interactive terminal".to_string());
     }

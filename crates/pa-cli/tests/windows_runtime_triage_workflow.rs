@@ -231,6 +231,15 @@ fn the_tui_battery_job_boots_the_binary_and_dumps_the_panes() {
         "the build step names the binary: {build}"
     );
 
+    // The broken-icons fix's mechanism battery: the cfg(windows) console
+    // tests run on the runner the PR wave ships to.
+    runs
+        .iter()
+        .find(|run| {
+            run.contains("cargo test --locked -p pa-types --lib console")
+        })
+        .expect("the job runs the pa-types console battery on the runner");
+
     // The battery: the three scripted TUI scenarios, with the dump dir the
     // panes land in for the artifact.
     let battery = runs

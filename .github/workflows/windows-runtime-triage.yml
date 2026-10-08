@@ -111,6 +111,14 @@ jobs:
       # built binary and warms the test run's build.
       - name: Build the binary the battery boots (locked)
         run: cargo build --locked -p pa-cli --bin prime-agent
+      # The broken-icons fix's mechanism battery (cfg(windows) tests in
+      # pa_types::platform::windows_console): the codepage/VT flips and the
+      # restore, proven on the runner the product ships to.
+      - name: The Windows console battery (the broken-icons fix)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p pa-types --lib console -- --nocapture
       - name: Run the triage battery (the three scripted TUI scenarios)
         shell: bash
         run: |

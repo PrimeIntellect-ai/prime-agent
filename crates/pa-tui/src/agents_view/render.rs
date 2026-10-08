@@ -792,6 +792,10 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
+                // The Windows console's UTF-8 codepages + VT bit arm before
+                // the first mode write (the broken-icons report's fix; a
+                // no-op on non-console stdout and non-Windows hosts).
+                pa_types::platform::console_init();
                 // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one
                 // trigger for lifting a pending Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;

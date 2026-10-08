@@ -168,6 +168,13 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
+                // The Windows console's UTF-8 codepages + VT bit arm before
+                // the first mode write: the frames this surface paints are
+                // UTF-8 bytes, and conhost decodes them with the console's
+                // OUTPUT CODEPAGE (the operator's 2026-10-08 broken-icons
+                // report). A no-op on non-console stdout and non-Windows
+                // hosts.
+                pa_types::platform::console_init();
                 // The raw-mode bracket's own `cfmakeraw` write clears IXON, which is the
                 // kernel's one trigger for lifting a pending Ctrl+S stop: a tty stopped at the
                 // shell prompt self-heals here (verified by the flow e2e's launch route).

@@ -115,5 +115,10 @@ fn main() -> Result<()> {
             // model.
             let _ = text;
         }),
-    )
+    )?;
+    // The console restore the CLI's exit funnel owns for the other
+    // surfaces: this bin does not go through the CLI (the broken-icons
+    // fix's exit half).
+    pa_types::platform::console_restore();
+    Ok(())
 }
