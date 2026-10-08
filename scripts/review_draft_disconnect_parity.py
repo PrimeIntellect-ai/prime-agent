@@ -31,6 +31,7 @@ TS_ARCHIVE_SHA256 = "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76
 LIMIT = 35
 PROMPT = "DRAFT_DISCONNECT_SENTINEL"
 PROBE = "DRAFT_TRANSPORT_PROBE"
+TS_SOURCE_COMMIT = "7d442aafa985f9342134fac16c2ef41f03fb45c1"
 REFUSAL = "Fixture definitively refused this prompt"
 
 
@@ -188,6 +189,21 @@ class Screen:
         return replies
 
 
+def fixture_state(root, active):
+    # AgentConnectionState in the pinned TS binary's source commit (types.ts).
+    # No model selected: model and contextUsage are optional on the wire.
+    return {"activeSessionId": active, "cwd": str(root), "sessionId": "fixture-durable",
+            "sessionName": "Draft fixture", "thinkingLevel": "off", "serviceTier": "default",
+            "availableThinkingLevels": ["off"], "isStreaming": False,
+            "isCompacting": False, "isBashRunning": False, "retryAttempt": 0,
+            "steeringMode": "all", "followUpMode": "all", "leafId": None,
+            "autoCompactionEnabled": False, "messageCount": 0, "compactionCount": 0,
+            "sessionActions": {"queuedCount": 0, "steering": [], "followUps": []},
+            "goal": {"active": False, "status": "idle", "tokensUsed": 0,
+                     "timeUsedSeconds": 0, "continuationsUsed": 0},
+            "scopedModels": [], "activeToolNames": []}
+
+
 class Supervisor:
     def __init__(self, path, hello, scenario, root):
         self.path, self.hello, self.scenario, self.root = path, hello, scenario, root
@@ -196,7 +212,9 @@ class Supervisor:
         self.done = threading.Event()
         self.lock = threading.Lock()
         self.sockets, self.threads, self.errors = [], [], []
-        self.commands, self.prompts = [], []
+        self.commands, self.prompts, self.prompt_envelopes = [], [], []
+        self.accepted_prompts, self.result_acks = [], []
+        self.journal, self.settled = {}, set()
         self.attaches = 0
         self.closed = False
         self.rebound = False
@@ -206,6 +224,26 @@ class Supervisor:
 
     def send(self, sock, data):
         sock.sendall((json.dumps(data) + "\n").encode())
+
+    def settle(self, sock, active, key, index):
+        with self.lock:
+            if key in self.settled:
+                return
+            self.settled.add(key)
+        # The held original synthetic turn finishes once; cached result replay
+        # does not execute another turn. No real provider is called.
+        marker = f"Fixture settled {index}"
+        message = {"role": "assistant", "stopReason": "stop",
+                   "api": "openai-completions", "provider": "parity-local", "model": "parity-1",
+                   "timestamp": 1750000000000, "usage": {"input": 0, "output": 0,
+                   "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                   "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+                   "content": [{"type": "text", "text": marker}]}
+        for event in ({"type": "turn_start"},
+                      {"type": "message_start", "message": message},
+                      {"type": "message_end", "message": message},
+                      {"type": "turn_end"}):
+            self.send(sock, {"type": "session_event", "activeSessionId": active, "event": event})
 
     def accept(self):
         while not self.done.is_set():
@@ -234,19 +272,26 @@ class Supervisor:
                     command = envelope.get("command", envelope)
                     name = command.get("type")
                     request_id = envelope.get("id")
+                    client_id = envelope.get("clientId")
+                    key = (client_id, request_id)
                     with self.lock:
                         self.commands.append(command)
                     active = "s2" if self.rebound else "s1"
                     response = {"type": "response", "id": request_id, "command": name,
                                 "success": True, "data": {}}
+                    if name == "ack_result":
+                        # TS supervisor acknowledges its journal and returns undefined;
+                        # this one-way command must not receive a synthetic response.
+                        with self.lock:
+                            ack_key = (client_id, command.get("commandId"))
+                            self.result_acks.append({"clientId": client_id, "commandId": command.get("commandId")})
+                            self.journal.pop(ack_key, None)
+                        continue
                     if name == "create":
                         response["data"] = {"activeSessionId": active, "id": active,
                             "sessionId": "fixture-durable", "sessionFile": str(self.root / "agent/sessions/fixture.jsonl")}
                     elif name == "attach":
-                        state = {"activeSessionId": active, "cwd": str(self.root),
-                                 "sessionId": "fixture-durable", "sessionName": "Draft fixture",
-                                 "model": None, "isStreaming": False, "isCompacting": False,
-                                 "sessionActions": {"queuedCount": 0, "steering": [], "followUps": []}}
+                        state = fixture_state(self.root, active)
                         response["data"] = {"protocol": hello["protocol"], "activeSessionId": active,
                             "snapshot": {"activeSessionId": active, "summary": {"id": active, "cwd": str(self.root)},
                                          "state": state, "messages": [], "lastEventSequence": 0, "lastEventCursor": None},
@@ -256,47 +301,71 @@ class Supervisor:
                             self.attaches += 1
                             if self.closed: self.post_close_attached = True
                     elif name == "prompt":
+                        if not client_id or not request_id:
+                            raise RuntimeError("prompt envelope lacks clientId/id for recovery identity")
+                        with self.lock:
+                            self.prompt_envelopes.append({"id": request_id, "clientId": client_id, "command": command})
+                            cached = self.journal.get(key)
+                        if cached is not None:
+                            # Exact TS supervisor semantics: (clientId, commandId) completion
+                            # returns the cached result without dispatching the prompt again.
+                            cached_response, index = cached
+                            self.send(sock, cached_response)
+                            if cached_response["success"]:
+                                self.settle(sock, active, key, index)
+                            continue
                         with self.lock:
                             self.prompts.append(command)
-                            first = len(self.prompts) == 1
+                            index = len(self.prompts)
+                            first = index == 1
                         if first and self.scenario == "refusal":
                             response.update(success=False, error=REFUSAL)
-                        elif first and self.scenario == "rebind_close":
+                        with self.lock:
+                            # Model complete-before-reply loss, not pending/uncertain journal
+                            # recovery. This scenario tests a lost ACK for a completed admission.
+                            self.journal[key] = (dict(response), index)
+                            if response["success"]:
+                                self.accepted_prompts.append({"id": request_id, "clientId": client_id,
+                                                              "command": command})
+                        if first and self.scenario == "rebind_close":
                             self.rebound = True
                             self.send(sock, {"type": "session_binding", "previousActiveSessionId": "s1", "activeSessionId": "s2"})
                             continue
-                        elif first and self.scenario == "queued_close":
+                        if first and self.scenario == "queued_close":
                             self.closed = True
-                            return  # Accepted by the fixture; intentionally no response/ACK.
-                        # Successful probes settle without producing transcript content.
+                            return  # Admission/result cached; reply intentionally lost.
                     elif name == "detach" and self.scenario == "rebind_close" and self.rebound and not self.closed:
                         self.closed = True
                         return  # The attach already adopted s2 before it requested detach(s1).
                     elif name == "list": response["data"] = {"sessions": []}
                     elif name == "heartbeats_list": response["data"] = {"heartbeats": []}
                     elif name == "roster_subscribe": response["data"] = {"changed": [], "removed": [], "resync": True}
+                    elif name == "get_available_models": response["data"] = {"models": []}
+                    elif name == "get_resource_snapshot":
+                        # AgentConnectionResourceSnapshot from the pinned TS source.
+                        response["data"] = {"contextFiles": [], "skills": [], "prompts": [],
+                                            "extensions": [], "themes": [], "diagnostics": {
+                                            "skills": [], "prompts": [], "extensions": [], "themes": []}}
+                    elif name == "get_session_stats":
+                        # AgentSession.getSessionStats's empty-session return shape.
+                        response["data"] = {"sessionId": "fixture-durable", "userMessages": 0,
+                                            "assistantMessages": 0, "toolCalls": 0, "toolResults": 0,
+                                            "totalMessages": 0, "cost": 0, "tokens": {
+                                            "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
                     elif name == "get_model_catalog": response["data"] = {"models": [], "configuredProviders": []}
                     elif name == "get_commands": response["data"] = {"commands": []}
                     elif name == "list_kernel_bash": response["data"] = {"commands": []}
                     elif name == "factory_activity": response["data"] = {"activity": [], "jobs": []}
-                    elif name in ("get_state", "get_session_stats", "get_connection_state", "get_mcp_connections", "detach"):
-                        response["data"] = {"isStreaming": False, "isCompacting": False,
-                                            "sessionActions": {"queuedCount": 0, "steering": [], "followUps": []}}
+                    elif name in ("get_state", "get_connection_state"):
+                        response["data"] = fixture_state(self.root, active)
+                    elif name == "get_mcp_connections": response["data"] = {"connections": []}
+                    elif name == "detach": response["data"] = {}
                     else:
                         self.errors.append(f"unexpected command: {name}")
                         response.update(success=False, error=f"Unsupported fixture command: {name}")
                     self.send(sock, response)
                     if name == "prompt" and response["success"]:
-                        # A visible synthetic assistant turn proves the ACK/events were handled
-                        # before typing the transport probe. No real provider is called.
-                        marker = f"FIXTURE_SETTLED_{len(self.prompts)}"
-                        message = {"role": "assistant", "stopReason": "stop",
-                                   "content": [{"type": "text", "text": marker}]}
-                        for event in ({"type": "turn_start"},
-                                      {"type": "message_start", "message": message},
-                                      {"type": "message_end", "message": message},
-                                      {"type": "turn_end"}):
-                            self.send(sock, {"type": "session_event", "activeSessionId": active, "event": event})
+                        self.settle(sock, active, key, index)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as error:
@@ -369,13 +438,14 @@ def scenario(kind, binary, root, hello, name):
                           and PROMPT in terminal.screen.text(), server)
         else:
             terminal.wait("reconnected attach and visible reconnect result", lambda: server.post_close_attached
-                          and "daemon reconnected" in terminal.screen.text().lower(), server)
+                          and any(phrase in terminal.screen.text().lower() for phrase in
+                                  ("daemon reconnected", "daemon restarted (v0.9.8) - reconnected")), server)
         result["screens"]["before_resubmit"] = terminal.screen.text()
         before = len(server.prompts)
         terminal.send("\r")
         if name == "refusal":
             terminal.wait("resubmitted refusal visibly settled", lambda:
-                          "FIXTURE_SETTLED_2" in terminal.screen.text(), server)
+                          "Fixture settled 2" in terminal.screen.text(), server)
         # A visible marker typed afterwards is the barrier that Enter has been handled;
         # the next prompt also proves the post-reconnect transport is operational.
         terminal.send(PROBE)
@@ -386,7 +456,7 @@ def scenario(kind, binary, root, hello, name):
         probe_index = next(index + 1 for index, prompt in enumerate(server.prompts)
                            if PROBE in prompt.get("message", ""))
         terminal.wait("transport probe visibly settled", lambda:
-                      f"FIXTURE_SETTLED_{probe_index}" in terminal.screen.text(), server)
+                      f"Fixture settled {probe_index}" in terminal.screen.text(), server)
         result.update(executed=True, dispatches_before_resubmit=before,
                       rebound=server.rebound, reconnected=server.post_close_attached)
     except Exception as error:
@@ -407,12 +477,18 @@ def scenario(kind, binary, root, hello, name):
         # A late dispatch cannot be hidden behind an earlier passing invariant.
         messages = [p.get("message") for p in server.prompts]
         expected = [PROMPT, PROMPT, PROBE] if name == "refusal" else [PROMPT, PROBE]
+        accepted = [item["command"].get("message") for item in server.accepted_prompts]
+        wire_messages = [item["command"].get("message") for item in server.prompt_envelopes]
         result.update(wire_commands=server.commands, prompts=messages,
+                      wire_prompt_messages=wire_messages,
+                      prompt_envelopes=server.prompt_envelopes,
+                      accepted_logical_prompts=server.accepted_prompts,
+                      accepted_logical_messages=accepted, result_acks=server.result_acks,
                       expected_prompts=expected, fixture_errors=server.errors,
                       draft_restored=name == "refusal" and messages == expected,
                       draft_consumed=name != "refusal" and messages == expected,
                       invariant_passed=bool(result["executed"] and messages == expected
-                                           and not server.errors and not result.get("cleanup_errors")))
+                                           and accepted == [PROMPT, PROBE] and not server.errors and not result.get("cleanup_errors")))
     return result
 
 
@@ -422,7 +498,8 @@ def main():
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
     receipt = {"fixture": "pr3401-draft-disconnect", "results": {},
-               "comparison_scope": "Targeted prompt-dispatch/draft behavior only; raw terminals, decoded screens and commands are retained but full frame/wire equivalence is not asserted.",
+               "fixture_schema_source_commit": TS_SOURCE_COMMIT,
+               "comparison_scope": "Targeted accepted logical prompt/draft behavior; complete result recovery is keyed by the actual (clientId, commandId), so same-ID wire retries are recorded but do not dispatch a second prompt. Raw IDs, attempts, terminals and commands are retained; full frame/wire equivalence is not asserted.",
                "ci_provenance": {key: os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_SHA")},
                "ts_reference": {"version": "0.9.8", "expected_archive_sha256": TS_ARCHIVE_SHA256},
                "pre_send_limitation": "A deterministically dead client before send needs the in-process death-watch seam; the binary fixture tests definitive refusal separately."}
@@ -457,13 +534,17 @@ def main():
     comparisons = {}
     for name in ("queued_close", "refusal", "rebind_close"):
         sides = [receipt["results"].get(kind, {}).get("scenarios", {}).get(name, {}) for kind in ("ts", "rust")]
-        comparisons[name] = {"both_executed": all(x.get("executed") for x in sides),
-                             "same_prompt_observations": bool(all(x.get("executed") for x in sides)
-                                 and sides[0].get("prompts") == sides[1].get("prompts")),
+        executed = all(x.get("executed") for x in sides)
+        comparisons[name] = {"both_executed": executed,
+                             "same_logical_prompt_observations": bool(executed and sides[0].get("prompts") == sides[1].get("prompts")),
+                             "same_accepted_logical_observations": bool(executed and sides[0].get("accepted_logical_messages") == sides[1].get("accepted_logical_messages")),
+                             "same_wire_prompt_observations": bool(executed and sides[0].get("wire_prompt_messages") == sides[1].get("wire_prompt_messages")),
                              "both_invariants_passed": all(x.get("invariant_passed") for x in sides)}
     receipt["comparisons"] = comparisons
     receipt["parity"] = bool("preflight_error" not in receipt and all(
-        all(item.values()) for item in comparisons.values()))
+        all(item[key] for key in ("both_executed", "same_logical_prompt_observations",
+                                 "same_accepted_logical_observations", "both_invariants_passed"))
+        for item in comparisons.values()))
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(json.dumps(receipt, indent=2, sort_keys=True))
