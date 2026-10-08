@@ -527,6 +527,25 @@ fn signature_equals(recorded: Option<TraceUploadSignature>, current: TraceUpload
     recorded.is_some_and(|recorded| recorded == current)
 }
 
+// Separate short mutation leases from delivery leases (which cover network
+// waits). Persist callers only try-lock; cursor/prune work stays in background.
+fn outbox_mutation_lock(entry: &Path) -> std::io::Result<std::fs::File> {
+    let lock = entry.with_extension("mutation-lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    crate::platform::perms::set_private_mode(&mut options);
+    match options.open(&lock) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = lock.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            options.open(lock)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn record_agent_trace_outbox_upload(
     agent_dir: &Path,
     session_file: &Path,
@@ -534,6 +553,8 @@ fn record_agent_trace_outbox_upload(
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(agent_trace_outbox_dir(agent_dir))?;
     let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
+    let mutation = outbox_mutation_lock(&entry_path)?;
+    mutation.lock()?;
     let temp = entry_path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),

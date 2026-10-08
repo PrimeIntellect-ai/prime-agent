@@ -200,12 +200,12 @@ impl Worker {
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
         let (settings, trace_consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(
-            &cwd,
+            std::path::Path::new(&cwd),
             &self.config.agent_dir,
         );
         let traces = |path: &std::path::Path| {
             pa_core::agent_traces::ContinuousTraceUpload::install(
-                &cwd,
+                std::path::Path::new(&cwd),
                 &self.config.agent_dir,
                 Some(path),
                 trace_consent.clone(),

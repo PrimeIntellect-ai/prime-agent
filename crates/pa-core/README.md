@@ -90,5 +90,7 @@ owns all transcript reads, scans, settings reloads, networking and retries; a ma
 of 256 live controllers and four deliveries bounds resident work. The synchronous
 persist seam performs two settings-generation metadata checks and an exists/create
 pending-marker write; it does not fsync the marker (matching TS v0.9.8 process-crash
-recovery rather than promising power-loss durability). Its cost must be measured
+recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention
+records one stable fallback marker per session, which is retained conservatively
+until a future sender has delivered it. Its cost must be measured
 separately; startup/paint parity is not established by scheduler unit tests.

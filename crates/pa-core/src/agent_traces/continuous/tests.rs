@@ -147,7 +147,6 @@ async fn controller_drop_cancels_timer_without_waiting_for_delivery() {
 }
 
 #[test]
-#[ignore = "remote performance measurement; never run on the loaded laptop"]
 fn measure_synchronous_pending_marker_cost() {
     let fixture = Fixture::new();
     let mut cold = Vec::new();
@@ -164,10 +163,14 @@ fn measure_synchronous_pending_marker_cost() {
     }
     cold.sort_unstable();
     warm.sort_unstable();
-    println!(
-        "{}",
+    let report = format!(
+        "{}\n",
         json!({"samples":1000,"cold_marker_ns":{"p50":cold[500],"p95":cold[950],"p99":cold[990]},"warm_marker_ns":{"p50":warm[500],"p95":warm[950],"p99":warm[990]},"fsync":false,"consent_metadata_checks_included":true})
     );
+    // Explicit stdout retains this informational measurement in hosted CI logs
+    // even when the test harness captures println output for passing tests.
+    use std::io::Write;
+    std::io::stdout().write_all(report.as_bytes()).unwrap();
 }
 
 fn enable_synthetic_fixture(fixture: &Fixture) {
@@ -325,4 +328,75 @@ async fn startup_recovery_uploads_pending_and_prunes_missing_but_preserves_unkno
     assert!(!agent_trace_outbox_entry_path(&fixture.agent_dir, &missing).exists());
     assert!(!malformed.exists());
     assert!(unknown.exists());
+}
+
+#[test]
+fn persist_racing_a_pruner_retains_a_complete_nonblocking_fallback_marker() {
+    let fixture = Fixture::new();
+    let path = fixture.write_session("prune-race.jsonl", "race");
+    let entry = agent_trace_outbox_entry_path(&fixture.agent_dir, &path);
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "{").unwrap();
+    let pruner = outbox_mutation_lock(&entry).unwrap();
+    pruner.lock().unwrap();
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let fallback = entry.with_extension("pending.json");
+    let raw = std::fs::read_to_string(&fallback).unwrap();
+    assert_eq!(
+        parse_outbox_entry(&raw),
+        Some((path.to_string_lossy().into_owned(), None))
+    );
+    drop(pruner);
+    prune_entry(&entry, "{", None);
+    assert!(!entry.exists());
+    assert!(fallback.exists());
+    prune_entry(&fallback, &raw, None);
+    assert!(fallback.exists());
+}
+
+#[test]
+fn stale_prune_observations_never_remove_a_new_cursor_or_recreated_transcript() {
+    let fixture = Fixture::new();
+    let path = fixture.write_session("stale-prune.jsonl", "stale");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let entry = agent_trace_outbox_entry_path(&fixture.agent_dir, &path);
+    let raw = std::fs::read_to_string(&entry).unwrap();
+    let signature = TraceUploadSignature::of(&path).unwrap();
+    record_agent_trace_outbox_upload(&fixture.agent_dir, &path, signature).unwrap();
+    prune_entry(&entry, &raw, Some(&path));
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        Some(signature)
+    );
+    let raw = std::fs::read_to_string(&entry).unwrap();
+    prune_entry(&entry, &raw, Some(&path));
+    assert!(entry.exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn fallback_only_restart_schedules_the_live_controller_without_a_fresh_write() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("fallback-only.jsonl", "fallback-only");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let primary = agent_trace_outbox_entry_path(&fixture.agent_dir, &path);
+    let fallback = primary.with_extension("pending.json");
+    std::fs::rename(&primary, &fallback).unwrap();
+    let c = controller(&fixture, &path, true);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (body, _reply) = observed.recv().await.unwrap();
+    assert!(body.contains("fallback-only"));
+    drop(c);
+    task.await.unwrap();
+    assert!(fallback.exists());
 }

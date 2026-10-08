@@ -225,7 +225,16 @@ impl ContinuousTraceUpload {
 }
 
 fn mark_pending(agent_dir: &Path, session_file: &Path) -> std::io::Result<()> {
-    let entry = agent_trace_outbox_entry_path(agent_dir, session_file);
+    let primary = agent_trace_outbox_entry_path(agent_dir, session_file);
+    let mutation = outbox_mutation_lock(&primary)?;
+    // Never wait behind a pruner or cursor writer on the host thread. A stable
+    // fallback marker retains intent even if the primary is about to be pruned.
+    let acquired = mutation.try_lock().is_ok();
+    let entry = if acquired {
+        primary
+    } else {
+        primary.with_extension("pending.json")
+    };
     if entry.exists() {
         return Ok(());
     }
@@ -255,6 +264,47 @@ fn mark_pending(agent_dir: &Path, session_file: &Path) -> std::io::Result<()> {
     })();
     let _ = std::fs::remove_file(temp);
     result
+}
+
+fn prune_entry(entry: &Path, observed: &str, missing_session: Option<&Path>) {
+    // Fallback markers are deliberately retained: another process can publish
+    // intent there without waiting while the primary's short lease is held.
+    if entry
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(".pending.json"))
+    {
+        return;
+    }
+    let Ok(mutation) = outbox_mutation_lock(entry) else {
+        return;
+    };
+    if mutation.try_lock().is_err() {
+        return;
+    }
+    use std::io::Read;
+    let mut current = String::new();
+    let Ok(file) = std::fs::File::open(entry) else {
+        return;
+    };
+    if file
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut current)
+        .is_err()
+        || current != observed
+    {
+        return;
+    }
+    if let Some(session) = missing_session {
+        match std::fs::metadata(session) {
+            Ok(meta) if meta.is_file() => return,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return,
+        }
+    }
+    if let Err(error) = std::fs::remove_file(entry) {
+        tracing::debug!(%error, "trace stale marker pruning failed");
+    }
 }
 
 fn delivery_lease(agent_dir: &Path, path: &Path) -> Option<std::fs::File> {
@@ -352,7 +402,8 @@ async fn run_controller(
     if let Some(controller) = weak.upgrade() {
         let mut pending = controller.pending.lock().unwrap();
         if let Some((path, schedule)) = pending.as_mut() {
-            if agent_trace_outbox_entry_path(&controller.agent_dir, path).is_file() {
+            let entry = agent_trace_outbox_entry_path(&controller.agent_dir, path);
+            if entry.is_file() || entry.with_extension("pending.json").is_file() {
                 schedule.persist(Instant::now());
             }
         }
@@ -499,7 +550,7 @@ async fn recover(
             continue;
         }
         let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-            let _ = tokio::fs::remove_file(entry.path()).await;
+            prune_entry(&entry.path(), &raw, None);
             continue;
         };
         if value.get("kind").is_some() {
@@ -510,7 +561,7 @@ async fn recover(
             .and_then(Value::as_str)
             .map(PathBuf::from)
         else {
-            let _ = tokio::fs::remove_file(entry.path()).await;
+            prune_entry(&entry.path(), &raw, None);
             continue;
         };
         let live = service()
@@ -532,11 +583,11 @@ async fn recover(
         match tokio::fs::metadata(&path).await {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => {
-                let _ = tokio::fs::remove_file(entry.path()).await;
+                prune_entry(&entry.path(), &raw, Some(&path));
                 continue;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let _ = tokio::fs::remove_file(entry.path()).await;
+                prune_entry(&entry.path(), &raw, Some(&path));
                 continue;
             }
             Err(_) => continue,
