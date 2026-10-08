@@ -331,11 +331,9 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
         "the moved child resolves through its session id"
     );
 
-    let state = ledger.replay_cached().unwrap();
+    let state = ledger.replay_of_parent(&parent).unwrap();
     let mut resolver = LivePathResolver::new(agent_dir.clone(), sessions_dir.clone());
-    let scoped = resolve_live_edges(&state, &mut resolver, |edge| {
-        Path::new(&edge.parent).file_stem() == parent.file_stem()
-    });
+    let scoped = resolve_live_edges(&state, &mut resolver);
     assert_eq!(scoped.len(), 2, "{scoped:?}");
     assert_eq!(
         resolver.resolved.len(),
@@ -347,8 +345,9 @@ fn live_edges_of_parent_bounds_the_liveness_work() {
         resolver.artifact_index.is_none(),
         "no foreign miss walks the artifacts tree"
     );
+    let full = ledger.replay_cached().unwrap();
     let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir);
-    assert_eq!(resolve_live_edges(&state, &mut unscoped, |_| true).len(), 2);
+    assert_eq!(resolve_live_edges(&full, &mut unscoped).len(), 2);
     assert!(unscoped.artifact_index.is_some());
     assert_eq!(unscoped.resolved.len(), 103);
 }
