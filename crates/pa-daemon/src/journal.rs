@@ -440,7 +440,9 @@ impl WorkerRecoveryJournal {
             queue_snapshots,
         };
         if tail_is_torn(path) {
-            journal.compact()?;
+            // Recovery can still contain busy verdicts and queued prompts.
+            // Sync the replacement before it takes over their durable history.
+            journal.compact(Finalize::Synced)?;
         }
         Ok(journal)
     }
@@ -539,7 +541,7 @@ impl WorkerRecoveryJournal {
         // after `set`); checking before it, a single-session journal never
         // compacted.
         if self.latest.values().all(|entry| !entry.busy) {
-            self.compact()?;
+            self.compact(Finalize::Bare)?;
         }
         Ok(())
     }
@@ -631,7 +633,7 @@ impl WorkerRecoveryJournal {
             // TS parity (same post-insert check as `record`): the
             // compaction fires on the all-idle map including the verdict.
             if self.latest.values().all(|entry| !entry.busy) {
-                self.compact()?;
+                self.compact(Finalize::Bare)?;
             }
         }
         Ok(())
@@ -664,7 +666,7 @@ impl WorkerRecoveryJournal {
             .map(|record| (record.steering, record.follow_up)))
     }
 
-    fn compact(&self) -> Result<()> {
+    fn compact(&self, finalize: Finalize) -> Result<()> {
         let mut records: Vec<Value> = self
             .latest
             .values()
@@ -676,7 +678,7 @@ impl WorkerRecoveryJournal {
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
         records.extend(snapshots);
-        rewrite_records(&self.path, &records, Finalize::Bare)
+        rewrite_records(&self.path, &records, finalize)
     }
 }
 
@@ -1119,6 +1121,12 @@ mod tests {
         file.write_all(torn).unwrap();
         drop(file);
 
+        let mut healed = WorkerRecoveryJournal::open(&path).unwrap();
+        // Reload after a fresh append so the assertions exercise the healed
+        // file, rather than only the state loaded before the rewrite.
+        healed
+            .record("s1", "sess1", Some("/a.jsonl"), true, "resumed")
+            .unwrap();
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(WorkerRecoveryJournal::read_interrupted(&path));
         let latest = reopened.get_latest();
