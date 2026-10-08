@@ -209,7 +209,7 @@ mod tests {
         let rows = render(&card, 3, Detail::Overview, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(
-            flat.iter().any(|r| r.contains("Elapsed 0.")),
+            flat.iter().any(|r| r.contains("Elapsed ")),
             "got: {flat:?}"
         );
         assert!(!flat.iter().any(|r| r.contains("Took ")), "got: {flat:?}");

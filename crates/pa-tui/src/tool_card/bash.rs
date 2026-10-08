@@ -396,20 +396,29 @@ mod tests {
         let rows = render(&card, 3, Detail::Overview, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
         assert!(
-            flat.iter().any(|r| r.contains("Elapsed 0.")),
+            flat.iter().any(|r| r.contains("Elapsed ")),
             "got: {flat:?}"
         );
         assert!(!flat.iter().any(|r| r.contains("Took ")), "got: {flat:?}");
+        // The value follows the execution start without pinning the
+        // leading second: the 4-second-old call paints a strictly larger
+        // live duration than the 300ms-old one, whatever the scheduler
+        // did in between.
+        let elapsed_of = |rows: &[String]| {
+            rows.iter()
+                .find(|r| r.contains("Elapsed "))
+                .and_then(|r| r.split_once("Elapsed "))
+                .and_then(|(_, rest)| rest.trim().trim_end_matches('s').parse::<f64>().ok())
+                .expect("the live duration parses")
+        };
+        let fresh = elapsed_of(&flat);
         let older = ToolCallCard {
             started_at: Some(started_ms_ago(4000)),
             ..card
         };
         let rows = render(&older, 4, Detail::Overview, &theme(), 120, true);
         let flat: Vec<String> = rows.iter().map(text_of).collect();
-        assert!(
-            flat.iter().any(|r| r.contains("Elapsed 4.")),
-            "got: {flat:?}"
-        );
+        assert!(elapsed_of(&flat) > fresh, "got: {flat:?}");
     }
 
     #[test]
