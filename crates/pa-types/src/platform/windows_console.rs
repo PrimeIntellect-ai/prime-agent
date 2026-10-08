@@ -42,6 +42,7 @@ static ORIGINAL: std::sync::OnceLock<OriginalConsole> = std::sync::OnceLock::new
 /// same policy as the named-pipe transport and the process wall).
 #[cfg(windows)]
 mod winapi {
+    // The Win32 header names stay verbatim: the pinned-constants wall mirrors them.
     #![allow(non_snake_case)]
 
     use std::ffi::c_void;

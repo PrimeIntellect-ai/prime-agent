@@ -124,6 +124,7 @@ fn daemon_endpoint(dir: &Path) -> PathBuf {
 }
 
 /// Spawn the freshly-built binary as a daemon supervisor.
+// The supervisor child is killed and reaped by `Supervisor`'s Drop; the lint cannot see past the spawn site.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = daemon_endpoint(dir);
@@ -296,6 +297,7 @@ fn dump_frames(scenario: &str, frames: &[String]) {
 /// engine's responses ride the script file; a parent path + depth make
 /// the session a real subagent (the same durable create a `rlm.spawn`
 /// issues).
+// The harness mirrors the daemon Create command's own config rows; a builder struct would shadow the protocol.
 #[allow(clippy::too_many_arguments)]
 async fn create_session_via_daemon(
     socket: &Path,
