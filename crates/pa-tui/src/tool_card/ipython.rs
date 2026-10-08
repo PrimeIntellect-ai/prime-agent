@@ -214,6 +214,7 @@ fn collapsed_line(
     };
 
     let mut parts: Vec<Line> = Vec::new();
+    let mut preview_index: Option<usize> = None;
     let mut marker = marker;
     marker.push(Span::raw(" "));
     marker.push(Span::styled(language_label, muted));
@@ -221,12 +222,14 @@ fn collapsed_line(
     if let Some(bash) = dominant {
         let preview = preview_bash_command(&bash.first);
         if !preview.text.is_empty() {
+            preview_index = Some(parts.len());
             parts.push(vec![Span::styled(preview.text, dim)]);
         }
         if bash.count > 1 {
             parts.push(vec![Span::styled(format!("+{} more", bash.count - 1), dim)]);
         }
     } else if !preview.text.is_empty() {
+        preview_index = Some(parts.len());
         parts.push(vec![Span::styled(preview.text, dim)]);
     } else if !card.started {
         parts.push(vec![Span::styled("waiting for code".to_string(), dim)]);
@@ -234,6 +237,7 @@ fn collapsed_line(
     if let Some(counts) = line_counts(card, details, code) {
         parts.push(vec![Span::styled(counts, dim)]);
     }
+    let mut live_timer = false;
     if let Some(duration) = details.duration_ms {
         let label = if background.is_some() {
             format!("cell {}", format_duration(duration))
@@ -250,6 +254,7 @@ fn collapsed_line(
         // settles — the exact duration the card always rendered.
         let elapsed_ms = started.elapsed().as_millis() as f64;
         parts.push(vec![Span::styled(format_duration(elapsed_ms), dim)]);
+        live_timer = true;
     }
     if !card.result_partial {
         let error_name = details
@@ -264,6 +269,35 @@ fn collapsed_line(
     if let Some(exit_code) = background.and_then(|shell| shell.exit_code) {
         if exit_code != 0 {
             parts.push(vec![Span::styled(format!("exit {exit_code}"), error)]);
+        }
+    }
+
+    // The live timer is only useful on screen, but the summary clips
+    // from the right and the duration slot clips first: while the cell
+    // runs, the code preview gives the ticking duration room by
+    // shortening (or, if it cannot fit at all, dropping) itself. The
+    // settled card keeps its established layout — `durationMs` lands
+    // in the same slot, clipped exactly as before.
+    if live_timer {
+        let separator_width = str_width(" \u{00b7} ");
+        let used = parts.iter().map(|p| crate::width::line_width(p)).sum::<usize>()
+            + separator_width * parts.len().saturating_sub(1)
+            + 1;
+        if used > width {
+            let excess = used - width;
+            match preview_index {
+                Some(index) if crate::width::line_width(&parts[index]) > excess => {
+                    let part = &mut parts[index];
+                    let target = crate::width::line_width(part) - excess;
+                    if let Some(span) = part.first_mut() {
+                        span.content = crate::width::truncate_to_width(&span.content, target, "");
+                    }
+                }
+                Some(index) => {
+                    parts.remove(index);
+                }
+                None => {}
+            }
         }
     }
 

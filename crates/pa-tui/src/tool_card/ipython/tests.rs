@@ -262,6 +262,26 @@ fn running_cell_summary_ticks_live_elapsed() {
 }
 
 #[test]
+fn running_cell_long_preview_keeps_live_duration_visible() {
+    // The summary clips from the right, so a preview that fills the width
+    // would clip the ticking duration first: while the cell runs, the
+    // preview shortens itself to keep the live duration on screen (the
+    // settled card keeps its established layout, clipping the same way
+    // it always has).
+    let code = format!("print('{}')", "x".repeat(90));
+    let mut card = cell_card(&code, json!({ "status": "ok" }), false, true);
+    card.started_at = Some(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1500))
+            .expect("the clock is past the start"),
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 80, true);
+    let text = text_of(&lines[0]);
+    assert!(text.contains("1.5s"), "got: {text}");
+    assert!(crate::width::str_width(&text) <= 80, "got: {text}");
+}
+
+#[test]
 fn background_shell_duration_label_and_exit() {
     let code = "h = bash('sleep 0.1')";
     let details = json!({
