@@ -541,7 +541,7 @@ impl PrintGoalSurface {
                     .map_err(|error| format!("{error:#}"))?;
                 self.publish_goal_update(engine).await;
             }
-            if let Some(wake_at) = engine.goal_backoff_wake_at().await {
+            if let Some(wake_at) = engine.take_goal_backoff_wake_at().await {
                 tokio::time::sleep(std::time::Duration::from_millis(
                     wake_at.saturating_sub(pa_core::autonomous::now_millis()),
                 ))

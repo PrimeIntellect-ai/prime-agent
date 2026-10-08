@@ -691,6 +691,20 @@ impl GoalDriver {
         (self.state.status == GoalStatus::Active && until > now_millis()).then_some(until)
     }
 
+    /// Take the armed backoff window's deadline: the print surface's settled
+    /// boundary reads it after its run, so an overdue window still yields
+    /// (the caller's sleep saturates to zero) and the take consumes it —
+    /// one wake per strike.
+    #[must_use]
+    pub fn take_backoff_wake_at(&mut self) -> Option<u64> {
+        let until = self.no_progress_backoff_until_ms;
+        if self.state.status != GoalStatus::Active || until == 0 {
+            return None;
+        }
+        self.no_progress_backoff_until_ms = 0;
+        Some(until)
+    }
+
     #[must_use]
     pub fn owns_continuation_wakeup(&self) -> bool {
         self.state.status == GoalStatus::Active && self.state.objective.is_some()
