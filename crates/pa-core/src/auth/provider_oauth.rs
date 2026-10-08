@@ -173,6 +173,19 @@ impl ProviderOAuth {
     }
 }
 
+/// Whether a refresh failure reads as the server refusing the grant — a
+/// 400/401/403 refusal in any of the providers' reason formats — rather
+/// than a transient endpoint failure (transport, 5xx) or a local mishap
+/// (a spawn failure, a malformed response). Only a refusal proves the
+/// grant dead; the rest keep the ordinary retry ladder.
+pub(crate) fn is_grant_rejection(reason: &str) -> bool {
+    [400, 401, 403].iter().any(|status| {
+        reason.contains(&format!("({status})"))
+            || reason.contains(&format!("(HTTP {status})"))
+            || reason.contains(&format!("status={status}"))
+    })
+}
+
 /// Credential-shaped material never reaches the log line or the re-login
 /// sentence: a provider error body can echo the rejected token back. The
 /// loaded credential's exact access and refresh values are redacted
@@ -812,6 +825,37 @@ mod tests {
             !logged.contains(short_refresh),
             "the structured warn line never carries the stored refresh token: {logged}"
         );
+    }
+
+    /// Only a refusal proves the grant dead: the refusal statuses in
+    /// every provider's reason format are rejections; transport failures,
+    /// 5xx overloads, and local mishaps are not.
+    #[test]
+    fn only_a_refusal_status_marks_the_grant_rejected() {
+        assert!(is_grant_rejection(
+            "OpenAI Codex token refresh failed (401): expired"
+        ));
+        assert!(is_grant_rejection(
+            "xAI OAuth token refresh failed (HTTP 400): authorization expired or revoked; sign in again"
+        ));
+        assert!(is_grant_rejection(
+            "Anthropic token refresh request failed. url=[redacted] details=Error: HTTP request failed. status=403; url=[redacted]"
+        ));
+        assert!(!is_grant_rejection(
+            "OpenAI Codex token refresh failed (503): overloaded"
+        ));
+        assert!(!is_grant_rejection(
+            "Anthropic token refresh request failed. url=[redacted] details=Error: HTTP request failed. status=502; url=[redacted]"
+        ));
+        assert!(!is_grant_rejection(
+            "Anthropic token refresh request failed. url=[redacted] details=Error: HTTP request failed."
+        ));
+        assert!(!is_grant_rejection("the refresh thread panicked"));
+        assert!(!is_grant_rejection(
+            "the refresh thread could not be spawned: no capacity"
+        ));
+        assert!(!is_grant_rejection("response is not valid JSON"));
+        assert!(!is_grant_rejection("url was not scripted"));
     }
 
     #[test]

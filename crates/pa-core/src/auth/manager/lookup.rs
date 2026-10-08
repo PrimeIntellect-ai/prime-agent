@@ -361,7 +361,17 @@ impl AuthStorage {
                 {
                     return Ok(credential);
                 }
-                return Err(ForcedRefreshFailure::Rejected(reason));
+                // Only a refusal (a 400/401/403 in the provider's reason)
+                // proves the grant dead: a transient endpoint failure
+                // (transport, 5xx) keeps the ordinary retry ladder
+                // instead of a false re-login.
+                return Err(
+                    if crate::auth::provider_oauth::is_grant_rejection(&reason) {
+                        ForcedRefreshFailure::Rejected(reason)
+                    } else {
+                        ForcedRefreshFailure::NotExchanged(reason)
+                    },
+                );
             }
             Some(Ok(new_credential)) => new_credential,
         };

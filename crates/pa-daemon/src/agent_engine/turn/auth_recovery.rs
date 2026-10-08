@@ -83,18 +83,20 @@ impl AgentSessionEngine {
             else {
                 return StoreOutcome::NotApplicable;
             };
-            if refresh.as_deref().is_none_or(str::is_empty) {
-                return StoreOutcome::NotApplicable;
-            }
             // A store that already outgrew the served key is a re-login,
             // not a dead session: rebinding to the stored credential
-            // needs no exchange (the pre-/reload outage shape). A keyless
-            // target is never evidence of a re-login — only a served key
-            // that differs is — so the keyless rejection falls through to
-            // the forced exchange instead of re-binding the store's
-            // possibly stale grant.
+            // needs no exchange (the pre-/reload outage shape) — even a
+            // grant without a refresh token (a pure access-token
+            // re-login) still rebinds. A keyless target is never
+            // evidence of a re-login — only a served key that differs is
+            // — so the keyless rejection falls through to the forced
+            // exchange instead of re-binding the store's possibly stale
+            // grant.
             if store_outgrew_the_served_key(served_key.as_deref(), access.as_str()) {
                 return StoreOutcome::Fresher;
+            }
+            if refresh.as_deref().is_none_or(str::is_empty) {
+                return StoreOutcome::NotApplicable;
             }
             match auth.force_refresh_oauth(&closure_provider) {
                 Ok(_) => StoreOutcome::Refreshed,
@@ -351,6 +353,48 @@ mod tests {
             slot.api_key.as_deref(),
             Some("fresh-access"),
             "the rebind resolves the store's credential"
+        );
+    }
+
+    /// A differing grant without a refresh token still rebinds: the
+    /// fresher check runs before the refresh-token requirement, so a pure
+    /// access-token re-login is served instead of retrying the stale
+    /// target.
+    #[tokio::test]
+    async fn a_refreshless_fresher_grant_still_rebinds() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "faux": {
+                    "type": "oauth",
+                    "access": "fresh-access",
+                    "expires": i64::MAX
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine = engine_over(dir.path());
+        *engine.provider_target.write().unwrap() =
+            Some(target("faux", "faux-1", Some("stale-access")));
+        assert_eq!(
+            engine.recover_provider_auth("faux".to_string()).await,
+            AuthRecoveryOutcome::NewCredential,
+            "the refreshless fresher grant rebinds without an exchange"
+        );
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the target stays");
+        assert_eq!(
+            slot.api_key.as_deref(),
+            Some("fresh-access"),
+            "the retry re-issues against the stored re-login"
         );
     }
 

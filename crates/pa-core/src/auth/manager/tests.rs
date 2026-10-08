@@ -810,6 +810,34 @@ fn force_refresh_without_forced_support_reports_it() {
     );
 }
 
+/// A transient token-endpoint failure (a 5xx overload, a transport
+/// error) never reads as a dead grant: the ordinary retry ladder
+/// stands instead of a false re-login.
+#[test]
+fn a_transient_refresh_failure_never_reads_as_a_rejection() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Err(
+            "OpenAI Codex token refresh failed (503): overloaded".to_string()
+        )),
+    });
+    let (mut auth, _backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-overloaded",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let outcome = auth.force_refresh_oauth("x-overloaded");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "OpenAI Codex token refresh failed (503): overloaded"
+        ),
+        "the transient endpoint failure keeps the ordinary ladder: {outcome:?}"
+    );
+}
+
 #[test]
 fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
     // A peer refreshed against the same rejection while this fetch ran:
