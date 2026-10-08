@@ -267,8 +267,9 @@ fn running_cell_long_preview_keeps_live_duration_visible() {
     // would clip the ticking duration first: while the cell runs, the
     // preview shortens itself to keep the live duration on screen (the
     // settled card keeps its established layout, clipping the same way
-    // it always has).
-    let code = format!("print('{}')", "x".repeat(90));
+    // it always has). The preview words stay under the noise-redaction
+    // run length so the descriptor caps at its full 64 units.
+    let code = format!("print('{}')", "lorem ipsum ".repeat(8));
     let mut card = cell_card(&code, json!({ "status": "ok" }), false, true);
     card.started_at = Some(
         std::time::Instant::now()
@@ -277,8 +278,14 @@ fn running_cell_long_preview_keeps_live_duration_visible() {
     );
     let lines = render(&card, 0, Detail::Overview, &theme(), 80, true);
     let text = text_of(&lines[0]);
-    assert!(text.contains("1.5s"), "got: {text}");
+    // Pre-fix this line is red: the row overflows to 95 columns and the
+    // right clip eats the duration slot entirely, so no `· 1.` survives.
+    assert!(text.contains("\u{00b7} 1."), "got: {text}");
     assert!(crate::width::str_width(&text) <= 80, "got: {text}");
+    assert!(
+        text.matches("lorem").count() < 8,
+        "the preview gave the duration its room: {text}"
+    );
 }
 
 #[test]
