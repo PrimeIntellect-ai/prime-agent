@@ -127,7 +127,7 @@ impl CommandRecoveryJournal {
     ///
     /// Returns an error when the parent directory cannot be created, or
     /// the torn-tail heal cannot rewrite it; a missing journal loads as
-    /// empty, and the record load never errors.
+    /// empty. Other record-read errors are returned before any rewrite.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -282,8 +282,13 @@ impl CommandRecoveryJournal {
     }
 
     fn load(&mut self) -> Result<()> {
-        let Ok(bytes) = fs::read(&self.path) else {
-            return Ok(());
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read journal {}", self.path.display()));
+            }
         };
         for line in String::from_utf8_lossy(&bytes).lines() {
             if line.is_empty() {
@@ -342,8 +347,12 @@ pub struct WorkerRecoveryRecord {
 
 fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRecord>> {
     let mut latest = HashMap::new();
-    let Ok(bytes) = fs::read(path) else {
-        return Ok(latest);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read journal {}", path.display()));
+        }
     };
     for line in String::from_utf8_lossy(&bytes).lines() {
         if line.is_empty() {
@@ -426,8 +435,8 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created, the
-    /// queue-snapshot pass cannot read an existing journal, or the
+    /// Returns an error when the parent directory cannot be created, either
+    /// record pass cannot read an existing journal, or the
     /// torn-tail heal cannot rewrite it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -452,8 +461,8 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Never errors: a missing or unreadable journal reads as an empty
-    /// set (the `Result` wrapper keeps the reading seam uniform).
+    /// Returns an error when an existing journal cannot be read; a missing
+    /// journal reads as an empty set.
     pub fn read_latest(path: &Path) -> Result<Vec<WorkerRecoveryRecord>> {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
@@ -786,6 +795,20 @@ mod tests {
         let reloaded2 = CommandRecoveryJournal::open(&path).unwrap();
         assert_eq!(reloaded2.lookup("client", "c2").unwrap().status, "pending");
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn journal_read_failures_are_not_empty_recovery_state() {
+        let path = temp_path("unreadable.jsonl");
+        fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("preserve");
+        fs::write(&sentinel, b"original data").unwrap();
+
+        assert!(CommandRecoveryJournal::open(&path).is_err());
+        assert!(parse_worker_records(&path).is_err());
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"original data");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]

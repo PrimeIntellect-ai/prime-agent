@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 
@@ -194,7 +194,7 @@ impl TerminalCompactionJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let latest = Self::load(path);
+        let latest = Self::load(path)?;
         if crate::journal::tail_is_torn(path) {
             let records = latest
                 .values()
@@ -209,9 +209,15 @@ impl TerminalCompactionJournal {
         })
     }
 
-    fn load(path: &Path) -> HashMap<String, TerminalCompactionRecord> {
-        let Ok(bytes) = std::fs::read(path) else {
-            return HashMap::new();
+    fn load(path: &Path) -> Result<HashMap<String, TerminalCompactionRecord>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HashMap::new());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read journal {}", path.display()));
+            }
         };
         let mut latest = HashMap::new();
         for line in String::from_utf8_lossy(&bytes).lines() {
@@ -223,7 +229,7 @@ impl TerminalCompactionJournal {
             };
             latest.insert(record.active_session_id.clone(), record);
         }
-        latest
+        Ok(latest)
     }
 
     /// Record the terminal declaration (durable before the synthetic end goes out, so a
@@ -819,6 +825,19 @@ mod tests {
             "the cleared record never reappears"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminal_journal_read_failure_stops_recovery() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("unreadable.jsonl");
+        std::fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("preserve");
+        std::fs::write(&sentinel, b"original data").unwrap();
+
+        assert!(TerminalCompactionJournal::open(&path).is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"original data");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
