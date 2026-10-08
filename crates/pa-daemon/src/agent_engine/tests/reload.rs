@@ -568,6 +568,19 @@ fn reload_reports_the_auth_store_failure() {
         .reload_live_inputs()
         .expect_err("the malformed store fails the reload");
     assert!(!error.is_empty(), "the reload surfaces the storage error");
+    // The failed reload never touched the target: the store gate ran
+    // before any rebind, so the session keeps its last-good request auth
+    // instead of falling to the provider's configured fallback key.
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the failed reload keeps the target set");
+    assert!(
+        target.api_key.as_deref() == Some("stale-access"),
+        "a failed reload preserves the last-good request auth"
+    );
     // A repaired store reloads cleanly again.
     write_oauth_credential(&agent_dir, "fresh-access");
     engine

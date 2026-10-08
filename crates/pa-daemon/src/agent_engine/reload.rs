@@ -35,10 +35,27 @@ impl AgentSessionEngine {
     /// model-turn attempt would reinstall the stale credentials. The MCP
     /// manager re-reads its settings and the shared auth store (the same
     /// reload the connections view applies on open). The auth store's
-    /// reload failure propagates: a malformed document or an
-    /// unacquirable lock leaves the MCP manager on its previous
-    /// credentials, and the reload must report that instead of success.
+    /// reload gates the whole session half and its failure propagates:
+    /// the request-auth resolutions read the same store a malformed
+    /// document or an unacquirable lock leaves unreadable, so they would
+    /// rebind the live target onto the configured fallback key over the
+    /// session's last-good stored credential — the gate keeps a failed
+    /// reload from touching the targets at all, and the MCP manager on
+    /// its previous credentials reports the failure instead of success.
     pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
+        // The auth store re-read runs FIRST, before any target rebind:
+        // it is the health gate for the store every resolution below
+        // reads. The settings re-read still applies on a failed reload —
+        // it reads settings, not credentials.
+        {
+            let mut manager = self
+                .mcp
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let auth_reload = manager.reload_auth_storage();
+            manager.refresh();
+            auth_reload?;
+        }
         // The armed route refreshes FIRST, the live slot SECOND: the
         // route lock fences the route's clone-and-install against this
         // refresh order (an attempt either installs the refreshed route
@@ -89,15 +106,6 @@ impl AgentSessionEngine {
                 }
             }
         }
-        let mut manager = self
-            .mcp
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The settings re-read runs even when the auth store failed: the
-        // settings half of the reload still applies, while the caller
-        // learns the auth half did not.
-        let auth_reload = manager.reload_auth_storage();
-        manager.refresh();
-        auth_reload
+        Ok(())
     }
 }
