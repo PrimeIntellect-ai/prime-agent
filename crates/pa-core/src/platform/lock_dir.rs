@@ -325,6 +325,68 @@ fn process_owner_record() -> String {
     format!("{} {token}\n", std::process::id())
 }
 
+/// The kernel-managed serialization guard for the stale-reclaim dance and
+/// the inode-anchored release pass: an flock on a tiny sidecar file, so
+/// a crashed or suspended holder releases it with the process - no
+/// staleness protocol of its own, no judge recursion.
+#[cfg(target_os = "linux")]
+fn reclaim_guard_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".rlock");
+    PathBuf::from(name)
+}
+
+/// Take the reclaim guard for `path` within `budget`, or `None`.
+#[cfg(target_os = "linux")]
+fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(reclaim_guard_path(path))
+        .ok()?;
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if result == 0 {
+            return Some(file);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Mark this guard's directory released through the pinned handle: the
+/// fd follows the inode through every exchange, so the marker lands in
+/// this guard's directory wherever a reclaim dance has moved it. A
+/// released marker outranks a live owner record - the guard itself has
+/// declared the release, and no judge may restore or refuse the
+/// directory afterwards.
+#[cfg(target_os = "linux")]
+fn mark_released_through(dir: &fs::File) {
+    use std::os::unix::io::AsRawFd;
+    let name = c"released";
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT,
+            0o600,
+        )
+    };
+    if fd >= 0 {
+        unsafe { libc::close(fd) };
+    }
+}
+
+/// True when a lock directory carries this guard's release marker.
+fn released_marker(path: &Path) -> bool {
+    path.join("released").exists()
+}
+
 /// The outcome of a Linux stale-incumbent reclaim attempt.
 #[cfg(target_os = "linux")]
 enum StaleClaim {
@@ -774,6 +836,24 @@ impl LockDir {
                         }
                         return Ok(StaleClaim::Removed);
                     }
+                    // A released guard's directory (its release marker
+                    // written through the pinned fd, wherever exchanges
+                    // carried the inode) is consumed, never restored: a
+                    // dropped guard's live-pid owner record must not
+                    // wedge the lock behind a lost release.
+                    if released_marker(&placeholder) {
+                        if let Err(error) = remove_candidate_dir(&placeholder) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
+                        if let Err(error) = remove_candidate_dir(path) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
+                        return Ok(StaleClaim::Vanished);
+                    }
                     // The exchanged directory is NOT the judged incumbent:
                     // a live successor. Swap it home atomically - both
                     // paths exist throughout, so the exchange cannot fail
@@ -1032,6 +1112,7 @@ impl LockDir {
                 if recorded
                     .as_deref()
                     .is_some_and(|owner| !Self::owner_dead(owner))
+                    && !released_marker(path)
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
@@ -1040,18 +1121,24 @@ impl LockDir {
                 }
                 #[cfg(target_os = "linux")]
                 {
-                    // Airtight reclaim where renameat2 exists: exchange
-                    // the stale incumbent with a blocking placeholder and
-                    // remove it from the private name only on a claimed-
-                    // inode == snapshot match; a live successor is swapped
-                    // home untouched and reported as contention. Only the
-                    // Unsupported outcome falls to the floor sequence
-                    // below - the enum makes a fall-through on any other
-                    // outcome unrepresentable.
+                    // Airtight reclaim where renameat2 exists: under the
+                    // reclaim guard (serializing this dance against every
+                    // holder release pass), exchange the stale incumbent
+                    // with a blocking placeholder and remove it from the
+                    // private name only on a claimed-inode == snapshot
+                    // match; a live successor is swapped home untouched
+                    // and reported as contention - unless its release
+                    // marker says its guard already dropped, in which case
+                    // it is consumed instead of restored (a released
+                    // guard's directory must never wedge behind its live
+                    // pid record). Only the Unsupported outcome falls to
+                    // the floor sequence below - the enum makes a
+                    // fall-through on any other outcome unrepresentable.
                     let incumbent = {
                         use std::os::unix::fs::MetadataExt;
                         Some((metadata.dev(), metadata.ino()))
                     };
+                    let guarded = try_reclaim_guard(path, Duration::from_millis(500));
                     match Self::claim_stale_incumbent(path, incumbent)? {
                         StaleClaim::Removed | StaleClaim::Vanished => return Ok(()),
                         StaleClaim::Successor => {
@@ -1062,6 +1149,7 @@ impl LockDir {
                         }
                         StaleClaim::Unsupported => {}
                     }
+                    drop(guarded);
                 }
                 // The floor reclaim (no no-replace rename): remove the
                 // owner file, then the directory, by pathname - the same
@@ -1123,21 +1211,40 @@ impl LockDir {
     /// release tolerates ENOENT); failures go to the trace log (`Drop`
     /// cannot propagate).
     pub fn release(&mut self) {
-        #[cfg(unix)]
-        let pinned = {
-            use std::os::unix::fs::MetadataExt;
-            self.dir
-                .as_ref()
-                .and_then(|dir| dir.metadata().ok())
-                .map(|metadata| (metadata.dev(), metadata.ino()))
-        };
-        #[cfg(unix)]
-        drop(self.dir.take());
         #[cfg(target_os = "linux")]
-        if let Some(pinned) = pinned {
-            self.release_by_inode(&pinned);
-            return;
+        {
+            let pinned = {
+                use std::os::unix::fs::MetadataExt;
+                self.dir
+                    .as_ref()
+                    .and_then(|dir| dir.metadata().ok())
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+            };
+            // Serialize with any concurrent reclaim dance. Without the
+            // guard within the budget (the dance's process is suspended),
+            // the release marker written through the pinned fd carries
+            // the release instead: the dance consumes a marked directory
+            // instead of restoring it, and no judge refuses a marked
+            // directory behind its live pid record.
+            if let Some(guard) = try_reclaim_guard(&self.path, Duration::from_millis(500)) {
+                #[cfg(unix)]
+                drop(self.dir.take());
+                if let Some(pinned) = pinned {
+                    self.release_by_inode(&pinned);
+                }
+                drop(guard);
+            } else {
+                if let Some(dir) = self.dir.as_ref() {
+                    mark_released_through(dir);
+                }
+                #[cfg(unix)]
+                drop(self.dir.take());
+            }
+            #[cfg(unix)]
+            drop(self.dir.take());
         }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        drop(self.dir.take());
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
                 return;
@@ -1154,14 +1261,14 @@ impl LockDir {
         }
     }
 
-    /// The idempotent inode-anchored release pass (Linux): claim each
-    /// candidate location with one atomic rename and remove it only when
-    /// the claimed inode matches the pinned handle - the reclaim dance's
-    /// exchanges cannot redirect the removal onto another holder's
-    /// directory, and the pass retries until the location binding is
-    /// stable. A claim of content that is not this guard's is restored
-    /// with a no-replace rename, never clobbering a newer occupant of
-    /// the vacated name.
+    /// The idempotent inode-anchored release pass (Linux), under the
+    /// reclaim guard: each candidate location - the public path and the
+    /// private location a dance's placeholder may have displaced this
+    /// guard to - is EXCHANGED with a blocking placeholder (never
+    /// vacated), the exchanged content is removed only when its inode
+    /// matches the pinned handle, and a mismatch is swapped back home
+    /// atomically, where occupancy cannot fail. The pass re-reads its
+    /// candidate locations every attempt until the removal completes.
     #[cfg(target_os = "linux")]
     fn release_by_inode(&self, pinned: &(u64, u64)) {
         let nanos = std::time::SystemTime::now()
@@ -1169,8 +1276,6 @@ impl LockDir {
             .map_or(0, |age| age.as_nanos());
         let pid = std::process::id();
         for attempt in 0..8 {
-            // The public path, and - when a reclaim placeholder sits
-            // there - the private location its `claimed-at` note names.
             let mut locations: Vec<PathBuf> = vec![self.path.clone()];
             if let Some(parent) = self.path.parent() {
                 if let Ok(note) = fs::read_to_string(self.path.join("claimed-at")) {
@@ -1184,26 +1289,60 @@ impl LockDir {
                 if identity_at(&location) != Some(*pinned) {
                     continue;
                 }
-                let claim = location.with_file_name(format!(".r{pid:x}{nanos:x}{attempt:x}"));
-                match fs::rename(&location, &claim) {
+                let placeholder = location.with_file_name(format!(".b{pid:x}{nanos:x}{attempt:x}"));
+                if let Err(error) = fs::create_dir(&placeholder) {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        continue;
+                    }
+                    return;
+                }
+                // The placeholder is token-protected and private-moded for
+                // the whole interval it may sit at the location.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if fs::set_permissions(&placeholder, fs::Permissions::from_mode(0o700)).is_err()
+                    {
+                        let _ = remove_candidate_dir(&placeholder);
+                        return;
+                    }
+                }
+                if fs::write(placeholder.join("owner"), process_owner_record()).is_err() {
+                    let _ = remove_candidate_dir(&placeholder);
+                    return;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(
+                        placeholder.join("owner"),
+                        fs::Permissions::from_mode(0o600),
+                    );
+                }
+                match rename_noreplace::exchange(&location, &placeholder) {
                     Ok(()) => {
-                        if identity_at(&claim) == Some(*pinned) {
-                            // This guard's directory, held where nothing
-                            // can replace it: remove it completely. A
-                            // crash before this point leaves the public
-                            // path already vacated (the claim), so no
-                            // wedge at the lock path is possible.
-                            let _ = remove_candidate_dir(&claim);
+                        if identity_at(&placeholder) == Some(*pinned) {
+                            // This guard's directory, held at the private
+                            // name where nothing can replace it: remove it
+                            // completely, then clear the placeholder from
+                            // the location so the lock path is empty.
+                            let _ = remove_candidate_dir(&placeholder);
+                            let _ = remove_candidate_dir(&location);
                             return;
                         }
-                        // An exchange swapped the content under this
-                        // claim: restore it without clobbering whatever
-                        // now holds the vacated name, and let the retry
-                        // pass find this guard's inode again.
-                        let _ = move_without_replacing(&claim, &location);
+                        // Not this guard's content: swap it home atomically
+                        // (both paths exist) and clear the placeholder at
+                        // its private name.
+                        let _ = rename_noreplace::exchange(&location, &placeholder);
+                        let _ = remove_candidate_dir(&placeholder);
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(_) => return,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let _ = remove_candidate_dir(&placeholder);
+                    }
+                    Err(_) => {
+                        let _ = remove_candidate_dir(&placeholder);
+                        return;
+                    }
                 }
             }
         }
