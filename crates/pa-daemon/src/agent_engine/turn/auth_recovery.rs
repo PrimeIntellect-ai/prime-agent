@@ -27,6 +27,16 @@ fn store_outgrew_the_served_key(served: Option<&str>, access: &str) -> bool {
     served.is_some_and(|served| served != access)
 }
 
+/// Whether the slot still holds the target a recovery captured: a moved
+/// slot (a live model switch resolved a new target) or a cleared one is
+/// superseded — the captured target's outcome never speaks for the
+/// current selection.
+fn slot_still_holds(slot: Option<&ProviderTarget>, captured: &ProviderTarget) -> bool {
+    slot.is_some_and(|current| {
+        current.model == captured.model && current.api_key == captured.api_key
+    })
+}
+
 impl AgentSessionEngine {
     /// One auth-class failure's recovery (the retry chains' seam): a
     /// stored OAuth credential for the failing provider force-refreshes
@@ -92,6 +102,19 @@ impl AgentSessionEngine {
             }
         })
         .await;
+        // The exchange ran while the slot could move: a captured target
+        // the slot no longer holds belongs to a superseded selection —
+        // its outcome, even a rejection, is dead information, and the
+        // current selection's retry proceeds with its own budget.
+        if !slot_still_holds(
+            self.provider_target
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+            &target,
+        ) {
+            return AuthRecoveryOutcome::Superseded;
+        }
         let Ok(outcome) = forced else {
             return AuthRecoveryOutcome::ReLoginRequired(re_login_sentence(
                 &provider,
@@ -121,9 +144,7 @@ impl AgentSessionEngine {
             .provider_target
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if slot.as_ref().is_some_and(|current| {
-            current.model == failed.model && current.api_key == failed.api_key
-        }) {
+        if slot_still_holds(slot.as_ref(), failed) {
             *slot = Some(ProviderTarget {
                 service_tier: *self
                     .service_tier
@@ -150,7 +171,9 @@ fn re_login_sentence(provider: &str, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::super::AgentEngineConfig;
-    use super::{store_outgrew_the_served_key, AgentSessionEngine, ProviderTarget};
+    use super::{
+        slot_still_holds, store_outgrew_the_served_key, AgentSessionEngine, ProviderTarget,
+    };
     use pa_core::session_engine::provider_auth::AuthRecoveryOutcome;
 
     /// One provider's OAuth grant in the store (the re-login shape: the
@@ -230,6 +253,30 @@ mod tests {
         assert!(
             !store_outgrew_the_served_key(None, "fresh-access"),
             "a keyless target is never evidence of a re-login"
+        );
+    }
+
+    /// Only the captured target itself still speaks for the slot: a moved
+    /// slot (a model switch) or a cleared one is superseded, and so is a
+    /// same-model slot whose key moved (a live re-login resolved it).
+    #[test]
+    fn only_the_captured_target_still_holds_the_slot() {
+        let captured = target("faux", "faux-1", Some("stale-access"));
+        assert!(
+            slot_still_holds(Some(&captured), &captured),
+            "the unmoved slot still holds the captured target"
+        );
+        assert!(
+            !slot_still_holds(Some(&target("drift", "drift-1", None)), &captured),
+            "a switched slot is superseded"
+        );
+        assert!(
+            !slot_still_holds(None, &captured),
+            "a cleared slot is superseded"
+        );
+        assert!(
+            !slot_still_holds(Some(&target("faux", "faux-1", None)), &captured),
+            "a same-model slot whose key moved is superseded"
         );
     }
 
