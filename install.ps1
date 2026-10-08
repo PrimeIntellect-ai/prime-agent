@@ -794,8 +794,8 @@ if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
     # THE WATCHDOG: the pre-warm runs as a WATCHED child - the payload
     # exe directly (watching the .cmd shim would mean cmd.exe and its
-    # quoting), bounded, and degraded to the honest note the offline arm
-    # below prints on expiry. Never fatal: the payload is published.
+    # quoting). Best-effort: never fatal, and only an observed stop is
+    # called a stop.
     $prewarmBoundSec = 300
     $prewarmExe = Join-Path $share 'prime-agent.exe'
     $prewarm = $null

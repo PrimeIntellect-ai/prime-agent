@@ -1184,13 +1184,10 @@ fn windows_e2e_harnesses_keep_the_kernel_prewarm_writes_in_scratch() {
     }
 }
 
-/// install.ps1's kernel pre-warm WATCHDOG: the pre-warm is best-effort
-/// by design (the no-uv arm already degrades to an honest note), so the
-/// launcher runs as a WATCHED child - bounded, tree-killed on expiry,
-/// degraded to the same honest note the offline path prints, and the
-/// kill's own result decides the wording (a tree that could not be
-/// stopped must not be reported as stopped). The install always
-/// continues past the pre-warm; nothing in the section may throw.
+/// install.ps1's kernel pre-warm WATCHDOG: a best-effort step (the no-uv
+/// arm already degrades to an honest note), so the launcher runs as a
+/// WATCHED child - bounded, tree-killed on expiry, degraded honestly
+/// (only an observed stop is called a stop), and never fatal.
 #[test]
 fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
     let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
@@ -1276,16 +1273,12 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
     }
 }
 
-/// install-rust.sh's kernel pre-warm WATCHDOG: the pre-warm gate block
-/// runs the launcher BOUNDED - the block is extracted from the shipped
-/// script and driven under `sh` with a fake hanging launcher that keeps
-/// a child alive. The watchdog must sweep the launcher's children, TERM
-/// the launcher, print the honest degradation (the same phrase the
-/// offline note uses), record the failed step, and CONTINUE the install
-/// (exit 0, the flow marker after the block). The bound is validated
-/// before the loop: a malformed override falls back to the default
-/// instead of disabling the watchdog. The harness runs under a kill
-/// guard: the red shape fails bounded instead of hanging.
+/// install-rust.sh's kernel pre-warm WATCHDOG: the gate block is
+/// extracted from the shipped script and driven under `sh` against a
+/// hanging launcher with a detached descendant. The watchdog must stop
+/// the whole tree (or report honestly when it cannot), degrade to the
+/// offline note's own phrase, validate the bound override, and CONTINUE
+/// the install.
 #[test]
 fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
     let script =
@@ -1340,7 +1333,7 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
         .expect("the verify section follows the pre-warm");
     let block = &script[start..end];
 
-    let drive = drive_sh_prewarm_block(block, "2");
+    let drive = drive_sh_prewarm_block(block, "2", None);
     let status = drive.status.unwrap_or_else(|| {
         panic!("the pre-warm block ran past its watchdog - a hung launcher held the whole install")
     });
@@ -1378,32 +1371,73 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
         .status()
         .is_ok_and(|status| status.success())
     {
-        for (pid, still_alive) in &drive.tree {
+        for (pid, still_alive, name) in &drive.tree {
             assert!(
                 !still_alive,
-                "the launcher tree was swept with it (pid {pid} survives)"
+                "the launcher tree was swept with it (the {name} pid {pid} survives)"
             );
         }
     }
+
+    // The no-walk arm reports honestly: with pgrep absent the tree's
+    // state is unknown, and the note must say the pre-warm could not be
+    // stopped - never claim an unobserved stop.
+    let no_walk_dir = tempfile::tempdir().expect("scratch dir for the hermetic path");
+    let no_walk_bin = no_walk_dir.path().join("bin");
+    std::fs::create_dir_all(&no_walk_bin).expect("hermetic bin dir");
+    for tool in ["mktemp", "cat", "sleep", "rm"] {
+        let source = Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {tool}"))
+            .output()
+            .expect("locate the tool");
+        let source = String::from_utf8_lossy(&source.stdout).trim().to_string();
+        assert!(
+            !source.is_empty(),
+            "the host has no {tool} for the hermetic path"
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, no_walk_bin.join(tool))
+            .unwrap_or_else(|error| panic!("symlink {tool}: {error}"));
+    }
+    let no_walk = drive_sh_prewarm_block(block, "2", Some(&no_walk_bin));
+    let status = no_walk
+        .status
+        .unwrap_or_else(|| panic!("the no-walk pre-warm block ran past its watchdog"));
+    assert!(
+        status.success(),
+        "the install continues past a bounded pre-warm without the walk: {status:?}"
+    );
+    assert!(
+        no_walk.flow.contains("could not be")
+            && no_walk.flow.contains("provisioning may still be running"),
+        "the no-walk expiry says the tree could not be stopped: {}",
+        no_walk.flow
+    );
+    assert!(
+        no_walk.flow.contains("flow-continued"),
+        "the install proceeds after the no-warm expiry: {}",
+        no_walk.flow
+    );
 }
 
-/// Drives the extracted pre-warm block under `sh` with a fake hanging
-/// launcher: stubs the ledger helpers, pins `prewarm_bound_s` to
-/// `bound`, appends a flow marker past the block, and runs the whole
-/// harness BOUNDED - a watchdog-less block hangs past the guard, which
-/// kills it and returns `None` so the caller fails instead of hanging
-/// the suite. Returns the harness exit status (None on the guard), the
-/// transcript the stubs wrote, and whether the launcher's TERM trap
-/// fired.
+/// Drives the pre-warm block under `sh` with a three-level hanging
+/// fixture, bounded by a kill guard (`None` on the guard). Liveness is
+/// measured before the cleanup kill; `hermetic_path` replaces PATH for
+/// the no-pgrep drive.
 #[derive(Default)]
 struct PrewarmDrive {
     status: Option<std::process::ExitStatus>,
     flow: String,
     terminated: bool,
-    tree: Vec<(u32, bool)>,
+    tree: Vec<(u32, bool, &'static str)>,
 }
 
-fn drive_sh_prewarm_block(block: &str, bound: &str) -> PrewarmDrive {
+fn drive_sh_prewarm_block(
+    block: &str,
+    bound: &str,
+    hermetic_path: Option<&std::path::Path>,
+) -> PrewarmDrive {
     let dir = tempfile::tempdir().expect("scratch dir");
     let transcript = dir.path().join("transcript");
     let sentinel = dir.path().join("terminated");
@@ -1412,25 +1446,15 @@ fn drive_sh_prewarm_block(block: &str, bound: &str) -> PrewarmDrive {
     let grandchild_pid_file = dir.path().join("grandchild.pid");
     let launcher = dir.path().join("launcher");
     let child = dir.path().join("prewarm-child");
-    // The grandchild detaches the way the product's own uv grandchild
-    // would (its own session when setsid exists), so only a parent-link
-    // walk can find it.
-    let setsid = if std::process::Command::new("sh")
-        .arg("-c")
-        .arg("command -v setsid >/dev/null 2>&1")
-        .status()
-        .is_ok_and(|status| status.success())
-    {
-        "setsid"
-    } else {
-        ""
-    };
     std::fs::write(
         &child,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid_file}\n{setsid} sleep 60 &\nprintf '%s\\n' \"$!\" > {grandchild}\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {pid_file}\n\
+             if command -v setsid >/dev/null 2>&1; then setsid sleep 60 &\n\
+             else sleep 60 &\nfi\n\
+             printf '%s\\n' \"$!\" > {grandchild}\n\
+             while :; do sleep 1; done\n",
             pid_file = child_pid_file.display(),
-            setsid = setsid,
             grandchild = grandchild_pid_file.display()
         ),
     )
@@ -1475,13 +1499,16 @@ fn drive_sh_prewarm_block(block: &str, bound: &str) -> PrewarmDrive {
     let harness_path = dir.path().join("harness.sh");
     std::fs::write(&harness_path, harness).expect("write the harness");
 
-    // The harness runs BOUNDED: a watchdog-less block (the red shape)
-    // hangs past this guard, which kills it and hands `None` back so
-    // the caller fails instead of hanging the suite.
-    let mut child = Command::new("sh")
-        .arg(&harness_path)
-        .spawn()
-        .expect("spawn the harness");
+    // The harness runs BOUNDED: the red shape hangs past this guard and
+    // hands `None` back so the caller fails instead of hanging.
+    // The absolute interpreter: the hermetic-path drive replaces PATH,
+    // and a bare "sh" would resolve against it.
+    let mut harness_command = Command::new("/bin/sh");
+    harness_command.arg(&harness_path);
+    if let Some(path) = hermetic_path {
+        harness_command.env("PATH", path);
+    }
+    let mut child = harness_command.spawn().expect("spawn the harness");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let status = loop {
         if let Ok(Some(done)) = child.try_wait() {
@@ -1508,17 +1535,25 @@ fn drive_sh_prewarm_block(block: &str, bound: &str) -> PrewarmDrive {
             .status()
             .is_ok_and(|status| status.success())
     };
-    let tree = [
-        read_pid(&launcher_pid),
-        read_pid(&child_pid_file),
-        read_pid(&grandchild_pid_file),
+    let fixture_pids = [
+        ("launcher", &launcher_pid),
+        ("child", &child_pid_file),
+        ("grandchild", &grandchild_pid_file),
     ]
     .into_iter()
-    .flatten()
-    .map(|pid| (pid, alive(pid)))
+    .map(|(name, path)| {
+        (
+            name,
+            read_pid(path).unwrap_or_else(|| panic!("the fixture published no {name} pid")),
+        )
+    })
     .collect::<Vec<_>>();
+    let tree = fixture_pids
+        .into_iter()
+        .map(|(name, pid)| (pid, alive(pid), name))
+        .collect::<Vec<_>>();
     // Best-effort cleanup: the red shape leaves the fixture looping.
-    for (pid, still_alive) in &tree {
+    for (pid, still_alive, _) in &tree {
         if *still_alive {
             let _ = Command::new("sh")
                 .arg("-c")

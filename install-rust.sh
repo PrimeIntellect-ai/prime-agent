@@ -3065,12 +3065,11 @@ if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
-  # THE WATCHDOG (the --version probe's own shape - never the `timeout`
-  # command: on Windows it is timeout.exe, which waits for a keypress, and
-  # macOS ships none). The pre-warm is best-effort - never fatal, the
-  # payload is already published; on expiry the launcher's whole
-  # descendant tree is stopped and the pre-warm degrades to the honest
-  # note the offline arm below prints.
+  # THE WATCHDOG: never the `timeout` command (on Windows it is
+  # timeout.exe, which waits for a keypress; macOS ships none) - the
+  # --version probe's own runner/marker/bound shape instead. The pre-warm
+  # is best-effort: never fatal, and on expiry the verdict only claims a
+  # stop that was observed.
   prewarm_bound_s="${prewarm_bound_s:-300}"
   case "$prewarm_bound_s" in
     ''|*[!0-9]*) prewarm_bound_s=300 ;;
@@ -3094,7 +3093,6 @@ if uv_on_path \
   prewarm_runner=$!
   prewarm_waited=0
   prewarm_timed_out=""
-  # pgrep feeds the descendant walk below.
   prewarm_pgrep="no"
   command -v pgrep >/dev/null 2>&1 && prewarm_pgrep="yes"
   while [ ! -f "$prewarm_done" ]; do
@@ -3143,19 +3141,26 @@ if uv_on_path \
   done
   wait "$prewarm_runner" 2>/dev/null || true
   if [ -n "$prewarm_timed_out" ]; then
-    # Only a proven-dead launcher counts as stopped: the kill above is a
-    # request, not a verdict.
-    prewarm_alive="no"
-    [ -n "$prewarm_pid" ] && kill -0 "$prewarm_pid" 2>/dev/null && prewarm_alive="yes"
-    if [ "$prewarm_alive" = "yes" ]; then
-      step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
-      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s; the launcher tree could"
-      note "  not be stopped and may still be running - the first session bootstraps the kernel itself"
-      note "  and needs the network once."
+    # Only an OBSERVED whole-tree stop counts: without the walk the
+    # tree's state is unknown, and a survivor anywhere means provisioning
+    # may still be running.
+    prewarm_tree_stopped="yes"
+    if [ "$prewarm_pgrep" = "yes" ] && [ -n "${prewarm_tree:-}" ]; then
+      for prewarm_node in $prewarm_tree; do
+        kill -0 "$prewarm_node" 2>/dev/null && prewarm_tree_stopped="no"
+      done
     else
+      prewarm_tree_stopped="no"
+    fi
+    if [ "$prewarm_tree_stopped" = "yes" ]; then
       step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
       note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and was stopped;"
       note "  the first session bootstraps the kernel itself and needs the network once."
+    else
+      step_fail "Preparing the Python kernel" "could not be stopped at the ${prewarm_bound_s}s bound"
+      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and could not be"
+      note "  stopped; provisioning may still be running - the first session bootstraps the"
+      note "  kernel itself and needs the network once."
     fi
   elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then
     step_ok "Kernel ready"
