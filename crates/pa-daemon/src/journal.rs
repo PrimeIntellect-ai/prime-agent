@@ -82,18 +82,28 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
     Ok(())
 }
 
-pub(crate) fn tail_is_torn(path: &Path) -> bool {
-    let Ok(mut file) = File::open(path) else {
-        return false;
+pub(crate) fn tail_is_torn(path: &Path) -> Result<bool> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open journal tail {}", path.display()));
+        }
     };
-    if !file.metadata().is_ok_and(|metadata| metadata.len() > 0) {
-        return false;
+    if file
+        .metadata()
+        .with_context(|| format!("stat journal tail {}", path.display()))?
+        .len()
+        == 0
+    {
+        return Ok(false);
     }
-    if file.seek(SeekFrom::End(-1)).is_err() {
-        return false;
-    }
+    file.seek(SeekFrom::End(-1))
+        .with_context(|| format!("seek journal tail {}", path.display()))?;
     let mut tail = [0u8];
-    file.read_exact(&mut tail).is_ok() && tail[0] != b'\n'
+    file.read_exact(&mut tail)
+        .with_context(|| format!("read journal tail {}", path.display()))?;
+    Ok(tail[0] != b'\n')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -211,7 +221,7 @@ impl WorkerRecoveryJournal {
             latest: parse_worker_records(path)?,
             queue_snapshots,
         };
-        if tail_is_torn(path) {
+        if tail_is_torn(path)? {
             // Recovery can still contain busy verdicts and queued prompts.
             // Sync the replacement before it takes over their durable history.
             journal.compact(Finalize::Synced)?;
@@ -546,6 +556,7 @@ mod tests {
         let sentinel = path.join("preserve");
         fs::write(&sentinel, b"original data").unwrap();
 
+        assert!(tail_is_torn(&path).is_err());
         assert!(parse_worker_records(&path).is_err());
         assert!(WorkerRecoveryJournal::open(&path).is_err());
         assert_eq!(fs::read(&sentinel).unwrap(), b"original data");

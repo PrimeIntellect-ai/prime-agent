@@ -195,7 +195,7 @@ impl TerminalCompactionJournal {
             std::fs::create_dir_all(parent)?;
         }
         let latest = Self::load(path)?;
-        if crate::journal::tail_is_torn(path) {
+        if crate::journal::tail_is_torn(path)? {
             let records = latest
                 .values()
                 .map(serde_json::to_value)
