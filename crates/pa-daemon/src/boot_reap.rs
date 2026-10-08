@@ -187,10 +187,10 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
-/// grace, SIGKILL, verify. The signals ride the kernel-held pidfd where
-/// the platform has one; on unix without a pidfd arm they ride kill(2)
-/// instead, gated by the identity check re-run immediately before each
-/// signal, so a recycled pid never receives one.
+/// grace, SIGKILL, verify. The signals ride the kernel-held pidfd, which
+/// pins the process, where the platform has one; on unix without one
+/// they ride kill(2), with the identity check re-run immediately before
+/// each signal, narrowing pid reuse to the check-to-kill gap.
 async fn stop_target_within(
     target: &ReapTarget,
     term_grace: Duration,
