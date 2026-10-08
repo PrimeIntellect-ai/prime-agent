@@ -199,13 +199,16 @@ impl Worker {
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
-        let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
+        let (settings, trace_consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(
+            &cwd,
+            &self.config.agent_dir,
+        );
         let traces = |path: &std::path::Path| {
             pa_core::agent_traces::ContinuousTraceUpload::install(
                 &cwd,
                 &self.config.agent_dir,
                 Some(path),
-                settings.get_agent_traces_enabled(),
+                trace_consent.clone(),
             )
         };
         let mut store = match (&session_path, no_session) {

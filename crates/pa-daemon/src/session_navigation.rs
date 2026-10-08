@@ -35,7 +35,15 @@ impl SessionNavigation {
     /// Swap the live session onto `file` (store, engine session file, rebuilt
     /// context). The caller retires the previous runtime and rebinds the cwd
     /// first, so the context park lands on the fresh session.
-    async fn replace_session(&self, file: SessionFile) -> Result<(), String> {
+    async fn replace_session(&self, mut file: SessionFile) -> Result<(), String> {
+        if file.trace_upload.is_none() {
+            let core = self.core.lock().unwrap();
+            file.trace_upload = core
+                .store
+                .as_ref()
+                .and_then(|old| old.trace_upload.as_ref())
+                .map(|traces| traces.rebind(std::path::Path::new(&core.cwd), &file.path));
+        }
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
         // Prime the new store's usage fold before it enters the core: the
@@ -121,6 +129,14 @@ impl SessionNavigation {
             fresh.lease = self
                 .target_lease(&fresh.path)
                 .map_err(|error| response_failure(None, "new_session", &error.to_string(), None))?;
+            fresh.trace_upload = self
+                .core
+                .lock()
+                .unwrap()
+                .store
+                .as_ref()
+                .and_then(|old| old.trace_upload.as_ref())
+                .map(|traces| traces.rebind(std::path::Path::new(&cwd), &fresh.path));
             if let Err(error) = fresh.rewrite() {
                 return Err(response_failure(
                     None,

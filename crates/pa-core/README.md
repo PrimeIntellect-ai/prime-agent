@@ -78,3 +78,17 @@ No provider HTTP (pa-ai), no loop policy (pa-agent), no daemon supervision (pa-d
 
 ## Depends on
 pa-types, pa-ai, pa-agent (one-way).
+
+
+Automatic trace delivery (`agent_traces::ContinuousTraceUpload`) owns consent-gated
+persist scheduling and startup outbox recovery alongside the existing manual uploader.
+Hosts reuse `load_settings` to capture consent before their existing settings parse,
+attach `persisted` after successful disk writes, and own the returned installation
+for the session lifetime. Replacements use `rebind` with the effective cwd; forks
+use `forked`. The installation never drains on drop. A detached process-wide runtime
+owns all transcript reads, scans, settings reloads, networking and retries; a maximum
+of 256 live controllers and four deliveries bounds resident work. The synchronous
+persist seam performs two settings-generation metadata checks and an exists/create
+pending-marker write; it does not fsync the marker (matching TS v0.9.8 process-crash
+recovery rather than promising power-loss durability). Its cost must be measured
+separately; startup/paint parity is not established by scheduler unit tests.

@@ -189,13 +189,14 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .map(|path| path.display().to_string())
             })
     };
-    let settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
+    let (settings, trace_consent) =
+        crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
     if session_manager.is_persisted() {
         let traces = crate::agent_traces::ContinuousTraceUpload::install(
             &cwd,
             &config.agent_dir,
             session_manager.get_session_file(),
-            settings.get_agent_traces_enabled(),
+            trace_consent,
         );
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }

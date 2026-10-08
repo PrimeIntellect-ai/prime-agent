@@ -623,3 +623,29 @@ fn the_outbox_entry_path_is_the_path_hash() {
         path
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn consent_revoked_during_backoff_prevents_the_next_request() {
+    let fixture = Fixture::new();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
+    let http = ScriptedTraceHttp::new(vec![Ok(response(500, "synthetic failure"))]);
+    let cwd = fixture.cwd.clone();
+    let agent_dir = fixture.agent_dir.clone();
+    let mut options = fixture.options(&http, None);
+    options.require_enabled = true;
+    options.on_upload_delay = Some(Arc::new(move |_| {
+        let mut settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
+        settings.set_agent_traces_enabled(false).unwrap();
+    }));
+    let result = super::upload::fetch_with_retry(
+        &options,
+        "http://synthetic.invalid",
+        vec![],
+        String::new(),
+        None,
+    )
+    .await;
+    assert_eq!(result, Err(TraceHttpError::Cancelled));
+    assert_eq!(http.requests.lock().unwrap().len(), 1);
+}

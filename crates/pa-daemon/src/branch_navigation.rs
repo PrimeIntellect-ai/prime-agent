@@ -390,6 +390,10 @@ impl TreeNavigation {
                     let file = session_dir
                         .join(crate::session_store::session_file_name(forked.session_id()));
                     forked.set_path(file);
+                    forked.trace_upload = store
+                        .trace_upload
+                        .as_ref()
+                        .map(|traces| traces.rebind(std::path::Path::new(&cwd), &forked.path));
                     if let Some(lease) = &store.lease {
                         forked.lease =
                             Some(lease.acquire_target(&forked.path).map_err(|error| {

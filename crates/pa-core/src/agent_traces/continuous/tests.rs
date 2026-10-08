@@ -169,3 +169,160 @@ fn measure_synchronous_pending_marker_cost() {
         json!({"samples":1000,"cold_marker_ns":{"p50":cold[500],"p95":cold[950],"p99":cold[990]},"warm_marker_ns":{"p50":warm[500],"p95":warm[950],"p99":warm[990]},"fsync":false,"consent_metadata_checks_included":true})
     );
 }
+
+fn enable_synthetic_fixture(fixture: &Fixture) {
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
+    std::fs::write(
+        fixture.agent_dir.join("auth.json"),
+        r#"{"prime-agent-traces":{"type":"api_key","key":"synthetic-only"}}"#,
+    )
+    .unwrap();
+}
+
+struct ObservedSink {
+    requests: tokio::sync::mpsc::UnboundedSender<(
+        String,
+        tokio::sync::oneshot::Sender<TraceHttpResponse>,
+    )>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+impl TraceHttp for ObservedSink {
+    fn put<'a>(
+        &'a self,
+        _url: &'a str,
+        _headers: Vec<(String, String)>,
+        body: String,
+        _timeout_ms: u64,
+        cancel: Option<&'a TraceUploadCancel>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<TraceHttpResponse, TraceHttpError>> + Send + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let (reply, result) = tokio::sync::oneshot::channel();
+            self.requests.send((body, reply)).unwrap();
+            tokio::select! {
+                answer = result => Ok(answer.unwrap()),
+                () = async { if let Some(cancel) = cancel { cancel.wait().await; } else { std::future::pending::<()>().await; } } => {
+                    self.cancelled.notify_one();
+                    Err(TraceHttpError::Cancelled)
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn dropping_an_active_controller_cancels_a_hanging_sink() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("hanging.jsonl", "hanging");
+    let c = controller(&fixture, &path, true);
+    c.persisted(&path);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: cancelled.clone(),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (_body, _reply) = observed.recv().await.unwrap();
+    drop(c);
+    cancelled.notified().await;
+    task.await.unwrap();
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        None
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn writes_during_upload_have_a_followup_and_do_not_advance_the_old_cursor() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("coalesce.jsonl", "coalesce");
+    let initial_signature = TraceUploadSignature::of(&path).unwrap();
+    let c = controller(&fixture, &path, true);
+    c.persisted(&path);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (first_body, first_reply) = observed.recv().await.unwrap();
+    let first_start = Instant::now();
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"custom","id":"synthetic-appended"})
+        )
+        .unwrap();
+    }
+    c.persisted(&path);
+    first_reply.send(response(200, "{}")).unwrap();
+    let (second_body, _second_reply) = observed.recv().await.unwrap();
+    assert!(Instant::now() - first_start >= MIN_INTERVAL);
+    assert!(!first_body.contains("synthetic-appended"));
+    assert!(second_body.contains("synthetic-appended"));
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        Some(initial_signature)
+    );
+    drop(c);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_recovery_uploads_pending_and_prunes_missing_but_preserves_unknown_kinds() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("recovery.jsonl", "recovery");
+    let missing = fixture.session_dir.join("missing.jsonl");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    mark_pending(&fixture.agent_dir, &missing).unwrap();
+    let unknown = agent_trace_outbox_dir(&fixture.agent_dir).join("unknown.json");
+    std::fs::write(
+        &unknown,
+        json!({"sessionFile":path,"kind":"semantic-edges"}).to_string(),
+    )
+    .unwrap();
+    let malformed = agent_trace_outbox_dir(&fixture.agent_dir).join("malformed.json");
+    std::fs::write(&malformed, "{").unwrap();
+    let c = controller(&fixture, &fixture.session_dir.join("live.jsonl"), true);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    recover(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    )
+    .await;
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+    assert!(!agent_trace_outbox_entry_path(&fixture.agent_dir, &missing).exists());
+    assert!(!malformed.exists());
+    assert!(unknown.exists());
+}

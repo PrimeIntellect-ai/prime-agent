@@ -59,7 +59,7 @@ impl Schedule {
 // A changed settings generation fails closed at persist time, including changes
 // made by a different client process. Parsing/reloading happens only in the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ConsentGeneration(Vec<Option<(u64, SystemTime)>>);
+struct ConsentGeneration(Vec<Result<Option<(u64, SystemTime)>, std::io::ErrorKind>>);
 
 impl ConsentGeneration {
     fn read(cwd: &Path, agent_dir: &Path) -> Self {
@@ -70,14 +70,25 @@ impl ConsentGeneration {
                     .join("settings.json"),
             ]
             .iter()
-            .map(|path| {
-                std::fs::metadata(path)
-                    .ok()
-                    .and_then(|m| Some((m.len(), m.modified().ok()?)))
+            .map(|path| match std::fs::metadata(path) {
+                Ok(m) => m
+                    .modified()
+                    .map(|mtime| Some((m.len(), mtime)))
+                    .map_err(|e| e.kind()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.kind()),
             })
             .collect(),
         )
     }
+}
+
+/// Consent captured around the host's settings load. The generation must be
+/// captured before parsing so a concurrent settings change fails closed.
+#[derive(Clone)]
+pub struct TraceConsentSnapshot {
+    enabled: bool,
+    generation: ConsentGeneration,
 }
 
 /// Session-owned installation. Dropping the last host reference cancels delivery;
@@ -107,19 +118,58 @@ impl Drop for ContinuousTraceUpload {
 }
 
 impl ContinuousTraceUpload {
-    /// Install without scanning the outbox or waiting for networking. `enabled`
-    /// is the host's already-loaded settings value, not a new disk read.
+    /// Reuse this settings load for the host's other settings. Only two bounded
+    /// metadata reads are added; parsing is the existing host configuration load.
+    #[must_use]
+    pub fn load_settings(
+        cwd: &Path,
+        agent_dir: &Path,
+    ) -> (crate::settings::SettingsManager, TraceConsentSnapshot) {
+        let generation = ConsentGeneration::read(cwd, agent_dir);
+        let settings = crate::settings::SettingsManager::create(cwd, agent_dir);
+        let consent = TraceConsentSnapshot {
+            enabled: settings.errors().is_empty() && settings.get_agent_traces_enabled(),
+            generation,
+        };
+        (settings, consent)
+    }
+
+    /// Bind a replacement session without parsing settings or awaiting delivery.
+    /// A cwd change starts with consent off until the background reader verifies it.
+    #[must_use]
+    pub fn rebind(&self, cwd: &Path, path: &Path) -> Arc<Self> {
+        let consent = self.consent.lock().unwrap();
+        let snapshot = TraceConsentSnapshot {
+            enabled: cwd == self.cwd && consent.0,
+            generation: if cwd == self.cwd {
+                consent.1.clone()
+            } else {
+                ConsentGeneration::read(cwd, &self.agent_dir)
+            },
+        };
+        drop(consent);
+        Self::install(cwd, &self.agent_dir, Some(path), snapshot)
+    }
+
+    /// Fork within this installation's effective working directory.
+    #[must_use]
+    pub fn forked(&self, path: &Path) -> Arc<Self> {
+        self.rebind(&self.cwd, path)
+    }
+
+    /// Install without scanning the outbox or waiting for networking. Consent
+    /// is captured around the host's existing settings load.
     #[must_use]
     pub fn install(
         cwd: &Path,
         agent_dir: &Path,
         session_file: Option<&Path>,
-        enabled: bool,
+        consent: TraceConsentSnapshot,
     ) -> Arc<Self> {
         let controller = Arc::new(Self {
             cwd: cwd.to_path_buf(),
             agent_dir: agent_dir.to_path_buf(),
-            consent: Mutex::new((enabled, ConsentGeneration::read(cwd, agent_dir))),
+            consent: Mutex::new((consent.enabled, consent.generation)),
             pending: Mutex::new(session_file.map(|p| (p.to_path_buf(), Schedule::default()))),
             wake: Arc::new(tokio::sync::Notify::new()),
             cancel: TraceUploadCancel::new(),
@@ -139,13 +189,17 @@ impl ContinuousTraceUpload {
     }
 
     /// Called only after a successful transcript write. This performs no
-    /// transcript read, settings parse, directory scan, serialization or network.
+    /// transcript read, settings parse, directory scan or network. Only the small
+    /// pending record is serialized synchronously.
     pub fn persisted(&self, session_file: &Path) {
         if session_file.as_os_str().is_empty() {
             return;
         }
         let consent = self.consent.lock().unwrap();
-        if !consent.0 || consent.1 != ConsentGeneration::read(&self.cwd, &self.agent_dir) {
+        if !consent.0
+            || consent.1 .0.iter().any(Result::is_err)
+            || consent.1 != ConsentGeneration::read(&self.cwd, &self.agent_dir)
+        {
             return;
         }
         drop(consent);
@@ -303,19 +357,23 @@ async fn run_controller(
             }
         }
     }
+    let mut initialized = false;
     loop {
         let Some(controller) = weak.upgrade() else {
             return;
         };
         let generation = ConsentGeneration::read(&controller.cwd, &controller.agent_dir);
-        let settings =
-            crate::settings::SettingsManager::create(&controller.cwd, &controller.agent_dir);
-        let unchanged =
-            generation == ConsentGeneration::read(&controller.cwd, &controller.agent_dir);
-        *controller.consent.lock().unwrap() = (
-            unchanged && settings.errors().is_empty() && settings.get_agent_traces_enabled(),
-            generation,
-        );
+        if controller.consent.lock().unwrap().1 != generation || !initialized {
+            let settings =
+                crate::settings::SettingsManager::create(&controller.cwd, &controller.agent_dir);
+            let unchanged =
+                generation == ConsentGeneration::read(&controller.cwd, &controller.agent_dir);
+            *controller.consent.lock().unwrap() = (
+                unchanged && settings.errors().is_empty() && settings.get_agent_traces_enabled(),
+                generation,
+            );
+            initialized = true;
+        }
         let due = controller
             .pending
             .lock()
@@ -351,12 +409,13 @@ async fn run_controller(
             tokio::select! { () = tokio::time::sleep(DEBOUNCE) => {}, () = cancel.wait() => return }
             continue;
         };
+        let leased_path = path;
         let (path, generation) = {
             let mut pending = controller.pending.lock().unwrap();
             let Some((path, schedule)) = pending.as_mut() else {
                 continue;
             };
-            if schedule.due.is_none_or(|due| due > Instant::now()) {
+            if path != &leased_path || schedule.due.is_none_or(|due| due > Instant::now()) {
                 continue;
             }
             (path.clone(), schedule.start(Instant::now()))
@@ -400,7 +459,7 @@ async fn recover(
     };
     let cwd = controller.cwd.clone();
     let agent_dir = controller.agent_dir.clone();
-    let cancel = controller.cancel.clone();
+    let cancel = TraceUploadCancel::new();
     drop(controller);
     // Workers share an agent directory: only one startup sweep may deliver it
     // at a time. OS locks release on crashes without stale-directory retries.
@@ -423,12 +482,22 @@ async fn recover(
             continue;
         }
         // Outbox records contain only a path/cursor; bound corrupt record reads.
-        if entry.metadata().await.is_ok_and(|m| m.len() > 16 * 1024) {
+        if entry.metadata().await.is_ok_and(|m| m.len() > 64 * 1024) {
             continue;
         }
-        let Ok(raw) = tokio::fs::read_to_string(entry.path()).await else {
+        let read_entry = async {
+            use tokio::io::AsyncReadExt;
+            let file = tokio::fs::File::open(entry.path()).await?;
+            let mut raw = String::new();
+            file.take(64 * 1024 + 1).read_to_string(&mut raw).await?;
+            Ok::<_, std::io::Error>(raw)
+        };
+        let Ok(raw) = read_entry.await else {
             continue;
         };
+        if raw.len() > 64 * 1024 {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(&raw) else {
             let _ = tokio::fs::remove_file(entry.path()).await;
             continue;
@@ -476,9 +545,13 @@ async fn recover(
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
             continue;
         };
+        let Some(header) = read_trace_session_header(&path) else {
+            continue;
+        };
+        let session_cwd = PathBuf::from(&header.cwd);
         let options = TraceUploadOptions {
             session_file: Some(&path),
-            cwd: &cwd,
+            cwd: &session_cwd,
             agent_dir: &agent_dir,
             require_enabled: true,
             reload_config: true,

@@ -26,7 +26,7 @@ pub use upload_all::{
 };
 
 mod continuous;
-pub use continuous::ContinuousTraceUpload;
+pub use continuous::{ContinuousTraceUpload, TraceConsentSnapshot};
 
 mod upload;
 use upload::perform_agent_trace_upload;
@@ -293,7 +293,8 @@ fn read_trace_session_header(path: &Path) -> Option<pa_types::session::SessionHe
     use std::io::BufRead;
     let file = std::fs::File::open(path).ok()?;
     let mut first_line = String::new();
-    std::io::BufReader::new(file)
+    // Corrupt headers must not allocate an entire unbounded transcript line.
+    std::io::Read::take(std::io::BufReader::new(file), 256 * 1024)
         .read_line(&mut first_line)
         .ok()?;
     if first_line.trim().is_empty() {

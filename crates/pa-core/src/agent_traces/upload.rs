@@ -37,7 +37,7 @@ impl TraceUploadOptions<'_> {
         if self.reload_config {
             let _ = settings.reload();
         }
-        settings.get_agent_traces_enabled()
+        settings.errors().is_empty() && settings.get_agent_traces_enabled()
     }
 }
 
@@ -210,7 +210,7 @@ pub(super) async fn perform_agent_trace_upload(
 
 /// The gate runs before every attempt, the retriable statuses/network
 /// errors back off with jitter, and 503 honors `Retry-After`.
-async fn fetch_with_retry(
+pub(super) async fn fetch_with_retry(
     options: &TraceUploadOptions<'_>,
     url: &str,
     headers: Vec<(String, String)>,
