@@ -14,7 +14,7 @@ use crate::refinement::executor::{
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, save_harness_state, HarnessScope, RefinementResult,
+    load_harness_state, merge_harness_states, update_harness_state, HarnessScope, RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -374,7 +374,6 @@ pub async fn execute_refinement_with_rows(
         HarnessScope::Global => global_harness_dir.to_path_buf(),
         HarnessScope::Local => local_harness_dir.clone(),
     };
-    let mut state = load_harness_state(&target_dir, target_scope);
     // The factory opt-in resolves HERE — immediately before the apply,
     // after the planning request — so a setting that changed during the
     // request (`/factory off` mid-plan) decides, not a snapshot captured
@@ -393,16 +392,20 @@ pub async fn execute_refinement_with_rows(
         }
         None => false,
     };
-    let mut result = apply_refinement_plan(
-        &mut state,
-        plan,
-        &core_options,
-        Some(baseline_state),
-        factory_enabled,
-    );
-    result.harness_state_path = save_harness_state(&target_dir, &state)?
-        .to_string_lossy()
-        .to_string();
+    let (mut result, state_path) = tokio::task::spawn_blocking(move || {
+        update_harness_state(&target_dir, target_scope, |state| {
+            apply_refinement_plan(
+                state,
+                plan,
+                &core_options,
+                Some(baseline_state),
+                factory_enabled,
+            )
+        })
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("refinement harness update task failed: {error}"))??;
+    result.harness_state_path = state_path.to_string_lossy().to_string();
     if target_scope == HarnessScope::Global {
         append_global_refinement(global_harness_dir, &result)?;
     }

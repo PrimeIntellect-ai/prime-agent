@@ -75,7 +75,9 @@ impl AgentSessionEngine {
             .iter()
             .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active);
         if matches_job {
-            let _ = wiring.store.cancel(job_id, crate::util::now_ms());
+            if let Err(error) = wiring.store.cancel(job_id, crate::util::now_ms()) {
+                eprintln!("failed to cancel quota resume job: {error}");
+            }
         }
     }
 
