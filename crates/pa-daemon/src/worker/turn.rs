@@ -1097,6 +1097,14 @@ impl TurnRunner {
                 operation: "turn_end",
             },
         );
+        let session_path = {
+            let core = self.core.lock().unwrap();
+            core.store.as_ref().map(|store| store.path.clone())
+        };
+        if let Some(path) = session_path {
+            let _ =
+                tokio::task::spawn_blocking(move || std::fs::File::open(&path)?.sync_all()).await;
+        }
         let _ = self.emit_action_update(&snapshot);
         self.idle_notify.notify_waiters();
         for admission_id in settled_admissions {

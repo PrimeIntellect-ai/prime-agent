@@ -331,6 +331,10 @@ fn model_parse(buf: &[u8], more: bool) -> ModelParse {
                         ))),
                     }
                 }
+                b'~' if payload == b"27;2;13~" => ModelParse::Event(Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::SHIFT,
+                ))),
                 b'~' if payload == b"200~" || payload == b"201~" => ModelParse::Invalid,
                 _ => ModelParse::Invalid,
             }
@@ -883,6 +887,35 @@ fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
             KeyModifiers::SHIFT
         ))]
     );
+}
+
+#[test]
+fn modify_other_keys_shift_enter_survives_every_read_boundary() {
+    let input = b"a\x1b[27;2;13~b";
+    for split in 0..=input.len() {
+        let events = leaks(&run_guard(read_projection(input, &[split])));
+        assert_eq!(
+            events,
+            vec![
+                char_press('a'),
+                Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                char_press('b'),
+            ],
+            "split at {split}"
+        );
+        let mut editor = crate::editor::Editor::new();
+        for event in events {
+            let Event::Key(key) = event else {
+                unreachable!("key events asserted above");
+            };
+            editor.handle_input(&crate::keys::key_event_to_id(&key).expect("key id"));
+        }
+        assert_eq!(editor.get_lines(), vec!["a", "b"], "split at {split}");
+        assert!(editor
+            .take_events()
+            .iter()
+            .all(|event| !matches!(event, crate::editor::EditorEvent::Submitted(_))));
+    }
 }
 
 /// The composed seam: a split kitty shift+enter reassembles, decodes to the `shift+enter` key id,

@@ -513,6 +513,11 @@ impl SessionEngine for AgentSessionEngine {
             .expect("effective thinking lock") = None;
     }
 
+    fn model_identity(&self) -> (Option<String>, Option<String>) {
+        let selection = self.current_selection();
+        (selection.provider, selection.model)
+    }
+
     fn model_metadata(&self) -> Option<Value> {
         let model = self.resolve_model().ok()?;
         Some(json!({

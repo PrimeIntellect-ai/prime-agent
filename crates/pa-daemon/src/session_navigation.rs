@@ -21,6 +21,7 @@ pub(crate) struct PreparedReplacement {
 
 /// The navigation surface: the prepare and swap phases of the replacement
 /// flow the three commands share.
+#[derive(Clone)]
 pub(crate) struct SessionNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -272,6 +273,9 @@ impl SessionNavigation {
                 .target_lease(std::path::Path::new(path))
                 .map_err(|error| response_failure(None, command, &error.to_string(), None))?,
         };
+        if lease.is_some() {
+            pa_core::session::manager::repair_jsonl_damage(std::path::Path::new(path));
+        }
         let mut file = SessionFile::open(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;
         file.lease = lease;
@@ -347,7 +351,9 @@ impl Worker {
             Ok(()) => {
                 self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
-                self.bind_scheduled_jobs().await;
+                if let Err(error) = self.bind_scheduled_jobs().await {
+                    return response_failure(None, command, &error.to_string(), None);
+                }
                 self.prewarm_replacement_session();
                 // The replacement never pushed a roster delta, so the subscribed
                 // surfaces kept the PREVIOUS session's numbers.
@@ -407,7 +413,26 @@ impl Worker {
         if let Err(response) = self.require_created("switch_session") {
             return response;
         }
-        let prepared = self.navigation.prepare_switch_session(payload);
+        let navigation = self.navigation.clone();
+        let payload = payload.clone();
+        // The closure boxes its error (clippy::result_large_err): the
+        // DaemonResponse unwraps in the match arms, not inside any closure.
+        let prepared = match tokio::task::spawn_blocking(move || {
+            navigation
+                .prepare_switch_session(&payload)
+                .map_err(Box::new)
+        })
+        .await
+        {
+            Ok(Ok(prepared)) => Ok(prepared),
+            Ok(Err(boxed)) => Err(*boxed),
+            Err(error) => Err(response_failure(
+                None,
+                "switch_session",
+                &error.to_string(),
+                None,
+            )),
+        };
         self.run_session_replacement("switch_session", prepared)
             .await
     }
@@ -417,7 +442,22 @@ impl Worker {
         if let Err(response) = self.require_created("import_jsonl") {
             return response;
         }
-        let prepared = self.navigation.prepare_import_jsonl(payload);
+        let navigation = self.navigation.clone();
+        let payload = payload.clone();
+        let prepared = match tokio::task::spawn_blocking(move || {
+            navigation.prepare_import_jsonl(&payload).map_err(Box::new)
+        })
+        .await
+        {
+            Ok(Ok(prepared)) => Ok(prepared),
+            Ok(Err(boxed)) => Err(*boxed),
+            Err(error) => Err(response_failure(
+                None,
+                "import_jsonl",
+                &error.to_string(),
+                None,
+            )),
+        };
         self.run_session_replacement("import_jsonl", prepared).await
     }
 }

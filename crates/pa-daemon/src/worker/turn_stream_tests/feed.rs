@@ -121,7 +121,6 @@ fn live_feed_runner(engine: Arc<dyn SessionEngine>, socket: std::path::PathBuf) 
             worker_token: "token".to_string(),
             worker_instance_id: "instance".to_string(),
             roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            roster_push_order: Arc::new(std::sync::Mutex::new(())),
         });
     crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
     TurnRunner {

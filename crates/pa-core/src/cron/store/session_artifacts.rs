@@ -42,26 +42,37 @@ impl AgentCronJobStore {
         files.clone().into_iter().collect()
     }
 
-    pub fn recover_session_artifact(&self, session_id: &str, now: u64) -> Vec<AgentCronJob> {
+    /// # Errors
+    ///
+    /// Returns an error when the state lock or write fails.
+    pub fn recover_session_artifact(
+        &self,
+        session_id: &str,
+        now: u64,
+    ) -> anyhow::Result<Vec<AgentCronJob>> {
         let Some(path) = self
             .session_artifacts()
             .into_iter()
             .find(|(id, _)| id == session_id)
             .map(|(_, path)| path)
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        with_state_locks(std::slice::from_ref(&path), || {
-            let mut state = read_jobs_state(&path);
-            let mut recovered = Vec::new();
-            if !state.dispatches.is_empty() {
-                recover_interrupted_in_state(&mut state, now, &mut recovered, None);
-                write_jobs_state(&path, &state);
-            }
-            recovered
-        })
+        with_state_locks(
+            std::slice::from_ref(&path),
+            || -> anyhow::Result<Vec<AgentCronJob>> {
+                let mut state = read_jobs_state(&path);
+                let mut recovered = Vec::new();
+                if !state.dispatches.is_empty() {
+                    recover_interrupted_in_state(&mut state, now, &mut recovered, None);
+                    write_jobs_state(&path, &state)?;
+                }
+                Ok(recovered)
+            },
+        )
+        .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))?
     }
-    pub(crate) fn write_jobs_session_artifacts(&self, jobs: &[AgentCronJob]) {
+    pub(crate) fn write_jobs_session_artifacts(&self, jobs: &[AgentCronJob]) -> anyhow::Result<()> {
         let artifact_files = self
             .session_artifact_files
             .lock()
@@ -71,12 +82,14 @@ impl AgentCronJobStore {
             artifact_files.keys().cloned().collect();
         for job in jobs {
             if !registered.contains(&job.session_id) {
-                // Mirror the TS error contract.
-                return;
+                anyhow::bail!(
+                    "cron job session artifact not registered: {}",
+                    job.session_id
+                );
             }
         }
         let paths: Vec<PathBuf> = artifact_files.values().cloned().collect();
-        with_state_locks(&paths, || {
+        let with_locks = with_state_locks(&paths, || -> anyhow::Result<()> {
             let current_by_session_id: HashMap<String, CronJobsState> = artifact_files
                 .iter()
                 .map(|(session_id, path)| (session_id.clone(), read_jobs_state(path)))
@@ -136,18 +149,20 @@ impl AgentCronJobStore {
                 if serde_json::to_string(&current).unwrap_or_default()
                     != serde_json::to_string(&next_state).unwrap_or_default()
                 {
-                    write_jobs_state(path, &next_state);
+                    write_jobs_state(path, &next_state)?;
                 }
             }
+            Ok(())
         });
+        with_locks.ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))?
     }
 }
 
-/// Read one scheduled-jobs artifact file's job rows: a locked, read-only scan A missing or
+/// Read one scheduled-jobs artifact file's job rows. A missing or
 /// unparseable file reads as no jobs.
 #[must_use]
 pub fn read_scheduled_jobs_artifact(path: &Path) -> Vec<AgentCronJob> {
-    with_state_locks(&[path.to_path_buf()], || read_jobs_state(path).jobs)
+    read_jobs_state(path).jobs
 }
 
 #[cfg(test)]
@@ -178,21 +193,25 @@ mod tests {
         assert_eq!(state_a.jobs[0].prompt, "job a");
         let state_b = read_jobs_state(&artifacts_b.join(SESSION_SCHEDULED_JOBS_FILENAME));
         assert_eq!(state_b.jobs.len(), 1);
-        let rebound = store.rebind_session_jobs(&SessionBinding {
-            active_session_id: "live-2".to_string(),
-            session_id: "session-1".to_string(),
-            session_file: "/w/session.jsonl".to_string(),
-            cwd: "/w".to_string(),
-        });
+        let rebound = store
+            .rebind_session_jobs(&SessionBinding {
+                active_session_id: "live-2".to_string(),
+                session_id: "session-1".to_string(),
+                session_file: "/w/session.jsonl".to_string(),
+                cwd: "/w".to_string(),
+            })
+            .unwrap();
         assert_eq!(rebound.len(), 2);
         assert!(rebound.iter().all(|job| job.active_session_id == "live-2"));
-        let cancelled = store.cancel_jobs_for_session(
-            &CancelJobsFilter {
-                session_file: Some("/w/session.jsonl".to_string()),
-                ..Default::default()
-            },
-            now + 1,
-        );
+        let cancelled = store
+            .cancel_jobs_for_session(
+                &CancelJobsFilter {
+                    session_file: Some("/w/session.jsonl".to_string()),
+                    ..Default::default()
+                },
+                now + 1,
+            )
+            .unwrap();
         // Both jobs share the session file (the rebind moved both), so both cancel.
         assert_eq!(cancelled.len(), 2);
     }
