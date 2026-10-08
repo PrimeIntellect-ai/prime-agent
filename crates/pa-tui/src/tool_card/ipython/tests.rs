@@ -257,7 +257,19 @@ fn running_cell_summary_ticks_live_elapsed() {
     );
     let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
     let text = text_of(&lines[0]);
-    assert!(text.contains("↑ 1 lines · 1."), "got: {text}");
+    assert!(text.contains("↑ 1 lines"), "got: {text}");
+    // The duration slot ticks right after the line counts: the summary's
+    // last segment is a live `<seconds>s` value, without pinning the
+    // leading second (a descheduled render must not flake the shape).
+    let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
+    assert!(
+        duration_part.ends_with('s')
+            && duration_part
+                .trim_end_matches('s')
+                .parse::<f64>()
+                .is_ok(),
+        "the live duration ticks in its own slot: {text}"
+    );
     assert!(!text.contains("Took "), "got: {text}");
 }
 
@@ -279,8 +291,17 @@ fn running_cell_long_preview_keeps_live_duration_visible() {
     let lines = render(&card, 0, Detail::Overview, &theme(), 80, true);
     let text = text_of(&lines[0]);
     // Pre-fix this line is red: the row overflows to 95 columns and the
-    // right clip eats the duration slot entirely, so no `· 1.` survives.
-    assert!(text.contains("\u{00b7} 1."), "got: {text}");
+    // right clip eats the duration slot entirely, so the summary's last
+    // segment is a fragment of the line counts, never a duration.
+    let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
+    assert!(
+        duration_part.ends_with('s')
+            && duration_part
+                .trim_end_matches('s')
+                .parse::<f64>()
+                .is_ok(),
+        "the live duration stays on screen as its own segment: {text}"
+    );
     assert!(crate::width::str_width(&text) <= 80, "got: {text}");
     assert!(
         text.matches("lorem").count() < 8,
