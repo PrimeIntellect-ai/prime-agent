@@ -409,30 +409,34 @@ async fn drive(
         predecessor.as_ref(),
         &spawned,
     )
-    .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned))?;
+    .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    // From here on the spawned child is live AND adopted: any later
+    // after-stop failure carries its identity, so the rollback stops the
+    // daemon this coordinator spawned - an adopted successor holds the
+    // socket exactly like a rejected one.
     writer
         .lock()
         .await
         .set_successor(successor)
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     // `Restoring`: the successor's restore pass reports real counts
     // (the `update_restore_status` poll; spec §9).
     writer
         .lock()
         .await
         .set_state(UpdateState::Restoring)
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     let (counts, failures) = restore_report(&options.socket_path, budget).await;
     writer
         .lock()
         .await
         .set_counts(counts)
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     writer
         .lock()
         .await
         .set_failures(failures)
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     // The coordinator deletes the prepared dir after `Restoring` (spec §7;
     // idempotent with the supervisor's self-expiry and the boot sweep).
     if let Some(prepared_dir) = roster_path.as_ref().map(|roster_path| {
@@ -442,12 +446,13 @@ async fn drive(
     }) {
         let _ = std::fs::remove_dir_all(prepared_dir);
     }
-    swap::clear_activation_state(&candidate.root).map_err(PhaseFailure::after_stop)?;
+    swap::clear_activation_state(&candidate.root)
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     writer
         .lock()
         .await
         .set_state(UpdateState::Complete)
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     let message = if counts.failed > 0 {
         format!(
             "Restarted the daemon with {} session restore failure{}",
@@ -461,7 +466,7 @@ async fn drive(
         .lock()
         .await
         .set_message(Some(message))
-        .map_err(PhaseFailure::after_stop)?;
+        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
     Ok(())
 }
 
@@ -563,9 +568,10 @@ async fn finish_failure(
         .await;
         return Ok(());
     }
-    // The rejected successor, still running from the failed spawn, is
-    // stopped HERE by an identity-verified DIRECT SIGKILL of the pid this
-    // coordinator spawned - never an RPC to the socket, and never a
+    // The successor this coordinator spawned - rejected or adopted - still
+    // running from the failed spawn and is stopped HERE by an
+    // identity-verified DIRECT SIGKILL of the pid this coordinator
+    // spawned - never an RPC to the socket, and never a
     // SIGTERM: both the graceful Shutdown and the TERM signal drain
     // persist worker stop tombstones (a durable stop that kills the
     // sessions), while the direct kill is the crash path the protocol
