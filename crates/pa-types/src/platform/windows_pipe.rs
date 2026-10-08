@@ -145,7 +145,8 @@ impl BlockingPipeClient {
             Some(timeout) => match self
                 .state
                 .runtime
-                .block_on(tokio::time::timeout(timeout, read))
+                // Construct the timer only after entering this client's runtime.
+                .block_on(async { tokio::time::timeout(timeout, read).await })
             {
                 Ok(result) => result,
                 // Cancelled reads leave the buffer untouched; callers treat
