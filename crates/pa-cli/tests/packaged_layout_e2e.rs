@@ -327,6 +327,130 @@ fn packaged_binary_reports_manifest_version() {
     );
 }
 
+/// One version identity across the packaged build: the daemon hello's
+/// `appVersion`/`buildId`, the same binary's `--version`, and the
+/// `doctor` "current" classification must all resolve the staged manifest's
+/// channel stamp (the version `.prime-agent-install` records for this
+/// payload) — not the compiled-in workspace version.
+#[test]
+#[cfg(unix)]
+fn packaged_daemon_hello_and_doctor_agree_with_the_manifest() {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    let _guard = serial_lock();
+    let dir = tempfile::TempDir::new().expect("stage dir");
+    let staged = dir.path();
+    stage_packaged_layout(staged, false);
+    std::fs::write(
+        staged.join("package.json"),
+        r#"{"name":"prime-agent","version":"9.8.7-test"}"#,
+    )
+    .expect("version manifest");
+    let box_ = sandbox();
+    let socket = box_.agent_dir.join("socks").join("daemon.sock");
+
+    // The packaged supervisor, exactly as production runs it. The launcher
+    // strips the worker role env before spawning a supervisor; this test
+    // process may itself run inside a daemon worker, so the same vars are
+    // scrubbed here.
+    let mut daemon_command = box_.command(staged);
+    daemon_command
+        .args(["--mode", "daemon", "--daemon-socket"])
+        .arg(&socket)
+        .env("TMPDIR", box_.home.path())
+        .env("PI_OFFLINE", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for var in [
+        pa_daemon::worker::WORKER_ROLE_ENV,
+        pa_daemon::worker::WORKER_TOKEN_ENV,
+        pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV,
+        pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV,
+        pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV,
+        pa_daemon::worker::WORKER_SOCKET_ENV,
+        pa_daemon::worker::WORKER_INSTANCE_ID_ENV,
+        pa_daemon::worker::WORKER_SCRIPT_ENV,
+    ] {
+        daemon_command.env_remove(var);
+    }
+    let mut daemon = daemon_command.spawn().expect("spawn staged daemon");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !socket.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "staged supervisor socket never appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // The hello carries the manifest's stamp, the same string --version
+    // prints for this staged build.
+    let stream = UnixStream::connect(&socket).expect("connect staged daemon");
+    let mut hello = String::new();
+    BufReader::new(stream)
+        .read_line(&mut hello)
+        .expect("read daemon hello");
+    let hello: serde_json::Value = serde_json::from_str(&hello).expect("parse daemon hello");
+    assert_eq!(hello["type"], "daemon_hello");
+    assert_eq!(
+        hello["appVersion"], "9.8.7-test",
+        "the hello must report the staged manifest version, not the compiled-in workspace version"
+    );
+    assert_eq!(
+        hello["runtime"]["buildId"], "pa-daemon-rs-9.8.7-test",
+        "the build id keeps the installer's pa-daemon-rs- prefix over the manifest version"
+    );
+    let version_output = box_
+        .command(staged)
+        .arg("--version")
+        .output()
+        .expect("run staged binary --version");
+    assert_eq!(
+        String::from_utf8_lossy(&version_output.stdout).trim(),
+        hello["appVersion"].as_str().expect("appVersion string"),
+        "the daemon hello and --version must print one identity"
+    );
+
+    // The doctor classification stays correct against the stamp: the daemon
+    // reports the same resolved version this CLI resolves, so the row reads
+    // current (the pre-fix daemon answered the workspace version and the
+    // row read stale for this very build).
+    let doctor = box_
+        .command(staged)
+        .arg("doctor")
+        .arg("--json")
+        .env("TMPDIR", box_.home.path())
+        .output()
+        .expect("run staged doctor");
+    assert_eq!(doctor.status.code(), Some(0));
+    let rows: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor json");
+    let row = rows
+        .as_array()
+        .expect("doctor json array")
+        .iter()
+        .find(|row| row["socketPath"] == socket.to_string_lossy().as_ref())
+        .unwrap_or_else(|| panic!("doctor must list the staged daemon: {rows}"));
+    assert_eq!(row["version"], "9.8.7-test");
+    assert_eq!(row["buildId"], "pa-daemon-rs-9.8.7-test");
+    assert_eq!(
+        row["status"], "current",
+        "a daemon answering the CLI's own resolved version classifies current"
+    );
+
+    // Teardown: the supervised connection closes politely so the drop kill
+    // never fights a draining worker.
+    let mut goodbye = UnixStream::connect(&socket).expect("connect for teardown");
+    let _ = writeln!(
+        goodbye,
+        r#"{{"type":"command","id":"e2e","protocol":{{"name":"prime-agent.daemon","version":7}},"command":{{"type":"shutdown","force":true}}}}"#
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+}
+
 /// A missing sidecar (broken install) surfaces the actionable failure, not a raw uv/pip error.
 #[test]
 fn missing_sidecar_reports_actionable_bootstrap_error() {

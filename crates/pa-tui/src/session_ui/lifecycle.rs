@@ -295,7 +295,9 @@ impl SessionUi {
                     .map(str::to_string);
                 let (text, status_kind) = crate::daemon_reconnect::reconnect_banner(
                     daemon_version.as_deref(),
-                    env!("CARGO_PKG_VERSION"),
+                    // The same canonical identity the daemon hello reports,
+                    // so a same-build restart is never misread as newer.
+                    pa_types::version::app_version(),
                 );
                 view.push_entry(crate::chat::ChatEntry::Status {
                     text,
