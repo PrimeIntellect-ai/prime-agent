@@ -384,7 +384,9 @@ mod tests {
         // The quiet window between `tool_execution_start` and the first
         // streamed frame: the card has a start and no result at all, and
         // the live timer is the only timing it shows. The value follows
-        // the execution start (the 80ms repaints recompute it).
+        // the execution start (the 80ms repaints recompute it) — the
+        // headless timer e2e asserts that tracking across frames, so
+        // this test pins only the row's presence.
         let card = ToolCallCard {
             id: "t".into(),
             name: "bash".into(),
@@ -400,25 +402,6 @@ mod tests {
             "got: {flat:?}"
         );
         assert!(!flat.iter().any(|r| r.contains("Took ")), "got: {flat:?}");
-        // The value follows the execution start without pinning the
-        // leading second: the 4-second-old call paints a strictly larger
-        // live duration than the 300ms-old one, whatever the scheduler
-        // did in between.
-        let elapsed_of = |rows: &[String]| {
-            rows.iter()
-                .find(|r| r.contains("Elapsed "))
-                .and_then(|r| r.split_once("Elapsed "))
-                .and_then(|(_, rest)| rest.trim().trim_end_matches('s').parse::<f64>().ok())
-                .expect("the live duration parses")
-        };
-        let fresh = elapsed_of(&flat);
-        let older = ToolCallCard {
-            started_at: Some(started_ms_ago(4000)),
-            ..card
-        };
-        let rows = render(&older, 4, Detail::Overview, &theme(), 120, true);
-        let flat: Vec<String> = rows.iter().map(text_of).collect();
-        assert!(elapsed_of(&flat) > fresh, "got: {flat:?}");
     }
 
     #[test]
