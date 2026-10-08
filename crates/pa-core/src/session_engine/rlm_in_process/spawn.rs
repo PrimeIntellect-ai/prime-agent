@@ -180,6 +180,7 @@ async fn admission(
             session_manager: Some(session_manager),
             rlm_depth: Some(depth + 1),
             rlm_subagent_host: Some(child_host.clone()),
+            queued_delivery: crate::session_engine::QueuedDelivery::SessionPump,
             extra_host_handlers: Some(super::family::family_host_handlers(
                 &child_host,
                 super::family::FamilySelf::Child {

@@ -170,6 +170,7 @@ async fn digest_session_with_harness(
         ))),
         vec![],
         Some(harness),
+        QueuedDelivery::EmbeddingOwned,
     )
     .await
     .unwrap()

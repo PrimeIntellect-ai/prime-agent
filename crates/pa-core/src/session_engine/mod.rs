@@ -118,6 +118,23 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
 }
 
 /// The session-bound agent: admission rules + persistence over the loop.
+/// Who delivers queued steering/follow-up rows once a run ends: the
+/// daemon's RPC layer owns delivery for its worker sessions (its pump
+/// respects `pump_suspended` — an abort parks the rows there), while an
+/// in-process host's sessions own their own idle-queue pump (a
+/// post-abort close cascade's notice claims must deliver without a
+/// daemon). Spawning the session pump in the daemon path would race the
+/// RPC pump and strand parked rows across an abort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueuedDelivery {
+    /// The embedding (the daemon's RPC pump) delivers; the session
+    /// spawns no idle-queue pump.
+    #[default]
+    EmbeddingOwned,
+    /// The session's own idle-queue pump delivers.
+    SessionPump,
+}
+
 pub struct AgentSession {
     agent: Arc<Agent>,
     session: Arc<tokio::sync::Mutex<SessionManager>>,
@@ -213,6 +230,7 @@ impl AgentSession {
             Arc::new(tokio::sync::Mutex::new(session)),
             prompt_templates,
             None,
+            QueuedDelivery::EmbeddingOwned,
         )
         .await
     }
@@ -230,6 +248,7 @@ impl AgentSession {
         session: Arc<tokio::sync::Mutex<SessionManager>>,
         prompt_templates: Vec<PromptTemplate>,
         harness_digest: Option<harness_digest::HarnessDigestContext>,
+        queued_delivery: QueuedDelivery,
     ) -> anyhow::Result<Self> {
         let persistence = session.clone();
         let notice_delivery = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
@@ -264,7 +283,9 @@ impl AgentSession {
             })
             .await;
         let (terminal_pump_shutdown, shutdown) = tokio::sync::watch::channel(false);
-        terminal_inbox::start_pump(Arc::clone(&agent), shutdown);
+        if matches!(queued_delivery, QueuedDelivery::SessionPump) {
+            terminal_inbox::start_pump(Arc::clone(&agent), shutdown);
+        }
         let this = Self {
             agent,
             session,

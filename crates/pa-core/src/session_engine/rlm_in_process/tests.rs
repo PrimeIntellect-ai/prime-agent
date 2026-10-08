@@ -23,6 +23,7 @@ use crate::session_engine::rlm_host::{
     RlmChildResult, RlmCreateSessionRequest, RlmSpawnRequest, RlmSubagentHost,
 };
 use crate::session_engine::rlm_in_process::StreamFnFactory;
+use crate::session_engine::QueuedDelivery;
 
 /// A per-model scripted stream catalog: the parent and every child run on
 /// their own scripted provider keyed by model id.
@@ -158,6 +159,7 @@ impl TestRig {
                 rlm_depth: Some(depth),
                 rlm_subagent_host: Some(Arc::clone(&host) as Arc<dyn RlmSubagentHost>),
                 extra_host_handlers: Some(host.family_host_handlers()),
+                queued_delivery: QueuedDelivery::SessionPump,
                 ..Default::default()
             })
             .await
@@ -1903,6 +1905,7 @@ impl RigFacts {
                 rlm_depth: Some(0),
                 rlm_subagent_host: Some(Arc::clone(&host) as Arc<dyn RlmSubagentHost>),
                 extra_host_handlers: Some(host.family_host_handlers()),
+                queued_delivery: QueuedDelivery::SessionPump,
                 ..Default::default()
             })
             .await

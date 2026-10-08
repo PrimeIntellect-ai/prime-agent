@@ -125,6 +125,7 @@ async fn direction_rig(
             include_shell_examples: false,
             include_refine: false,
         }),
+        QueuedDelivery::EmbeddingOwned,
     )
     .await
     .unwrap()

@@ -38,6 +38,10 @@ pub struct SessionEngineConfig {
     pub session_manager: Option<SessionManager>,
     /// Merged over the built-in goal/heartbeat registrations.
     pub extra_host_handlers: Option<crate::kernel::shared::HostRequestHandlers>,
+    /// Who delivers queued rows once a run ends: the daemon's RPC layer
+    /// owns delivery for worker sessions; an in-process host's sessions
+    /// own their idle-queue pump (see [`QueuedDelivery`]).
+    pub queued_delivery: QueuedDelivery,
     /// Conversation-log path for the system prompt when the caller owns
     /// persistence outside the session manager.
     pub conversation_log_path: Option<PathBuf>,
@@ -629,6 +633,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         wiring.session.clone(),
         resources.prompts.clone(),
         Some(digest_context),
+        config.queued_delivery,
     )
     .await?;
     session.set_auto_refine(auto_refine_allowed, auto_refine_gates);
