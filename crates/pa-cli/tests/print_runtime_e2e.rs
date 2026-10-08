@@ -183,6 +183,27 @@ fn print_mode_goal_cap_reports_the_reason_and_exits_one() {
     assert_eq!(stdout, "follow-up answer\n");
 }
 
+/// The session files holding a runtime lease right now (the owner records
+/// under the agent dir's `session-leases`).
+fn leased_session_files(home: &std::path::Path) -> Vec<String> {
+    let mut leased = Vec::new();
+    let Ok(entries) = std::fs::read_dir(home.join(".prime/agent/session-leases")) else {
+        return leased;
+    };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path().join("owner.json")) else {
+            continue;
+        };
+        let Ok(owner) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        if let Some(path) = owner.get("sessionPath").and_then(serde_json::Value::as_str) {
+            leased.push(path.to_string());
+        }
+    }
+    leased
+}
+
 #[test]
 fn print_mode_persists_a_session_file_by_default() {
     let home = isolated_home();
@@ -283,6 +304,23 @@ fn print_mode_continue_recent_reuses_the_latest_session() {
         session_files(home.path()).len(),
         1,
         "continue reuses the saved session"
+    );
+}
+
+/// A finished print run releases the session file's runtime lease: the run
+/// exits and no owner record survives under `session-leases`.
+#[test]
+fn print_mode_releases_the_session_lease_when_the_run_ends() {
+    let home = isolated_home();
+    let script = serde_json::json!({ "responses": ["leased answer"] });
+    let (stdout, stderr, code) = run_in_home(home.path(), &["-p", "hi"], &script);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "leased answer\n");
+    let files = session_files(home.path());
+    assert_eq!(files.len(), 1, "one session file, got {files:?}");
+    assert!(
+        leased_session_files(home.path()).is_empty(),
+        "the ended run left a lease owner behind"
     );
 }
 
