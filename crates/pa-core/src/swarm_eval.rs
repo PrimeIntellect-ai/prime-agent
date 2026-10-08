@@ -117,6 +117,14 @@ pub struct MessagingStatsSnapshot {
     pub ingestion_steps: StepCounts,
     pub context: ContextShape,
     pub sends: SendCounts,
+    /// True when the transcript the snapshot was derived from is a
+    /// compaction-truncated view: `get_messages` serves only the rows kept
+    /// from the latest compaction's `firstKeptEntryId`, so the counters
+    /// cover just the retained window instead of the session's lifetime
+    /// totals. The turn/cost shares over such counters fold to unknown —
+    /// the trial scores inconclusive, never a silent pass. The #2352
+    /// producer counts live lifetime totals and never sets this.
+    pub compacted: bool,
 }
 
 /// Accepted inbound agent messages (delivered or queued).
@@ -183,17 +191,19 @@ fn score_line(value: Option<f64>, limit: f64) -> MessagingDefenseLine {
     }
 }
 
-/// Agent-triggered model steps over all model steps (unknown with no steps).
+/// Agent-triggered model steps over all model steps (unknown with no steps,
+/// or when a compaction-truncated transcript left only part of them).
 #[must_use]
 pub fn turn_share(snapshot: &MessagingStatsSnapshot) -> Option<f64> {
-    (snapshot.model_steps.total > 0)
+    (!snapshot.compacted && snapshot.model_steps.total > 0)
         .then(|| snapshot.ingestion_steps.total as f64 / snapshot.model_steps.total as f64)
 }
 
-/// Ingestion-step usage tokens over all step usage tokens (unknown with none).
+/// Ingestion-step usage tokens over all step usage tokens (unknown with none,
+/// or when a compaction-truncated transcript left only part of them).
 #[must_use]
 pub fn cost_share(snapshot: &MessagingStatsSnapshot) -> Option<f64> {
-    (snapshot.model_steps.tokens > 0)
+    (!snapshot.compacted && snapshot.model_steps.tokens > 0)
         .then(|| snapshot.ingestion_steps.tokens as f64 / snapshot.model_steps.tokens as f64)
 }
 

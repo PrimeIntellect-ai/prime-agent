@@ -25,6 +25,11 @@
 //! counters with no transcript evidence; they mirror the run totals
 //! (`last5m = total`) and stay zero (`sends`) respectively, and are unused by
 //! the defense lines.
+//!
+//! After a compaction the served transcript is a truncated view, so the step
+//! counters cover only the retained window; the snapshot marks that
+//! (`compacted: true`) and the turn/cost shares fold to unknown instead of
+//! passing off a partial session as the full one.
 
 use serde_json::Value;
 
@@ -55,8 +60,17 @@ pub fn snapshot_from_transcript(
     // follows the last delivered primary and a non-agent primary is not an
     // ingestion run.
     let mut trigger_is_agent = false;
+    // `get_messages` serves the session's compacted view once it has
+    // compacted: a `compactionSummary` row heads the rows kept from the
+    // compaction's `firstKeptEntryId` and every earlier row is gone. The
+    // counters below then cover only the retained window, not the lifetime
+    // totals the #2352 producer counts, so the snapshot carries the
+    // truncation and the turn/cost shares over them fold to unknown
+    // (inconclusive) instead of scoring a partial session as a full one.
+    let mut compacted = false;
     for message in messages {
         match message.get("role").and_then(Value::as_str) {
+            Some("compactionSummary") => compacted = true,
             Some("custom") if is_agent_message(message) => {
                 arrivals += 1;
                 estimated_agent_message_tokens += estimate_tokens(message);
@@ -101,6 +115,7 @@ pub fn snapshot_from_transcript(
             share,
         },
         sends: SendCounts::default(),
+        compacted,
     }
 }
 

@@ -28,6 +28,7 @@ fn snapshot() -> MessagingStatsSnapshot {
             attempts: 3,
             failures: 0,
         },
+        compacted: false,
     }
 }
 
@@ -103,6 +104,7 @@ fn unknown_lines_never_override_a_failure() {
         },
         context: ContextShape::default(),
         sends: SendCounts::default(),
+        compacted: false,
     };
     let defense =
         evaluate_messaging_defense_lines(&only_cost, MessagingDefenseLineLimits::default());
@@ -758,4 +760,58 @@ fn a_non_agent_custom_row_resets_the_ingestion_trigger() {
     // Only the step of the second agent-triggered turn counts as ingestion.
     assert_eq!(snapshot.ingestion_steps.total, 1);
     assert_eq!(snapshot.ingestion_steps.tokens, 70);
+}
+
+#[test]
+fn a_compacted_transcript_cannot_verify_the_turn_or_cost_lines() {
+    // After a mid-trial compaction `get_messages` serves the truncated view:
+    // the `compactionSummary` row heads the rows kept from the compaction's
+    // `firstKeptEntryId` and every earlier row is gone. The counters the loop
+    // derives then cover only the retained window, not the session's
+    // lifetime totals, so a session that crossed a defense line before the
+    // compaction would score as passing. The truncation must fold the
+    // turn/cost shares to unknown — the trial is inconclusive, never a
+    // silent pass.
+    let messages = vec![
+        json!({
+            "role": "compactionSummary",
+            "summary": "the crew replied",
+            "tokensBefore": 90_000,
+            "retainedMessageCount": 6,
+        }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 1000 }, "stopReason": "stop" }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 1000 }, "stopReason": "stop" }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 1000 }, "stopReason": "stop" }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 1000 }, "stopReason": "stop" }),
+        json!({ "role": "custom", "customType": "agent_message", "content": "REPORT 411" }),
+        json!({ "role": "assistant", "usage": { "totalTokens": 10 }, "stopReason": "stop" }),
+    ];
+    let snapshot = snapshot_from_transcript(&messages, Some(1_000));
+    assert!(snapshot.compacted);
+    // The retained-window counters stay visible as diagnostics.
+    assert_eq!(snapshot.arrivals.total, 1);
+    assert_eq!(snapshot.model_steps.total, 5);
+    assert_eq!(snapshot.ingestion_steps.total, 1);
+    // The context share is the #2352 current-state estimate (the retained
+    // agent-message rows over the working context), so it stays measured;
+    // the lifetime step ratios cannot be verified from a suffix.
+    assert_eq!(snapshot.context.share, Some(3.0 / 1_000.0));
+    let defense =
+        evaluate_messaging_defense_lines(&snapshot, MessagingDefenseLineLimits::default());
+    assert_eq!(defense.context_share.passed, Some(true));
+    assert_eq!(defense.turn_share.passed, None);
+    assert_eq!(defense.cost_share.passed, None);
+    assert_eq!(defense.verdict, DefenseVerdict::Inconclusive);
+
+    // Without the compaction row the same rows are the full session and
+    // every line is measured and passing: the compacted view must be the
+    // only difference, so removing the truncation rule fails this pin.
+    let full = messages[1..].to_vec();
+    let snapshot = snapshot_from_transcript(&full, Some(1_000));
+    assert!(!snapshot.compacted);
+    let defense =
+        evaluate_messaging_defense_lines(&snapshot, MessagingDefenseLineLimits::default());
+    assert_eq!(defense.turn_share.passed, Some(true));
+    assert_eq!(defense.cost_share.passed, Some(true));
+    assert_eq!(defense.verdict, DefenseVerdict::Pass);
 }
