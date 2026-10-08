@@ -78,14 +78,24 @@ fn chat_open_first_frame_pins_the_first_paint() {
     // The one complete frame: transcript, title row, and dock row all land;
     // each wait is an observable-readiness barrier, not a wall-clock window.
     harness.wait_from_start("settled answer", "the transcript painted");
-    harness.wait_from_start("layout probe", "the pinned title row painted");
+    harness.wait_from_start("probe", "the pinned title row painted");
     harness.wait_from_start("\u{25f7} 1 heartbeat", "the dock panel painted");
+    harness.wait_from_start("\x1b[>7u", "the kitty keyboard flags enabled");
 
     // Let the surface settle so the audit covers every repaint the open can produce, then read the
     // whole byte stream.
     harness.drain_until_quiet(10);
     let collected = harness.output();
+    harness.finish();
     let stream: &[u8] = &collected;
+
+    // Ghostty stores keyboard flags per screen. Enable them after the completed first
+    // paint, so setup cannot arm the primary screen or flush an empty alternate screen.
+    let entered = find_subsequence(stream, b"\x1b[?1049h").expect("alternate screen entered");
+    let painted = find_subsequence(stream, b"\x1b[?2026l").expect("first paint completed");
+    let enabled = find_subsequence(stream, b"\x1b[>7u").expect("kitty flags enabled");
+    assert!(entered < painted && painted < enabled);
+    assert_eq!(count_occurrences(stream, b"\x1b[>7u"), 1);
 
     // The brand splash never paints (no flash, no one-row shift under the title).
     assert!(
@@ -109,8 +119,6 @@ fn chat_open_first_frame_pins_the_first_paint() {
         find_subsequence(stream, "\u{25f7} 1 heartbeat".as_bytes()).is_some(),
         "the dock's heartbeat panel row painted"
     );
-
-    harness.finish();
 }
 
 /// Whether this runner is attached to a controlling-terminal session (the
@@ -277,7 +285,13 @@ fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
         .arg("--exact")
         .arg("chat_open_first_frame_child_mode")
         .env(CHILD_SOCKET_ENV, socket)
+        .env("TERM", "xterm-ghostty")
+        .env("TERM_PROGRAM", "ghostty")
         .env_remove("TMUX")
+        .env_remove("STY")
+        .env_remove("ZELLIJ")
+        .env_remove("SSH_CONNECTION")
+        .env_remove("SSH_TTY")
         .stdin(slave_as_stdio(slave))
         .stdout(slave_as_stdio(slave))
         .stderr(slave_as_stdio(slave));
