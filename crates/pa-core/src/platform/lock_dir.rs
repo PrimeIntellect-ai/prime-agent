@@ -51,7 +51,7 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
 /// directory. A missing candidate is a non-error (a racing reclaimer).
 #[cfg(unix)]
 fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
-    for note in ["owner", "claimed-at"] {
+    for note in ["owner", "claimed-at", "released"] {
         match fs::remove_file(candidate.join(note)) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -331,9 +331,21 @@ fn process_owner_record() -> String {
 /// staleness protocol of its own, no judge recursion.
 #[cfg(target_os = "linux")]
 fn reclaim_guard_path(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".rlock");
-    PathBuf::from(name)
+    // A component-independent short name: the sidecar must not overflow
+    // the filesystem's component limit for a near-limit lock name, so
+    // the guard is derived from a stable FNV-1a hash of the full path -
+    // every process derives the same sidecar for the same lock, and a
+    // hash collision between two different locks in one directory only
+    // over-serializes (both contend on one guard), never corrupts.
+    let bytes = path.as_os_str().to_string_lossy().into_owned();
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".r{hash:016x}"))
 }
 
 /// Take the reclaim guard for `path` within `budget`, or `None`.
@@ -1139,6 +1151,18 @@ impl LockDir {
                         Some((metadata.dev(), metadata.ino()))
                     };
                     let guarded = try_reclaim_guard(path, Duration::from_millis(500));
+                    if guarded.is_none() {
+                        // Another reclaim dance (or release pass) holds the
+                        // serialization guard - likely suspended mid-flight
+                        // with a token-protected placeholder at the public
+                        // path. The exchange dance must not run unguarded;
+                        // report contention and let the caller retry once
+                        // the holder completes.
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ));
+                    }
                     match Self::claim_stale_incumbent(path, incumbent)? {
                         StaleClaim::Removed | StaleClaim::Vanished => return Ok(()),
                         StaleClaim::Successor => {
@@ -1240,10 +1264,18 @@ impl LockDir {
                 #[cfg(unix)]
                 drop(self.dir.take());
             }
-            #[cfg(unix)]
-            drop(self.dir.take());
         }
-        #[cfg(all(unix, not(target_os = "linux")))]
+        #[cfg(not(target_os = "linux"))]
+        self.release_floors();
+    }
+
+    /// The non-Linux release floors: an owned lock is removed only when
+    /// the owner file still records this guard, and a missing directory
+    /// means someone else already reclaimed it (the TS release tolerates
+    /// ENOENT); failures go to the trace log (`Drop` cannot propagate).
+    #[cfg(not(target_os = "linux"))]
+    fn release_floors(&mut self) {
+        #[cfg(unix)]
         drop(self.dir.take());
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
@@ -1624,6 +1656,76 @@ mod tests {
             "the placeholder stays until its own process clears it"
         );
         let _ = remove_candidate_dir(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn marker_files_all_clear_on_removal() {
+        // A directory carrying every protocol note must remove cleanly -
+        // the released marker included - or the dance's consume arms
+        // fail ENOTEMPTY and wedge the public placeholder.
+        let dir = tempfile::tempdir().unwrap();
+        let candidate = dir.path().join(".c-probe");
+        fs::create_dir(&candidate).unwrap();
+        fs::write(candidate.join("owner"), "1 token\n").unwrap();
+        fs::write(candidate.join("claimed-at"), "note").unwrap();
+        fs::write(candidate.join("released"), "").unwrap();
+        remove_candidate_dir(&candidate).unwrap();
+        assert!(!candidate.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn marked_stale_lock_is_reclaimed_despite_live_owner() {
+        // The release marker outranks a live pid record: a guard that
+        // dropped mid-dance must never wedge its directory behind its
+        // own process's lifetime.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        fs::create_dir(&path).unwrap();
+        fs::write(
+            path.join("owner"),
+            format!("{} live-token\n", std::process::id()),
+        )
+        .unwrap();
+        fs::write(path.join("released"), "").unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        next.ensure_owned().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unobtainable_guard_marks_the_release_through_the_fd() {
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        // Hold the sidecar guard from the test itself: the release must
+        // carry through the pinned fd's marker, not race the guard with
+        // pathname removals.
+        let sidecar = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(reclaim_guard_path(&guard.path))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(sidecar.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        drop(guard);
+        drop(sidecar);
+        // The marker carried: the directory is reclaimable by age
+        // despite this process's live pid.
+        let path = LockDir::path_for(&file);
+        set_mtime(&path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        next.ensure_owned().unwrap();
     }
 
     #[cfg(target_os = "linux")]
