@@ -86,6 +86,11 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The bound on one bootstrap child, overridable for slow links through
 /// `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS`.
+/// The bound tops out at a day: a larger override clamps here, because
+/// a deadline beyond what the clock can represent would panic the wait
+/// after the child is already running.
+const MAX_BOOTSTRAP_CHILD_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
 fn resolve_bootstrap_child_timeout_ms() -> u64 {
     match std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS") {
         // A non-positive bound would kill every child on its first poll;
@@ -94,7 +99,9 @@ fn resolve_bootstrap_child_timeout_ms() -> u64 {
             .parse::<u64>()
             .ok()
             .filter(|ms| *ms > 0)
-            .unwrap_or(DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS),
+            .map_or(DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS, |ms| {
+                ms.min(MAX_BOOTSTRAP_CHILD_TIMEOUT_MS)
+            }),
         _ => DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS,
     }
 }
@@ -141,7 +148,17 @@ fn drain_child_stream<R: std::io::Read + Send + 'static>(
             }
             line.clear();
         };
-        while let Ok(available) = std::io::BufRead::fill_buf(&mut pipe) {
+        loop {
+            let available = match std::io::BufRead::fill_buf(&mut pipe) {
+                Ok(available) => available,
+                // An interrupted read is transient: the drain keeps
+                // going, or a healthy child's next write hits a closed
+                // pipe.
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(_) => break,
+            };
             if available.is_empty() {
                 break;
             }

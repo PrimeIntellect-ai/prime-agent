@@ -563,6 +563,10 @@ fn bootstrap_child_timeout_rejects_non_positive_overrides() {
         ("abc", 600_000),
         ("", 600_000),
         ("2500", 2_500),
+        // The day-topping clamp: a huge override is representable, never a
+        // clock-overflow panic after the child is running.
+        ("99999999999999999", 86_400_000),
+        ("86400000", 86_400_000),
     ] {
         std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", given);
         assert_eq!(
