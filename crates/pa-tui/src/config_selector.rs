@@ -606,10 +606,6 @@ fn run_selector_surface(
                 Some(SelectorAction::Close) => break,
                 Some(SelectorAction::Exit) => {
                     crate::exit_restore::restore_terminal();
-                    // The console codepages are console-session state and
-                    // this exit never returns to the CLI's funnel: hand them
-                    // back here (a no-op when nothing was prepared).
-                    pa_types::platform::console_restore();
                     std::process::exit(0);
                 }
                 Some(SelectorAction::Toggle { key, enabled }) => {

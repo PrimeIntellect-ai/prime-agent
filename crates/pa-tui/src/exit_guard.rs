@@ -250,10 +250,6 @@ fn spawn_watchdog(state: &Arc<GuardState>) {
 fn force_quit() -> ! {
     crate::exit_restore::restore_terminal();
     eprintln!("Prime Agent: shutdown stalled; forced exit.");
-    // The console codepages are console-session state and the force quit
-    // never returns to the CLI's funnel: hand them back here (a no-op
-    // when nothing was prepared).
-    pa_types::platform::console_restore();
     std::process::exit(0)
 }
 
