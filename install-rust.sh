@@ -3108,13 +3108,11 @@ if uv_on_path \
       prewarm_timed_out="yes"
       prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
       if [ -n "$prewarm_pid" ]; then
-        # The launcher is FROZEN before anything else: still running, it
-        # can start another provisioning between the walk and the kill,
-        # and that one would escape the tree, the kill list, and the stop
-        # verdict. It thaws into the TERM below.
-        kill -STOP "-$prewarm_pid" 2>/dev/null || kill -STOP "$prewarm_pid" 2>/dev/null || true
+        # The launcher is TERMed first: a live launcher can spawn past any
+        # snapshot of its children, and this is the last sample it takes.
+        kill -TERM "$prewarm_pid" 2>/dev/null || true
         # THE DESCENDANT WALK: collect the launcher's whole tree by parent
-        # links BEFORE killing anything (after the launcher dies its
+        # links while it still owns them (after the launcher dies its
         # descendants reparent and no sweep can find them). A descendant
         # that leads its own process group (the product's uv) is
         # group-killed with its own subtree.
@@ -3140,41 +3138,7 @@ if uv_on_path \
         for prewarm_node in $prewarm_tree; do
           kill -TERM "-$prewarm_node" 2>/dev/null || kill -TERM "$prewarm_node" 2>/dev/null || true
         done
-        # The frozen launcher thaws straight into the pending TERM: the
-        # graceful stop the TERM buys still happens, without the respawn
-        # window a running launcher would get.
-        kill -CONT "-$prewarm_pid" 2>/dev/null || kill -CONT "$prewarm_pid" 2>/dev/null || true
         sleep 1
-        # THE RE-WALK: a TERM-grace survivor or a late child of the
-        # launcher must not escape the KILL list. Anything that died is
-        # simply absent from it.
-        if [ "$prewarm_pgrep" = "yes" ]; then
-          prewarm_refrontier="$prewarm_tree"
-          prewarm_reseen=""
-          while [ -n "$prewarm_refrontier" ]; do
-            prewarm_renext=""
-            for prewarm_node in $prewarm_refrontier; do
-              case " $prewarm_reseen " in
-                *" $prewarm_node "*) continue ;;
-              esac
-              prewarm_reseen="$prewarm_reseen $prewarm_node"
-              # Freeze BEFORE sampling: a node still running can spawn
-              # between its sampling and the KILL pass and escape the
-              # tree and the verdict.
-              kill -STOP "-$prewarm_node" 2>/dev/null || kill -STOP "$prewarm_node" 2>/dev/null || true
-              for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
-                prewarm_renext="$prewarm_renext $prewarm_child"
-              done
-            done
-            prewarm_refrontier="$prewarm_renext"
-          done
-          for prewarm_node in $prewarm_reseen; do
-            case " $prewarm_tree " in
-              *" $prewarm_node "*) ;;
-              *) prewarm_tree="$prewarm_tree $prewarm_node" ;;
-            esac
-          done
-        fi
         for prewarm_node in $prewarm_tree; do
           kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
         done

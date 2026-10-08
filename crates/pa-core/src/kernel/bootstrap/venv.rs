@@ -88,8 +88,8 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS`.
 fn resolve_bootstrap_child_timeout_ms() -> u64 {
     match std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS") {
-        // A non-positive bound would kill every child on its first poll;
-        // the sh pre-warm gate rejects the same values.
+        // A non-positive override is not a bound: it falls back to the
+        // default rather than killing every child on sight.
         Ok(value) if !value.is_empty() => value
             .parse::<u64>()
             .ok()
@@ -99,78 +99,70 @@ fn resolve_bootstrap_child_timeout_ms() -> u64 {
     }
 }
 
-/// The most one drained line buffers before it is forwarded in pieces:
-/// a stream without newlines must not grow the drain's memory without
-/// bound while the child bound is still minutes away.
-const MAX_DRAIN_LINE_BYTES: usize = 64 * 1024;
-
 /// Forward one piped child stream line by line through the progress
 /// reporter; the pipe is drained to EOF whatever the reporter does.
 /// Lines are read byte-delimited and decoded lossily: a child that emits
 /// non-UTF-8 bytes (locale noise, a raw progress escape) is forwarded
-/// mangled, never allowed to end the drain mid-stream. A line longer
-/// than [`MAX_DRAIN_LINE_BYTES`] is forwarded in pieces, never buffered
-/// whole. The reporter is held weakly: a drain still blocked on a
-/// descendant that inherited the pipe releases the reporter when the
-/// bootstrap ends, and the pipe itself closes at the descendant's EOF.
+/// mangled, never allowed to end the drain mid-stream.
 fn drain_child_stream<R: std::io::Read + Send + 'static>(
     pipe: Option<R>,
     report: Option<KernelBootstrapProgressHandler>,
 ) -> std::thread::JoinHandle<()> {
+    // One forwarded line is capped: a newline-free stream must not grow
+    // the carry without bound (the pipe still drains - the cap only
+    // bounds a single forward).
+    const MAX_LINE_BYTES: usize = 64 * 1024;
     std::thread::spawn(move || {
-        let Some(mut pipe) = pipe.map(std::io::BufReader::new) else {
+        let Some(mut pipe) = pipe else {
             return;
         };
-        let report = report.map(|handler| std::sync::Arc::downgrade(&handler));
-        let mut line: Vec<u8> = Vec::new();
-        let forward = |line: &mut Vec<u8>| {
-            let mut text = String::from_utf8_lossy(line).into_owned();
-            if text.ends_with('\n') {
-                text.pop();
-                if text.ends_with('\r') {
-                    text.pop();
+        let mut carry: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            let read = match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            let mut start = 0;
+            for (at, byte) in chunk[..read].iter().enumerate() {
+                if *byte != b'\n' {
+                    continue;
                 }
+                let mut line = carry.clone();
+                line.extend_from_slice(&chunk[start..at]);
+                forward_drained_line(&line, report.as_ref());
+                carry.clear();
+                start = at + 1;
             }
-            match &report {
-                Some(handler) => {
-                    if let Some(handler) = handler.upgrade() {
-                        handler(&text);
-                    }
-                }
-                None => eprintln!("{text}"),
+            // The cap check precedes the extend: the carry may already
+            // sit at the cap when the next chunk's tail arrives.
+            let pending = &chunk[start..read];
+            if carry.len() + pending.len() > MAX_LINE_BYTES {
+                forward_drained_line(&carry, report.as_ref());
+                carry.clear();
             }
-            line.clear();
-        };
-        while let Ok(available) = std::io::BufRead::fill_buf(&mut pipe) {
-            if available.is_empty() {
-                break;
-            }
-            if line.len() == MAX_DRAIN_LINE_BYTES {
-                // A piece at the cap is forwarded before any more bytes
-                // join it.
-                forward(&mut line);
-                continue;
-            }
-            let remaining = MAX_DRAIN_LINE_BYTES - line.len();
-            let (consumed, complete) =
-                if let Some(at) = available.iter().position(|&byte| byte == b'\n') {
-                    let take = (at + 1).min(remaining);
-                    line.extend_from_slice(&available[..take]);
-                    (take, take > at)
-                } else {
-                    let take = available.len().min(remaining);
-                    line.extend_from_slice(&available[..take]);
-                    (take, false)
-                };
-            std::io::BufRead::consume(&mut pipe, consumed);
-            if complete {
-                forward(&mut line);
-            }
+            carry.extend_from_slice(pending);
         }
-        if !line.is_empty() {
-            forward(&mut line);
+        if !carry.is_empty() {
+            forward_drained_line(&carry, report.as_ref());
         }
     })
+}
+
+/// One drained line, lossily decoded (a child that emits non-UTF-8 bytes
+/// is forwarded mangled, never allowed to end the drain mid-stream).
+fn forward_drained_line(bytes: &[u8], report: Option<&KernelBootstrapProgressHandler>) {
+    let mut line = String::from_utf8_lossy(bytes).into_owned();
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    match report {
+        Some(handler) => handler(&line),
+        None => eprintln!("{line}"),
+    }
 }
 
 /// Spawn one bootstrap child: stdin is null, stdout and stderr are piped
@@ -261,10 +253,12 @@ async fn run_async(
                         }
                         None => drop(child),
                     }
-                    // An unreaped child that dies later must not linger as
-                    // a zombie: it rides a reaper that waits for its exit.
-                    #[cfg(unix)]
-                    if !reaped {
+                    // An unreaped child keeps its parent: dropped, its
+                    // later exit would linger as a zombie for the whole
+                    // session. It parks on a reaper thread instead - the
+                    // thread dies with the child, the verdict never waits.
+                    #[cfg(not(windows))]
+                    {
                         std::thread::spawn(move || {
                             let _ = child.wait();
                         });
@@ -291,14 +285,29 @@ async fn run_async(
                 }
             }
         };
+        // Past the grace the remaining drains are parked: a descendant
+        // holding the pipes keeps them blocked, and the thread (a pipe fd
+        // and the callback) is released when that descendant dies - the
+        // parker joins it then, so nothing accumulates per bootstrap.
+        let mut parked: Vec<std::thread::JoinHandle<()>> = Vec::new();
         let drain_deadline = std::time::Instant::now() + drain_grace;
         for drain in drains {
+            let drain = drain;
             while !drain.is_finished() && std::time::Instant::now() < drain_deadline {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             if drain.is_finished() {
                 let _ = drain.join();
+            } else {
+                parked.push(drain);
             }
+        }
+        if !parked.is_empty() {
+            std::thread::spawn(move || {
+                for drain in parked {
+                    let _ = drain.join();
+                }
+            });
         }
         if status.success() {
             Ok(())
