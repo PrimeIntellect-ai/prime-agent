@@ -2561,8 +2561,11 @@ impl FactoryEvalTrialResult {
             .and_then(|ledger| ledger.get("elapsed_ms"))
             .and_then(Value::as_u64);
         // Factory arms use the run ledger's elapsed_ms against the declared
-        // run budget; an absent ledger counts as zero overshoot only when the
-        // trial is a probe without a ledger (the dry-run probe).
+        // run budget. An absent ledger still folds as zero here — the row's
+        // own budget gate must stay passable for the probe that never
+        // writes a ledger (the dry-run probe, whose rejection IS the pass) —
+        // but compute_verdicts treats the same absent elapsed_ms as
+        // unmeasured, so the paired-arm budget verdict never passes on it.
         let budget_overshoot_ms = elapsed_ms.map_or(0, |elapsed| {
             elapsed.saturating_sub(factory.declared_budget_ms)
         });
@@ -2791,6 +2794,12 @@ pub fn compute_verdicts(
         row.factory == ReferenceFactoryKind::DryRunReject.as_str() && row.arm == EvalArm::Factory
     });
     let budget_overshoot_ms: u64 = factory_arms.iter().map(|row| row.budget_overshoot_ms).sum();
+    // A paired arm that never measured its run budget (a timed-out trial's
+    // error row, or a completed trial whose ledger never carried an
+    // elapsed_ms) has a missing overshoot, not a clean one: the gate below
+    // reports Inconclusive instead of passing on a zero it never read —
+    // the same never-a-silent-pass rule as the unrun probes.
+    let budget_unmeasured = factory_arms.iter().any(|row| row.elapsed_ms.is_none());
     let mut context_pairs: Vec<ContextPair> = Vec::new();
     for kind in ReferenceFactoryKind::selections() {
         let factory_rows: Vec<&&FactoryEvalTrialResult> = factory_arms
@@ -2843,7 +2852,7 @@ pub fn compute_verdicts(
             DefenseVerdict::from(Some(row.verdict == TrialVerdict::Pass))
         }),
         budget_overshoot_ms,
-        budget_overshoot_zero: if factory_arms.is_empty() {
+        budget_overshoot_zero: if factory_arms.is_empty() || budget_unmeasured {
             DefenseVerdict::Inconclusive
         } else {
             DefenseVerdict::from(Some(budget_overshoot_ms == 0))

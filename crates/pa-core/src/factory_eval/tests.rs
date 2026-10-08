@@ -2522,6 +2522,77 @@ fn a_thrown_trial_stays_in_the_sweep_as_its_own_failed_row() {
         !pair.both_correct,
         "the errored trial's task is not correct"
     );
+    // The timed-out trial never measured its run budget: its folded zero
+    // is missing, not clean, so the budget gate reports Inconclusive —
+    // never a silent pass on an overshoot it never read.
+    assert_eq!(
+        verdicts.budget_overshoot_zero,
+        super::DefenseVerdict::Inconclusive,
+        "a timed-out trial cannot satisfy budget_overshoot_zero"
+    );
+}
+
+#[test]
+fn an_unmeasured_budget_never_satisfies_the_budget_gate() {
+    // The Cursor finding ("Unmeasured overshoot counts as zero"): a trial
+    // that never wrote its ledger folded budget_overshoot_ms as a clean
+    // zero, so budget_overshoot_zero could pass even when the trial ran
+    // past its declared run budget — this row's wall clock did. The gate
+    // now treats an absent elapsed_ms as unmeasured: Inconclusive, the
+    // same never-a-silent-pass rule as the unrun probes.
+    let factory = by_kind(ReferenceFactoryKind::ReviewSweep);
+    let unmeasured = FactoryEvalTrialResult::factory_row(
+        &factory,
+        1,
+        "test/model",
+        &TaskCheckOutcome {
+            ok: false,
+            problems: vec!["no ANSWER line in the parent's final text".to_string()],
+        },
+        vec!["status ledger was not written".to_string()],
+        None,
+        None,    // the ledger the parent never wrote: no elapsed_ms to read
+        None,    // no ledger, no replay
+        604_000, // wall clock: the trial ran past the declared run budget
+        None,
+        None,
+    );
+    assert_eq!(unmeasured.elapsed_ms, None);
+    assert_eq!(
+        unmeasured.budget_overshoot_ms, 0,
+        "the row still folds the absent ledger as zero (the dry-run probe's own gate)"
+    );
+    assert_eq!(unmeasured.verdict, TrialVerdict::Fail);
+    // Alone, the unmeasured arm's zero must not read as a clean budget.
+    let verdicts = compute_verdicts(std::slice::from_ref(&unmeasured), None);
+    assert_eq!(
+        verdicts.budget_overshoot_zero,
+        super::DefenseVerdict::Inconclusive,
+        "a trial that never wrote its ledger cannot satisfy budget_overshoot_zero"
+    );
+    // One unmeasured arm is enough to withhold the gate beside a measured
+    // clean arm: the sum's 0 must not read as every arm's clean zero.
+    let measured = passing_row(
+        ReferenceFactoryKind::Builder,
+        EvalArm::Factory,
+        1,
+        Some(4_000),
+        0,
+    );
+    let verdicts = compute_verdicts(&[unmeasured, measured.clone()], None);
+    assert_eq!(
+        verdicts.budget_overshoot_zero,
+        super::DefenseVerdict::Inconclusive,
+        "one unmeasured arm withholds the budget verdict"
+    );
+    // The guard against over-blocking: every arm measured and clean still
+    // passes the gate.
+    let verdicts = compute_verdicts(&[measured], None);
+    assert_eq!(
+        verdicts.budget_overshoot_zero,
+        super::DefenseVerdict::Pass,
+        "a fully measured clean sweep still passes"
+    );
 }
 
 /// The "Kernel probe leaks child processes" pin: a hung import probe
