@@ -816,8 +816,14 @@ if ($uvKnown) {
         # The tree kill runs from the absolute System32 path (a bare name
         # must never resolve a planted exe). Only the OBSERVED exit counts
         # as stopped: a taskkill exit code is a request's receipt, not a
-        # dead tree.
-        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $prewarm.Id /T /F *> $null
+        # dead tree. The taskkill itself is BOUNDED like the Rust helper's
+        # own: a stuck one is killed after the grace instead of blocking
+        # the install the watchdog exists to end.
+        $taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList '/PID', $prewarm.Id, '/T', '/F' -WindowStyle Hidden -PassThru
+        if (-not $taskkill.WaitForExit(5000)) {
+            $null = $taskkill.Kill()
+            $null = $taskkill.WaitForExit(5000)
+        }
         $null = $prewarm.WaitForExit(15000)
         $prewarmStopped = $prewarm.HasExited
         $prewarmDetail = "the watchdog stopped it at ${prewarmBoundSec}s"

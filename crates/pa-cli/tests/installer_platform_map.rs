@@ -1198,7 +1198,7 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
         .find("# --- the PATH add")
         .expect("the PATH-add section follows");
     let section = &text[section_start..section_end];
-    let markers: [(&str, &str); 9] = [
+    let markers: [(&str, &str); 11] = [
         (
             "the watchdog bound (the pre-warm may take minutes on a slow link, never forever)",
             "$prewarmBoundSec = 300",
@@ -1217,7 +1217,15 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
         ),
         (
             "the expiry arm tree-kills the launcher tree",
-            "& (Join-Path $env:SystemRoot 'System32\\taskkill.exe') /PID $prewarm.Id /T /F",
+            "$taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\taskkill.exe')",
+        ),
+        (
+            "the taskkill wait is bounded (a stuck one is killed after its grace, like the Rust helper's own)",
+            "-not $taskkill.WaitForExit(5000)",
+        ),
+        (
+            "a stuck taskkill is killed",
+            "$null = $taskkill.Kill()",
         ),
         (
             "the expiry arm reaps the killed child",

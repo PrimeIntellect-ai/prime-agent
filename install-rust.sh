@@ -3254,7 +3254,14 @@ if uv_on_path \
     prewarm_tree_stopped="yes"
     if [ "$prewarm_pgrep" = "yes" ] && [ -n "${prewarm_tree:-}" ]; then
       for prewarm_node in $prewarm_tree; do
-        kill -0 "$prewarm_node" 2>/dev/null && prewarm_tree_stopped="no"
+        if kill -0 "$prewarm_node" 2>/dev/null; then
+          # A zombie is a dead process whose parent has not reaped it
+          # yet - the runner owns the launcher's reap and is not waited
+          # for on this path - so it counts as stopped, like the
+          # `--version` probe's own rule for `kill -0`.
+          ps -o stat= -p "$prewarm_node" 2>/dev/null | grep -q '^Z' \
+            || prewarm_tree_stopped="no"
+        fi
       done
     else
       prewarm_tree_stopped="no"
