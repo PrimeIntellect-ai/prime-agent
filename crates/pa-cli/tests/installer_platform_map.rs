@@ -1727,6 +1727,44 @@ fn install_rust_sh_prewarm_kill_contains_a_respawning_launcher() {
     );
 }
 
+/// A frozen pre-warm tree must not outlive the installer: the expiry
+/// path STOPs the tree it kills, so every exit path (an interrupt inside
+/// the kill window, or a kill that does not take) releases what the walk
+/// collected. Pinned as shipped text - the trap chain is not
+/// block-extractable - and the behavioral drives must stay green.
+#[test]
+fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
+    let script =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    assert!(
+        script.contains("prewarm_tree_release() {"),
+        "the release helper exists: it thaws and kills the walked tree"
+    );
+    for arm in [
+        "trap 'ui_stop; prewarm_tree_release; rm -rf \"${dl:-}\" \"${stage:-}\"' EXIT",
+        "trap 'ui_stop; prewarm_tree_release; rm -rf \"$dl\"' EXIT",
+    ] {
+        assert!(
+            script.contains(arm),
+            "the EXIT trap releases the frozen tree: {arm}"
+        );
+    }
+    assert!(
+        script.contains("  prewarm_tree_release\n  publish_window_restore"),
+        "the interrupt handler releases the frozen tree before restoring"
+    );
+    let release_at = script
+        .find("prewarm_tree_release() {")
+        .expect("the release helper exists");
+    let traps_at = script
+        .find("trap 'ui_stop; prewarm_tree_release")
+        .expect("the EXIT trap");
+    assert!(
+        release_at < traps_at,
+        "the helper is defined before the trap that calls it is armed"
+    );
+}
+
 /// Drives the pre-warm block under `sh` with a three-level hanging
 /// fixture, bounded by a kill guard (`None` on the guard). Liveness is
 /// measured before the cleanup kill; `hermetic_path` replaces PATH for

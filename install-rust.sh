@@ -663,6 +663,16 @@ tilde() {
 ts_takeover_from=""
 ts_takeover_undo=""
 migrated_note=""
+# The pre-warm's expiry path freezes the tree it kills: an exit inside that
+# window (an interrupt, or a kill that does not take) must not leave the
+# processes frozen with the kernel venv lock held. No-op whenever no walk
+# collected a tree. Defined before the traps that call it.
+prewarm_tree_release() {
+  for prewarm_node in ${prewarm_tree:-}; do
+    kill -CONT "-$prewarm_node" 2>/dev/null || kill -CONT "$prewarm_node" 2>/dev/null || true
+    kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+  done
+}
 # The renderer always restores the cursor and line wrap when it stops; the
 # trap stops it on every exit path (an INT/TERM exits through it too).
 # The pre-flights' exits sit far from the run's own success-path sweep
@@ -672,9 +682,9 @@ if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ] || [ "${PRIME_AGENT_ARCHIVE_CHECK
   # The stage rides too (an abort during the archive check's extraction
   # must leave no staged tree under the prefix); `stage` is initialized
   # before the traps, so the sweep targets only what THIS script assigns.
-  trap 'ui_stop; rm -rf "${dl:-}" "${stage:-}"' EXIT
+  trap 'ui_stop; prewarm_tree_release; rm -rf "${dl:-}" "${stage:-}"' EXIT
 else
-  trap 'ui_stop; rm -rf "$dl"' EXIT
+  trap 'ui_stop; prewarm_tree_release; rm -rf "$dl"' EXIT
 fi
 stage=""
 publish_parked=""
@@ -715,6 +725,7 @@ ui_interrupted() {
   # environment is never the removal's target.
   if [ -n "$ui_step" ]; then step_fail "$ui_step" "interrupted"; fi
   ui_stop
+  prewarm_tree_release
   publish_window_restore
   rm -rf "$dl"
   if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
