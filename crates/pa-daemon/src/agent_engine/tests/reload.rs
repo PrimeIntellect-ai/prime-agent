@@ -663,8 +663,7 @@ fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_fai
     );
     assert!(
         restored.headers.as_ref() == Some(&team_headers("team-1")),
-        "a failed store read keeps the captured headers: {:?}",
-        restored.headers
+        "a failed store read keeps the captured headers"
     );
     // A healthy store still resolves the override pair fresh.
     write_oauth_credential(&agent_dir, "stored-key");
