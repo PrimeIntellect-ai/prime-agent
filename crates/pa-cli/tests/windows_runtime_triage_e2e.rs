@@ -463,11 +463,12 @@ async fn tui_reopen_renders_the_old_history() {
     // attach's ids (the durable id rides the state snapshot; an empty
     // one means the resumed worker served no store).
     eprintln!(
-        "REOPEN DIAGNOSTIC: active={} session_id={} frames={} resume_hint={:?}",
+        "REOPEN DIAGNOSTIC: active={} session_id={} frames={} notice={:?} view={}",
         reopened.active_session_id,
         reopened.session_id,
         reopened.frames.len(),
-        reopened.resume_hint
+        reopened.agents_view_notice,
+        reopened.return_to_agents_view,
     );
     // The panes dump BEFORE the asserts: a red run uploads its evidence
     // (the workflow's red-runs-too contract).
