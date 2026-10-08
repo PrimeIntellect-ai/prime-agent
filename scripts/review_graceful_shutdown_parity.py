@@ -224,7 +224,7 @@ def run_one(kind, binary, root):
                                    "message": "PARITY_" + lane.upper()})
 
         prompt("idle", wait=True)
-        idle_before = digest(sessions["idle"]["file"])
+        idle_before = Path(sessions["idle"]["file"]).read_bytes()
         prompt("park")
         until("park stream chunk", lambda: provider.chunks["park"] >= 1)
         client.command({"type": "follow_up", "activeSessionId": sessions["park"]["id"],
@@ -234,7 +234,7 @@ def run_one(kind, binary, root):
               "activeSessionId": sessions["park"]["id"]}).get("isStreaming") is False)
         queue = client.command({"type": "get_queue",
                                 "activeSessionId": sessions["park"]["id"]})
-        park_before = digest(sessions["park"]["file"])
+        park_before = Path(sessions["park"]["file"]).read_bytes()
         result["park_queue_before"] = queue.get("followUp")
         prompt("busy")
         until("busy stream chunk", lambda: provider.chunks["busy"] >= 1)
@@ -259,15 +259,28 @@ def run_one(kind, binary, root):
                 pass
         listed = client.command({"type": "list"}).get("sessions", [])
         busy_text = Path(sessions["busy"]["file"]).read_text()
+        controls = {"idle": idle_before, "park": park_before}
+        result["control_transcripts"] = {}
+        for lane, before in controls.items():
+            after = Path(sessions[lane]["file"]).read_bytes()
+            result["control_transcripts"][lane] = {
+                "before_utf8": before.decode("utf-8"),
+                "after_restart_utf8": after.decode("utf-8"),
+                "before_sha256": hashlib.sha256(before).hexdigest(),
+                "after_restart_sha256": hashlib.sha256(after).hexdigest(),
+            }
         result["observed"] = {
             "provider_requests": dict(provider.calls),
             "busy_continuation_requested": provider.calls["busy"] >= 2,
             "busy_continued": "busy-completed" in busy_text,
             "park_not_executed": provider.calls["park"] == 1,
             "idle_not_executed": provider.calls["idle"] == 1,
-            "park_queue_preserved": queue.get("followUp") == ["PARKED_QUEUE_DO_NOT_RUN"],
-            "park_transcript_unchanged": digest(sessions["park"]["file"]) == park_before,
-            "idle_transcript_unchanged": digest(sessions["idle"]["file"]) == idle_before,
+            "park_queue_before_shutdown_matches": queue.get("followUp") ==
+                                                  ["PARKED_QUEUE_DO_NOT_RUN"],
+            "park_transcript_unchanged": result["control_transcripts"]["park"]["before_sha256"] ==
+                                         result["control_transcripts"]["park"]["after_restart_sha256"],
+            "idle_transcript_unchanged": result["control_transcripts"]["idle"]["before_sha256"] ==
+                                         result["control_transcripts"]["idle"]["after_restart_sha256"],
             "listed_session_count": len(listed),
             "listed_busy": any((row.get("id") or row.get("activeSessionId")) ==
                                sessions["busy"]["id"] for row in listed),
@@ -344,7 +357,7 @@ def main():
         receipt["preflight_error"] = f"{type(error).__name__}: {error}"
     results = receipt["results"]
     checks = ("busy_continued", "park_not_executed", "idle_not_executed",
-              "park_queue_preserved",
+              "park_queue_before_shutdown_matches",
               "park_transcript_unchanged", "idle_transcript_unchanged", "listed_busy")
     observed = [results.get(kind, {}).get("observed") for kind in ("ts", "rust")]
     receipt["parity"] = bool("preflight_error" not in receipt and
