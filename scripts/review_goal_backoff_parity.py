@@ -138,7 +138,7 @@ def run_case(binary, label, scenario, base_dir):
                                                     "defaultModel": "goal-fixture"}))
     # An explicit environment prevents inherited tokens, proxies, or a user's
     # package/session paths from reaching either binary or a spawned kernel.
-    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TZ",
+    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TZ", "PYTHONPATH",
                                              "PRIME_AGENT_KERNEL_PYTHON", "PA_E2E_KERNEL_PYTHON")
            if key in os.environ}
     env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
@@ -148,6 +148,16 @@ def run_case(binary, label, scenario, base_dir):
                 "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
                 "PRIME_AGENT_SESSION_DIR": str(sessions)})
     (home / "tmp").mkdir()
+    goal_module = next((pathlib.Path(part) / "goal" / "__init__.py"
+                        for part in env.get("PYTHONPATH", "").split(os.pathsep)
+                        if part and (pathlib.Path(part) / "goal" / "__init__.py").is_file()), None)
+    kernel_provenance = {
+        "kernel_python": env.get("PRIME_AGENT_KERNEL_PYTHON"),
+        "e2e_kernel_python": env.get("PA_E2E_KERNEL_PYTHON"),
+        "pythonpath": env.get("PYTHONPATH"),
+        "goal_module_path": str(goal_module) if goal_module else None,
+        "goal_module_sha256": sha256(goal_module) if goal_module else None,
+    }
     version = None
     if scenario == "control":
         probe = subprocess.run([str(binary), "--version"], cwd=cwd, env=env,
@@ -215,6 +225,13 @@ def run_case(binary, label, scenario, base_dir):
                     and isinstance(event.get("goal"), dict)]
     goal_statuses = [goal.get("status") for goal in goal_updates]
     final_goal_status = goal_statuses[-1] if goal_statuses else None
+    tool_events = []
+    for event in events:
+        if event.get("type") == "tool_execution_end":
+            tool_events.append({key: event.get(key) for key in
+                                ("toolName", "toolCallId", "isError", "result") if key in event})
+    turn_tool_results = [event.get("toolResults") for event in events
+                         if event.get("type") == "turn_end" and event.get("toolResults")]
     model_completion_text = False
     for event in events:
         message = event.get("message")
@@ -230,6 +247,7 @@ def run_case(binary, label, scenario, base_dir):
             )
     return {
         "version_probe": version,
+        "kernel_provenance": kernel_provenance if scenario == "control" else None,
         "exit_code": exit_code,
         "stopped": stopped,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
@@ -238,6 +256,8 @@ def run_case(binary, label, scenario, base_dir):
         "goal_context_request_numbers": [row["number"] for row in server.requests if row["goal_context"]],
         "request_count": len(server.requests),
         "event_types": [event.get("type") for event in events],
+        "tool_execution_end": tool_events,
+        "turn_end_tool_results": turn_tool_results,
         "goal_statuses": goal_statuses,
         "final_goal_status": final_goal_status,
         "confirmed_goal_complete": final_goal_status == "complete",
@@ -292,6 +312,7 @@ def main():
             if scenario == "control":
                 for label in paths:
                     result["binaries"][label]["version_probe"] = result["scenarios"][scenario][label]["version_probe"]
+                    result["binaries"][label]["kernel_provenance"] = result["scenarios"][scenario][label]["kernel_provenance"]
             result["differences"][scenario] = {
                 field: {"ts": ts[field], "rust": rust[field]}
                 for field in ("request_count", "wake_marker_count", "wake_request_numbers",
@@ -300,8 +321,17 @@ def main():
                               "model_completion_text_seen", "exit_code", "stopped")
                 if ts[field] != rust[field]
             }
-    result["parity"] = not result["fixture_error"] and not any(result["differences"].values())
-    result["requires_behavior_decision"] = any(result["differences"].values())
+    all_runs = [run for versions in result["scenarios"].values() for run in versions.values()]
+    result["observed_fields_equal"] = not any(result["differences"].values())
+    result["validation_complete"] = (not result["fixture_error"] and len(all_runs) == 8
+                                     and all(run["request_count"] > 0 and run["stopped"] is None
+                                             for run in all_runs))
+    recovery = result["scenarios"].get("recover", {})
+    result["recovery_confirmed"] = (len(recovery) == 2 and
+                                    all(run["confirmed_goal_complete"] for run in recovery.values()))
+    result["parity"] = (result["observed_fields_equal"] and result["validation_complete"]
+                        and result["recovery_confirmed"])
+    result["requires_behavior_decision"] = not result["parity"]
     args.receipt.write_text(json.dumps(result, indent=2) + "\n")
     print("goal parity receipt: %s" % args.receipt)
     for scenario, versions in result["scenarios"].items():
@@ -309,7 +339,9 @@ def main():
                                            (label, run["request_count"], run["exit_code"], run["stopped"])
                                            for label, run in versions.items()))
     if result["requires_behavior_decision"]:
-        print("OBSERVED BEHAVIORAL DIVERGENCE: receipt requires an explicit review decision; this is not a parity pass")
+        print("PARITY NOT CONFIRMED: inspect differences and incomplete observations in receipt")
+    if result["binaries"].get("ts", {}).get("kernel_provenance"):
+        print("kernel/goal provenance: " + json.dumps(result["binaries"]["ts"]["kernel_provenance"]))
     if result["fixture_error"]:
         print(result["fixture_error"], file=sys.stderr)
         return 1
