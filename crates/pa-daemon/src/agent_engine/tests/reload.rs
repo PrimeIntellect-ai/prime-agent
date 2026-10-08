@@ -395,6 +395,24 @@ fn restored_primary_target_serves_the_store_auth() {
         Some("stale-capture"),
         "a resolution that yields nothing falls back to the capture"
     );
+
+    // An unreadable store keeps the captured pair: the fresh resolution
+    // would serve the configured fallback key, which is not a credential
+    // — the same overwrite /reload's gate avoids.
+    std::fs::write(agent_dir.join("auth.json"), "not json").unwrap();
+    let restored = engine.restored_primary_target(
+        &primary,
+        Some("captured-key".to_string()),
+        Some(team_headers("captured-team")),
+    );
+    assert!(
+        restored.api_key.as_deref() == Some("captured-key"),
+        "a failed store read keeps the last-good captured key"
+    );
+    assert!(
+        restored.headers.as_ref() == Some(&team_headers("captured-team")),
+        "a failed store read keeps the last-good captured headers"
+    );
 }
 
 /// A custom `prime-inference` provider: the one provider whose stored

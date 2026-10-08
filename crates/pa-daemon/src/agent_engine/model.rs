@@ -374,17 +374,38 @@ impl AgentSessionEngine {
         Option<String>,
         Option<std::collections::BTreeMap<String, String>>,
     ) {
+        let (api_key, headers, _store_healthy) =
+            self.resolve_request_key_and_headers_and_store_health(model);
+        (api_key, headers)
+    }
+
+    /// [`Self::resolve_request_key_and_headers`] plus the auth store's
+    /// read health: `false` means the store's last load failed (an
+    /// unreadable `auth.json`), in which case the registry resolves the
+    /// configured fallback key — not a stored credential. A caller that
+    /// replaces last-good auth with a resolved pair must check this the
+    /// way `/reload`'s gate does.
+    pub(crate) fn resolve_request_key_and_headers_and_store_health(
+        &self,
+        model: &Model,
+    ) -> (
+        Option<String>,
+        Option<std::collections::BTreeMap<String, String>>,
+        bool,
+    ) {
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let store_healthy = auth.load_error().is_none();
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path.
-            return (Some(api_key.clone()), resolved.headers);
+            // `getApiKeyAndHeaders` override path. The override lives in
+            // memory, so the pair stands regardless of the store's health.
+            return (Some(api_key.clone()), resolved.headers, true);
         }
-        (resolved.api_key, resolved.headers)
+        (resolved.api_key, resolved.headers, store_healthy)
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
@@ -410,15 +431,17 @@ impl AgentSessionEngine {
         captured_api_key: Option<String>,
         captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
-        let (api_key, headers) = self.resolve_request_key_and_headers(primary);
-        // The capture backs the restore only when the store resolves
-        // nothing: a resolved credential REPLACES the pair — its headers
-        // land even when it carries none, so a failover onto a credential
-        // without the team header never keeps the captured
-        // `X-Prime-Team-ID` on the new key.
+        let (api_key, headers, store_healthy) =
+            self.resolve_request_key_and_headers_and_store_health(primary);
+        // The capture backs the restore when the store resolves nothing
+        // OR the store itself failed to read: an unreadable `auth.json`
+        // makes the fresh resolution fall to the configured fallback key,
+        // which is not a credential — the captured pair is the last-good
+        // one, exactly the overwrite `/reload`'s gate avoids. A healthy
+        // resolution REPLACES the pair, headers included.
         let (api_key, headers) = match api_key {
-            Some(api_key) => (Some(api_key), headers),
-            None => (captured_api_key, captured_headers),
+            Some(api_key) if store_healthy => (Some(api_key), headers),
+            _ => (captured_api_key, captured_headers),
         };
         pa_core::session_engine::provider_adapter::ProviderTarget {
             service_tier: *self.service_tier.read().expect("service tier lock"),
