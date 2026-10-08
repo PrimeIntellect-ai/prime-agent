@@ -97,7 +97,10 @@ impl AgentSessionEngine {
             .provider_target
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if true {
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.model == failed.model && current.api_key == failed.api_key)
+        {
             *slot = Some(ProviderTarget {
                 service_tier: *self
                     .service_tier
@@ -247,8 +250,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         write_oauth(&dir.path().join("agent"), "fresh-access");
         let engine = engine_over(dir.path());
-        *engine.provider_target.write().unwrap() =
-            Some(target("faux", "faux-1", Some("stale-access")));
+        *engine.provider_target.write().unwrap() = Some(target("faux", "faux-1", Some("stale-access")));
         assert_eq!(
             engine.recover_provider_auth().await,
             AuthRecoveryOutcome::Continue
