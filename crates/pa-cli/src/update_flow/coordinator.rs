@@ -654,9 +654,13 @@ async fn finish_failure(
             Ok(identity) => {
                 writer.lock().await.set_successor(identity)?;
                 writer.lock().await.set_state(UpdateState::Restoring)?;
-                let (counts, _failures) =
+                let (counts, failures) =
                     restore_report(&options.socket_path, &options.budget).await;
                 writer.lock().await.set_counts(counts)?;
+                // The per-session restore diagnostics ride the report too -
+                // the completed rollback must say WHICH sessions failed and
+                // why, never silently drop them.
+                writer.lock().await.set_failures(failures)?;
                 writer.lock().await.set_state(UpdateState::Complete)?;
                 writer.lock().await.set_message(Some(format!(
                     "Rolled back to the previous Prime Agent version ({reason})"
