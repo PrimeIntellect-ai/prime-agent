@@ -160,8 +160,13 @@ pub struct AgentSession {
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
     /// One compaction at a time: a second `compact` waits for the
     /// in-flight run and prepares against its result; reads and writes
-    /// keep using the session lock meanwhile.
-    compaction_flight: tokio::sync::Mutex<()>,
+    /// keep using the session lock meanwhile; its slot holds the
+    /// background summarize.
+    compaction_flight: tokio::sync::Mutex<
+        Option<
+            tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,
+        >,
+    >,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -248,7 +253,7 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
-            compaction_flight: tokio::sync::Mutex::new(()),
+            compaction_flight: tokio::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
