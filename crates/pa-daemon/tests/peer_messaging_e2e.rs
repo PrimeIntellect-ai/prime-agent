@@ -287,13 +287,13 @@ fn alpha_responses(receipts_dir: &Path) -> Value {
     let receipt_path = receipts_dir.join("0.json");
     json!([
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": {
+            { "type": "toolCall", "name": "python_repl", "arguments": {
                 "code": send_cell("hello from alpha", "beta", &receipt_path),
             } },
         ] },
         { "text": "alpha turn done" },
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": {
+            { "type": "toolCall", "name": "python_repl", "arguments": {
                 "code": send_cell("hello from alpha", "beta", &receipt_path),
             } },
         ] },

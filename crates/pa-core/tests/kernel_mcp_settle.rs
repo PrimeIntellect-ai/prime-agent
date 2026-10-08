@@ -170,7 +170,7 @@ async fn a_kernel_needing_op_mid_boot_joins_the_in_flight_build_and_succeeds() {
         Some("calling the kernel"),
         vec![(
             "cell-1",
-            "ipython",
+            "python_repl",
             json!({ "code": "print('JOINED_BOOT_OK')" }),
         )],
     )));
@@ -454,7 +454,11 @@ async fn the_first_python_cell_never_waits_behind_the_eager_mcp_status() {
     provider.push_turn(ScriptedTurn::Events(tool_call_turn_steps(
         &model,
         Some("running the cell"),
-        vec![("cell-1", "ipython", json!({ "code": "print('CELL_OK')" }))],
+        vec![(
+            "cell-1",
+            "python_repl",
+            json!({ "code": "print('CELL_OK')" }),
+        )],
     )));
     provider.push_text_turn("the turn settles");
 

@@ -431,13 +431,13 @@ fn differential_live_export_matches_ts_binary() {
         .expect("tools array")
         .iter()
         .any(|tool| {
-            tool["name"] == "ipython"
+            tool["name"] == "python_repl"
                 && tool["description"].is_string()
                 && tool["parameters"].is_object()
         });
     assert!(
         ipython_registered,
-        "ipython contract in tools: {}",
+        "python_repl contract in tools: {}",
         ts_data["tools"]
     );
 

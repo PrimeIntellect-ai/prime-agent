@@ -8,6 +8,7 @@ use std::sync::Arc;
 use pa_agent::agent::{Agent, AgentInitialState, AgentOptions};
 use pa_agent::stream::StreamFn;
 use pa_agent::types::{Model, ThinkingLevel};
+use pa_types::ai::PYTHON_TOOL_NAME;
 
 use crate::resources::{load_resources, ResourceLoaderOptions};
 use crate::session::manager::SessionManager;
@@ -401,7 +402,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
-    if !tools.iter().any(|tool| tool.name() == "ipython") {
+    if !tools.iter().any(|tool| tool.name() == PYTHON_TOOL_NAME) {
         let definition = crate::tools::ipython::create_ipython_tool_definition(
             &cwd.to_string_lossy(),
             super::runtime_wiring::ipython_tool_options(
@@ -420,7 +421,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let prewarm_configured =
         config.prewarm_ipython_kernel.unwrap_or(false) && config.rlm_depth.unwrap_or(0) == 0;
     if (prewarm_configured || has_snapshot)
-        && active_tool_names.iter().any(|name| name == "ipython")
+        && active_tool_names
+            .iter()
+            .any(|name| name == PYTHON_TOOL_NAME)
     {
         provisioner.prewarm();
         // The MCP settle rides the same background posture (the
@@ -490,7 +493,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let digest_context = super::harness_digest::HarnessDigestContext {
         global_dir: crate::refinement::get_global_harness_state_dir(&config.agent_dir),
         local_dir: local_harness_dir,
-        include_ipython: active_tool_names.iter().any(|name| name == "ipython"),
+        include_ipython: active_tool_names
+            .iter()
+            .any(|name| name == PYTHON_TOOL_NAME),
         include_shell_examples: active_tool_names.iter().any(|name| name == "bash"),
         include_refine: resources.skills.iter().any(|skill| {
             !skill.disable_model_invocation

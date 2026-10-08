@@ -43,7 +43,7 @@ fn fixture_prompt() -> (String, usize) {
         cwd: "/w".to_string(),
         messages_path: Some("/w/sessions/fixture-session.jsonl".to_string()),
         skills: loaded.skills,
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         allow_recursion: Some(true),
         rlm_depth: Some(0),
         ..Default::default()
@@ -85,7 +85,7 @@ fn system_prompt_matches_golden_snapshot() {
             fixture: serde_json::json!({
                 "cwd": "/w",
                 "messagesPath": "/w/sessions/fixture-session.jsonl",
-                "selectedTools": ["ipython"],
+                "selectedTools": ["python_repl"],
                 "skillsSource": "bundled skills directory (<skills-dir>)",
             }),
             skill_count,

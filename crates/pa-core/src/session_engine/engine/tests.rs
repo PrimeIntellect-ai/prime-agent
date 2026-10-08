@@ -366,7 +366,7 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
         .map(|tool| tool.name().to_string())
         .collect();
     assert!(
-        names.iter().any(|name| name == "ipython"),
+        names.iter().any(|name| name == "python_repl"),
         "tools: {names:?}"
     );
 }

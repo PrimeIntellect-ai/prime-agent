@@ -485,7 +485,7 @@ pub async fn execute_ipython(
     })
 }
 
-/// The `ipython` tool definition: exact name, schema, and description.
+/// The `python_repl` tool definition: exact name, schema, and description.
 #[must_use]
 pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -> ToolDefinition {
     let options = Arc::new(options);
@@ -504,7 +504,7 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
                 let code = params
                     .get("code")
                     .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| anyhow::anyhow!("ipython tool requires a code string"))?
+                    .ok_or_else(|| anyhow::anyhow!("python_repl tool requires a code string"))?
                     .to_string();
                 execute_ipython(
                     &options,
@@ -518,11 +518,12 @@ pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -
         })
     };
     ToolDefinition {
-        name: "ipython".to_string(),
-        label: "ipython".to_string(),
+        name: pa_types::ai::PYTHON_TOOL_NAME.to_string(),
+        label: pa_types::ai::PYTHON_TOOL_NAME.to_string(),
         description: ipython_tool_description().to_string(),
         prompt_snippet:
-            "ipython - persistent Python REPL for code, state, and bash() orchestration".to_string(),
+            "python_repl - persistent Python REPL for code, state, and bash() orchestration"
+                .to_string(),
         // The kernel is single-threaded; calls must not run in parallel.
         execution_mode: Some(ExecutionMode::Sequential),
         parameters: ipython_tool_schema(),
