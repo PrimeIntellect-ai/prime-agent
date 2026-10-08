@@ -234,6 +234,8 @@ def run_case(binary, label, scenario, base_dir):
         "stopped": stopped,
         "elapsed_ms": round((time.monotonic() - started) * 1000),
         "requests": server.requests,
+        "wake_request_numbers": [row["number"] for row in server.requests if row["wake_marker"]],
+        "goal_context_request_numbers": [row["number"] for row in server.requests if row["goal_context"]],
         "request_count": len(server.requests),
         "event_types": [event.get("type") for event in events],
         "goal_statuses": goal_statuses,
@@ -292,17 +294,22 @@ def main():
                     result["binaries"][label]["version_probe"] = result["scenarios"][scenario][label]["version_probe"]
             result["differences"][scenario] = {
                 field: {"ts": ts[field], "rust": rust[field]}
-                for field in ("request_count", "wake_marker_count", "cap_reason_seen",
+                for field in ("request_count", "wake_marker_count", "wake_request_numbers",
+                              "goal_context_request_numbers", "cap_reason_seen",
                               "final_goal_status", "confirmed_goal_complete",
                               "model_completion_text_seen", "exit_code", "stopped")
                 if ts[field] != rust[field]
             }
+    result["parity"] = not result["fixture_error"] and not any(result["differences"].values())
+    result["requires_behavior_decision"] = any(result["differences"].values())
     args.receipt.write_text(json.dumps(result, indent=2) + "\n")
     print("goal parity receipt: %s" % args.receipt)
     for scenario, versions in result["scenarios"].items():
         print(scenario + ": " + ", ".join("%s requests=%s exit=%s stopped=%s" %
                                            (label, run["request_count"], run["exit_code"], run["stopped"])
                                            for label, run in versions.items()))
+    if result["requires_behavior_decision"]:
+        print("OBSERVED BEHAVIORAL DIVERGENCE: receipt requires an explicit review decision; this is not a parity pass")
     if result["fixture_error"]:
         print(result["fixture_error"], file=sys.stderr)
         return 1

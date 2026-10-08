@@ -318,7 +318,7 @@ jobs:
       # and only synthetic loopback providers/state. One leg avoids 8 downloads.
       - name: Compare the lifecycle binaries (pinned TS reference)
         id: lifecycle_parity
-        if: matrix.shard == 1 && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '')
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -346,7 +346,7 @@ jobs:
             fi
           done
       - name: Upload the binary comparison receipts
-        if: always() && matrix.shard == 1 && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '')
+        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lifecycle-parity-receipts
