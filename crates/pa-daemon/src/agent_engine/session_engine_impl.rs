@@ -918,6 +918,20 @@ impl SessionEngine for AgentSessionEngine {
         }
     }
 
+    /// One accepted `rlm.progress.note` from a child arrived through the
+    /// supervisor (TS's in-process child subscription): the registry's
+    /// roster row carries the newest note.
+    fn mark_child_note(&self, child_active_session_id: &str, message: &str, timestamp_ms: u64) {
+        if let Some(children) = &self.children {
+            let children = Arc::clone(children);
+            let child = child_active_session_id.to_string();
+            let message = message.to_string();
+            self.runtime.spawn(async move {
+                children.mark_child_note(&child, &message, timestamp_ms).await;
+            });
+        }
+    }
+
     /// The worker's turn completed: release child prompt tasks waiting on the boundary.
     fn on_turn_done(&self) {
         if let Some(children) = &self.children {

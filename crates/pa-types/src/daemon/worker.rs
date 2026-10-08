@@ -184,6 +184,17 @@ pub enum DaemonWorkerCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// One child progress note routed to the parent worker's registry:
+    /// updates the child's `progress_note` row, never queues a prompt.
+    WorkerDeliverProgressNote {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        child_active_session_id: String,
+        message: String,
+        timestamp_ms: u64,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     WorkerPrepareUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

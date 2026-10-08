@@ -99,6 +99,35 @@ async fn deliver_message_answers_the_ts_receipt_shape() {
     assert!(queue_texts(&worker.core, Lane::FollowUp).is_empty());
 }
 
+/// A progress-note delivery updates the child registry (no children on this
+/// worker: the engine default no-op) and never queues a prompt on either lane.
+#[tokio::test]
+async fn a_progress_note_delivery_never_queues_a_prompt() {
+    let worker = created_worker().await;
+    let response = worker
+        .dispatch(
+            "worker_deliver_progress_note",
+            &json!({
+                "childActiveSessionId": "source-session",
+                "message": "halfway done",
+                "timestampMs": 1_000,
+            }),
+        )
+        .await;
+    assert!(response.success, "progress note deliver failed: {response:?}");
+    assert_eq!(response.command, "worker_deliver_progress_note");
+    assert!(queue_texts(&worker.core, Lane::Steering).is_empty());
+    assert!(queue_texts(&worker.core, Lane::FollowUp).is_empty());
+
+    let invalid = worker
+        .dispatch(
+            "worker_deliver_progress_note",
+            &json!({ "childActiveSessionId": "", "message": "", "timestampMs": 0 }),
+        )
+        .await;
+    assert!(!invalid.success, "an empty note must be refused: {invalid:?}");
+}
+
 /// The row's content is the rendered prompt; the details carry the identity the
 /// collapsed card reads, and the marker still targets `agent_messages_clear`/`pause`.
 #[tokio::test]

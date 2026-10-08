@@ -240,6 +240,31 @@ impl Worker {
         response_success(None, command, Some(json!({ "queued": true })))
     }
 
+    /// One child progress note routed by the supervisor (TS's in-process
+    /// `rlm_progress_note` subscription): update the child's roster row;
+    /// never queue a prompt.
+    pub(crate) fn handle_worker_deliver_progress_note(&self, payload: &Value) -> DaemonResponse {
+        let child = payload
+            .get("childActiveSessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let message = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let timestamp_ms = payload.get("timestampMs").and_then(Value::as_u64).unwrap_or(0);
+        if child.is_empty() || message.is_empty() {
+            return response_failure(
+                None,
+                "worker_deliver_progress_note",
+                "progress note needs a child id and a message",
+                None,
+            );
+        }
+        self.engine.mark_child_note(child, message, timestamp_ms);
+        response_success(None, "worker_deliver_progress_note", None)
+    }
+
     /// Agent-to-agent delivery: render the `[agent-message from ...]` prompt and queue
     /// it on the requested lane with the `agent_message` custom row (the turn renders
     /// the collapsed card). Answers `queued` when running, else `delivered`.

@@ -145,6 +145,87 @@ impl Supervisor {
         }
     }
 
+    /// `notify_rlm_child_progress_note`: route one accepted child
+    /// `rlm.progress.note` to its parent worker as
+    /// `worker_deliver_progress_note` — a registry update on the parent's
+    /// child roster, never a prompt. Best-effort like TS's in-process
+    /// note push: a parent that is not resident (its children cannot be
+    /// running) drops the note instead of waking the session.
+    pub(crate) async fn handle_notify_rlm_child_progress_note(
+        self: &Arc<Self>,
+        command_id: &str,
+        command: &DaemonCommand,
+    ) -> DaemonResponse {
+        let DaemonCommand::NotifyRlmChildProgressNote {
+            target_active_session_id,
+            child_active_session_id,
+            message,
+            timestamp_ms,
+            ..
+        } = command
+        else {
+            return response_failure(
+                Some(command_id),
+                "notify_rlm_child_progress_note",
+                "invalid command",
+                None,
+            );
+        };
+        let fail = |error: String| {
+            response_failure(
+                Some(command_id),
+                "notify_rlm_child_progress_note",
+                &error,
+                None,
+            )
+        };
+        let target = match self.registry.resolve(target_active_session_id).await {
+            Ok(resident) => resident,
+            Err(_) => {
+                // Fire-and-forget parity: a gone parent never saw the TS
+                // note either; nothing wakes a session for it.
+                return response_success(
+                    Some(command_id),
+                    "notify_rlm_child_progress_note",
+                    Some(json!({ "delivered": false })),
+                );
+            }
+        };
+        let delivery = DaemonWorkerCommand::WorkerDeliverProgressNote {
+            id: None,
+            child_active_session_id: child_active_session_id.clone(),
+            message: message.clone(),
+            timestamp_ms: *timestamp_ms,
+            rest: Map::default(),
+        };
+        let payload = match serde_json::to_value(&delivery) {
+            Ok(payload) => payload,
+            Err(error) => return fail(format!("invalid delivery command: {error}")),
+        };
+        let response = self
+            .route_command_typed(
+                &target,
+                "worker_deliver_progress_note",
+                payload,
+                WORKER_REQUEST_TIMEOUT_MS,
+                RouteAdmission::SupervisorInternal,
+            )
+            .await;
+        match response {
+            Ok(response) if response.success => response_success(
+                Some(command_id),
+                "notify_rlm_child_progress_note",
+                Some(json!({ "delivered": true })),
+            ),
+            Ok(response) => fail(
+                response
+                    .error
+                    .unwrap_or_else(|| "delivery failed".to_string()),
+            ),
+            Err(error) => fail(format!("{error:#}")),
+        }
+    }
+
     /// The send source's live session summary (`get_state`), strict: the
     /// read's error fails the send (the roster's `worker_summary` downgrades
     /// instead).
@@ -677,5 +758,45 @@ mod tests {
             response.error.as_deref(),
             Some("Session worker is not connected")
         );
+    }
+
+    fn note_command(target: &str) -> DaemonCommand {
+        DaemonCommand::NotifyRlmChildProgressNote {
+            id: Some("n1".to_string()),
+            target_active_session_id: target.to_string(),
+            child_active_session_id: "child-live".to_string(),
+            message: "halfway".to_string(),
+            timestamp_ms: 1_000,
+            rest: Map::default(),
+        }
+    }
+
+    /// A child progress note routes a `worker_deliver_progress_note` to the
+    /// resident parent worker (the route attempt fails only because the
+    /// test worker has no live connection).
+    #[tokio::test]
+    async fn a_child_progress_note_routes_to_the_resident_parent() {
+        let supervisor = supervisor();
+        supervisor.registry.insert(resident("parent-1")).await;
+        let response = supervisor
+            .handle_notify_rlm_child_progress_note("n1", &note_command("parent-1"))
+            .await;
+        assert!(!response.success, "{response:?}");
+        assert_eq!(
+            response.error.as_deref(),
+            Some("Session worker is not connected")
+        );
+    }
+
+    /// A parent that is not resident drops the note (nothing wakes a
+    /// session for a best-effort note) and answers the TS-shaped truth.
+    #[tokio::test]
+    async fn a_child_progress_note_drops_when_the_parent_is_not_resident() {
+        let supervisor = supervisor();
+        let response = supervisor
+            .handle_notify_rlm_child_progress_note("n1", &note_command("ghost-parent"))
+            .await;
+        assert!(response.success, "{response:?}");
+        assert_eq!(response.data, Some(json!({ "delivered": false })));
     }
 }

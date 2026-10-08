@@ -144,6 +144,13 @@ struct ChildRecord {
     settled: bool,
     answer_preview: Option<String>,
     answer_captured: bool,
+    /// The child's newest accepted `rlm.progress.note` (TS
+    /// `progressNotes.at(-1)` on the run); a settled row keeps its last
+    /// note like the TS settled snapshot.
+    progress_note: Option<String>,
+    /// The accepted note's wall-clock timestamp; the roster row's
+    /// `last_activity_at` rides it (TS `touchRlmChildActivity`).
+    progress_note_at_ms: Option<u64>,
     /// A child agent message arrived since its task was admitted; the
     /// no-reply terminal notice is withheld once set.
     replied_since_task: bool,
@@ -176,6 +183,10 @@ struct ChildRecord {
     /// Serializes usage emissions for this child without holding the record lock across them.
     emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     last_emitted_status: Option<&'static str>,
+    /// The note gate beside the status gate (TS dedups the child snapshot
+    /// minus the activity fields): a changed note re-emits, an identical
+    /// one stays quiet.
+    last_emitted_note: Option<String>,
     /// Serializes parent-directed rename and delete for this child.
     rename_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
@@ -204,6 +215,9 @@ impl ChildRecord {
         }
         if let Some(error) = &self.error {
             snapshot["error"] = json!(error);
+        }
+        if let Some(note) = &self.progress_note {
+            snapshot["progressNote"] = json!(note);
         }
         snapshot
     }
@@ -615,6 +629,30 @@ impl SupervisorChildSessions {
         }
     }
 
+    /// Record one accepted `rlm.progress.note` from a child (the TS child
+    /// subscription's `rlm_progress_note` arm): the newest note replaces
+    /// any earlier one and the changed snapshot re-emits on the
+    /// child-update wire.
+    pub async fn mark_child_note(
+        &self,
+        child_active_session_id: &str,
+        message: &str,
+        timestamp_ms: u64,
+    ) {
+        let Some(record) = self.inner.find_record(child_active_session_id).await else {
+            return;
+        };
+        {
+            let mut record = record.lock().await;
+            if record.progress_note.as_deref() == Some(message) {
+                return;
+            }
+            record.progress_note = Some(message.to_string());
+            record.progress_note_at_ms = Some(timestamp_ms);
+        }
+        self.inner.emit_child_update(&record).await;
+    }
+
     /// Test seam: settle a pushed child record (the gate tests need a settled-only
     /// registry).
     #[cfg(test)]
@@ -652,6 +690,8 @@ impl SupervisorChildSessions {
                 settled: false,
                 answer_preview: None,
                 answer_captured: false,
+                progress_note: None,
+                progress_note_at_ms: None,
                 replied_since_task: false,
                 notice_delivered: false,
                 prompt_admitted: true,
@@ -663,6 +703,7 @@ impl SupervisorChildSessions {
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 last_emitted_status: None,
+                last_emitted_note: None,
                 rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
     }
@@ -726,9 +767,13 @@ impl SupervisorChildSessions {
             duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
             answer_preview: record.answer_preview.clone(),
             replied_since_task: None,
-            progress_note: None,
+            progress_note: record.progress_note.clone(),
             label: (!record.label.is_empty()).then(|| record.label.clone()),
-            last_activity_at: Some(record.started_at_ms),
+            last_activity_at: Some(
+                record
+                    .progress_note_at_ms
+                    .unwrap_or(record.started_at_ms),
+            ),
             activity_stale_ms: None,
         }
     }
@@ -818,10 +863,13 @@ impl SupervisorChildSessionsInner {
         let row = {
             let mut record = record.lock().await;
             let status = record.status();
-            if record.last_emitted_status == Some(status) {
+            if record.last_emitted_status == Some(status)
+                && record.last_emitted_note == record.progress_note
+            {
                 return;
             }
             record.last_emitted_status = Some(status);
+            record.last_emitted_note = record.progress_note.clone();
             record.snapshot_value()
         };
         sink(row);

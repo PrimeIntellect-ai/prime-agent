@@ -393,6 +393,93 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
         .is_some_and(|content| content.contains("the child final answer")));
 }
 
+/// TS parity for `rlm.progress_note` (TS `rlm_progress_note` on the child
+/// subscription): the newest note reaches the kernel roster row and the
+/// child-update wire, a changed note re-emits under an unchanged status,
+/// and a settled row keeps its last note.
+#[tokio::test]
+async fn a_child_progress_note_reaches_the_roster_and_the_update_sink() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    sessions
+        .push_test_child(RlmChildIdentity {
+            rlm_child_id: "child-id".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: Some("child-file".to_string()),
+            session_name: "note-child".to_string(),
+        })
+        .await;
+    let rows: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_rows = Arc::clone(&rows);
+    sessions.set_child_update_sink(Arc::new(move |child| {
+        sink_rows.lock().unwrap().push(child);
+    }));
+    sessions
+        .mark_child_note("child-live", "halfway done", 1_000)
+        .await;
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].progress_note.as_deref(),
+        Some("halfway done"),
+        "the roster row carries the newest note"
+    );
+    assert_eq!(
+        entries[0].last_activity_at,
+        Some(1_000),
+        "the note touched the row's activity"
+    );
+    {
+        let rows = rows.lock().unwrap();
+        assert_eq!(rows.len(), 1, "the first note emitted one row: {rows:?}");
+        assert!(
+            rows[0]["progressNote"] == json!("halfway done")
+                && rows[0]["status"] == json!("running")
+                && rows[0]["id"] == json!("child-id"),
+            "the wire row carries the note: {rows:?}"
+        );
+    }
+    // A changed note re-emits although the status never moved (the
+    // status-only gate swallowed notes before).
+    sessions
+        .mark_child_note("child-live", "almost done", 2_000)
+        .await;
+    {
+        let rows = rows.lock().unwrap();
+        assert_eq!(
+            rows.len(),
+            2,
+            "the changed note re-emitted under an unchanged status: {rows:?}"
+        );
+        assert!(
+            rows[1]["progressNote"] == json!("almost done")
+                && rows[1]["status"] == json!("running"),
+            "the second wire row carries the changed note: {rows:?}"
+        );
+    }
+    // An identical note is deduped (TS re-emits only a changed snapshot).
+    sessions
+        .mark_child_note("child-live", "almost done", 3_000)
+        .await;
+    assert_eq!(
+        rows.lock().unwrap().len(),
+        2,
+        "an identical note stays quiet"
+    );
+    // A settled row keeps its last note like the TS settled snapshot.
+    sessions.settle_test_child("child-live").await;
+    let entries = sessions.list_subagents().await.expect("child roster");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].status, "completed");
+    assert_eq!(
+        entries[0].progress_note.as_deref(),
+        Some("almost done"),
+        "the settled row keeps its last note"
+    );
+}
+
 #[tokio::test]
 async fn child_updates_surface_through_the_sink() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -1034,6 +1121,8 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         settled: false,
         answer_preview: None,
         answer_captured: false,
+        progress_note: None,
+        progress_note_at_ms: None,
         replied_since_task: false,
         notice_delivered: false,
         prompt_admitted: true,
@@ -1045,6 +1134,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         last_emitted_status: None,
+        last_emitted_note: None,
         rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // A running child that goes unreachable is the error class.

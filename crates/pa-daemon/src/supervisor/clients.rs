@@ -784,6 +784,12 @@ impl Supervisor {
                     .await;
                 (vec![response_line(&response)], false)
             }
+            DaemonCommand::NotifyRlmChildProgressNote { .. } => {
+                let response = self
+                    .handle_notify_rlm_child_progress_note(&command_id, command)
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::GetWorkerPeerTransport {
                 worker_token,
                 target_active_session_id,

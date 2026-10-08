@@ -381,6 +381,10 @@ pub trait SessionEngine: Send + Sync {
     /// session: the child's terminal no-reply notice can be withheld.
     fn mark_child_reply(&self, _child_active_session_id: &str) {}
 
+    /// One accepted `rlm.progress.note` from an RLM child of this session
+    /// reached the worker: the child's roster row carries the newest note.
+    fn mark_child_note(&self, _child_active_session_id: &str, _message: &str, _timestamp_ms: u64) {}
+
     /// The session's RLM children as wire snapshots (the `get_rlm_children`
     /// response and the context-tree children).
     fn rlm_child_snapshots(

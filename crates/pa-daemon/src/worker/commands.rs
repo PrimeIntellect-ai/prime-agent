@@ -116,6 +116,9 @@ impl Worker {
             "get_rlm_max_depth_status" => self.handle_get_rlm_max_depth_status(),
             "get_available_models" => self.handle_get_available_models(),
             "worker_deliver_message" => self.handle_worker_deliver_message(payload),
+            "worker_deliver_progress_note" => {
+                self.handle_worker_deliver_progress_note(payload)
+            }
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown().await,

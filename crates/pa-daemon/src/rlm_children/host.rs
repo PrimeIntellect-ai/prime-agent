@@ -132,6 +132,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     settled: false,
                     answer_preview: None,
                     answer_captured: false,
+                    progress_note: None,
+                    progress_note_at_ms: None,
                     replied_since_task: false,
                     notice_delivered: false,
                     prompt_admitted: false,
@@ -143,6 +145,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                     last_emitted_status: None,
+                    last_emitted_note: None,
                     rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
                 let record = Arc::new(Mutex::new(record));

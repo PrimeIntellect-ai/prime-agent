@@ -900,6 +900,7 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::RosterUnsubscribe { .. }
         | DaemonCommand::Create { .. }
         | DaemonCommand::SendMessage { .. }
+        | DaemonCommand::NotifyRlmChildProgressNote { .. }
         | DaemonCommand::AckResult { .. }
         | DaemonCommand::PrepareUpdateRestart { .. }
         | DaemonCommand::CommitUpdateRestart { .. }
@@ -955,6 +956,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::CancelRlmChild { .. } => "cancel_rlm_child",
         DaemonCommand::FactoryActivity { .. } => "factory_activity",
         DaemonCommand::DeleteRlmSubagent { .. } => "delete_rlm_subagent",
+        DaemonCommand::NotifyRlmChildProgressNote { .. } => "notify_rlm_child_progress_note",
         DaemonCommand::WaitForIdle { .. } => "wait_for_idle",
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
         DaemonCommand::GetSessionHeader { .. } => "get_session_header",

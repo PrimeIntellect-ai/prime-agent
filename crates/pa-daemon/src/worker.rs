@@ -625,9 +625,13 @@ impl Worker {
                     withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
-                // The accepted note frames as a session event on the pump.
+                // The accepted note frames as a session event on the pump and,
+                // for an RLM child, routes to the parent's supervisor registry
+                // (TS pushed the in-process `rlm_progress_note` subscription;
+                // the daemon child's parent lives behind the supervisor link).
                 let note_core = Arc::clone(&core);
                 let note_events = events.clone();
+                let note_link = Arc::clone(&roster_link);
                 let note_emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit =
                     Arc::new(move |message, timestamp| {
                         emit_worker_event_with(
@@ -639,6 +643,32 @@ impl Worker {
                                 "timestamp": timestamp,
                             }),
                         );
+                        let (child, parent) = {
+                            let core = note_core
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            (
+                                core.active_session_id.clone(),
+                                core.parent_active_session_id.clone(),
+                            )
+                        };
+                        let Some(parent) = parent else {
+                            return;
+                        };
+                        let command = json!({
+                            "type": "notify_rlm_child_progress_note",
+                            "targetActiveSessionId": parent,
+                            "childActiveSessionId": child,
+                            "message": message,
+                            "timestampMs": timestamp,
+                        });
+                        let link = Arc::clone(&note_link);
+                        tokio::spawn(async move {
+                            // Fire-and-forget like the TS event: a missing
+                            // parent worker drops the note, never the turn.
+                            let timeout = std::time::Duration::from_secs(30);
+                            let _ = link.request(command, timeout).await;
+                        });
                     });
                 concrete.set_progress_note_emit(note_emit);
             }

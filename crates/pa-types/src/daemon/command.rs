@@ -554,6 +554,18 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// A child worker forwards one accepted `rlm.progress.note` to its
+    /// parent's supervisor registry: a roster/wire update, never a prompt.
+    NotifyRlmChildProgressNote {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        target_active_session_id: String,
+        child_active_session_id: String,
+        message: String,
+        timestamp_ms: u64,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     WaitForIdle {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
