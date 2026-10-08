@@ -259,8 +259,7 @@ fn the_tui_battery_job_boots_the_binary_and_dumps_the_panes() {
         .find(|step| {
             step.get("uses")
                 .and_then(serde_yaml::Value::as_str)
-                .map(|uses| uses.starts_with("actions/upload-artifact"))
-                .unwrap_or(false)
+                .is_some_and(|uses| uses.starts_with("actions/upload-artifact"))
         })
         .expect("the job uploads the pane dumps");
     let upload_if = upload

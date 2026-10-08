@@ -72,6 +72,18 @@ fn newest_session() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
+    // The console codepages are console-session state: every exit path
+    // of this bin (the `?` early returns included) hands them back. The
+    // restore is a no-op when nothing was prepared.
+    if let Err(error) = replay() {
+        pa_types::platform::console_restore();
+        return Err(error);
+    }
+    pa_types::platform::console_restore();
+    Ok(())
+}
+
+fn replay() -> Result<()> {
     let args = Args::parse();
     let path = match &args.session {
         Some(p) => std::path::PathBuf::from(p),
@@ -115,10 +127,5 @@ fn main() -> Result<()> {
             // model.
             let _ = text;
         }),
-    )?;
-    // The console restore the CLI's exit funnel owns for the other
-    // surfaces: this bin does not go through the CLI (the broken-icons
-    // fix's exit half).
-    pa_types::platform::console_restore();
-    Ok(())
+    )
 }

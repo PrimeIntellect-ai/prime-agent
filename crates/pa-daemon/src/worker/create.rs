@@ -277,9 +277,10 @@ impl Worker {
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
-                        // Prime the usage fold on the file's final identity (the full-reader
-                        // fallback's rewrite replaces the inode), off the runtime and before
-                        // the core lock: summaries under the lock fold only the appended tail.
+                        // Prime the usage fold on the file's final identity,
+                        // off the runtime and before the core lock:
+                        // summaries under the lock fold only the appended
+                        // tail.
                         let primed = path.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             crate::session_store::read_session_info(&primed)

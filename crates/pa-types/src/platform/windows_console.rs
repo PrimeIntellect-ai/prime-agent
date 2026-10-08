@@ -112,14 +112,14 @@ mod winapi {
 /// the CLI's terminal-mode output). Idempotent (the first call records
 /// the originals; later calls re-apply the same values); a no-op when
 /// stdout is not a console (pipes, redirects, headless runs) and on
-/// non-Windows hosts. Returns whether a live console was prepared.
-#[must_use = "the console-prepare verdict decides whether the exit funnel owes a restore"]
-pub fn init() -> bool {
+/// non-Windows hosts. The mounts call it unconditionally - [`restore`]
+/// is a safe no-op when nothing was prepared, so no verdict returns.
+pub fn init() {
     #[cfg(windows)]
     {
         let handle = winapi::stdout_handle();
         let Some(original_mode) = winapi::output_mode(handle) else {
-            return false;
+            return;
         };
         let _ = ORIGINAL.set(OriginalConsole {
             output_cp: winapi::output_codepage(),
@@ -132,11 +132,6 @@ pub fn init() -> bool {
         let _ = winapi::set_output_codepage(winapi::cp_utf8());
         let _ = winapi::set_input_codepage(winapi::cp_utf8());
         let _ = winapi::set_output_mode(handle, original_mode | winapi::enable_vt());
-        true
-    }
-    #[cfg(not(windows))]
-    {
-        false
     }
 }
 
@@ -186,13 +181,22 @@ mod windows_tests {
     fn init_flips_the_console_to_utf8_and_vt_and_restore_hands_it_back() {
         let handle = winapi::stdout_handle();
         let Some(original_mode) = winapi::output_mode(handle) else {
-            assert!(!init(), "a non-console stdout must not be prepared");
+            // A redirected (non-console) stdout: the gate keeps the
+            // codepages untouched - a CI `tee` or a piped run must never
+            // flip the host console.
+            let before = (winapi::output_codepage(), winapi::input_codepage());
+            init();
+            assert_eq!(
+                (winapi::output_codepage(), winapi::input_codepage()),
+                before,
+                "a non-console stdout must not be prepared"
+            );
             return;
         };
         let original_output_cp = winapi::output_codepage();
         let original_input_cp = winapi::input_codepage();
 
-        assert!(init(), "a live console is prepared");
+        init();
         assert_eq!(winapi::output_codepage(), winapi::cp_utf8());
         assert_eq!(winapi::input_codepage(), winapi::cp_utf8());
         let mode = winapi::output_mode(handle).expect("the console mode");
@@ -228,10 +232,10 @@ mod portable_tests {
 
     /// The non-Windows contract the call sites rely on: both fns are
     /// total no-ops (the TUI mount and the exit funnel call them
-    /// unconditionally), and `init` answers false - nothing was prepared.
+    /// unconditionally).
     #[test]
     fn the_no_windows_arms_are_no_ops() {
-        assert!(!init());
+        init();
         restore();
     }
 }

@@ -108,6 +108,10 @@ fn daemon_endpoint(dir: &Path) -> PathBuf {
     }
     #[cfg(not(unix))]
     {
+        // Pipe names are host-global, so the unique suffix keeps parallel
+        // test binaries from colliding (the temp dir does not appear in
+        // the name).
+        let _ = dir;
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|stamp| stamp.as_nanos())
@@ -178,6 +182,20 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     }
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
     Supervisor { child, socket }
+}
+
+/// Wait until the session's runtime lease is free (no live owner), the
+/// bounded cold-reopen drain: a killed supervisor's workers exit on their
+/// supervisor-lost watchdog, never instantly.
+fn drain_session_lease(agent_dir: &Path, session_path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if pa_daemon::lease::live_lease_owner(agent_dir, session_path).is_none() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    panic!("the killed daemon's worker still held the session lease past the drain bound");
 }
 
 /// Wait until the supervisor answers a client connect (the readiness
@@ -416,6 +434,15 @@ async fn tui_reopen_renders_the_old_history() {
     // The cold reopen: the daemon (and its live worker) are gone; a fresh
     // supervisor boots against the same store.
     stop_supervisor(&mut supervisor);
+    // The killed supervisor's session workers can outlive it (unix's
+    // PDEATHSIG kills only the supervisor's own child; Windows has no
+    // equivalent - the worker exits on its supervisor-lost watchdog),
+    // and a lingering worker holds the session's runtime lease: a
+    // reopen before it exits answers the session-hold refusal, not the
+    // stored history. Drain the lease first (the first windows-runner
+    // run of this battery caught exactly this class: the reopen came
+    // back with an empty session id).
+    drain_session_lease(&agent_dir, &session_path);
     let second_supervisor = spawn_supervisor(dir.path());
     wait_for_daemon(&second_supervisor.socket).await;
 
@@ -432,6 +459,19 @@ async fn tui_reopen_renders_the_old_history() {
         height: 30,
     };
     let reopened = run_headless_bounded(options, plan).await;
+    // The triage loop's shape row: the windows runner's logs carry the
+    // attach's ids (the durable id rides the state snapshot; an empty
+    // one means the resumed worker served no store).
+    eprintln!(
+        "REOPEN DIAGNOSTIC: active={} session_id={} frames={} resume_hint={:?}",
+        reopened.active_session_id,
+        reopened.session_id,
+        reopened.frames.len(),
+        reopened.resume_hint
+    );
+    // The panes dump BEFORE the asserts: a red run uploads its evidence
+    // (the workflow's red-runs-too contract).
+    dump_frames("reopen-history", &reopened.frames);
     assert_eq!(
         reopened.session_id, session_id,
         "the reopen attached the stored session, not a new one"
@@ -513,10 +553,7 @@ async fn subagent_session_stays_a_distinct_store_entry() {
     assert_eq!(child_header.id, child_id);
     assert_ne!(parent_path, child_path, "separate store files");
     assert_eq!(
-        child_header
-            .parent_session
-            .as_deref()
-            .map(|parent| Path::new(parent)),
+        child_header.parent_session.as_deref().map(Path::new),
         Some(parent_path.as_path()),
         "the child's header names the parent's file"
     );
@@ -599,6 +636,8 @@ async fn subagent_session_stays_a_distinct_store_entry() {
     .await
     .expect("agents view run")
     .outcome;
+    // The panes dump BEFORE the asserts: a red run uploads its evidence.
+    dump_frames("subagent-distinct", &view.frames);
     let rendered = view.frames.join("\n");
     assert!(
         rendered.contains("triage-parent"),
@@ -612,7 +651,6 @@ async fn subagent_session_stays_a_distinct_store_entry() {
         rendered.contains("1 subagent"),
         "the parent's summary row counts its distinct child:\n{rendered}"
     );
-    dump_frames("subagent-distinct", &view.frames);
 }
 
 /// Scenario (3): the agent-message rows carry their glyph vocabulary, and
@@ -644,6 +682,7 @@ async fn agent_message_rows_dump_their_glyphs() {
         height: 30,
     };
     let outcome = run_headless_bounded(options, plan).await;
+    dump_frames("glyph-rows", &outcome.frames);
     let rendered = outcome.frames.join("\n");
     assert!(
         rendered.contains("the glyph battery question"),
@@ -653,5 +692,4 @@ async fn agent_message_rows_dump_their_glyphs() {
         rendered.contains("the glyph battery reply"),
         "the agent message row renders:\n{rendered}"
     );
-    dump_frames("glyph-rows", &outcome.frames);
 }
