@@ -187,48 +187,79 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
-/// grace, SIGKILL, verify. The signals ride the kernel-held pidfd: a pid
-/// recycled in the check-then-signal window never receives the signal.
+/// grace, SIGKILL, verify. The signals ride the kernel-held pidfd where
+/// the platform has one; on unix without a pidfd arm they ride kill(2)
+/// instead, gated by the identity check re-run immediately before each
+/// signal, so a recycled pid never receives one.
 async fn stop_target_within(
     target: &ReapTarget,
     term_grace: Duration,
     kill_verify: Duration,
 ) -> ReapOutcome {
-    // The handle opens BEFORE the identity check and the check runs WHILE
-    // it is held: a target that dies and has its pid recycled in between
-    // would otherwise leave the handle pinning the REPLACEMENT - open
-    // first, then verify the pid still names our process, and only then
-    // does any signal ride the held fd (a signal through this fd can
-    // reach the pinned process and nothing else, ever).
-    let Ok(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
-        // The kernel-held handle is unavailable (an unsupported platform,
-        // an old kernel, or a process that just exited): the conservative
-        // default never signals - a missed reap is recoverable, a wrong
-        // one is not. A LIVE process behind an unobtainable handle is NOT
-        // gone: the terminal stop keeps its tombstoned descriptor (the
-        // next boot retries), never deletes it behind a false AlreadyGone.
-        if identity_current(target) && crate::lease::is_process_alive(target.pid).unwrap_or(false) {
-            return ReapOutcome::Survived;
+    match pa_core::platform::process::open_pidfd(target.pid) {
+        // The fd opens before the identity check and is held across it and
+        // every signal, so only the pinned process can receive one.
+        Ok(pidfd) => {
+            let outcome = escalate(
+                target,
+                |signal| pa_core::platform::process::pidfd_signal(pidfd, signal),
+                term_grace,
+                kill_verify,
+            )
+            .await;
+            pa_core::platform::process::close_pidfd(pidfd);
+            outcome
         }
-        return ReapOutcome::AlreadyGone;
-    };
+        Err(error) if cfg!(unix) && error.kind() == std::io::ErrorKind::Unsupported => {
+            escalate(
+                target,
+                |signal| {
+                    if identity_current(target) {
+                        let _ = pa_core::platform::process::kill_pid(target.pid as i32, signal);
+                    }
+                    true
+                },
+                term_grace,
+                kill_verify,
+            )
+            .await
+        }
+        // Every other unobtainable handle keeps the conservative default:
+        // it never signals. A LIVE process behind it is NOT gone: the
+        // terminal stop keeps its tombstoned descriptor (the next boot
+        // retries), never deletes it behind a false AlreadyGone.
+        Err(_) => {
+            if identity_current(target)
+                && crate::lease::is_process_alive(target.pid).unwrap_or(false)
+            {
+                ReapOutcome::Survived
+            } else {
+                ReapOutcome::AlreadyGone
+            }
+        }
+    }
+}
+
+/// The escalation ladder both signal carriers ride: gone check, SIGTERM,
+/// grace, SIGKILL, verify.
+async fn escalate(
+    target: &ReapTarget,
+    signal: impl Fn(pa_core::platform::process::Signal) -> bool,
+    term_grace: Duration,
+    kill_verify: Duration,
+) -> ReapOutcome {
     if !identity_current(target) || !crate::lease::is_process_alive(target.pid).unwrap_or(false) {
-        pa_core::platform::process::close_pidfd(pidfd);
         return ReapOutcome::AlreadyGone;
     }
-    if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
+    if signal(pa_core::platform::process::Signal::Term) {
         if await_gone(target, term_grace).await {
-            pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Term;
         }
-        if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Kill)
-            && await_gone(target, kill_verify).await
+        if signal(pa_core::platform::process::Signal::Kill) && await_gone(target, kill_verify).await
         {
-            pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Kill;
         }
     }
-    pa_core::platform::process::close_pidfd(pidfd);
     ReapOutcome::Survived
 }
 
@@ -666,12 +697,9 @@ mod tests {
 
     /// Kills and reaps the child on any exit path (a failed assertion in
     /// between would otherwise leak the `sleep` into the test machine: the
-    /// std child kills nothing on drop). Linux only: the guard exists for
-    /// the /proc census tests, which never compile elsewhere.
-    #[cfg(target_os = "linux")]
+    /// std child kills nothing on drop).
     struct ReapOnDrop(Option<std::process::Child>);
 
-    #[cfg(target_os = "linux")]
     impl Drop for ReapOnDrop {
         fn drop(&mut self) {
             if let Some(mut child) = self.0.take() {
@@ -762,21 +790,23 @@ mod tests {
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
     }
 
-    /// The `bash` ignores SIGTERM without spawning a child (a leaked grandchild would outlive
-    /// the guard's kill); its marker file is the readiness barrier.
-    #[cfg(target_os = "linux")]
+    /// The `bash` records SIGTERM without exiting or spawning a child (a leaked
+    /// grandchild would outlive the guard's kill); the trap marker is the readiness
+    /// barrier and the TERM record the escalation must leave before its KILL.
     #[tokio::test]
     async fn a_term_ignoring_process_dies_to_the_stop_escalation() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let trap_armed = dir.path().join("trap-armed");
+        let term_delivered = dir.path().join("term-delivered");
         let child = std::process::Command::new("bash")
             .arg("-c")
-            .arg("trap '' TERM; : > \"$1\"; while :; do :; done")
+            .arg("trap ': > \"$2\"' TERM; : > \"$1\"; while :; do :; done")
             .arg("bash")
             .arg(&trap_armed)
+            .arg(&term_delivered)
             .spawn()
             .expect("spawn term-ignoring bash");
-        let guard = ReapOnDrop(Some(child));
+        let mut guard = ReapOnDrop(Some(child));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !trap_armed.exists() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -784,11 +814,21 @@ mod tests {
         assert!(trap_armed.exists(), "the trap never armed");
         let pid = guard.0.as_ref().expect("guard holds the child").id();
         let outcome = stop_process(pid, crate::lease::get_process_start_id(pid)).await;
-        drop(guard);
         assert_eq!(
             outcome,
             ReapOutcome::Kill,
             "the stop escalation must SIGKILL a term-ignoring worker"
+        );
+        assert!(
+            term_delivered.exists(),
+            "the escalation must deliver its TERM before the KILL"
+        );
+        let mut child = guard.0.take().expect("guard holds the child");
+        let status = child.wait().expect("reap the escalated child");
+        assert_eq!(
+            pa_core::platform::process::termination_signal(&status),
+            Some(9),
+            "the child's death must be the escalation's SIGKILL"
         );
     }
 
