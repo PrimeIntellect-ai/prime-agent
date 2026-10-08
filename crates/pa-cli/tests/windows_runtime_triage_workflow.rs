@@ -93,10 +93,9 @@ const SCENARIO_TESTS: [&str; 3] = [
 
 #[test]
 fn the_battery_source_defines_the_three_scenarios() {
-    let battery = fs::read_to_string(
-        repo_root().join("crates/pa-cli/tests/windows_runtime_triage_e2e.rs"),
-    )
-    .expect("read the battery source");
+    let battery =
+        fs::read_to_string(repo_root().join("crates/pa-cli/tests/windows_runtime_triage_e2e.rs"))
+            .expect("read the battery source");
     for scenario in SCENARIO_TESTS {
         assert!(
             battery.contains(&format!("async fn {scenario}")),
@@ -129,16 +128,15 @@ fn the_pr_wave_runs_on_windows_touched_paths() {
         .get("paths")
         .and_then(serde_yaml::Value::as_sequence)
         .expect("the pull_request trigger carries a Windows-touched paths filter");
-    let paths: Vec<&str> = paths
-        .iter()
-        .filter_map(serde_yaml::Value::as_str)
-        .collect();
+    let paths: Vec<&str> = paths.iter().filter_map(serde_yaml::Value::as_str).collect();
     assert!(
         paths.contains(&"crates/**"),
         "every crate-source PR is Windows-touched: {paths:?}"
     );
     assert!(
-        paths.iter().any(|path| path.ends_with("windows-runtime-triage.yml")),
+        paths
+            .iter()
+            .any(|path| path.ends_with("windows-runtime-triage.yml")),
         "workflow edits re-run the workflow: {paths:?}"
     );
     assert!(
@@ -155,9 +153,7 @@ fn the_nightly_wave_runs_on_main() {
         .and_then(serde_yaml::Value::as_sequence)
         .expect("the workflow carries the nightly schedule");
     assert!(
-        schedule
-            .iter()
-            .any(|entry| entry.get("cron").is_some()),
+        schedule.iter().any(|entry| entry.get("cron").is_some()),
         "a nightly cron entry exists: {schedule:?}"
     );
 }
@@ -233,11 +229,8 @@ fn the_tui_battery_job_boots_the_binary_and_dumps_the_panes() {
 
     // The broken-icons fix's mechanism battery: the cfg(windows) console
     // tests run on the runner the PR wave ships to.
-    runs
-        .iter()
-        .find(|run| {
-            run.contains("cargo test --locked -p pa-types --lib console")
-        })
+    runs.iter()
+        .find(|run| run.contains("cargo test --locked -p pa-types --lib console"))
         .expect("the job runs the pa-types console battery on the runner");
 
     // The battery: the three scripted TUI scenarios, with the dump dir the

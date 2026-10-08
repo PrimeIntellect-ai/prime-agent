@@ -40,9 +40,9 @@
 //! everything else - the scripted engine, the headless TUI driver, the
 //! store reads - is platform-neutral product code.
 
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -334,7 +334,10 @@ async fn create_session_via_daemon(
 /// Every session file under `session_dir` with a readable header.
 fn session_files(session_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for entry in std::fs::read_dir(session_dir).expect("session dir").flatten() {
+    for entry in std::fs::read_dir(session_dir)
+        .expect("session dir")
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
             files.push(path);
@@ -502,8 +505,8 @@ async fn subagent_session_stays_a_distinct_store_entry() {
         .find(|path| path.as_path() != parent_path.as_path())
         .expect("the child's own file")
         .clone();
-    let parent_header = pa_daemon::session_store::read_session_header(&parent_path)
-        .expect("parent header");
+    let parent_header =
+        pa_daemon::session_store::read_session_header(&parent_path).expect("parent header");
     let child_header =
         pa_daemon::session_store::read_session_header(&child_path).expect("child header");
     assert_eq!(parent_header.id, parent_id);
@@ -549,11 +552,13 @@ async fn subagent_session_stays_a_distinct_store_entry() {
         .find(|row| row["sessionFile"] == json!(child_path.display().to_string()))
         .expect("the child row names the child's OWN file");
     assert_eq!(
-        parent_row["sessionId"], json!(parent_id),
+        parent_row["sessionId"],
+        json!(parent_id),
         "the parent row's session id: {parent_row}"
     );
     assert_eq!(
-        child_row["sessionId"], json!(child_id),
+        child_row["sessionId"],
+        json!(child_id),
         "the child row's session id: {child_row}"
     );
 
