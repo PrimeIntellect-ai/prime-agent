@@ -820,9 +820,15 @@ if ($uvKnown) {
         # own: a stuck one is killed after the grace instead of blocking
         # the install the watchdog exists to end.
         $taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList '/PID', $prewarm.Id, '/T', '/F' -WindowStyle Hidden -PassThru
-        if (-not $taskkill.WaitForExit(5000)) {
-            $null = $taskkill.Kill()
-            $null = $taskkill.WaitForExit(5000)
+        try {
+            if (-not $taskkill.WaitForExit(5000)) {
+                $null = $taskkill.Kill()
+                $null = $taskkill.WaitForExit(5000)
+            }
+        } catch {
+            # The helper's death is not the install's: a helper that
+            # exited between the bound and the kill throws here, and
+            # the launcher's own observed exit below is the verdict.
         }
         $null = $prewarm.WaitForExit(15000)
         $prewarmStopped = $prewarm.HasExited

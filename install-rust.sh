@@ -3254,14 +3254,18 @@ if uv_on_path \
     prewarm_tree_stopped="yes"
     if [ "$prewarm_pgrep" = "yes" ] && [ -n "${prewarm_tree:-}" ]; then
       for prewarm_node in $prewarm_tree; do
-        if kill -0 "$prewarm_node" 2>/dev/null; then
-          # A zombie is a dead process whose parent has not reaped it
-          # yet - the runner owns the launcher's reap and is not waited
-          # for on this path - so it counts as stopped, like the
-          # `--version` probe's own rule for `kill -0`.
-          ps -o stat= -p "$prewarm_node" 2>/dev/null | grep -q '^Z' \
-            || prewarm_tree_stopped="no"
-        fi
+        # The ps state is sampled FIRST: a node that dies and reaps
+        # between two probes is stopped, and a zombie - a dead process
+        # whose parent has not reaped it yet, the runner owning the
+        # launcher's reap and never waited for on this path - is
+        # stopped too. ps showing a live state, or ps seeing nothing
+        # while kill -0 still can, is the only not-stopped.
+        prewarm_state="$(ps -o stat= -p "$prewarm_node" 2>/dev/null)" || true
+        case "$prewarm_state" in
+          '') if kill -0 "$prewarm_node" 2>/dev/null; then prewarm_tree_stopped="no"; fi ;;
+          Z*) ;;
+          *) prewarm_tree_stopped="no" ;;
+        esac
       done
     else
       prewarm_tree_stopped="no"
