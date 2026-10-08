@@ -260,7 +260,7 @@ async fn drive(
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&partial, &bytes)?;
-                std::fs::rename(&partial, &backup)?;
+                pa_telemetry::rename_onto(&partial, &backup)?;
                 Ok(())
             })();
             insured.map_err(|error| {
