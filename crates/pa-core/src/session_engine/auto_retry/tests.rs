@@ -1265,3 +1265,56 @@ async fn an_unrefreshed_rejection_at_the_exhaustion_boundary_stays_within_budget
         "the unrefreshed rejection never issues a fifth beyond-budget request"
     );
 }
+
+/// A just-refreshed credential never waits out an over-cap server
+/// request: the auth seam's grant re-issues immediately instead of
+/// wasting the exchange on the give-up path.
+#[tokio::test]
+async fn a_refreshed_grant_re_issues_past_an_over_cap_wait() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match index {
+                    0 => error_message(Some("auth"), Some(401), Some(60_000)),
+                    _ => ok_message(),
+                })
+            }
+        },
+        move |event| {
+            let _ = event;
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the recovery seam runs once despite the over-cap wait"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the refreshed grant re-issues past the over-cap request"
+    );
+}

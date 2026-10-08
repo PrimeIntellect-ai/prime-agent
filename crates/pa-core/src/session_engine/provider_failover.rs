@@ -290,10 +290,10 @@ where
             .await?;
             continue;
         }
-        // The auth retry re-issues on the current provider: consume its
-        // one-shot grant here (a later failure falls to the ceiling
-        // check and switches).
-        auth_quick_retry = false;
+        // The grant stays visible through the delay match: the refreshed
+        // credential's retry re-issues past a per-provider ceiling, a
+        // spent episode, and an over-cap server wait alike — consumed by
+        // the arm that issues it.
         let delay = failover_retry_delay(
             retries_on_provider,
             provider_stream_failure_retry_after_ms(&message),
@@ -305,46 +305,58 @@ where
             // 2026-09-23): the jittered value is both waited and
             // reported.
             ProviderRetryDelay::Wait { delay_ms } => {
+                // The ordinary wait issues the auth retry too: consume its
+                // one-shot grant here (a later failure falls to the
+                // ceiling check and switches).
+                auth_quick_retry = false;
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
-                if switched {
-                    let _ = restore().await?;
-                }
-                // The give-up sentence here is the park's abort message
-                // (TS `reset-too-far`).
-                let abort = format!(
+                // The refreshed credential's one retry never waits out an
+                // over-cap server request: the auth seam's grant re-issues
+                // immediately instead of wasting the exchange.
+                if auth_quick_retry {
+                    auth_quick_retry = false;
+                    0
+                } else {
+                    if switched {
+                        let _ = restore().await?;
+                    }
+                    // The give-up sentence here is the park's abort message
+                    // (TS `reset-too-far`).
+                    let abort = format!(
                     "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
                     retry_after_ms.div_ceil(1000),
                     quick_policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam: other
-                // server-requested waits keep the give-up.
-                let parked = if is_quota_block_failure(&message) {
-                    match park.as_deref_mut() {
-                        Some(park) => park(message.clone(), &abort).await,
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let final_error = match parked {
-                    // The parked status replaces the give-up (TS
-                    // `_finishQuotaParkedTurn`'s `finalError`).
-                    Some(outcome) => outcome.status_message,
-                    None => format!(
-                        "{abort}: {}",
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    ),
-                };
-                emit(AutoRetryEvent::End {
-                    success: false,
-                    attempt: total_retries - 1,
-                    final_error: Some(final_error),
-                    restored_model: None,
-                })
-                .await?;
-                return Ok(message);
+                    // The park seam is a quota-failure seam: other
+                    // server-requested waits keep the give-up.
+                    let parked = if is_quota_block_failure(&message) {
+                        match park.as_deref_mut() {
+                            Some(park) => park(message.clone(), &abort).await,
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let final_error = match parked {
+                        // The parked status replaces the give-up (TS
+                        // `_finishQuotaParkedTurn`'s `finalError`).
+                        Some(outcome) => outcome.status_message,
+                        None => format!(
+                            "{abort}: {}",
+                            message.error_message.as_deref().unwrap_or("unknown error"),
+                        ),
+                    };
+                    emit(AutoRetryEvent::End {
+                        success: false,
+                        attempt: total_retries - 1,
+                        final_error: Some(final_error),
+                        restored_model: None,
+                    })
+                    .await?;
+                    return Ok(message);
+                }
             }
         };
         emit(AutoRetryEvent::Start {
@@ -405,6 +417,39 @@ mod tests {
 
     fn error_message(kind: Option<&str>, status: Option<u16>, error: &str) -> AssistantMessage {
         let details = serde_json::json!({ "kind": kind, "status": status });
+        AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            })],
+            api: String::new(),
+            provider: "primary".to_string(),
+            model: "glm-5.3".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(details),
+            }]),
+            usage: Usage::zero(),
+            stop_reason: StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(error.to_string()),
+            timestamp: 0,
+        }
+    }
+
+    /// One auth failure carrying a server-requested wait (the
+    /// `retryAfterMs` the delay ladder reads).
+    fn auth_message_with_wait(
+        status: Option<u16>,
+        error: &str,
+        retry_after_ms: u64,
+    ) -> AssistantMessage {
+        let details =
+            serde_json::json!({ "kind": "auth", "status": status, "retryAfterMs": retry_after_ms });
         AssistantMessage {
             content: vec![AssistantContent::Text(TextContent {
                 text: String::new(),
@@ -1283,6 +1328,81 @@ mod tests {
             switches.lock().unwrap().as_slice(),
             ["backup-a/glm-5.3"],
             "the unchanged credential switches instead of re-issuing past the ceiling"
+        );
+    }
+
+    /// A just-refreshed credential never waits out an over-cap server
+    /// request in the chain either: the auth seam's grant re-issues
+    /// immediately on the current provider instead of refreshing and
+    /// then ending the turn unused.
+    #[tokio::test]
+    async fn a_refreshed_grant_re_issues_past_an_over_cap_wait() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 => auth_message_with_wait(Some(401), "token rejected", 120_000),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs once despite the over-cap wait"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the refreshed grant re-issues past the over-cap request"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the refreshed primary keeps its re-issue before any switch"
         );
     }
 }

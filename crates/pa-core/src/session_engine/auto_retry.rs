@@ -198,40 +198,48 @@ where
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
-                // The give-up sentence of this arm is the park's abort
-                // message (the TS wait loop's `reset-too-far` analogue).
-                let abort = format!(
+                // The refreshed credential's one retry never waits out an
+                // over-cap server request: the auth seam's grant re-issues
+                // immediately instead of wasting the exchange.
+                if auth_quick_retry {
+                    auth_quick_retry = false;
+                    0
+                } else {
+                    // The give-up sentence of this arm is the park's abort
+                    // message (the TS wait loop's `reset-too-far` analogue).
+                    let abort = format!(
                     "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
                     retry_after_ms.div_ceil(1000),
                     policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam: other
-                // server-requested waits keep the give-up.
-                let parked = if is_quota_block_failure(&message) {
-                    match park.as_deref_mut() {
-                        Some(park) => park(message.clone(), &abort).await,
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let final_error = match parked {
-                    // The turn settles as the park's pause, not its
-                    // death: the parked status replaces the give-up.
-                    Some(outcome) => outcome.status_message,
-                    None => format!(
-                        "{abort}: {}",
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    ),
-                };
-                emit(AutoRetryEvent::End {
-                    success: false,
-                    attempt: retries_performed - 1,
-                    restored_model: None,
-                    final_error: Some(final_error),
-                })
-                .await?;
-                return Ok(message);
+                    // The park seam is a quota-failure seam: other
+                    // server-requested waits keep the give-up.
+                    let parked = if is_quota_block_failure(&message) {
+                        match park.as_deref_mut() {
+                            Some(park) => park(message.clone(), &abort).await,
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let final_error = match parked {
+                        // The turn settles as the park's pause, not its
+                        // death: the parked status replaces the give-up.
+                        Some(outcome) => outcome.status_message,
+                        None => format!(
+                            "{abort}: {}",
+                            message.error_message.as_deref().unwrap_or("unknown error"),
+                        ),
+                    };
+                    emit(AutoRetryEvent::End {
+                        success: false,
+                        attempt: retries_performed - 1,
+                        restored_model: None,
+                        final_error: Some(final_error),
+                    })
+                    .await?;
+                    return Ok(message);
+                }
             }
         };
         emit(AutoRetryEvent::Start {

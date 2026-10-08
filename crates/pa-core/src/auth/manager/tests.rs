@@ -1113,7 +1113,7 @@ fn an_api_key_peer_replacement_serves_without_a_fetch() {
             &outcome,
             Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
         ),
-        "the replacement serves without spending the obsolete refresh token: {outcome:?}"
+        "the replacement serves without spending the obsolete refresh token"
     );
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -1171,7 +1171,7 @@ fn a_failed_fetch_still_serves_a_landed_api_key_replacement() {
             &outcome,
             Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
         ),
-        "the standing replacement settles the failed fetch: {outcome:?}"
+        "the standing replacement settles the failed fetch"
     );
 }
 
