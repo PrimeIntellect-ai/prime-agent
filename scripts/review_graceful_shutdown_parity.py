@@ -239,9 +239,10 @@ def run_one(kind, binary, root):
         prompt("busy")
         until("busy stream chunk", lambda: provider.chunks["busy"] >= 1)
         client.command({"type": "shutdown"})
-        until("daemon shutdown exit", lambda: daemon.poll() is not None, 45)
+        # The TS supervisor waits for connected clients to leave before exit.
         client.close()
         client = None
+        until("daemon shutdown exit", lambda: daemon.poll() is not None, 45)
         daemon2, client = launch()
         result["restart_hello"] = {key: client.hello.get(key) for key in
                                    ("appVersion", "protocol", "schemaId")}
@@ -273,6 +274,8 @@ def run_one(kind, binary, root):
             "busy_transcript_sha256": digest(sessions["busy"]["file"]),
         }
         client.command({"type": "shutdown"})
+        client.close()
+        client = None
         until("restarted daemon exit", lambda: daemon2.poll() is not None, 45)
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"
