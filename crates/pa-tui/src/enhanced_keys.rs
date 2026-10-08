@@ -60,19 +60,9 @@
 //! 250ms — measured: the raced suspend's teardown waits to ~250ms on a
 //! silent pty and lands at its dispatch on every answered class).
 //!
-//! DIVERGENCE FROM TS (the shift-modified printable bug class): this port
-//! never arms modifyOtherKeys mode 2 and instead resets it
-//! (`\x1b[>4;0m`) at every surface start. TS parses the resulting
-//! `CSI 27;<mods>;<key>~` sequences itself (keys.ts
-//! `parseModifyOtherKeysSequence`), but crossterm 0.28 has no case for
-//! them and drops the whole pending input buffer on the parse error
-//! (`Parser::advance` clears on `Err`) — a terminal in mode 2 (a sticky
-//! mode any other pane or process may have armed) makes shift-modified
-//! printables like `shift+=` vanish entirely. The reset returns such
-//! terminals to legacy encodings (shift+= arrives as the produced `+`),
-//! and the kitty path covers the enhanced-reporting surface crossterm
-//! can parse (kitty CSI-u with shifted alternates resolves to the
-//! produced character in crossterm's own parser).
+//! We reset modifyOtherKeys mode 2 at each surface start to keep legacy
+//! printable-key behavior. Some terminals still emit modifyOtherKeys for
+//! modified control keys; the vendored parser accepts those reports.
 //!
 //! Every mode-flag transition is serialized (a module-wide lock pairs each
 //! flag write with its escape write), and the force-quit exit path marks
@@ -151,10 +141,10 @@ fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Whether the kitty probe's answer window is open. The input reader keys
-/// its bounded poll cadence on this so its park cannot starve the probe.
-pub(crate) fn query_in_flight() -> bool {
-    QUERY_IN_FLIGHT.load(Ordering::SeqCst)
+/// Whether Kitty setup or its probe is pending. Keep input polls bounded even
+/// before the first draw starts the probe, so an idle reader cannot starve it.
+pub(crate) fn kitty_probe_pending() -> bool {
+    !KITTY_PROBED.load(Ordering::SeqCst) || QUERY_IN_FLIGHT.load(Ordering::SeqCst)
 }
 
 /// Mark the terminal released for process exit, before writing the restore
@@ -283,6 +273,11 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         write_all(out, ENABLE_BRACKETED_PASTE)?;
     }
     write_all(out, MODIFY_OTHER_KEYS_RESET)?;
+    // Ghostty keeps keyboard flags per screen. The first draw enables Kitty once
+    // the alternate screen is painted; bracketed paste is already safe to enable.
+    if !crate::altscreen::active() {
+        return Ok(());
+    }
     match kitty_action(
         KITTY_SUPPORTED.load(Ordering::SeqCst),
         KITTY_PROBED.load(Ordering::SeqCst),
@@ -296,7 +291,7 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                 KeyboardCapability::Supported => {
                     KITTY_PROBED.store(true, Ordering::SeqCst);
                     record_kitty_supported();
-                    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+                    if !KITTY_ACTIVE.load(Ordering::SeqCst) {
                         // The stale-level drain: clear the levels a
                         // killed session (or a miscounting relay) left
                         // before this process's own push (see
@@ -305,6 +300,7 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                             write_all(out, POP_KITTY_FLAGS)?;
                         }
                         write_all(out, ENABLE_KITTY_FLAGS)?;
+                        KITTY_ACTIVE.store(true, Ordering::SeqCst);
                     }
                 }
                 KeyboardCapability::Unsupported => {
@@ -319,7 +315,7 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
             }
         }
         KittyAction::PushFlags => {
-            if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+            if !KITTY_ACTIVE.load(Ordering::SeqCst) {
                 // The stale-level drain (see STALE_LEVEL_DRAIN): a
                 // suspend's pop and resume's re-push stay balanced; a
                 // stale level from a killed session levels out here.
@@ -327,6 +323,7 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                     write_all(out, POP_KITTY_FLAGS)?;
                 }
                 write_all(out, ENABLE_KITTY_FLAGS)?;
+                KITTY_ACTIVE.store(true, Ordering::SeqCst);
             }
         }
         KittyAction::None => {}
@@ -487,13 +484,13 @@ fn enable_kitty(out: &mut Stdout) {
     if EXIT_RELEASE.load(Ordering::SeqCst) {
         return;
     }
-    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
+    if !KITTY_ACTIVE.load(Ordering::SeqCst) {
         // The stale-level drain (see STALE_LEVEL_DRAIN): the probe
         // answer's push drains the stale levels too.
         for _ in 0..STALE_LEVEL_DRAIN {
             let _ = write_all(out, POP_KITTY_FLAGS);
         }
-        let _ = write_all(out, ENABLE_KITTY_FLAGS);
+        KITTY_ACTIVE.store(write_all(out, ENABLE_KITTY_FLAGS).is_ok(), Ordering::SeqCst);
     }
 }
 

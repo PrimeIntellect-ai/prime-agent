@@ -112,10 +112,10 @@ where
             // The wait never runs past a held escape sequence's deadline (the guard flushes on the
             // next wake); otherwise the reader parks edge-driven on real input, so an idle surface
             // costs no wakeups. Two bounded exceptions: a held sequence's flush deadline, and the
-            // kitty probe's answer window (`query_in_flight`), whose slices must interleave through
-            // crossterm's process-global event-reader lock.
+            // Kitty setup and its answer window: an indefinite park before the first draw
+            // would hold crossterm's reader lock and prevent the deferred probe from reading replies.
             let timeout = guard.poll_deadline(Instant::now()).or_else(|| {
-                if thread_waker.is_none() || crate::enhanced_keys::query_in_flight() {
+                if thread_waker.is_none() || crate::enhanced_keys::kitty_probe_pending() {
                     Some(Duration::from_millis(POLL_TIMEOUT_MS))
                 } else {
                     None
