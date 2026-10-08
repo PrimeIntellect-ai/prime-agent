@@ -133,6 +133,72 @@ async fn engine_runs_tool_loop_and_persists() {
     let _ = ToolDefinitionBridge::new;
 }
 
+/// The built agent pins the session id into every provider request (TS
+/// `sessionId` on the Agent options, sdk.ts:326): the provider-side
+/// affinity headers and `prompt_cache_key` read it from
+/// `StreamRequestOptions`.
+#[tokio::test]
+async fn create_session_pins_the_provider_session_id() {
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    provider.push_text_turn("ok");
+    let inner = provider.stream_fn();
+    let captured: Arc<std::sync::Mutex<Vec<Option<String>>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Arc::clone(&captured);
+    let stream_fn: pa_agent::stream::StreamFn =
+        Arc::new(move |model, context, mut options| {
+            capture
+                .lock()
+                .unwrap()
+                .push(std::mem::take(&mut options.session_id));
+            inner(model, context, options)
+        });
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let session_manager = crate::session::manager::SessionManager::in_memory(&cwd);
+    let expected_session_id = session_manager.get_session_id().to_string();
+    let engine = create_session(SessionEngineConfig {
+        cwd: cwd.clone(),
+        agent_dir: tmp.path().join("agent"),
+        model: Some(model),
+        stream_fn: Some(stream_fn),
+        session_manager: Some(session_manager),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let outcome = engine
+        .prompt("hello", PromptOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(outcome, PromptOutcome::Prompt);
+    engine.session.agent().wait_for_idle().await;
+
+    let captured = captured.lock().unwrap().clone();
+    assert!(!captured.is_empty(), "the turn made provider requests");
+    assert!(
+        captured
+            .iter()
+            .all(|id| id.as_deref() == Some(expected_session_id.as_str())),
+        "every provider request pinned the session id: {captured:?}"
+    );
+}
+
 /// A spawned child's prompt stamps its recursion depth: `create_session`
 /// at depth N reads "depth: N (not root)", never the root identity.
 #[tokio::test]

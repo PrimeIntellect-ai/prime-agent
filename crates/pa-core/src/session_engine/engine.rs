@@ -266,6 +266,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 
     let python_skills = super::runtime_wiring::kernel_python_skills(&resources.skills);
     let session_id = wiring.session.lock().await.get_session_id().to_string();
+    // The session id rides the provider options (TS `sessionId` on the
+    // Agent options: sdk.ts:326 for root sessions, agent-session.ts:10729
+    // for children). Every provider that keys cache or transport affinity
+    // reads it from `StreamRequestOptions`: anthropic/google `session_id`,
+    // mistral `x-affinity`, codex `prompt_cache_key` +
+    // `session_id`/`x-client-request-id`, azure `prompt_cache_key`.
+    let provider_session_id = session_id.clone();
     let mut handlers = wiring.handlers.clone();
     if let Some(extra) = config.extra_host_handlers.clone() {
         handlers.merge(extra);
@@ -598,6 +605,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         should_stop_before_turn: config.queued_steering_probe.clone(),
         steering_mode: config.steering_mode,
         follow_up_mode: config.follow_up_mode,
+        session_id: Some(provider_session_id),
         ..Default::default()
     });
 
