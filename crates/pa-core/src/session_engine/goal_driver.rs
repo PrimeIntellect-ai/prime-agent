@@ -75,7 +75,10 @@ mod progress;
 
 use progress::CONTINUATION_NO_PROGRESS_CAP;
 pub use progress::{terminal_provider_failure, turn_produced_no_output};
-pub use progress::{GOAL_BACKOFF_WAKE_CRON_LABEL, GOAL_BACKOFF_WAKE_MARKER_TEXT};
+pub use progress::{
+    CONTINUATION_NO_PROGRESS_CAP_REASON, GOAL_BACKOFF_WAKE_CRON_LABEL,
+    GOAL_BACKOFF_WAKE_MARKER_TEXT,
+};
 
 impl GoalDriver {
     #[must_use]
@@ -522,8 +525,7 @@ impl GoalDriver {
         if self.state.status == GoalStatus::Active
             && self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP
         {
-            let reason =
-                "Goal continuation cap reached: consecutive turns made no progress".to_string();
+            let reason = progress::CONTINUATION_NO_PROGRESS_CAP_REASON.to_string();
             self.set_state(
                 session,
                 GoalState {
