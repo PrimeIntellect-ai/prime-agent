@@ -33,25 +33,34 @@ pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> boo
     if !is_alive(pid) {
         return true;
     }
-    // A start-id mismatch is a VISIBLE pid reuse: the process at this pid
-    // is somebody else's, so this coordinator's child - which owned the
-    // pid - has exited. Confirmed dead, never signaled.
+    // A READABLE start-id mismatch is a VISIBLE pid reuse: the process at
+    // this pid is somebody else's, so this coordinator's child - which
+    // owned the pid - has exited. Confirmed dead, never signaled. An
+    // UNREADABLE start id on a live process is not evidence of reuse: the
+    // conservative verdict is unconfirmed, never "gone" - the caller must
+    // refuse to spawn against it.
     if let Some(expected) = start_id {
-        if process_start_id(pid).as_deref() != Some(expected) {
-            return true;
+        match process_start_id(pid) {
+            Some(observed) if observed != expected => return true,
+            Some(_) => {}
+            None => return false,
         }
     }
     let _ = kill_pid(pid as i32, Signal::Kill);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
-        // Confirmed death when the process is gone or its identity
-        // visibly changed under the pid.
+        // Confirmed death when the process is gone, or its identity
+        // READABLY changed under the pid (the pid was reused after the
+        // kill); an unreadable identity keeps polling to the deadline -
+        // never a false confirmation.
         if !is_alive(pid) {
             return true;
         }
         if let Some(expected) = start_id {
-            if process_start_id(pid).as_deref() != Some(expected) {
-                return true;
+            if let Some(observed) = process_start_id(pid) {
+                if observed != expected {
+                    return true;
+                }
             }
         }
         if std::time::Instant::now() >= deadline {
