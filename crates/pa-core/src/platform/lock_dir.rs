@@ -386,6 +386,12 @@ pub struct LockDir {
     /// heap fields freed, its registry entry unregistered), never
     /// forgotten whole.
     finished: AtomicBool,
+    /// Whether an explicit `release` already attempted the removal and
+    /// FAILED (the artifact survived): the guard's Drop then retries
+    /// through the identity-bound removal instead of the plain one, so a
+    /// successor that reclaimed the path in between is never deleted by
+    /// the retry.
+    release_attempted: AtomicBool,
     /// The lock directory's identity captured at acquisition (the inode;
     /// TS `guardIno`), `None` where the platform cannot observe it.
     owned: Option<u64>,
@@ -728,6 +734,7 @@ impl LockDir {
             witness,
             held_key,
             finished: AtomicBool::new(false),
+            release_attempted: AtomicBool::new(false),
             path,
         })
     }
@@ -1513,36 +1520,38 @@ impl LockDir {
                 return;
             }
         }
-        let mut removed = true;
-        if let Err(error) = fs::remove_dir(&self.path) {
-            if error.kind() == io::ErrorKind::NotFound {
-                removed = true;
-            } else {
+        let removed = match fs::remove_dir(&self.path) {
+            Ok(()) => true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
-                removed = false;
+                false
             }
-        }
-        // A released guard no longer holds the path: the registry entry
-        // must not answer contention for a later same-process acquire that
-        // legitimately retakes the freed path while this guard object is
-        // still alive. The key is TAKEN here - never unregistered twice (a
-        // repeat would remove a later holder's entry).
-        #[cfg(unix)]
-        if let Some(key) = self
-            .held_key
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            unregister_locally_held(&key);
-        }
-        // The plain release is marked finished only when the directory is
-        // actually gone (or was never there): a guard whose removal FAILED
-        // keeps `finished` unset, so its Drop retries the cleanup instead
-        // of leaving the artifact to block every later acquisition until
-        // it ages stale.
+        };
         if removed {
+            // A released guard no longer holds the path: the registry
+            // entry must not answer contention for a later same-process
+            // acquire that legitimately retakes the freed path while this
+            // guard object is still alive. The key is TAKEN here - never
+            // unregistered twice (a repeat would remove a later holder's
+            // entry).
+            #[cfg(unix)]
+            if let Some(key) = self
+                .held_key
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                unregister_locally_held(&key);
+            }
+            // The plain release is marked finished only when the directory
+            // is actually gone (or was never there): a guard whose
+            // removal FAILED keeps `finished` unset and its registry entry
+            // registered (the artifact is still this guard's), so its Drop
+            // retries the cleanup through the identity-bound removal.
             self.finished.store(true, Ordering::Relaxed);
+        } else {
+            self.release_attempted.store(true, Ordering::Relaxed);
         }
     }
 
@@ -1751,6 +1760,22 @@ impl Drop for LockDir {
         // abandonment marked the guard finished, and its successor's fresh
         // lock at the vacated path must never see a second rmdir.
         if !self.finished.swap(true, Ordering::Relaxed) {
+            // A failed explicit release retries through the identity-bound
+            // removal (the verify-ours discipline): a successor that
+            // reclaimed the path between the failed attempt and this Drop
+            // is never deleted by the retry - the artifact is removed only
+            // while it still carries this guard's own inode and probe.
+            #[cfg(unix)]
+            if self.release_attempted.load(Ordering::Relaxed) {
+                let probe = *self
+                    .owned_mtime
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                Self::remove_owned_artifact(&self.path, self.owned, probe);
+            } else {
+                self.release();
+            }
+            #[cfg(not(unix))]
             self.release();
         }
         // Unregistered by the STORED registration key: the lock directory
@@ -2375,6 +2400,39 @@ mod tests {
         assert!(
             !lock_of(&file).exists(),
             "the Drop retry removed the artifact"
+        );
+    }
+
+    /// A failed release's Drop retry is identity-bound: a successor that
+    /// reclaimed the path between the failed attempt and the guard's Drop
+    /// is never deleted by the retry.
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_releases_retry_never_removes_a_successor() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let path = lock_of(&file);
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        // The removal fails under a read-only parent.
+        std::fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        guard.release();
+        assert!(!guard.finished.load(Ordering::Relaxed));
+        // A successor reclaims the path while the old guard still lives.
+        std::fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        set_mtime(&path, 123, 456).unwrap();
+        drop(guard);
+        assert!(
+            path.is_dir(),
+            "the failed release's Drop retry never deletes the successor's lock"
+        );
+        assert_eq!(
+            LockDir::observed_mtime(&path),
+            Some((123, 456)),
+            "the surviving lock is untouched"
         );
     }
 
