@@ -158,13 +158,18 @@ where
                 .await?;
                 return Ok(message);
             }
-            // This auth failure is being retried: the classification
-            // counts it, so the next rejection settles the turn. Only a
-            // credential the failed attempt never served earns the
-            // beyond-budget one-shot; an unchanged key retries inside the
-            // ordinary ladder.
-            auth_retries += 1;
-            auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            // A superseded selection's failure never consumes the
+            // episode's one auth budget: the newer target's own rejection
+            // still gets its recovery round.
+            if outcome != AuthRecoveryOutcome::Superseded {
+                // This auth failure is being retried: the classification
+                // counts it, so the next rejection settles the turn. Only
+                // a credential the failed attempt never served earns the
+                // beyond-budget one-shot; an unchanged key retries inside
+                // the ordinary ladder.
+                auth_retries += 1;
+                auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            }
         }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.

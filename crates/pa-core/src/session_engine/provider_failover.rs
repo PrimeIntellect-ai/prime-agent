@@ -232,13 +232,18 @@ where
                 .await?;
                 return Ok(message);
             }
-            // This auth failure is being retried: the classification
-            // counts it, so the next rejection settles the turn. Only a
-            // credential the failed attempt never served earns the
-            // beyond-budget one-shot; an unchanged key retries inside the
-            // ordinary budget.
-            auth_retries += 1;
-            auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            // A superseded selection's failure never consumes the
+            // episode's one auth budget: the newer target's own rejection
+            // still gets its recovery round.
+            if outcome != AuthRecoveryOutcome::Superseded {
+                // This auth failure is being retried: the classification
+                // counts it, so the next rejection settles the turn. Only
+                // a credential the failed attempt never served earns the
+                // beyond-budget one-shot; an unchanged key retries inside
+                // the ordinary budget.
+                auth_retries += 1;
+                auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            }
         }
         total_retries += 1;
         retries_on_provider += 1;
@@ -1403,6 +1408,85 @@ mod tests {
         assert!(
             switches.lock().unwrap().is_empty(),
             "the refreshed primary keeps its re-issue before any switch"
+        );
+    }
+
+    /// A superseded selection's rejection never consumes the chain's one
+    /// auth budget either: the newer target's own rejection still gets
+    /// its recovery round instead of switching or ending as a "second"
+    /// auth failure.
+    #[tokio::test]
+    async fn a_superseded_rejection_keeps_the_recovery_budget() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                let call = recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    crate::session_engine::provider_auth::AuthRecoveryOutcome::Superseded
+                } else {
+                    crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+                }
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both rejections get their recovery round"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "two auth rejections and the recovered retry"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the auth class never walks the provider chain"
         );
     }
 }

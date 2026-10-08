@@ -19,6 +19,14 @@ enum StoreOutcome {
     Rejected(String),
 }
 
+/// Whether the store's credential already outgrew the one the failed
+/// request served: a served key that differs is a re-login (rebinding
+/// needs no exchange); a keyless target proves nothing and must fall
+/// through to the forced exchange.
+fn store_outgrew_the_served_key(served: Option<&str>, access: &str) -> bool {
+    served.is_some_and(|served| served != access)
+}
+
 impl AgentSessionEngine {
     /// One auth-class failure's recovery (the retry chains' seam): a
     /// stored OAuth credential for the failing provider force-refreshes
@@ -48,10 +56,11 @@ impl AgentSessionEngine {
         let provider = target.model.provider.clone();
         // A failure from a superseded selection (a model switch outran the
         // response) never touches the newer selection's grant: the retry
-        // re-issues against the newer target with its own credential — a
-        // genuine rejection there runs its own recovery round.
+        // re-issues against the newer target with its own credential, and
+        // the failure never consumes the episode's one auth budget — a
+        // genuine rejection there still gets its own recovery round.
         if provider != failed_provider {
-            return AuthRecoveryOutcome::Continue;
+            return AuthRecoveryOutcome::Superseded;
         }
         let agent_dir = self.config.agent_dir.clone();
         let served_key = target.api_key.clone();
@@ -69,8 +78,12 @@ impl AgentSessionEngine {
             }
             // A store that already outgrew the served key is a re-login,
             // not a dead session: rebinding to the stored credential
-            // needs no exchange (the pre-/reload outage shape).
-            if served_key.as_deref() != Some(access.as_str()) {
+            // needs no exchange (the pre-/reload outage shape). A keyless
+            // target is never evidence of a re-login — only a served key
+            // that differs is — so the keyless rejection falls through to
+            // the forced exchange instead of re-binding the store's
+            // possibly stale grant.
+            if store_outgrew_the_served_key(served_key.as_deref(), access.as_str()) {
                 return StoreOutcome::Fresher;
             }
             match auth.force_refresh_oauth(&closure_provider) {
@@ -137,7 +150,7 @@ fn re_login_sentence(provider: &str, reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::super::AgentEngineConfig;
-    use super::{AgentSessionEngine, ProviderTarget};
+    use super::{store_outgrew_the_served_key, AgentSessionEngine, ProviderTarget};
     use pa_core::session_engine::provider_auth::AuthRecoveryOutcome;
 
     /// One provider's OAuth grant in the store (the re-login shape: the
@@ -199,6 +212,25 @@ mod tests {
             queued_steering_probe: None,
         })
         .unwrap()
+    }
+
+    /// Only a served key that differs proves a re-login: a keyless
+    /// target falls through to the forced exchange, and the identical
+    /// served key stays on the exchange path too.
+    #[test]
+    fn only_a_differing_served_key_proves_a_fresher_store() {
+        assert!(
+            store_outgrew_the_served_key(Some("stale-access"), "fresh-access"),
+            "a differing served key is a re-login"
+        );
+        assert!(
+            !store_outgrew_the_served_key(Some("fresh-access"), "fresh-access"),
+            "the served key itself is not a re-login"
+        );
+        assert!(
+            !store_outgrew_the_served_key(None, "fresh-access"),
+            "a keyless target is never evidence of a re-login"
+        );
     }
 
     /// A model switch that lands between the failed request and the
@@ -298,7 +330,7 @@ mod tests {
             Some(target("drift", "drift-1", Some("stale-drift")));
         assert_eq!(
             engine.recover_provider_auth("faux".to_string()).await,
-            AuthRecoveryOutcome::Continue,
+            AuthRecoveryOutcome::Superseded,
             "a superseded provider's rejection never refreshes the newer grant"
         );
         let slot = engine

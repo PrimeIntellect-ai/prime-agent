@@ -1318,3 +1318,62 @@ async fn a_refreshed_grant_re_issues_past_an_over_cap_wait() {
         "the refreshed grant re-issues past the over-cap request"
     );
 }
+
+/// A superseded selection's rejection never consumes the episode's one
+/// auth budget: the newer target's own rejection still gets its recovery
+/// round instead of ending the turn as a "second" auth failure.
+#[tokio::test]
+async fn a_superseded_rejection_keeps_the_recovery_budget() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            let call = recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // The first rejection belongs to a superseded selection; the
+            // second is the newer target's own.
+            if call == 0 {
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Superseded
+            } else {
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+            }
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match index {
+                    0 | 1 => error_message(Some("auth"), Some(401), None),
+                    _ => ok_message(),
+                })
+            }
+        },
+        move |event| {
+            let _ = event;
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "both rejections get their recovery round"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "two auth rejections and the recovered retry"
+    );
+}

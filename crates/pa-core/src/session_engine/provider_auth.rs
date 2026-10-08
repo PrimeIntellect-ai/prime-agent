@@ -16,9 +16,15 @@ use pa_agent::types::AssistantMessage;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRecoveryOutcome {
     /// Nothing changed the credential the retry would carry (no stored
-    /// OAuth grant, an env or config key, a superseded selection): the
-    /// quick retry re-issues inside the ordinary retry budget only.
+    /// OAuth grant, an env or config key): the quick retry re-issues
+    /// inside the ordinary retry budget only.
     Continue,
+    /// The failure belongs to a selection the target slot already
+    /// outgrew (a model switch outran the response): the newer
+    /// selection's retry proceeds, but this failure never consumes the
+    /// episode's one auth-recovery budget — a genuine rejection on the
+    /// newer target still gets its own recovery round.
+    Superseded,
     /// The retry will carry a credential the failed attempt never served
     /// (a forced exchange refreshed the stored grant, or a re-login
     /// outran the stale target): the one auth retry may spend past the
@@ -34,7 +40,8 @@ pub enum AuthRecoveryOutcome {
 pub type AuthRecoveryFuture = Pin<Box<dyn Future<Output = AuthRecoveryOutcome> + Send>>;
 
 /// The retry chains consult this on an auth-class failure: `Continue`
-/// lets the quick retry proceed inside the ordinary budget, `NewCredential`
+/// lets the quick retry proceed inside the ordinary budget, `Superseded`
+/// re-issues without consuming the episode's auth budget, `NewCredential`
 /// re-issues with the changed credential (one retry past a spent budget),
 /// `ReLoginRequired` ends the turn with the returned sentence.
 pub type AuthRecoveryCallback<'a> = &'a mut dyn FnMut(&AssistantMessage) -> AuthRecoveryFuture;
