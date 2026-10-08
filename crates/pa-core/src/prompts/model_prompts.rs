@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use pa_types::session::CustomMessage;
 use serde::Deserialize;
@@ -79,10 +79,20 @@ fn parse_layer(toml_text: &str, source: &str) -> (Vec<ParsedRule>, Vec<String>) 
                 Err(error) => errors.push(format!("{source}: {error}")),
             }
         }
-        rules.push(ParsedRule {
-            patterns,
-            files: rule.files,
-        });
+        let mut files = Vec::new();
+        for name in rule.files {
+            if Path::new(&name)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+            {
+                files.push(name);
+            } else {
+                errors.push(format!(
+                    "{source}: file {name:?} must be a relative path inside the agent directory"
+                ));
+            }
+        }
+        rules.push(ParsedRule { patterns, files });
     }
     (rules, errors)
 }
@@ -448,5 +458,42 @@ files = ["shared.md", "user-only.md"]
         let empty = tempfile::tempdir().unwrap();
         let resolution = load_model_prompts(Some("z-ai/glm-5.3"), empty.path());
         assert!(resolution.errors.is_empty());
+    }
+
+    #[test]
+    fn file_entries_outside_the_agent_dir_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(root.path(), "outside.md", "OUTSIDE");
+        let agent_dir = root.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        write_file(&agent_dir, "inside.md", "INSIDE");
+
+        let outside = root.path().join("outside.md").display().to_string();
+        // (file entry, expected extras, whether an error must name it)
+        let cases = [
+            ("inside.md", Some("INSIDE"), false),
+            ("../outside.md", None, true),
+            (outside.as_str(), None, true),
+        ];
+        let mut failures = Vec::new();
+        for (name, extras, rejected) in cases {
+            write_file(
+                &agent_dir,
+                USER_MODEL_PROMPTS_TOML,
+                &format!("[[rule]]\nmatch = [\"glm-5.3\"]\nfiles = [{name:?}]\n"),
+            );
+            let resolution = resolve_model_prompts(Some("z-ai/glm-5.3"), "", &[], &agent_dir);
+            let leaked = resolution.extras.as_deref();
+            if leaked != extras {
+                failures.push(format!(
+                    "file {name:?}: extras {leaked:?}, expected {extras:?}"
+                ));
+            }
+            let named = resolution.errors.iter().any(|error| error.contains(name));
+            if named != rejected {
+                failures.push(format!("file {name:?}: errors {:#?}", resolution.errors));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }
