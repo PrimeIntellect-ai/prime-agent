@@ -1772,7 +1772,7 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
     );
     // The release KILLS FROZEN, never thaws first: a CONT would hand the
     // launcher a respawn window no re-walk then covers.
-    let release_end = release_at + script[release_at..].find('}').expect("the helper closes");
+    let release_end = release_at + script[release_at..].find("\n}").expect("the helper closes");
     let helper = &script[release_at..release_end];
     assert!(
         !helper.contains("kill -CONT"),
@@ -1790,17 +1790,23 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
         launcher_tree_at < freeze_at,
         "the launcher joins the release tree before its freeze"
     );
-    let rewalk_stop_at = script[release_at..]
-        .find("kill -STOP \"-$prewarm_node\"")
-        .map(|at| release_at + at)
-        .expect("the re-walk freeze");
-    let rewalk_merge_at = script[release_at..]
+    let rewalk_merge_at = script[release_end..]
         .find("prewarm_tree=\"$prewarm_tree $prewarm_node\"")
-        .map(|at| release_at + at)
+        .map(|at| release_end + at)
         .expect("the re-walk merge");
+    // The merge rides outside the release helper - one source of truth -
+    // and the freeze follows it in the same loop body.
     assert!(
-        rewalk_merge_at < rewalk_stop_at,
-        "the re-walk merges each node into the release tree before its freeze"
+        !helper.contains("prewarm_tree=\"$prewarm_tree"),
+        "the release helper never merges into the release tree"
+    );
+    let rewalk_stop_at = script[rewalk_merge_at..]
+        .find("kill -STOP \"-$prewarm_node\"")
+        .map(|at| rewalk_merge_at + at)
+        .expect("the re-walk freeze");
+    assert!(
+        rewalk_stop_at < rewalk_merge_at + 400,
+        "the re-walk freezes each node right after merging it"
     );
     // The merge rides one place only - at the freeze. A second, trailing
     // merge over the same nodes would be a duplicate check.
@@ -1810,6 +1816,24 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
     assert!(
         merges == 1,
         "the re-walk merge happens once, at the freeze: found {merges}"
+    );
+    // The launcher is registered for release BEFORE the pre-warm runs: an
+    // interrupt during the pre-warm takes the whole provisioning down.
+    assert!(
+        script.contains("prewarm_launch_reads=0"),
+        "the launch-window registration poll exists"
+    );
+    let launch_reads_at = script.find("prewarm_launch_reads=0").expect("the poll");
+    let gate_loop_at = script
+        .find("while [ ! -f \"$prewarm_done\" ]")
+        .expect("the gate loop");
+    assert!(
+        launch_reads_at < gate_loop_at,
+        "the launcher is registered before the gate's watch loop runs"
+    );
+    assert!(
+        helper.contains("prewarm_release_frontier"),
+        "the release walk collects descendants, not only the registered pids"
     );
 }
 

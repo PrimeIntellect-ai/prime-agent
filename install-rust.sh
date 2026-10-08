@@ -672,10 +672,35 @@ migrated_note=""
 prewarm_tree=""
 prewarm_tree_release() {
   # KILLED FROZEN, never thawed first: a CONT would hand the launcher a
-  # respawn window, and SIGKILL reaches stopped processes.
-  for prewarm_node in ${prewarm_tree:-}; do
-    kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
-  done
+  # respawn window, and SIGKILL reaches stopped processes. The walk
+  # covers what the registered pids spawned since registration, so an
+  # interrupt in the pre-warm's own window takes the whole provisioning
+  # down, not only the launcher.
+  if command -v pgrep >/dev/null 2>&1; then
+    prewarm_release_seen=""
+    prewarm_release_frontier="$prewarm_tree"
+    while [ -n "$prewarm_release_frontier" ]; do
+      prewarm_release_next=""
+      for prewarm_node in $prewarm_release_frontier; do
+        case " $prewarm_release_seen " in
+          *" $prewarm_node "*) continue ;;
+        esac
+        prewarm_release_seen="$prewarm_release_seen $prewarm_node"
+        kill -STOP "-$prewarm_node" 2>/dev/null || kill -STOP "$prewarm_node" 2>/dev/null || true
+        for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
+          prewarm_release_next="$prewarm_release_next $prewarm_child"
+        done
+      done
+      prewarm_release_frontier="$prewarm_release_next"
+    done
+    for prewarm_node in $prewarm_release_seen; do
+      kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+    done
+  else
+    for prewarm_node in ${prewarm_tree:-}; do
+      kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+    done
+  fi
 }
 # The renderer always restores the cursor and line wrap when it stops; the
 # trap stops it on every exit path (an INT/TERM exits through it too).
@@ -3113,11 +3138,22 @@ if uv_on_path \
     printf 'done\n' >"$prewarm_done"
   ) </dev/null >/dev/null 2>&1 3>&- &
   prewarm_runner=$!
+  # The launcher joins the release tree as soon as its pid is readable:
+  # an interrupt during the pre-warm must take the provisioning down,
+  # not leave it holding the bootstrap lock.
+  prewarm_launch_reads=0
+  while [ -z "${prewarm_tree:-}" ] && [ "$prewarm_launch_reads" -lt 40 ]; do
+    prewarm_tree="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
+    [ -n "$prewarm_tree" ] && break
+    prewarm_launch_reads=$((prewarm_launch_reads + 1))
+    sleep 0.05
+  done
   prewarm_waited=0
   prewarm_timed_out=""
   prewarm_pgrep="no"
   command -v pgrep >/dev/null 2>&1 && prewarm_pgrep="yes"
   while [ ! -f "$prewarm_done" ]; do
+    [ -z "${prewarm_tree:-}" ] && prewarm_tree="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
     prewarm_waited=$((prewarm_waited + 1))
     if [ "$prewarm_waited" -gt "$prewarm_bound_s" ]; then
       prewarm_timed_out="yes"
