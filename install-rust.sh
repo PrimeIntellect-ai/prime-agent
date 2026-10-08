@@ -3188,12 +3188,6 @@ if uv_on_path \
             done
             prewarm_refrontier="$prewarm_renext"
           done
-          for prewarm_node in $prewarm_reseen; do
-            case " $prewarm_tree " in
-              *" $prewarm_node "*) ;;
-              *) prewarm_tree="$prewarm_tree $prewarm_node" ;;
-            esac
-          done
         fi
         for prewarm_node in $prewarm_tree; do
           kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true

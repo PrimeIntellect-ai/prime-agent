@@ -1795,6 +1795,15 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
         rewalk_merge_at < rewalk_stop_at,
         "the re-walk merges each node into the release tree before its freeze"
     );
+    // The merge rides one place only - at the freeze. A second, trailing
+    // merge over the same nodes would be a duplicate check.
+    let merges = script
+        .matches("prewarm_tree=\"$prewarm_tree $prewarm_node\"")
+        .count();
+    assert!(
+        merges == 1,
+        "the re-walk merge happens once, at the freeze: found {merges}"
+    );
 }
 
 /// Drives the pre-warm block under `sh` with a three-level hanging
