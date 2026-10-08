@@ -98,7 +98,14 @@ impl AgentSessionEngine {
             }
             match auth.force_refresh_oauth(&closure_provider) {
                 Ok(_) => StoreOutcome::Refreshed,
-                Err(reason) => StoreOutcome::Rejected(reason),
+                // Only the provider's rejection (or a concurrent logout)
+                // ends the turn with guidance; an unexchanged attempt — no
+                // forced-refresh support, an unreadable store — keeps the
+                // ordinary retry ladder.
+                Err(pa_core::auth::ForcedRefreshFailure::Rejected(reason)) => {
+                    StoreOutcome::Rejected(reason)
+                }
+                Err(_) => StoreOutcome::NotApplicable,
             }
         })
         .await;
@@ -128,7 +135,12 @@ impl AgentSessionEngine {
             }
             StoreOutcome::Fresher | StoreOutcome::Refreshed => {}
         }
-        self.rebind_request_target_after_refresh(&target);
+        if !self.rebind_request_target_after_refresh(&target) {
+            // The slot moved between the post-await check and this write:
+            // the newer resolution stands and the failure never consumed
+            // the auth budget.
+            return AuthRecoveryOutcome::Superseded;
+        }
         AuthRecoveryOutcome::NewCredential
     }
 
@@ -137,8 +149,9 @@ impl AgentSessionEngine {
     /// credential. A slot that moved under the exchange — a live model
     /// switch resolved a new target — keeps its newer resolution: the
     /// recovery only re-binds the target the failed request was issued
-    /// on, and never resurrects a cleared slot.
-    fn rebind_request_target_after_refresh(&self, failed: &ProviderTarget) {
+    /// on, and never resurrects a cleared slot. Returns whether the
+    /// captured target was re-bound; a miss leaves the newer resolution.
+    fn rebind_request_target_after_refresh(&self, failed: &ProviderTarget) -> bool {
         let (api_key, headers) = self.resolve_request_key_and_headers(&failed.model);
         let mut slot = self
             .provider_target
@@ -154,7 +167,9 @@ impl AgentSessionEngine {
                 model: failed.model.clone(),
                 headers,
             });
+            return true;
         }
+        false
     }
 }
 
@@ -291,7 +306,10 @@ mod tests {
         let failed = target("faux", "faux-1", Some("stale-access"));
         // The switch resolved a new target while the exchange ran.
         *engine.provider_target.write().unwrap() = Some(target("drift", "drift-1", None));
-        engine.rebind_request_target_after_refresh(&failed);
+        assert!(
+            !engine.rebind_request_target_after_refresh(&failed),
+            "the missed rebind reports the move"
+        );
         let slot = engine
             .provider_target
             .read()
@@ -315,7 +333,10 @@ mod tests {
         let engine = engine_over(dir.path());
         let failed = target("faux", "faux-1", Some("stale-access"));
         *engine.provider_target.write().unwrap() = Some(failed.clone());
-        engine.rebind_request_target_after_refresh(&failed);
+        assert!(
+            engine.rebind_request_target_after_refresh(&failed),
+            "the unmoved slot re-binds"
+        );
         let slot = engine
             .provider_target
             .read()
@@ -407,7 +428,10 @@ mod tests {
         let engine = engine_over(dir.path());
         let failed = target("faux", "faux-1", Some("stale-access"));
         *engine.provider_target.write().unwrap() = None;
-        engine.rebind_request_target_after_refresh(&failed);
+        assert!(
+            !engine.rebind_request_target_after_refresh(&failed),
+            "the cleared slot reports the miss"
+        );
         assert!(
             engine.provider_target.read().unwrap().is_none(),
             "the cleared slot stays cleared"

@@ -762,10 +762,13 @@ fn a_rejected_force_refresh_keeps_the_stored_credential() {
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
     let outcome = auth.force_refresh_oauth("x-revoked");
-    assert_eq!(
-        outcome.unwrap_err(),
-        "OpenAI Codex token refresh failed (401): expired",
-        "the rejection reason carries out for the re-login surface"
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
+                if reason == "OpenAI Codex token refresh failed (401): expired"
+        ),
+        "the provider's rejection classifies for the re-login surface: {outcome:?}"
     );
     assert_eq!(
         auth.get_api_key("x-revoked").as_deref(),
@@ -792,9 +795,13 @@ fn force_refresh_without_forced_support_reports_it() {
         &oauth_credential("live-access", now_epoch_ms() + 3_600_000),
     );
     let outcome = auth.force_refresh_oauth("x-plain");
-    assert_eq!(
-        outcome.unwrap_err(),
-        "x-plain has no forced-refresh support"
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "x-plain has no forced-refresh support"
+        ),
+        "the unexchanged attempt classifies for the ordinary ladder: {outcome:?}"
     );
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -939,7 +946,7 @@ fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
     let outcome = auth.force_refresh_oauth("x-logged-out");
     writer.join().expect("the writer settles");
     assert!(
-        outcome.is_err(),
+        matches!(outcome, Err(crate::auth::ForcedRefreshFailure::Rejected(_))),
         "a concurrent logout fails the recovery: no usable credential remains"
     );
     assert!(
@@ -1241,6 +1248,76 @@ fn the_forced_refresh_flight_guards_the_write() {
     assert!(
         matches!(&outcome, Ok(AuthCredential::Oauth { access, .. }) if access == "fetched-access"),
         "the forced refresh completes"
+    );
+    assert!(
+        backend.held.load(std::sync::atomic::Ordering::SeqCst),
+        "the single flight is still held while the refreshed credential persists"
+    );
+}
+
+/// The expiry-gated refresh holds the same single flight through its
+/// write: a waiter that acquires the flight after the fetch must see
+/// this attempt's write land before it spends the same single-use
+/// refresh token.
+#[test]
+fn the_expiry_refresh_flight_guards_the_write() {
+    struct WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        probed: std::sync::atomic::AtomicBool,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuthStorageBackend for WriteProbingBackend {
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            let probed = &self.probed;
+            let held = &self.held;
+            let mut wrapped = |current: Option<String>| -> anyhow::Result<((), Option<String>)> {
+                let ((), next) = update(current)?;
+                if next.is_some() && !probed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    held.store(
+                        refresh_flight_is_held("x-expiry-flight"),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                Ok(((), next))
+            };
+            self.inner.with_lock(&mut wrapped)
+        }
+    }
+
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: None,
+    });
+    let backend = Arc::new(WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        probed: std::sync::atomic::AtomicBool::new(false),
+        held: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-expiry-flight",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let api_key = auth.get_api_key("x-expiry-flight");
+    assert_eq!(
+        api_key.as_deref(),
+        Some("fetched-access"),
+        "the expiry refresh serves the fetched credential"
     );
     assert!(
         backend.held.load(std::sync::atomic::Ordering::SeqCst),

@@ -17,6 +17,8 @@ mod tests;
 
 mod lookup;
 
+pub use lookup::ForcedRefreshFailure;
+
 mod prime_inference;
 
 fn fingerprint(source: AuthSource, material: &str) -> String {

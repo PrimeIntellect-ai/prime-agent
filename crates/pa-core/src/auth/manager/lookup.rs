@@ -8,6 +8,31 @@ use super::{
     PRIME_INFERENCE_PROVIDER_ID,
 };
 
+/// Why a forced refresh failed: a dead grant surfaces the re-login
+/// guidance, an unexchanged attempt keeps the ordinary retry ladder.
+///
+/// [`ForcedRefreshFailure::Rejected`] means the provider refused the
+/// grant (or a concurrent logout removed it) — the carried reason
+/// belongs in the re-login sentence. [`ForcedRefreshFailure::NotExchanged`]
+/// means no exchange ran at all (no stored grant, no forced-refresh
+/// support, an unreadable store): the caller retries inside its
+/// ordinary budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForcedRefreshFailure {
+    /// The grant is dead; the carried reason surfaces in the re-login
+    /// guidance.
+    Rejected(String),
+    /// No exchange ran; the ordinary retry ladder stands.
+    NotExchanged(String),
+}
+
+impl std::fmt::Display for ForcedRefreshFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Self::Rejected(reason) | Self::NotExchanged(reason)) = self;
+        formatter.write_str(reason)
+    }
+}
+
 impl AuthStorage {
     pub fn get_api_key_with_source_token(
         &mut self,
@@ -181,9 +206,12 @@ impl AuthStorage {
             self.reload();
             return Some(credential);
         }
-        // FETCH: outside every lock, one flight per provider.
+        // FETCH + WRITE behind the per-provider flight: a waiter that
+        // acquires the flight after this fetch sees this attempt's write
+        // land before spending the same single-use refresh token (the
+        // forced-refresh path holds the same guarantee).
+        let _flight = refresh_flight(provider_id);
         let fetched = {
-            let _flight = refresh_flight(provider_id);
             // The gate may have just released a flight that wrote a fresh
             // credential; re-check before spending a refresh token.
             let content = self.storage.read().unwrap_or_default();
@@ -245,7 +273,7 @@ impl AuthStorage {
     /// locally-valid token (a 401 before the stored expiry), so the expiry
     /// gates step aside while the fetch single-flight and the locked
     /// read-modify-write stay. `Ok` = the store now holds a fresher
-    /// credential (refreshed here or by a peer); `Err(reason)` = no usable
+    /// credential (refreshed here or by a peer); `Err` = no usable
     /// credential resulted and the stored one stands untouched.
     ///
     /// The peer checks compare access tokens, not expiry: a future-dated
@@ -253,17 +281,25 @@ impl AuthStorage {
     ///
     /// # Errors
     ///
-    /// Returns the reason when the store is unreadable, the provider has no
-    /// OAuth credential with a refresh token, the exchange is rejected, or
-    /// the refreshed credential cannot be written back.
-    pub fn force_refresh_oauth(&mut self, provider_id: &str) -> Result<AuthCredential, String> {
+    /// [`ForcedRefreshFailure::Rejected`] carries the provider's refusal
+    /// (or a concurrent logout); [`ForcedRefreshFailure::NotExchanged`]
+    /// marks the attempts that never exchanged (an unreadable store, no
+    /// OAuth grant, no forced-refresh support, a failed write-back).
+    pub fn force_refresh_oauth(
+        &mut self,
+        provider_id: &str,
+    ) -> Result<AuthCredential, ForcedRefreshFailure> {
         let Ok(content) = self.storage.read() else {
             self.reload();
-            return Err("the credential store could not be read".to_string());
+            return Err(ForcedRefreshFailure::NotExchanged(
+                "the credential store could not be read".to_string(),
+            ));
         };
         let Ok(data) = parse_storage_data(content.as_deref()) else {
             self.reload();
-            return Err("the credential store could not be parsed".to_string());
+            return Err(ForcedRefreshFailure::NotExchanged(
+                "the credential store could not be parsed".to_string(),
+            ));
         };
         let credential = data.credential(provider_id).filter(|credential| {
             matches!(
@@ -277,9 +313,9 @@ impl AuthStorage {
         let loaded = credential.clone();
         let Some(AuthCredential::Oauth { .. }) = credential else {
             self.reload();
-            return Err(format!(
+            return Err(ForcedRefreshFailure::NotExchanged(format!(
                 "the stored credential for {provider_id} carries no refresh token"
-            ));
+            )));
         };
         // FETCH + WRITE behind the per-provider flight: the guard stays
         // alive through persistence and reload, so a concurrent caller
@@ -305,7 +341,9 @@ impl AuthStorage {
         let new_credential = match fetched {
             None => {
                 self.reload();
-                return Err(format!("{provider_id} has no forced-refresh support"));
+                return Err(ForcedRefreshFailure::NotExchanged(format!(
+                    "{provider_id} has no forced-refresh support"
+                )));
             }
             Some(Err(reason)) => {
                 // A peer's forced refresh may have won the single-use
@@ -323,7 +361,7 @@ impl AuthStorage {
                 {
                     return Ok(credential);
                 }
-                return Err(reason);
+                return Err(ForcedRefreshFailure::Rejected(reason));
             }
             Some(Ok(new_credential)) => new_credential,
         };
@@ -331,7 +369,9 @@ impl AuthStorage {
         // the credential this attempt loaded; any change that landed under
         // the fetch — a peer's fresher grant, an API-key replacement, a
         // logout — stands untouched.
-        let mut outcome = Err("the refreshed credential could not be stored".to_string());
+        let mut outcome = Err(ForcedRefreshFailure::NotExchanged(
+            "the refreshed credential could not be stored".to_string(),
+        ));
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
             match data.credential(provider_id) {
@@ -340,9 +380,9 @@ impl AuthStorage {
                     return Ok(((), None));
                 }
                 None => {
-                    outcome = Err(format!(
+                    outcome = Err(ForcedRefreshFailure::Rejected(format!(
                         "the stored credential for {provider_id} was removed while refreshing"
-                    ));
+                    )));
                     return Ok(((), None));
                 }
                 Some(_) => {}
@@ -362,7 +402,9 @@ impl AuthStorage {
                 .filter(|credential| Some(credential) != loaded.as_ref())
             {
                 Some(credential) => Ok(credential),
-                None => Err("the refreshed credential could not be stored".to_string()),
+                None => Err(ForcedRefreshFailure::NotExchanged(
+                    "the refreshed credential could not be stored".to_string(),
+                )),
             };
         }
         // Reload from what we wrote: the in-memory snapshot must not serve the

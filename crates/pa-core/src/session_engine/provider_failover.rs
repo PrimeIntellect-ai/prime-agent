@@ -212,11 +212,13 @@ where
         // DIVERGENCE, operator ruling 2026-10-07, the revoked-session
         // outage: TS fails the turn on the provider's 401). A rejected
         // grant ends the episode with the re-login sentence.
+        let mut superseded_auth_failure = false;
         if is_provider_auth_failure(&message) {
             let outcome = match auth_recovery.as_deref_mut() {
                 Some(recovery) => recovery(&message).await,
                 None => AuthRecoveryOutcome::Continue,
             };
+            superseded_auth_failure = outcome == AuthRecoveryOutcome::Superseded;
             if let AuthRecoveryOutcome::ReLoginRequired(sentence) = &outcome {
                 if switched {
                     let _ = restore().await?;
@@ -246,7 +248,13 @@ where
             }
         }
         total_retries += 1;
-        retries_on_provider += 1;
+        // A superseded selection's failure never charges the current
+        // provider's budget: only the current selection's own failures
+        // can switch it away. The episode total still counts the real
+        // attempt (the whole-episode ceiling stays the bound).
+        if !superseded_auth_failure {
+            retries_on_provider += 1;
+        }
         // The whole-episode ceiling binds first: a long candidate chain
         // gives up here instead of stacking per-provider budgets. The
         // refreshed credential's one-shot re-issues past it once — a
@@ -1487,6 +1495,77 @@ mod tests {
         assert!(
             switches.lock().unwrap().is_empty(),
             "the auth class never walks the provider chain"
+        );
+    }
+
+    /// A superseded selection's failure never charges the current
+    /// provider's budget: at the per-provider ceiling the chain stays on
+    /// the current selection instead of switching away from a provider
+    /// that never failed.
+    #[tokio::test]
+    async fn a_superseded_failure_never_charges_the_current_provider() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Superseded
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            2 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered on primary"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "two rate-limit retries, the superseded rejection, and the re-issue"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the never-failed current provider keeps its turn"
         );
     }
 }

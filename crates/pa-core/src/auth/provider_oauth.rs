@@ -662,7 +662,9 @@ mod tests {
             )),
         );
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
-        let reason = outcome.expect_err("the failed exchange carries its reason");
+        let reason = outcome
+            .expect_err("the failed exchange carries its reason")
+            .to_string();
         assert!(
             reason.contains("was not scripted"),
             "the server-side reason carries out for the re-login surface: {reason}"
@@ -695,7 +697,7 @@ mod tests {
         let mut auth = storage_with_credential(OPENAI_CODEX_PROVIDER_ID, &without_refresh);
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
         assert_eq!(
-            outcome.unwrap_err(),
+            outcome.unwrap_err().to_string(),
             "the stored credential for openai-codex carries no refresh token"
         );
     }
@@ -738,7 +740,9 @@ mod tests {
         );
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
         pa_ai::utils::log::set_log_sink(None);
-        let reason = outcome.expect_err("the rejected exchange carries its reason");
+        let reason = outcome
+            .expect_err("the rejected exchange carries its reason")
+            .to_string();
         assert!(
             !reason.contains(echoed_token),
             "the re-login reason never carries the echoed token: {reason}"
@@ -792,7 +796,9 @@ mod tests {
         );
         let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
         pa_ai::utils::log::set_log_sink(None);
-        let reason = outcome.expect_err("the rejected exchange carries its reason");
+        let reason = outcome
+            .expect_err("the rejected exchange carries its reason")
+            .to_string();
         assert!(
             !reason.contains(short_refresh),
             "the re-login reason never carries the stored refresh token: {reason}"
