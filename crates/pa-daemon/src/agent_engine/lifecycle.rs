@@ -158,6 +158,7 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             image_route: std::sync::Mutex::new(None),
+            reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(

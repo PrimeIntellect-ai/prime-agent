@@ -43,6 +43,16 @@ impl AgentSessionEngine {
     /// reload from touching the targets at all, and the MCP manager on
     /// its previous credentials reports the failure instead of success.
     pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
+        // The whole refresh is serialized: overlapping `/reload`s each
+        // resolve the store at their own read times, so without this the
+        // earlier reload could install its already-resolved pair over the
+        // later reload's fresher one (the model-unchanged branch trusts
+        // its pre-read). Serialization makes the LAST reload to run leave
+        // the target serving the newest store.
+        let _serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The auth store re-read runs FIRST, before any target rebind:
         // it is the health gate for the store every resolution below
         // reads. The settings re-read still applies on a failed reload —
