@@ -559,12 +559,12 @@ mod tests {
                         "success": false,
                         "error": refusal,
                     });
+                    attempts.lock().unwrap().push(started.elapsed().as_millis());
                     write_half
                         .write_all(format!("{response}\n").as_bytes())
                         .await
                         .expect("refuse");
                     write_half.flush().await.expect("flush");
-                    attempts.lock().unwrap().push(started.elapsed().as_millis());
                 }
             })
         };
@@ -580,7 +580,6 @@ mod tests {
                 );
             });
 
-        tokio::time::sleep(Duration::from_millis(750)).await;
         let attempts = attempts.lock().unwrap();
         assert_eq!(attempts.len(), 1, "a retired registration never retries");
         refuser.abort();
