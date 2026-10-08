@@ -428,13 +428,15 @@ fn run_trial(
     // a failed child close is swallowed (the kill envelope still
     // succeeds), so a settled root kill does not prove the crew stopped.
     // The crew is captured before the kill — `get_rlm_children` needs the
-    // live parent — and every child is confirmed dead after it: an
-    // already-dead child answers the settled nothing-to-kill, a survivor
-    // is killed now, and any child that cannot be confirmed keeps the
-    // trial dir, with the child's name retained in the error (the address
-    // a later retry can resolve; session ids never reach stderr), instead
-    // of retiring the directory under a still-spending crew.
-    let crew = trial_crew(client, &session_id);
+    // live parent, and the list retries over a fresh connection so a
+    // transport failure cannot drop the children's only addresses — and
+    // every child is confirmed dead after it: an already-dead child
+    // answers the settled nothing-to-kill, a survivor is killed now, and
+    // any child that cannot be confirmed keeps the trial dir, with the
+    // child's name retained in the error (the address a later retry can
+    // resolve; session ids never reach stderr), instead of retiring the
+    // directory under a still-spending crew.
+    let crew = trial_crew(client, socket, &session_id);
     let cleanup = kill_session(client, socket, &session_id)
         .map(|_| ())
         .and_then(|()| match &crew {
@@ -675,12 +677,36 @@ fn kill_session(client: &mut Client, socket: &Path, session_id: &str) -> Result<
 /// these are the only addresses the confirm pass can reach the children's
 /// sessions by. A row without a session id leaves the crew unverifiable,
 /// so it errors instead of counting as an empty crew.
-fn trial_crew(client: &mut Client, session_id: &str) -> Result<Vec<(String, String)>, String> {
-    let data = command_data(
-        client,
-        &json!({ "type": "get_rlm_children", "activeSessionId": session_id }),
-        Duration::from_secs(30),
-    )?;
+fn trial_crew(
+    client: &mut Client,
+    socket: &Path,
+    session_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let command = json!({ "type": "get_rlm_children", "activeSessionId": session_id });
+    let response = match client.command(&command, Duration::from_secs(30)) {
+        Ok(response) => response,
+        Err(first_error) => {
+            // A transport failure retries once over a fresh connection —
+            // the list needs the live parent, so it must land before the
+            // cleanup kill archives it, or the children's only addresses
+            // are dropped for good. A list that still cannot be answered
+            // leaves the crew unverifiable (the cleanup stays unsettled),
+            // never silently empty. The fresh connection also heals the
+            // shared client for the cleanup kill behind it.
+            let mut retry = Client::connect(socket)
+                .map_err(|connect_error| format!("{first_error}; reconnect: {connect_error}"))?;
+            let retry_result = retry.command(&command, Duration::from_secs(30));
+            *client = retry;
+            retry_result.map_err(|retry_error| {
+                format!("the crew list failed on both connections ({first_error}; {retry_error})")
+            })?
+        }
+    };
+    // A rejected envelope reached the daemon: no reconnect can change it.
+    if response.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err(format!("command failed: {response}"));
+    }
+    let data = response.get("data").cloned().unwrap_or(Value::Null);
     let rows = data
         .get("children")
         .and_then(Value::as_array)
@@ -705,26 +731,33 @@ fn trial_crew(client: &mut Client, session_id: &str) -> Result<Vec<(String, Stri
 /// Confirm every crew member's session died with the root: the kill
 /// cascade's child closes are swallowed on failure, so each child gets its
 /// own id-addressed kill. An already-dead child answers the settled
-/// nothing-to-kill; a live one is stopped now; any child that cannot be
-/// confirmed leaves the cleanup unsettled with the child's name.
+/// nothing-to-kill; a live one is stopped now. Every child is attempted —
+/// one rejection must not leave its siblings unaddressed and spending — and
+/// any failure (reported with the children's names, never their session
+/// ids) leaves the cleanup unsettled.
 fn confirm_crew_killed(
     client: &mut Client,
     socket: &Path,
     crew: &[(String, String)],
 ) -> Result<(), String> {
+    let mut failures = Vec::new();
     for (id, name) in crew {
-        kill_session(client, socket, id)
-            .map(|_| ())
-            .map_err(|error| {
-                let name = if name.is_empty() {
-                    "an unnamed child"
-                } else {
-                    name
-                };
-                format!("child '{name}' could not be confirmed stopped: {error}")
-            })?;
+        if let Err(error) = kill_session(client, socket, id) {
+            let name = if name.is_empty() {
+                "an unnamed child"
+            } else {
+                name
+            };
+            failures.push(format!(
+                "child '{name}' could not be confirmed stopped: {error}"
+            ));
+        }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn nothing_to_kill(response: &Value) -> bool {
@@ -2119,12 +2152,25 @@ mod tests {
             reader.read_line(&mut line).expect("read prompt");
             drop(writer);
             drop(reader);
-            // Connection 2 (the cleanup retry): hello, then answer the kill
-            // and record it.
+            // Connection 2 (the cleanup retries): hello, then the crew
+            // list — the parent is still alive, so its children are still
+            // listable, and the list must precede the kill that archives
+            // the parent — then the kill.
             let (stream, _) = listener.accept().expect("accept 2");
             let mut writer = stream.try_clone().expect("clone 2");
             let mut reader = BufReader::new(stream);
             let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read crew list");
+            let envelope: Value = serde_json::from_str(line.trim()).expect("crew list envelope");
+            let _ = tx.send(envelope.get("command").cloned().unwrap_or(Value::Null));
+            let _ = writeln!(
+                writer,
+                "{}",
+                json!({ "id": envelope.get("id").cloned().unwrap_or(Value::Null),
+                        "type": "response", "success": true,
+                        "data": { "children": [] } })
+            );
             let mut line = String::new();
             reader.read_line(&mut line).expect("read kill");
             let envelope: Value = serde_json::from_str(line.trim()).expect("kill envelope");
@@ -2142,12 +2188,19 @@ mod tests {
         let mut client = Client::connect(&socket).expect("connect");
         let error = run_trial(&mut client, &socket, &config, 2, 1, &runs_root, "77-880")
             .expect_err("the trial fails on the reset socket");
-        // The kill reached the daemon over the retry connection.
-        let command = rx
+        // The crew list and then the kill reached the daemon over the
+        // retry connection, in that order: the list must land while the
+        // parent is still alive, or the children's only addresses are
+        // dropped for good.
+        let crew_list = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the crew list arrived");
+        assert_eq!(crew_list["type"], "get_rlm_children", "{crew_list}");
+        let kill = rx
             .recv_timeout(Duration::from_secs(5))
             .expect("the cleanup kill arrived");
-        assert_eq!(command["type"], "kill", "{command}");
-        assert_eq!(command["activeSessionId"], "s-eval", "{command}");
+        assert_eq!(kill["type"], "kill", "{kill}");
+        assert_eq!(kill["activeSessionId"], "s-eval", "{kill}");
         // The trial reports the drive failure instead of silently
         // completing.
         assert!(
@@ -2275,6 +2328,145 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+    }
+
+    #[test]
+    // Lint exception, kept narrow (AGENTS.md lint discipline): the inline
+    // scripted daemon is this test's fixture — the per-child kill verdicts
+    // the assertions address step by step — and a helper would only move
+    // the fixture behind a boundary the assertions cannot follow.
+    #[allow(clippy::too_many_lines)]
+    fn a_rejected_child_stop_does_not_skip_the_siblings() {
+        // One child's stop is rejected (the same tombstone-persist failure
+        // the root kill treats as unsettled): the confirm pass must still
+        // address every later sibling — stopping at the first failure
+        // leaves them unattempted and spending — while the rejection alone
+        // unsettles the cleanup.
+        let (seed, size, trial) = (1, 2, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 2);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("crew.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (tx, rx) = channel();
+        let crew_rows = json!({ "children": [
+            json!({
+                "id": "child-1",
+                "activeSessionId": "s-child-a",
+                "sessionName": "worker-a",
+                "status": "done",
+            }),
+            json!({
+                "id": "child-2",
+                "activeSessionId": "s-child-b",
+                "sessionName": "worker-b",
+                "status": "done",
+            }),
+        ] });
+        let scored_messages = json!({ "messages": [
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({
+                "role": "custom",
+                "customType": "agent_message",
+                "content": "[agent-message from worker-a]\n\nREPORT",
+                "details": { "from": { "activeSessionId": "s-child-a" } },
+            }),
+            json!({
+                "role": "custom",
+                "customType": "agent_message",
+                "content": "[agent-message from worker-b]\n\nREPORT",
+                "details": { "from": { "activeSessionId": "s-child-b" } },
+            }),
+            json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+        ] });
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let by_type: Vec<(&str, Value)> = vec![
+                ("create", json!({ "activeSessionId": "s-eval" })),
+                ("prompt", json!({})),
+                (
+                    "get_last_assistant_text",
+                    json!({ "text": format!("ANSWER: {answer}") }),
+                ),
+                ("get_rlm_children", crew_rows.clone()),
+                ("get_messages", scored_messages.clone()),
+                (
+                    "get_session_stats",
+                    json!({ "contextUsage": { "tokens": 1_000 } }),
+                ),
+            ];
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let _ = tx.send(command.clone());
+                let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
+                let id = envelope.get("id").cloned().unwrap_or(Value::Null);
+                let mut response = json!({ "id": id, "type": "response", "success": true });
+                if kind == "kill" {
+                    let target = command
+                        .get("activeSessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if target == "s-child-a" {
+                        response["success"] = json!(false);
+                        response["error"] = json!("stop tombstone persist failed");
+                    }
+                } else if let Some((_, data)) = by_type.iter().find(|(entry, _)| *entry == kind) {
+                    response["data"] = data.clone();
+                } else {
+                    response["success"] = json!(false);
+                    response["error"] = json!(format!("no script for {kind}"));
+                }
+                let _ = writeln!(writer, "{response}");
+            }
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+        let runs_root = dir.path().join("runs");
+        let mut client = Client::connect(&socket).expect("connect");
+
+        let result = run_trial(&mut client, &socket, &config, 2, 1, &runs_root, "77-882")
+            .expect("the trial scored a row");
+
+        // Every child kill was attempted: the rejected first child did not
+        // stop the pass from addressing its sibling.
+        let mut commands = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            commands.push(command);
+        }
+        let kills = |target: &str| {
+            commands
+                .iter()
+                .any(|command| command["type"] == "kill" && command["activeSessionId"] == target)
+        };
+        assert!(kills("s-eval"), "{commands:?}");
+        assert!(kills("s-child-a"), "{commands:?}");
+        assert!(kills("s-child-b"), "{commands:?}");
+        // The rejection unsettles the cleanup; the confirmed sibling does
+        // not add a failure of its own.
+        assert!(result.task_success);
+        let instant_fail = result.instant_fail.expect("the cleanup failed");
+        assert!(
+            instant_fail.starts_with("cleanup failed:"),
+            "{instant_fail}"
+        );
+        assert!(instant_fail.contains("child 'worker-a'"), "{instant_fail}");
+        assert!(!instant_fail.contains("worker-b"), "{instant_fail}");
+        assert_eq!(result.verdict, DefenseVerdict::Fail);
     }
 
     #[test]
