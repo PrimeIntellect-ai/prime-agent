@@ -286,8 +286,7 @@ impl CommandRecoveryJournal {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("read journal {}", self.path.display()));
+                return Err(error).with_context(|| format!("read journal {}", self.path.display()));
             }
         };
         for line in String::from_utf8_lossy(&bytes).lines() {
