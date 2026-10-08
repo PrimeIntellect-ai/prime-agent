@@ -376,21 +376,62 @@ fn service() -> &'static Service {
 async fn run_service() {
     let service = service();
     let permits = Arc::new(tokio::sync::Semaphore::new(4));
-    let mut recovered = std::collections::HashSet::new();
+    // Recovery belongs to all live hosts sharing this directory, not its first host.
+    let mut recovered: std::collections::HashMap<
+        PathBuf,
+        (TraceUploadCancel, Arc<std::sync::atomic::AtomicU8>),
+    > = std::collections::HashMap::new();
     loop {
         let controllers = service.controllers.lock().unwrap().clone();
+        for (directory, (cancel, _)) in &recovered {
+            if !controllers
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|c| &c.agent_dir == directory)
+            {
+                cancel.cancel();
+            }
+        }
         for weak in controllers {
             if let Some(controller) = weak.upgrade() {
-                if recovered.len() < MAX_CONTROLLERS
-                    && recovered.insert(controller.agent_dir.clone())
+                if controller.consent.lock().unwrap().0
+                    && (recovered.contains_key(&controller.agent_dir)
+                        || recovered.len() < MAX_CONTROLLERS)
                 {
-                    tokio::spawn(recover(
-                        controller.cwd.clone(),
-                        controller.agent_dir.clone(),
-                        permits.clone(),
-                        Arc::new(ReqwestTraceHttp),
-                        None,
-                    ));
+                    let (cancel, state) = recovered
+                        .entry(controller.agent_dir.clone())
+                        .or_insert_with(|| {
+                            (
+                                TraceUploadCancel::new(),
+                                Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                            )
+                        });
+                    if cancel.is_cancelled() {
+                        *cancel = TraceUploadCancel::new();
+                        *state = Arc::new(std::sync::atomic::AtomicU8::new(0));
+                    }
+                    if state
+                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        let cwd = controller.cwd.clone();
+                        let agent_dir = controller.agent_dir.clone();
+                        let cancel = cancel.clone();
+                        let state = state.clone();
+                        let permits = permits.clone();
+                        tokio::spawn(async move {
+                            let complete = recover(
+                                cwd,
+                                agent_dir,
+                                permits,
+                                Arc::new(ReqwestTraceHttp),
+                                None,
+                                cancel,
+                            )
+                            .await;
+                            state.store(if complete { 2 } else { 0 }, Ordering::Release);
+                        });
+                    }
                 }
                 if !controller.started.swap(true, Ordering::AcqRel) {
                     tokio::spawn(run_controller(
@@ -402,7 +443,7 @@ async fn run_service() {
                 }
             }
         }
-        service.wake.notified().await;
+        tokio::select! { () = service.wake.notified() => {}, () = tokio::time::sleep(DEBOUNCE) => {} }
     }
 }
 
@@ -413,11 +454,22 @@ async fn run_controller(
     base_url: Option<String>,
 ) {
     if let Some(controller) = weak.upgrade() {
-        let mut pending = controller.pending.lock().unwrap();
-        if let Some((path, schedule)) = pending.as_mut() {
-            let entry = agent_trace_outbox_entry_path(&controller.agent_dir, path);
-            if entry.is_file() || entry.with_extension("pending.json").is_file() {
-                schedule.persist(Instant::now());
+        let path = controller
+            .pending
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(p, _)| p.clone());
+        if let Some(path) = path {
+            let entry = agent_trace_outbox_entry_path(&controller.agent_dir, &path);
+            let pending_on_disk = entry.is_file() || entry.with_extension("pending.json").is_file();
+            if pending_on_disk {
+                let mut pending = controller.pending.lock().unwrap();
+                if let Some((current, schedule)) = pending.as_mut() {
+                    if current == &path {
+                        schedule.persist(Instant::now());
+                    }
+                }
             }
         }
     }
@@ -487,19 +539,23 @@ async fn run_controller(
         let cwd = controller.cwd.clone();
         let agent_dir = controller.agent_dir.clone();
         drop(controller);
-        let result = upload_trace_file(&TraceUploadOptions {
-            session_file: Some(&path),
-            cwd: &cwd,
-            agent_dir: &agent_dir,
-            require_enabled: true,
-            reload_config: true,
-            base_url: base_url.as_deref(),
-            http: http.as_ref(),
-            request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
-            cancel: Some(&cancel),
-            on_upload_delay: None,
-        })
+        let result = deliver_with_consent(
+            &TraceUploadOptions {
+                session_file: Some(&path),
+                cwd: &cwd,
+                agent_dir: &agent_dir,
+                require_enabled: true,
+                reload_config: true,
+                base_url: base_url.as_deref(),
+                http: http.as_ref(),
+                request_timeout_ms: DEFAULT_REQUEST_TIMEOUT_MS,
+                cancel: Some(&cancel),
+                on_upload_delay: None,
+            },
+            None,
+        )
         .await;
+        log_agent_trace_outcome(&agent_dir, Some(&path), &result);
         drop(permit);
         if let Some(controller) = weak.upgrade() {
             let mut pending = controller.pending.lock().unwrap();
@@ -512,30 +568,68 @@ async fn run_controller(
     }
 }
 
+async fn deliver_with_consent(
+    options: &TraceUploadOptions<'_>,
+    gate: Option<&TraceRequestGate>,
+) -> TraceUploadResult {
+    let mut initial = ConsentGeneration::read(options.cwd, options.agent_dir);
+    let request_cancel = TraceUploadCancel::new();
+    let guarded = TraceUploadOptions {
+        cancel: Some(&request_cancel),
+        on_upload_delay: options.on_upload_delay.clone(),
+        ..*options
+    };
+    let request = perform_agent_trace_upload(&guarded, gate);
+    tokio::pin!(request);
+    loop {
+        tokio::select! {
+            result = &mut request => return result,
+            () = async { if let Some(cancel) = options.cancel { cancel.wait().await; } else { std::future::pending::<()>().await; } } => {
+                request_cancel.cancel();
+                return request.await;
+            }
+            () = tokio::time::sleep(DEBOUNCE) => {
+                let current = ConsentGeneration::read(options.cwd, options.agent_dir);
+                if initial != current {
+                    let settings = crate::settings::SettingsManager::create(options.cwd, options.agent_dir);
+                    if settings.errors().is_empty() && settings.get_agent_traces_enabled()
+                        && current == ConsentGeneration::read(options.cwd, options.agent_dir) {
+                        initial = current;
+                    } else {
+                        request_cancel.cancel();
+                        let _ = request.await;
+                        return TraceUploadResult::Disabled;
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn recover(
     cwd: PathBuf,
     agent_dir: PathBuf,
     permits: Arc<tokio::sync::Semaphore>,
     http: Arc<dyn TraceHttp>,
     base_url: Option<String>,
-) {
-    let cancel = TraceUploadCancel::new();
+    cancel: TraceUploadCancel,
+) -> bool {
     let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
     if !settings.errors().is_empty() || !settings.get_agent_traces_enabled() {
-        return;
+        return false;
     }
     // Workers share an agent directory: only one startup sweep may deliver it
     // at a time. OS locks release on crashes without stale-directory retries.
     let Some(_recovery_lease) = delivery_lease(&agent_dir, &agent_dir.join("catch-up")) else {
-        return;
+        return false;
     };
     let Ok(mut entries) = tokio::fs::read_dir(agent_trace_outbox_dir(&agent_dir)).await else {
-        return;
+        return false;
     };
     let gate = TraceRequestGate::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
         if cancel.is_cancelled() {
-            return;
+            return false;
         }
         if entry.path().extension().is_none_or(|ext| ext != "json") {
             continue;
@@ -600,7 +694,6 @@ async fn recover(
             }
             Err(_) => continue,
         }
-        let permit = tokio::select! { p = permits.clone().acquire_owned() => p.unwrap(), () = cancel.wait() => return };
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
             continue;
         };
@@ -620,10 +713,25 @@ async fn recover(
             cancel: Some(&cancel),
             on_upload_delay: None,
         };
-        let result = perform_agent_trace_upload(&options, Some(&gate)).await;
-        log_agent_trace_outcome(&agent_dir, Some(&path), &result);
-        drop(permit);
+        // Bound catch-up retries per entry; exhaustion leaves its durable marker.
+        let mut schedule = Schedule::default();
+        for attempt in 0..3 {
+            let permit = tokio::select! { p = permits.clone().acquire_owned() => p.unwrap(), () = cancel.wait() => return false };
+            let generation = schedule.start(Instant::now());
+            let result = deliver_with_consent(&options, Some(&gate)).await;
+            log_agent_trace_outcome(&agent_dir, Some(&path), &result);
+            drop(permit);
+            schedule.settle(Instant::now(), generation, &result);
+            let Some(due) = schedule.due else {
+                break;
+            };
+            if attempt == 2 {
+                break;
+            }
+            tokio::select! { () = tokio::time::sleep_until(due) => {}, () = cancel.wait() => return false }
+        }
     }
+    !cancel.is_cancelled()
 }
 
 #[cfg(test)]

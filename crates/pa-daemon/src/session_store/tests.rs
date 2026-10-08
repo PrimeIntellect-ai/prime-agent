@@ -1262,3 +1262,26 @@ fn session_header_line_leads_with_the_type_tag() {
     let line = serde_json::to_string(&session_header_line(&header)).unwrap();
     assert!(line.starts_with("{\"type\":\"session\",\"version\":3,\"id\":\"abc\""));
 }
+
+#[cfg(unix)] // Windows uses the full reader rather than windowed hydration.
+#[test]
+fn hydrating_full_history_preserves_the_trace_controller() {
+    let dir = temp_dir();
+    let path = dir.join("trace-hydration.jsonl");
+    let mut original = SessionFile::create(dir.to_str().unwrap(), None, 0);
+    original.append_message(&json!({"role":"user", "content":"synthetic", "timestamp":1u64}));
+    original.set_path(path.clone());
+    original.rewrite().unwrap();
+    let mut windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(windowed.window.is_some());
+    let (_, consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(&dir, &dir);
+    let controller =
+        pa_core::agent_traces::ContinuousTraceUpload::install(&dir, &dir, Some(&path), consent);
+    windowed.trace_upload = Some(controller.clone());
+    windowed.ensure_full_history().unwrap();
+    assert!(windowed.window.is_none());
+    assert!(std::sync::Arc::ptr_eq(
+        windowed.trace_upload.as_ref().unwrap(),
+        &controller
+    ));
+}

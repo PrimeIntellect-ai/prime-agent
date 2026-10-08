@@ -94,3 +94,8 @@ recovery rather than promising power-loss durability). A short nonblocking mutat
 records one stable fallback marker per session, which is retained conservatively
 until a future sender has delivered it. Its cost must be measured
 separately; startup/paint parity is not established by scheduler unit tests.
+Active requests monitor consent changes every second on the worker and cancel on
+revocation/errors; bytes already sent cannot be recalled. Recovery belongs to all
+live hosts sharing the agent directory and cancels when the last host disappears.
+Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
+and releases upload capacity during retry waits; exhaustion retains durable intent.

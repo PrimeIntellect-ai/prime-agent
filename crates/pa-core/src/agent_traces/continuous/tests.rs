@@ -250,6 +250,108 @@ async fn dropping_an_active_controller_cancels_a_hanging_sink() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn disabling_consent_cancels_an_inflight_request_without_shutting_down_the_host() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("revoked-inflight.jsonl", "revoked");
+    let c = controller(&fixture, &path, true);
+    c.persisted(&path);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: cancelled.clone(),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (_body, _reply) = observed.recv().await.unwrap();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(false).unwrap();
+    cancelled.notified().await;
+    assert!(!c.cancel.is_cancelled());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        None
+    );
+    drop(c);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_reschedules_rate_limits_without_holding_an_upload_permit() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("recovery-retry.jsonl", "retry");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let task = tokio::spawn(recover(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        permits.clone(),
+        sink,
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+    ));
+    let (_body, first) = observed.recv().await.unwrap();
+    let started = Instant::now();
+    let mut limited = response(429, "{}");
+    limited.retry_after = Some("120".into());
+    first.send(limited).unwrap();
+    // Acquire readiness demonstrates the retry timer does not consume delivery capacity.
+    let permit = permits.acquire().await.unwrap();
+    drop(permit);
+    let (_body, second) = observed.recv().await.unwrap();
+    assert!(Instant::now() - started >= Duration::from_secs(120));
+    second.send(response(200, "{}")).unwrap();
+    assert!(task.await.unwrap());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn recovery_shutdown_cancels_a_hanging_request_and_preserves_intent() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("recovery-shutdown.jsonl", "shutdown");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: cancelled.clone(),
+    });
+    let cancel = TraceUploadCancel::new();
+    let task = tokio::spawn(recover(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+        cancel.clone(),
+    ));
+    let (_body, _reply) = observed.recv().await.unwrap();
+    cancel.cancel();
+    cancelled.notified().await;
+    assert!(!task.await.unwrap());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        None
+    );
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+}
+
+#[tokio::test(start_paused = true)]
 async fn writes_during_upload_have_a_followup_and_do_not_advance_the_old_cursor() {
     let fixture = Fixture::new();
     enable_synthetic_fixture(&fixture);
@@ -307,6 +409,7 @@ async fn opted_out_recovery_does_not_create_an_outbox() {
         Arc::new(tokio::sync::Semaphore::new(1)),
         sink,
         Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
     )
     .await;
     assert!(!agent_trace_outbox_dir(&fixture.agent_dir).exists());
@@ -335,6 +438,7 @@ async fn startup_recovery_uploads_pending_and_prunes_missing_but_preserves_unkno
         Arc::new(tokio::sync::Semaphore::new(1)),
         sink,
         Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
     )
     .await;
     assert_eq!(
