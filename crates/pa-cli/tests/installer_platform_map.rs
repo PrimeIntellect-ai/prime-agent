@@ -1756,6 +1756,13 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
     let release_at = script
         .find("prewarm_tree_release() {")
         .expect("the release helper exists");
+    let tree_init_at = script
+        .find("prewarm_tree=\"\"")
+        .expect("the tree initializes empty");
+    assert!(
+        tree_init_at < release_at,
+        "the release tree is initialized empty before the helper that kills it"
+    );
     let traps_at = script
         .find("trap 'ui_stop; prewarm_tree_release")
         .expect("the EXIT trap");

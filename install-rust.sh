@@ -666,7 +666,10 @@ migrated_note=""
 # The pre-warm's expiry path freezes the tree it kills: an exit inside that
 # window (an interrupt, or a kill that does not take) must not leave the
 # processes frozen with the kernel venv lock held. No-op whenever no walk
-# collected a tree. Defined before the traps that call it.
+# collected a tree. The tree is INITIALIZED to empty here - before any trap
+# can fire - so a caller-exported variable of the same name is never the
+# kill's target (the cleanup trap's own rule for `stage` and `dl`).
+prewarm_tree=""
 prewarm_tree_release() {
   # KILLED FROZEN, never thawed first: a CONT would hand the launcher a
   # respawn window, and SIGKILL reaches stopped processes.
