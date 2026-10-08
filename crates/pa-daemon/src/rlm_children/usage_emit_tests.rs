@@ -2,18 +2,26 @@ use super::*;
 use pa_core::session_engine::rlm_usage::RlmChildUsageReport;
 use std::sync::Arc;
 
-/// A capturing sink: reports land in a shared vector for assertions.
+/// A capturing sink: reports land in a shared vector for assertions;
+/// `fail` flips `record` into a failing no-op.
 #[derive(Default)]
-struct CapturingSink(std::sync::Mutex<Vec<RlmChildUsageReport>>);
+struct CapturingSink {
+    reports: std::sync::Mutex<Vec<RlmChildUsageReport>>,
+    fail: std::sync::atomic::AtomicBool,
+}
 
 impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
     fn record(
         &self,
         report: RlmChildUsageReport,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        let reports = &self.0;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        let (reports, fail) = (&self.reports, &self.fail);
         Box::pin(async move {
+            if fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
             reports.lock().expect("reports lock").push(report);
+            true
         })
     }
 
@@ -96,7 +104,7 @@ async fn emit_reads_once_and_advances_the_cursor() {
     let record = record_with_file("sub-emit1", &file);
 
     sessions.inner.emit_child_usage(&record).await;
-    let reports = sink.0.lock().expect("reports lock").clone();
+    let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-emit1");
     let [(origin, usage)] = reports[0].batches[..] else {
@@ -110,9 +118,37 @@ async fn emit_reads_once_and_advances_the_cursor() {
     assert!(consumed.is_some_and(|rows| rows > 0));
 
     sessions.inner.emit_child_usage(&record).await;
-    let reports = sink.0.lock().expect("reports lock").clone();
+    let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(record.lock().await.attributed_rows, consumed);
+}
+
+/// A failed delivery keeps the cursor so the next emission re-delivers the
+/// same rows; once the sink persists, the report lands exactly once.
+#[tokio::test]
+async fn emit_keeps_the_cursor_until_the_sink_persists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let sessions = registry(Path::new("/agent"));
+    let sink = Arc::new(CapturingSink::default());
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-emit5", &file);
+
+    sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.emit_child_usage(&record).await;
+    assert_eq!(record.lock().await.attributed_rows, Some(0));
+    assert_eq!(sink.reports.lock().expect("reports lock").len(), 0);
+
+    sink.fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.emit_child_usage(&record).await;
+    let reports = sink.reports.lock().expect("reports lock").clone();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].rlm_child_id, "sub-emit5");
+    assert!(record
+        .lock()
+        .await
+        .attributed_rows
+        .is_some_and(|rows| rows > 0));
 }
 
 #[tokio::test]
@@ -134,12 +170,12 @@ async fn emit_tolerates_missing_and_absent_files() {
     sessions.set_usage_sink(sink.clone());
     let missing = record_with_file("sub-emit3", &tmp.path().join("absent.jsonl"));
     sessions.inner.emit_child_usage(&missing).await;
-    assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+    assert_eq!(sink.reports.lock().expect("reports lock").len(), 0);
 
     let no_file = record_with_file("sub-emit4", &tmp.path().join("x.jsonl"));
     no_file.lock().await.session_file = None;
     sessions.inner.emit_child_usage(&no_file).await;
-    assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+    assert_eq!(sink.reports.lock().expect("reports lock").len(), 0);
 }
 
 /// The reseed lists the parent's live ledger children as settled rows
@@ -273,7 +309,7 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
         .expect("the reseeded row");
     // Nothing is owed: the pre-restart history never re-bills.
     sessions.inner.emit_child_usage(&record).await;
-    assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+    assert_eq!(sink.reports.lock().expect("reports lock").len(), 0);
     // A delivery primes the lazy cursor at the tail; the delivered turn
     // appends its row; the next emit bills only that row.
     SupervisorChildSessionsInner::arm_usage_watch(&sessions.inner, &record).await;
@@ -285,7 +321,7 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
     content.push('\n');
     std::fs::write(Path::new(&child_one), content).expect("append the row");
     sessions.inner.emit_child_usage(&record).await;
-    let reports = sink.0.lock().expect("reports lock").clone();
+    let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     let [(_, usage)] = reports[0].batches[..] else {
         panic!("one batch: {:?}", reports[0].batches);

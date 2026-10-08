@@ -9,9 +9,10 @@ use super::{
 
 impl SupervisorChildSessionsInner {
     /// Deliver the child's unattributed usage rows as one per-origin
-    /// report; the cursor advances past every parsed row (no
-    /// double-billing); without a sink nothing is read, a torn trailing
-    /// line lands on the next read.
+    /// report; the cursor advances only past the rows the sink persisted
+    /// (no double-billing; a failed delivery re-reads the same rows);
+    /// without a sink nothing is read, a torn trailing line lands on the
+    /// next read.
     pub(super) async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
         let sink = self.usage_sink.lock().expect("usage sink lock").clone();
         let Some(sink) = sink else {
@@ -58,18 +59,19 @@ impl SupervisorChildSessionsInner {
             return;
         };
         let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
-        {
-            let mut record_guard = record.lock().await;
-            record_guard.attributed_rows = Some(next);
-        }
         if batches.is_empty() {
+            record.lock().await.attributed_rows = Some(next);
             return;
         }
-        sink.record(RlmChildUsageReport {
-            rlm_child_id,
-            batches,
-        })
-        .await;
+        let persisted = sink
+            .record(RlmChildUsageReport {
+                rlm_child_id,
+                batches,
+            })
+            .await;
+        if persisted {
+            record.lock().await.attributed_rows = Some(next);
+        }
         drop(emit_guard);
     }
 

@@ -40,6 +40,13 @@ pub(crate) fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usag
 pub type RlmChildUsageFuture<'a, T> =
     std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// The durable-write boundary the attribution producer writes through: the
+/// parent session's transcript. Object-safe (stored behind `Arc<dyn ...>`),
+/// so implementations box their futures. `last_assistant` is the newest
+/// assistant row's id + usage (any stop reason); `append_attribution`
+/// durably appends one `child_usage_attributed` row against an existing
+/// assistant row, `Err` when the target row is missing or the write fails
+/// (nothing persisted).
 pub trait RlmChildUsageStore: Send + Sync {
     fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
 
@@ -166,17 +173,18 @@ impl RlmChildUsageAttributions {
     }
 
     /// Flush one observed report: batches fold into the target row's cumulative aggregate,
-    /// one durable `child_usage_attributed` row per batch; a failed append is logged and
-    /// dropped, so attribution bookkeeping never breaks the observing path.
+    /// one durable `child_usage_attributed` row per batch. Returns whether every batch
+    /// persisted (nothing owed — an unregistered or forgotten child has no durable target,
+    /// and retrying cannot help — counts as persisted); a failed append is logged and stops
+    /// the flush, leaving the rest for the next observation's retry.
     ///
     /// # Panics
     ///
     /// Panics if the forward, children, or telemetry state mutexes are poisoned.
-    pub async fn record_child_usage(&self, report: RlmChildUsageReport) {
+    pub async fn record_child_usage(&self, report: RlmChildUsageReport) -> bool {
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
-            Box::pin(async move { forward.record_child_usage(report).await }).await;
-            return;
+            return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
         // The guard drops at its own statement: a scrutinee temp held
         // across the fallback await is not Send.
@@ -193,7 +201,7 @@ impl RlmChildUsageAttributions {
                 None => {
                     // Never registered here (raced a rebuild, or the
                     // child outlived its engine): no durable target.
-                    return;
+                    return true;
                 }
             },
         };
@@ -209,8 +217,7 @@ impl RlmChildUsageAttributions {
             // THIS producer's bases (a tokio Mutex is not reentrant); holding it across
             // the await would deadlock the handoff path and the adoption.
             drop(bases);
-            Box::pin(async move { forward.record_child_usage(report).await }).await;
-            return;
+            return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
         for (origin, usage) in report.batches {
             let base = bases
@@ -244,9 +251,11 @@ impl RlmChildUsageAttributions {
                 }
                 Err(error) => {
                     eprintln!("pa-core: RLM child usage attribution not persisted: {error}");
+                    return false;
                 }
             }
         }
+        true
     }
 
     /// A rebuild keeps the session's live children: adopt the retired
@@ -390,7 +399,7 @@ pub trait RlmChildUsageSink: Send + Sync {
     fn record(
         &self,
         report: RlmChildUsageReport,
-    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = bool> + Send + '_>>;
 
     /// Drop the registration so sequential children do not accumulate.
     fn forget(
@@ -759,5 +768,72 @@ mod tests {
         assert!(rows
             .iter()
             .all(|row| row["type"] != "child_usage_attributed"));
+    }
+
+    /// A store whose appends fail while the toggle is set, so a report's
+    /// first delivery fails and its retry persists.
+    struct FailingAppendStore {
+        store: SessionUsageStore,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl RlmChildUsageStore for FailingAppendStore {
+        fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+            self.store.last_assistant()
+        }
+
+        fn append_attribution(
+            &self,
+            target_id: &str,
+            child_usage: Usage,
+            aggregate_usage: Usage,
+            origin: Option<ChildUsageOrigin>,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+            if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
+                return Box::pin(std::future::ready(Err(std::io::Error::other(
+                    "append disabled",
+                ))));
+            }
+            self.store
+                .append_attribution(target_id, child_usage, aggregate_usage, origin)
+        }
+    }
+
+    /// A failed append returns false and writes no row; the retry persists
+    /// the batch once, folding from the unchanged base (no double fold).
+    #[tokio::test]
+    async fn a_failed_append_leaves_the_base_for_the_retry() {
+        let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
+        let (_tmp, manager) = manager_with_assistant(raw_parent);
+        let store = std::sync::Arc::new(FailingAppendStore {
+            store: SessionUsageStore(manager.clone()),
+            fail: std::sync::atomic::AtomicBool::new(true),
+        });
+        let producer = RlmChildUsageAttributions::new(store.clone());
+        producer.register_spawn("sub-flaky").await;
+        let report = || RlmChildUsageReport {
+            rlm_child_id: "sub-flaky".to_string(),
+            batches: vec![(
+                ChildUsageOrigin::SpawnTask,
+                usage_block(10, 5, 0, 0, 15, 0.01),
+            )],
+        };
+        assert!(!producer.record_child_usage(report()).await);
+        let rows = file_rows(&manager).await;
+        assert!(rows
+            .iter()
+            .all(|row| row["type"] != "child_usage_attributed"));
+
+        store
+            .fail
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(producer.record_child_usage(report()).await);
+        let rows = file_rows(&manager).await;
+        let attributed: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(attributed.len(), 1, "the retry persisted the batch once");
+        assert_eq!(attributed[0]["aggregateUsage"]["input"], 1_010);
     }
 }
