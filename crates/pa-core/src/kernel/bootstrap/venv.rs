@@ -99,11 +99,20 @@ fn resolve_bootstrap_child_timeout_ms() -> u64 {
     }
 }
 
+/// The most one drained line buffers before it is forwarded in pieces:
+/// a stream without newlines must not grow the drain's memory without
+/// bound while the child bound is still minutes away.
+const MAX_DRAIN_LINE_BYTES: usize = 64 * 1024;
+
 /// Forward one piped child stream line by line through the progress
 /// reporter; the pipe is drained to EOF whatever the reporter does.
 /// Lines are read byte-delimited and decoded lossily: a child that emits
 /// non-UTF-8 bytes (locale noise, a raw progress escape) is forwarded
-/// mangled, never allowed to end the drain mid-stream.
+/// mangled, never allowed to end the drain mid-stream. A line longer
+/// than [`MAX_DRAIN_LINE_BYTES`] is forwarded in pieces, never buffered
+/// whole. The reporter is held weakly: a drain still blocked on a
+/// descendant that inherited the pipe releases the reporter when the
+/// bootstrap ends, and the pipe itself closes at the descendant's EOF.
 fn drain_child_stream<R: std::io::Read + Send + 'static>(
     pipe: Option<R>,
     report: Option<KernelBootstrapProgressHandler>,
@@ -112,24 +121,54 @@ fn drain_child_stream<R: std::io::Read + Send + 'static>(
         let Some(mut pipe) = pipe.map(std::io::BufReader::new) else {
             return;
         };
-        let mut bytes: Vec<u8> = Vec::new();
-        loop {
-            bytes.clear();
-            match std::io::BufRead::read_until(&mut pipe, b'\n', &mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let mut line = String::from_utf8_lossy(&bytes).into_owned();
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
+        let report = report.map(|handler| std::sync::Arc::downgrade(&handler));
+        let mut line: Vec<u8> = Vec::new();
+        let forward = |line: &mut Vec<u8>| {
+            let mut text = String::from_utf8_lossy(line).into_owned();
+            if text.ends_with('\n') {
+                text.pop();
+                if text.ends_with('\r') {
+                    text.pop();
                 }
             }
             match &report {
-                Some(handler) => handler(&line),
-                None => eprintln!("{line}"),
+                Some(handler) => {
+                    if let Some(handler) = handler.upgrade() {
+                        handler(&text);
+                    }
+                }
+                None => eprintln!("{text}"),
             }
+            line.clear();
+        };
+        while let Ok(available) = std::io::BufRead::fill_buf(&mut pipe) {
+            if available.is_empty() {
+                break;
+            }
+            if line.len() == MAX_DRAIN_LINE_BYTES {
+                // A piece at the cap is forwarded before any more bytes
+                // join it.
+                forward(&mut line);
+                continue;
+            }
+            let remaining = MAX_DRAIN_LINE_BYTES - line.len();
+            let (consumed, complete) =
+                if let Some(at) = available.iter().position(|&byte| byte == b'\n') {
+                    let take = (at + 1).min(remaining);
+                    line.extend_from_slice(&available[..take]);
+                    (take, take > at)
+                } else {
+                    let take = available.len().min(remaining);
+                    line.extend_from_slice(&available[..take]);
+                    (take, false)
+                };
+            std::io::BufRead::consume(&mut pipe, consumed);
+            if complete {
+                forward(&mut line);
+            }
+        }
+        if !line.is_empty() {
+            forward(&mut line);
         }
     })
 }

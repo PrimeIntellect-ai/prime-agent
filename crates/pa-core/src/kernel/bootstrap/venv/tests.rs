@@ -1166,6 +1166,98 @@ async fn bootstrap_children_forward_piped_output_through_the_reporter() {
     );
 }
 
+/// A stream without newlines is drained in bounded pieces: one line may
+/// not buffer without bound while the child bound is still minutes away.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_newline_free_stream_is_drained_in_bounded_pieces() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         echo BEGIN_MARKER\n\
+         head -c 2097152 /dev/zero | tr '\\0' x\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    assert!(
+        collected.len() > 10,
+        "the cap-free stream reaches the reporter in pieces: {:?}",
+        collected.len()
+    );
+    let longest = collected.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest <= super::MAX_DRAIN_LINE_BYTES,
+        "no forwarded piece may exceed the cap: longest is {longest}, cap is {}",
+        super::MAX_DRAIN_LINE_BYTES
+    );
+    let pieces = collected
+        .iter()
+        .filter(|line| line.contains('x') && !line.contains("MARKER"))
+        .map(String::len)
+        .collect::<Vec<_>>();
+    let filled = pieces.iter().any(|length| *length >= 32_000);
+    assert!(
+        filled,
+        "the over-long line is forwarded in cap-sized pieces, not in every          reader-sized chunk (pieces: {pieces:?})"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("BEGIN_MARKER")),
+        "the stream's head reaches the reporter"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the stream's tail reaches the reporter"
+    );
+}
+
+/// A line shorter than the cap that spans several reader fills stays
+/// whole: only the cap splits a line, never the reader's chunk size.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_short_line_spanning_fills_is_forwarded_whole() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         head -c 20480 /dev/zero | tr '\\0' x\n\
+         echo\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    let whole = collected
+        .iter()
+        .find(|line| line.starts_with('x'))
+        .expect("the over-cap-free line reached the reporter");
+    assert_eq!(
+        whole.len(),
+        20480,
+        "a line under the cap arrives in one piece, spanning fills: {whole:?}"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the tail reaches the reporter"
+    );
+}
+
 /// A child that emits non-UTF-8 bytes mid-stream is forwarded mangled,
 /// never allowed to end the drain: the lines after the bad bytes still
 /// reach the reporter and the bootstrap still completes.
