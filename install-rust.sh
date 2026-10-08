@@ -3146,7 +3146,10 @@ if uv_on_path \
     prewarm_tree="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
     [ -n "$prewarm_tree" ] && break
     prewarm_launch_reads=$((prewarm_launch_reads + 1))
-    sleep 0.05
+    # The sleep is best-effort on machines whose sleep rejects fractions:
+    # the poll is a bounded spin either way, and the watch loop below
+    # re-registers the pid if it lands later than the spin.
+    sleep 0.05 2>/dev/null || true
   done
   prewarm_waited=0
   prewarm_timed_out=""

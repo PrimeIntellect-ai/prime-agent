@@ -1823,6 +1823,12 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
         script.contains("prewarm_launch_reads=0"),
         "the launch-window registration poll exists"
     );
+    // The poll's fractional sleep is guarded the installer's own way: a
+    // sleep that rejects fractions must not abort a published install.
+    assert!(
+        script.contains("sleep 0.05 2>/dev/null || true"),
+        "the launch-window poll never aborts on an unsupported fractional sleep"
+    );
     let launch_reads_at = script.find("prewarm_launch_reads=0").expect("the poll");
     let gate_loop_at = script
         .find("while [ ! -f \"$prewarm_done\" ]")
