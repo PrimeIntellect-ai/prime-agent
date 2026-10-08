@@ -769,11 +769,7 @@ impl SupervisorChildSessions {
             replied_since_task: None,
             progress_note: record.progress_note.clone(),
             label: (!record.label.is_empty()).then(|| record.label.clone()),
-            last_activity_at: Some(
-                record
-                    .progress_note_at_ms
-                    .unwrap_or(record.started_at_ms),
-            ),
+            last_activity_at: Some(record.progress_note_at_ms.unwrap_or(record.started_at_ms)),
             activity_stale_ms: None,
         }
     }
@@ -869,7 +865,8 @@ impl SupervisorChildSessionsInner {
                 return;
             }
             record.last_emitted_status = Some(status);
-            record.last_emitted_note = record.progress_note.clone();
+            let note = record.progress_note.clone();
+            record.last_emitted_note = note;
             record.snapshot_value()
         };
         sink(row);

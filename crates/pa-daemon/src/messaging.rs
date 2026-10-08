@@ -179,17 +179,14 @@ impl Supervisor {
                 None,
             )
         };
-        let target = match self.registry.resolve(target_active_session_id).await {
-            Ok(resident) => resident,
-            Err(_) => {
-                // Fire-and-forget parity: a gone parent never saw the TS
-                // note either; nothing wakes a session for it.
-                return response_success(
-                    Some(command_id),
-                    "notify_rlm_child_progress_note",
-                    Some(json!({ "delivered": false })),
-                );
-            }
+        let Ok(target) = self.registry.resolve(target_active_session_id).await else {
+            // Fire-and-forget parity: a gone parent never saw the TS
+            // note either; nothing wakes a session for it.
+            return response_success(
+                Some(command_id),
+                "notify_rlm_child_progress_note",
+                Some(json!({ "delivered": false })),
+            );
         };
         let delivery = DaemonWorkerCommand::WorkerDeliverProgressNote {
             id: None,

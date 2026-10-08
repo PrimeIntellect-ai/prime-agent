@@ -114,7 +114,10 @@ async fn a_progress_note_delivery_never_queues_a_prompt() {
             }),
         )
         .await;
-    assert!(response.success, "progress note deliver failed: {response:?}");
+    assert!(
+        response.success,
+        "progress note deliver failed: {response:?}"
+    );
     assert_eq!(response.command, "worker_deliver_progress_note");
     assert!(queue_texts(&worker.core, Lane::Steering).is_empty());
     assert!(queue_texts(&worker.core, Lane::FollowUp).is_empty());
@@ -125,7 +128,10 @@ async fn a_progress_note_delivery_never_queues_a_prompt() {
             &json!({ "childActiveSessionId": "", "message": "", "timestampMs": 0 }),
         )
         .await;
-    assert!(!invalid.success, "an empty note must be refused: {invalid:?}");
+    assert!(
+        !invalid.success,
+        "an empty note must be refused: {invalid:?}"
+    );
 }
 
 /// The row's content is the rendered prompt; the details carry the identity the

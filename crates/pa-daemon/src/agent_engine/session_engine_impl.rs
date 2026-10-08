@@ -927,7 +927,9 @@ impl SessionEngine for AgentSessionEngine {
             let child = child_active_session_id.to_string();
             let message = message.to_string();
             self.runtime.spawn(async move {
-                children.mark_child_note(&child, &message, timestamp_ms).await;
+                children
+                    .mark_child_note(&child, &message, timestamp_ms)
+                    .await;
             });
         }
     }

@@ -252,7 +252,10 @@ impl Worker {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let timestamp_ms = payload.get("timestampMs").and_then(Value::as_u64).unwrap_or(0);
+        let timestamp_ms = payload
+            .get("timestampMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         if child.is_empty() || message.is_empty() {
             return response_failure(
                 None,

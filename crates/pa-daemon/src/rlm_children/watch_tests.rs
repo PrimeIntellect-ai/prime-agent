@@ -401,8 +401,7 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
 async fn a_child_progress_note_reaches_the_roster_and_the_update_sink() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
     let (sessions, _kill_rx) =
-        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy)
-            .await;
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
     sessions
         .push_test_child(RlmChildIdentity {
             rlm_child_id: "child-id".to_string(),
