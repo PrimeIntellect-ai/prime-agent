@@ -199,7 +199,7 @@ mod tests {
 
     use std::io::{Read, Write};
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -252,16 +252,18 @@ mod tests {
     #[test]
     fn blocking_client_deadline_then_roundtrip() {
         let path = test_pipe("blocking-roundtrip");
-        let setup = tokio::runtime::Runtime::new().expect("setup runtime");
-        let listener = setup.block_on(bind_transport(&path)).expect("bind");
-        drop(setup);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let server_path = path.clone();
 
         let server = std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("server runtime");
             runtime.block_on(async move {
+                let listener = bind_transport(&server_path).await.expect("bind");
+                ready_tx.send(()).expect("listener ready");
                 let server = listener.accept().await.expect("accept");
                 let (mut reader, mut writer) = server.split();
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                reply_rx.await.expect("release reply");
                 writer.write_all(b"hello").await.expect("server write");
                 let mut buf = [0u8; 4];
                 reader.read_exact(&mut buf).await.expect("server read");
@@ -269,28 +271,24 @@ mod tests {
             });
         });
 
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("listener ready");
         let mut stream = connect_blocking(&path).expect("blocking connect");
         stream
             .set_read_timeout(Duration::from_millis(50))
             .expect("deadline");
-        let started = Instant::now();
         let mut buf = [0u8; 5];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(5) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-                other => panic!("unexpected read result: {other:?}"),
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "server reply never arrived"
-            );
-        }
-        assert_eq!(&buf, b"hello");
-        assert!(
-            started.elapsed() >= Duration::from_millis(200),
-            "the read deadline must be honored while the reply is held back"
+        assert_eq!(
+            stream.read(&mut buf).expect_err("reply is held back").kind(),
+            std::io::ErrorKind::TimedOut
         );
+        reply_tx.send(()).expect("release reply");
+        stream
+            .set_read_timeout(Duration::from_secs(5))
+            .expect("roundtrip deadline");
+        stream.read_exact(&mut buf).expect("client read");
+        assert_eq!(&buf, b"hello");
         stream.write_all(b"echo").expect("client write");
         stream.flush().expect("client flush");
         server.join().expect("server thread");
