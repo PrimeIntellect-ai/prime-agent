@@ -88,6 +88,71 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
     let done = client.read_response("p2");
     assert_eq!(done["success"], true, "idle turn failed: {done}");
 
+    // A user-aborted turn with visible queued input is deliberately parked,
+    // not interrupted work that the restart may resume automatically.
+    client.send_command(
+        "c3",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script_busy.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("c3");
+    assert_eq!(created["success"], true, "create paused failed: {created}");
+    let paused_session = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let paused_session_file = created["data"]["sessionFile"]
+        .as_str()
+        .expect("session file")
+        .to_string();
+    client.send_command(
+        "p3",
+        &json!({ "type": "prompt", "activeSessionId": paused_session, "message": "go" }),
+    );
+    assert_eq!(client.read_response("p3")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let started = std::fs::read_to_string(&paused_session_file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| entry["message"]["role"].as_str() == Some("assistant"));
+        if started {
+            break;
+        }
+        assert!(Instant::now() < deadline, "paused turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    client.send_command(
+        "q3",
+        &json!({ "type": "follow_up", "activeSessionId": paused_session, "message": "remain parked" }),
+    );
+    assert_eq!(client.read_response("q3")["success"], true);
+    client.send_command(
+        "a3",
+        &json!({ "type": "abort", "activeSessionId": paused_session }),
+    );
+    assert_eq!(client.read_response("a3")["success"], true);
+    client.send_command(
+        "w3",
+        &json!({ "type": "wait_for_idle", "activeSessionId": paused_session }),
+    );
+    assert_eq!(client.read_response("w3")["success"], true);
+    client.send_command(
+        "g3",
+        &json!({ "type": "get_queue", "activeSessionId": paused_session }),
+    );
+    let queue = client.read_response("g3");
+    assert_eq!(queue["data"]["followUp"], json!(["remain parked"]));
+    let paused_bytes = std::fs::read(&paused_session_file).expect("paused transcript");
+
     client.send_command(
         "p1",
         &json!({
@@ -197,6 +262,11 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         distinct(listed_ids),
         vec![busy_session],
         "only the interrupted session came back"
+    );
+    assert_eq!(
+        std::fs::read(&paused_session_file).expect("paused transcript after restart"),
+        paused_bytes,
+        "a user-aborted session must not execute its parked queue after restart"
     );
 
     client2.send_command("sd2", &json!({ "type": "shutdown" }));

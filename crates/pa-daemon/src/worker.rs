@@ -811,7 +811,11 @@ impl Worker {
         // `closeKeepsResumeEntry("shutdown")`).
         let busy = {
             let core = self.core.lock().unwrap();
-            !core.steering.is_empty() || !core.follow_up.is_empty()
+            // A user abort parks visible input until an explicit resume.
+            // Restarting a fresh worker would otherwise drop that suspension
+            // and execute the parked prompts without the user's consent.
+            !core.queued_input_suspended
+                && (!core.steering.is_empty() || !core.follow_up.is_empty())
         };
         let _ = self.record_recovery(busy, "shutdown");
         self.close_listener_then_cleanup_socket().await;
