@@ -14,13 +14,13 @@ type CapturedRequest = (String, Vec<(String, String)>, String);
 
 /// A scripted transport: one PUT slot at a time with its captured
 /// request and scripted answer.
-struct ScriptedTraceHttp {
+pub(super) struct ScriptedTraceHttp {
     requests: Mutex<Vec<CapturedRequest>>,
     answers: Mutex<VecDeque<Result<TraceHttpResponse, TraceHttpError>>>,
 }
 
 impl ScriptedTraceHttp {
-    fn new(answers: Vec<Result<TraceHttpResponse, TraceHttpError>>) -> Self {
+    pub(super) fn new(answers: Vec<Result<TraceHttpResponse, TraceHttpError>>) -> Self {
         ScriptedTraceHttp {
             requests: Mutex::new(Vec::new()),
             answers: Mutex::new(answers.into_iter().collect()),
@@ -48,7 +48,7 @@ impl TraceHttp for ScriptedTraceHttp {
     }
 }
 
-fn response(status: u16, body: &str) -> TraceHttpResponse {
+pub(super) fn response(status: u16, body: &str) -> TraceHttpResponse {
     TraceHttpResponse {
         status,
         body: body.to_string(),
@@ -56,17 +56,17 @@ fn response(status: u16, body: &str) -> TraceHttpResponse {
     }
 }
 
-struct Fixture {
+pub(super) struct Fixture {
     /// The temp dir stays alive for the fixture's life (the paths
     /// point into it); it is never read.
     _dir: tempfile::TempDir,
-    cwd: PathBuf,
-    agent_dir: PathBuf,
-    session_dir: PathBuf,
+    pub(super) cwd: PathBuf,
+    pub(super) agent_dir: PathBuf,
+    pub(super) session_dir: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         let session_dir = agent_dir.join("sessions");
@@ -79,7 +79,7 @@ impl Fixture {
         }
     }
 
-    fn write_session(&self, name: &str, id: &str) -> PathBuf {
+    pub(super) fn write_session(&self, name: &str, id: &str) -> PathBuf {
         let path = self.session_dir.join(name);
         std::fs::write(
             &path,

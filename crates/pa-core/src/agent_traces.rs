@@ -25,6 +25,9 @@ pub use upload_all::{
     TraceUploadAllOptions,
 };
 
+mod continuous;
+pub use continuous::ContinuousTraceUpload;
+
 mod upload;
 use upload::perform_agent_trace_upload;
 pub use upload::{upload_trace_file, TraceUploadOptions};

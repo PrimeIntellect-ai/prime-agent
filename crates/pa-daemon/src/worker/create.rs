@@ -61,7 +61,9 @@ impl Worker {
                         return response_failure(
                             None,
                             "create",
-                            &format!("Invalid thinking level \"{level}\". Valid values: off, minimal, low, medium, high, xhigh, max"),
+                            &format!(
+                                "Invalid thinking level \"{level}\". Valid values: off, minimal, low, medium, high, xhigh, max"
+                            ),
                             None,
                         );
                     }
@@ -197,6 +199,15 @@ impl Worker {
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
+        let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
+        let traces = |path: &std::path::Path| {
+            pa_core::agent_traces::ContinuousTraceUpload::install(
+                &cwd,
+                &self.config.agent_dir,
+                Some(path),
+                settings.get_agent_traces_enabled(),
+            )
+        };
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
                 let loaded = {
@@ -215,6 +226,7 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
+                        opened.trace_upload = Some(traces(&opened.path));
                         opened_existing_session = true;
                         // The session-model restore records its decision only for a path
                         // this worker opened — a failed open never leaks the binding into a
@@ -279,6 +291,7 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
+                created.trace_upload = Some(traces(&created.path));
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -317,6 +330,7 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
+                created.trace_upload = Some(traces(&created.path));
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -343,7 +357,7 @@ impl Worker {
                     "create",
                     "Session cannot be both no-session and session-pathed",
                     None,
-                )
+                );
             }
         };
 
@@ -449,7 +463,6 @@ impl Worker {
         // The session's settings-seeded switches: a restarted session re-seeds
         // its auto-compaction flag from the persisted `compaction.enabled`.
         let (service_tier, steering_mode, follow_up_mode, auto_compaction_enabled) = {
-            let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
             let queue_mode = |mode: pa_core::settings::QueueModeSetting| -> String {
                 match mode {
                     pa_core::settings::QueueModeSetting::All => "all".to_string(),

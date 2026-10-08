@@ -156,6 +156,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
         };
         for line in lines {
@@ -209,6 +210,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown,
         };
         // The raw rows are consumed in place: each line String drops as soon as its
@@ -303,6 +305,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
         }
     }

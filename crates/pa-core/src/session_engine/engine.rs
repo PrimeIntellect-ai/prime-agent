@@ -174,7 +174,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
-    let session_manager = config
+    let mut session_manager = config
         .session_manager
         .unwrap_or_else(|| SessionManager::in_memory(&cwd));
     let conversation_log = {
@@ -189,6 +189,16 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .map(|path| path.display().to_string())
             })
     };
+    let settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
+    if session_manager.is_persisted() {
+        let traces = crate::agent_traces::ContinuousTraceUpload::install(
+            &cwd,
+            &config.agent_dir,
+            session_manager.get_session_file(),
+            settings.get_agent_traces_enabled(),
+        );
+        session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
+    }
     let wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
@@ -200,7 +210,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.cron_store.clone(),
     );
 
-    let settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
