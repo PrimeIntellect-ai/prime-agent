@@ -102,6 +102,7 @@ pub struct ContinuousTraceUpload {
     pending: Mutex<Option<(PathBuf, Schedule)>>,
     wake: Arc<tokio::sync::Notify>,
     cancel: TraceUploadCancel,
+    started: AtomicBool,
 }
 
 impl std::fmt::Debug for ContinuousTraceUpload {
@@ -184,6 +185,7 @@ impl ContinuousTraceUpload {
             pending: Mutex::new(session_file.map(|p| (p.to_path_buf(), Schedule::default()))),
             wake: Arc::new(tokio::sync::Notify::new()),
             cancel: TraceUploadCancel::new(),
+            started: AtomicBool::new(false),
         });
         let service = service();
         let Ok(mut registrations) = service.controllers.lock() else {
@@ -374,29 +376,23 @@ fn service() -> &'static Service {
 async fn run_service() {
     let service = service();
     let permits = Arc::new(tokio::sync::Semaphore::new(4));
-    let mut active = std::collections::HashSet::new();
     let mut recovered = std::collections::HashSet::new();
     loop {
         let controllers = service.controllers.lock().unwrap().clone();
-        active.retain(|key| {
-            controllers
-                .iter()
-                .any(|weak| weak.as_ptr() as usize == *key && weak.strong_count() > 0)
-        });
         for weak in controllers {
-            let key = weak.as_ptr() as usize;
             if let Some(controller) = weak.upgrade() {
                 if recovered.len() < MAX_CONTROLLERS
                     && recovered.insert(controller.agent_dir.clone())
                 {
                     tokio::spawn(recover(
-                        Arc::downgrade(&controller),
+                        controller.cwd.clone(),
+                        controller.agent_dir.clone(),
                         permits.clone(),
                         Arc::new(ReqwestTraceHttp),
                         None,
                     ));
                 }
-                if active.insert(key) {
+                if !controller.started.swap(true, Ordering::AcqRel) {
                     tokio::spawn(run_controller(
                         weak,
                         permits.clone(),
@@ -517,27 +513,22 @@ async fn run_controller(
 }
 
 async fn recover(
-    weak: Weak<ContinuousTraceUpload>,
+    cwd: PathBuf,
+    agent_dir: PathBuf,
     permits: Arc<tokio::sync::Semaphore>,
     http: Arc<dyn TraceHttp>,
     base_url: Option<String>,
 ) {
-    let Some(controller) = weak.upgrade() else {
-        return;
-    };
-    let cwd = controller.cwd.clone();
-    let agent_dir = controller.agent_dir.clone();
     let cancel = TraceUploadCancel::new();
-    drop(controller);
+    let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
+    if !settings.errors().is_empty() || !settings.get_agent_traces_enabled() {
+        return;
+    }
     // Workers share an agent directory: only one startup sweep may deliver it
     // at a time. OS locks release on crashes without stale-directory retries.
     let Some(_recovery_lease) = delivery_lease(&agent_dir, &agent_dir.join("catch-up")) else {
         return;
     };
-    let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
-    if !settings.get_agent_traces_enabled() {
-        return;
-    }
     let Ok(mut entries) = tokio::fs::read_dir(agent_trace_outbox_dir(&agent_dir)).await else {
         return;
     };

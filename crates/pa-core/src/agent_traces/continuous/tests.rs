@@ -13,6 +13,7 @@ fn controller(fixture: &Fixture, path: &Path, enabled: bool) -> Arc<ContinuousTr
         pending: Mutex::new(Some((path.to_path_buf(), Schedule::default()))),
         wake: Arc::new(tokio::sync::Notify::new()),
         cancel: TraceUploadCancel::new(),
+        started: AtomicBool::new(false),
     })
 }
 
@@ -297,6 +298,21 @@ async fn writes_during_upload_have_a_followup_and_do_not_advance_the_old_cursor(
 }
 
 #[tokio::test(start_paused = true)]
+async fn opted_out_recovery_does_not_create_an_outbox() {
+    let fixture = Fixture::new();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![]));
+    recover(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    )
+    .await;
+    assert!(!agent_trace_outbox_dir(&fixture.agent_dir).exists());
+}
+
+#[tokio::test(start_paused = true)]
 async fn startup_recovery_uploads_pending_and_prunes_missing_but_preserves_unknown_kinds() {
     let fixture = Fixture::new();
     enable_synthetic_fixture(&fixture);
@@ -312,10 +328,10 @@ async fn startup_recovery_uploads_pending_and_prunes_missing_but_preserves_unkno
     .unwrap();
     let malformed = agent_trace_outbox_dir(&fixture.agent_dir).join("malformed.json");
     std::fs::write(&malformed, "{").unwrap();
-    let c = controller(&fixture, &fixture.session_dir.join("live.jsonl"), true);
     let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
     recover(
-        Arc::downgrade(&c),
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
         Arc::new(tokio::sync::Semaphore::new(1)),
         sink,
         Some("http://synthetic.invalid".into()),
