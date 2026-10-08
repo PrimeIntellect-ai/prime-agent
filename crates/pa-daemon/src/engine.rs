@@ -295,6 +295,13 @@ pub trait SessionEngine: Send + Sync {
         Box::pin(async { None })
     }
 
+    /// The cheap model-selection key used to validate metadata resolved outside
+    /// the worker core lock. Implementations that switch models return the
+    /// provider and model id from the same selection the resolver reads.
+    fn model_identity(&self) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+
     /// The engine's resolved model as connection-state wire data
     /// (`{ id, provider, reasoning }`), for the splash and tray labels.
     fn model_metadata(&self) -> Option<Value> {

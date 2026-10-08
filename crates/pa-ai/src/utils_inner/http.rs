@@ -53,36 +53,71 @@ pub struct HttpResponse {
     pub headers: std::collections::HashMap<String, String>,
     body: reqwest::Response,
     signal: Option<CancellationToken>,
+    /// Trailing bytes of a UTF-8 sequence split across body chunks, held until the rest arrives.
+    utf8_tail: Vec<u8>,
     /// The request's connection-error profile: body-read failures on the AWS http2 profile surface
     /// the TS bedrock transport's mid-stream texts.
     pub(crate) connection: ConnectionErrorProfile,
 }
 
 impl HttpResponse {
-    /// Read the next text chunk from the body (None at end of stream).
+    /// Read the next text chunk from the body (None at end of stream). A UTF-8 sequence split
+    /// across body chunks is held until it completes; a sequence still incomplete at end of
+    /// stream yields one U+FFFD.
     pub async fn next_text(&mut self) -> Result<Option<String>, ProviderError> {
-        if self
-            .signal
-            .as_ref()
-            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-        {
-            return Err(ProviderError::Aborted);
-        }
-        let signal = self.signal.clone();
-        let chunk = match signal {
-            Some(signal) => {
-                let next = self.body.chunk();
-                tokio::select! {
-                    () = signal.cancelled() => return Err(ProviderError::Aborted),
-                    result = next => result,
-                }
+        loop {
+            if self
+                .signal
+                .as_ref()
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+            {
+                return Err(ProviderError::Aborted);
             }
-            None => self.body.chunk().await,
-        };
-        match chunk {
-            Ok(Some(bytes)) => Ok(Some(String::from_utf8_lossy(&bytes).to_string())),
-            Ok(None) => Ok(None),
-            Err(error) => Err(self.body_error(&error)),
+            let signal = self.signal.clone();
+            let chunk = match signal {
+                Some(signal) => {
+                    let next = self.body.chunk();
+                    tokio::select! {
+                        () = signal.cancelled() => return Err(ProviderError::Aborted),
+                        result = next => result,
+                    }
+                }
+                None => self.body.chunk().await,
+            };
+            let text = match chunk {
+                Ok(Some(bytes)) => {
+                    self.utf8_tail.extend_from_slice(&bytes);
+                    match std::str::from_utf8(&self.utf8_tail) {
+                        Ok(text) => {
+                            let text = text.to_string();
+                            self.utf8_tail.clear();
+                            text
+                        }
+                        Err(error) if error.error_len().is_none() => {
+                            let valid_up_to = error.valid_up_to();
+                            let text =
+                                String::from_utf8_lossy(&self.utf8_tail[..valid_up_to]).to_string();
+                            self.utf8_tail.drain(..valid_up_to);
+                            text
+                        }
+                        Err(_) => {
+                            let text = String::from_utf8_lossy(&self.utf8_tail).to_string();
+                            self.utf8_tail.clear();
+                            text
+                        }
+                    }
+                }
+                Ok(None) if self.utf8_tail.is_empty() => return Ok(None),
+                Ok(None) => {
+                    let text = String::from_utf8_lossy(&self.utf8_tail).to_string();
+                    self.utf8_tail.clear();
+                    text
+                }
+                Err(error) => return Err(self.body_error(&error)),
+            };
+            if !text.is_empty() {
+                return Ok(Some(text));
+            }
         }
     }
 
@@ -280,6 +315,7 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
         headers,
         body: response,
         signal,
+        utf8_tail: Vec::new(),
         connection: request.connection,
     })
 }
@@ -309,4 +345,91 @@ pub async fn post_json(
             .map_err(|error| ProviderError::Message(format!("Invalid JSON response: {error}")))?
     };
     Ok((status, parsed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve one plain-text body split across two writes. The second write is held until `hold`
+    /// fires, so the chunk boundary lands where the caller put it.
+    async fn serve_split_body(
+        first: Vec<u8>,
+        second: Vec<u8>,
+        hold: tokio::sync::oneshot::Receiver<()>,
+    ) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = String::new();
+            let mut buffer = [0u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    return;
+                }
+                head.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                if head.contains("\r\n\r\n") {
+                    break;
+                }
+            }
+            let content_length = first.len() + second.len();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&first).await.unwrap();
+            hold.await.unwrap();
+            socket.write_all(&second).await.unwrap();
+        });
+        addr
+    }
+
+    /// A multi-byte character split across two body chunks decodes once, whole: the first chunk
+    /// ends inside 你, and the server sends the rest only after that chunk was read.
+    #[tokio::test]
+    async fn next_text_rejoins_a_multi_byte_character_split_across_body_chunks() {
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
+        let addr = serve_split_body(b"hi \xE4".to_vec(), b"\xBD\xA0!".to_vec(), hold_rx).await;
+        let mut response = send(RequestOptions::new(
+            reqwest::Method::GET,
+            format!("http://{addr}/"),
+        ))
+        .await
+        .unwrap();
+        let mut text = String::new();
+        if let Some(chunk) = response.next_text().await.unwrap() {
+            text.push_str(&chunk);
+            let _ = hold_tx.send(());
+        }
+        while let Some(chunk) = response.next_text().await.unwrap() {
+            text.push_str(&chunk);
+        }
+        assert_eq!(text, "hi 你!");
+    }
+
+    /// A body that ends inside a multi-byte character yields the valid text plus exactly one
+    /// U+FFFD at end of stream.
+    #[tokio::test]
+    async fn next_text_ends_a_torn_body_with_one_replacement_character() {
+        let (hold_tx, hold_rx) = tokio::sync::oneshot::channel();
+        let addr = serve_split_body(b"cut \xE4".to_vec(), b"\xBD".to_vec(), hold_rx).await;
+        let mut response = send(RequestOptions::new(
+            reqwest::Method::GET,
+            format!("http://{addr}/"),
+        ))
+        .await
+        .unwrap();
+        let mut text = String::new();
+        if let Some(chunk) = response.next_text().await.unwrap() {
+            text.push_str(&chunk);
+            let _ = hold_tx.send(());
+        }
+        while let Some(chunk) = response.next_text().await.unwrap() {
+            text.push_str(&chunk);
+        }
+        assert_eq!(text, "cut \u{FFFD}");
+    }
 }
