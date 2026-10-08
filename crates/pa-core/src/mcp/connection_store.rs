@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::storage::atomic_write;
+use crate::settings::storage::{atomic_write_with, AtomicWriteOptions};
 
 /// The connections file version.
 const FILE_VERSION: u8 = 1;
@@ -231,7 +231,11 @@ fn write_records(
         "version": FILE_VERSION,
         "connections": ordered,
     });
-    atomic_write(path, &serde_json::to_string_pretty(&doc)?)?;
+    atomic_write_with(
+        path,
+        &serde_json::to_string_pretty(&doc)?,
+        AtomicWriteOptions { fsync: true },
+    )?;
     Ok(())
 }
 
@@ -262,11 +266,10 @@ pub fn new_pending_record(
 mod tests {
     use super::*;
 
-    /// Per-call-site served-path oracle (the TS writer passes only `{ mode: 0o600 }`): the
-    /// registry write goes through the real `write_records` writer and takes NO fsync
-    /// branch.
+    /// Per-call-site served-path oracle: the registry write goes through the real
+    /// `write_records` writer and takes exactly one fsync branch.
     #[test]
-    fn registry_write_takes_the_ts_default_no_sync() {
+    fn registry_write_takes_exactly_one_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("connections.json");
         let record = McpConnectionRecord {
@@ -293,8 +296,8 @@ mod tests {
         write_records(&path, &records).unwrap();
         assert_eq!(
             crate::settings::storage::opt_in_fsync_calls(),
-            before,
-            "the TS-default registry write must not sync"
+            before + 1,
+            "the registry write must flush the temp file before the rename"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }

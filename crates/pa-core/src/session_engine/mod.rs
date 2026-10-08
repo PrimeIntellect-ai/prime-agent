@@ -158,6 +158,10 @@ pub struct AgentSession {
     /// daemon can install it after the build; `None` (the default)
     /// keeps the one-shot summarizer completion.
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
+    /// One compaction at a time: a second `compact` waits for the
+    /// in-flight run and prepares against its result; reads and writes
+    /// keep using the session lock meanwhile.
+    compaction_flight: tokio::sync::Mutex<()>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -244,6 +248,7 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
+            compaction_flight: tokio::sync::Mutex::new(()),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
@@ -480,3 +485,6 @@ mod slash_session_tests;
 
 #[cfg(test)]
 mod compaction_outcome_tests;
+
+#[cfg(test)]
+mod compaction_unblocked_tests;

@@ -87,7 +87,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = self.read_jobs();
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -169,7 +169,7 @@ impl AgentCronJobStore {
             .collect();
         if matched {
             if let Some(updated_job) = &updated {
-                self.write_jobs(&jobs);
+                self.write_jobs(&jobs)?;
                 return Ok(Some(updated_job.clone()));
             }
             anyhow::bail!(
@@ -179,12 +179,15 @@ impl AgentCronJobStore {
         Ok(None)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the state lock or write fails.
     pub fn delete_rlm_heartbeat(
         &self,
         active_session_id: &str,
         id: &str,
         now: u64,
-    ) -> Option<AgentCronJob> {
+    ) -> anyhow::Result<Option<AgentCronJob>> {
         let now_iso = iso_from_millis(now);
         let mut deleted = None;
         let jobs: Vec<AgentCronJob> = self
@@ -208,16 +211,19 @@ impl AgentCronJobStore {
             })
             .collect();
         if deleted.is_some() {
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
         }
-        deleted
+        Ok(deleted)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the state lock or write fails.
     pub fn cancel_rlm_heartbeats_for_session(
         &self,
         active_session_id: &str,
         now: u64,
-    ) -> Vec<AgentCronJob> {
+    ) -> anyhow::Result<Vec<AgentCronJob>> {
         let now_iso = iso_from_millis(now);
         let mut cancelled = Vec::new();
         let jobs: Vec<AgentCronJob> = self
@@ -241,9 +247,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if !cancelled.is_empty() {
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
         }
-        cancelled
+        Ok(cancelled)
     }
 }
 
@@ -289,10 +295,13 @@ mod tests {
         assert_eq!(resumed.status, JobStatus::Active);
         let deleted = store
             .delete_rlm_heartbeat("live-1", &rlm.id, now + 3)
+            .unwrap()
             .unwrap();
         assert_eq!(deleted.status, JobStatus::Cancelled);
         let second = store.create_rlm_heartbeat(&rlm_input).unwrap();
-        let cancelled = store.cancel_rlm_heartbeats_for_session("live-1", now + 4);
+        let cancelled = store
+            .cancel_rlm_heartbeats_for_session("live-1", now + 4)
+            .unwrap();
         assert_eq!(cancelled.len(), 1);
         assert_eq!(second.status, JobStatus::Active);
         assert_eq!(cancelled[0].status, JobStatus::Cancelled);
