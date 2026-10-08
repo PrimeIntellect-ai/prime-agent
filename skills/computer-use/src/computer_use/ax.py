@@ -475,9 +475,11 @@ def _describe(app_services: Any, element: Any, deadline: float | None = None) ->
     role = _cap(role)
     subrole_ok, subrole = read_subrole()
     subrole = _cap(subrole)
-    if not subrole_ok and (not role_ok or role == _SECURE_ROLE):
-        # an unreadable subrole fails closed whenever the role could be a
-        # text field, including when the role itself could not be read
+    if not role_ok or (not subrole_ok and role == _SECURE_ROLE):
+        # an unreadable role fails closed even when the subrole is a
+        # determinate absence, and an unreadable subrole on a text field
+        # fails closed: a secure field hiding behind a read that could not
+        # complete never has its value collected
         subrole = _SECURE_SUBROLE
     if _is_secure_field({"role": role, "subrole": subrole}):
         # a secure marker in any shape - role-only included - never reads

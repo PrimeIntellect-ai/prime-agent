@@ -717,5 +717,27 @@ class SelectRangeWrapTests(unittest.TestCase):
         self.assertNotIn("bare-range", str(services.set_calls[0][1]))
 
 
+class UnreadableRoleWithAbsentSubroleTests(unittest.TestCase):
+    def test_a_role_that_cannot_be_read_fails_closed_even_with_an_absent_subrole(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (-25204, None)  # the role read cannot complete
+                if attribute == "AXSubrole":
+                    return (-25205, None)  # the subrole attribute is absent
+                if attribute == "AXValue":
+                    return (0, "hunter2")  # a role-only secure field's value
+                return (0, None)
+
+        described = ax._describe(Services(), "element")
+        self.assertEqual(described["subrole"], "AXSecureTextField")
+        self.assertIsNone(described["value"])
+
+
 if __name__ == "__main__":
     unittest.main()
