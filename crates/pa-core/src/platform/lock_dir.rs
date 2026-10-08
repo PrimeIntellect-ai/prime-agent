@@ -1516,9 +1516,8 @@ impl LockDir {
         // A released guard no longer holds the path: the registry entry
         // must not answer contention for a later same-process acquire that
         // legitimately retakes the freed path while this guard object is
-        // still alive. The key is TAKEN here -
-        // never unregistered twice (a repeat would remove a later
-        // holder's entry).
+        // still alive. The key is TAKEN here - never unregistered twice (a
+        // repeat would remove a later holder's entry).
         #[cfg(unix)]
         if let Some(key) = self
             .held_key
@@ -1528,6 +1527,11 @@ impl LockDir {
         {
             unregister_locally_held(&key);
         }
+        // And the plain release runs at most once: a guard released
+        // explicitly must never remove the lock directory a later
+        // acquire_at() recreated at the freed path when this guard
+        // finally drops.
+        self.finished.store(true, Ordering::Relaxed);
     }
 
     /// Whether the directory at the lock path is still the one this guard
@@ -2292,6 +2296,27 @@ mod tests {
             lock_of(&file).is_dir(),
             "a foreign mtime is never ours to remove"
         );
+    }
+
+    /// An explicitly released guard's Drop never removes a later hold:
+    /// `release()` marks the guard finished, so the Drop's plain release
+    /// cannot delete the lock directory a later `acquire_at()` recreated
+    /// at the freed path.
+    #[test]
+    #[cfg(unix)]
+    fn an_explicitly_released_guard_never_removes_a_later_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.guard");
+        let first = LockDir::acquire_at(&path, MIN_STALE).unwrap();
+        first.release();
+        let second = LockDir::acquire_at(&path, MIN_STALE).unwrap();
+        drop(first);
+        assert!(
+            path.is_dir(),
+            "the old guard's Drop never removes the later hold"
+        );
+        drop(second);
+        assert!(!path.exists(), "the second guard releases its own lock");
     }
 
     /// The plain-rename restore (the non-Linux arm, and the Linux
