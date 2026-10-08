@@ -748,18 +748,23 @@ fn drive_trial(
     // sibling. A schedule cut-off gets its own class first (children may
     // still have been mid-REPORT at the deadline, so the arrivals count
     // alone would misread a cut-off as crewless), and the rate-limit class
-    // stays first as before.
+    // stays first as before. Both reporter gates also read lifetime
+    // evidence — every child's REPORT — which a compaction-truncated
+    // transcript cannot provide (the pre-boundary rows are gone), so a
+    // compacted view holds them off: the trial still cannot pass (the same
+    // truncated counters leave the turn/cost lines unknown, so the row is
+    // inconclusive) but is never mislabeled with a crew it did have.
     let reporters = distinct_reporting_children(&messages);
     let instant_fail = rate_limit_failure(&messages)
         .or_else(|| {
             timed_out.then(|| "schedule timeout: no ANSWER line before the deadline".to_string())
         })
         .or_else(|| {
-            (snapshot.arrivals.total == 0)
+            (!snapshot.compacted && snapshot.arrivals.total == 0)
                 .then(|| "crewless trial: no child REPORT arrived".to_string())
         })
         .or_else(|| {
-            (reporters < size)
+            (!snapshot.compacted && reporters < size)
                 .then(|| format!("partial crew: {reporters} of {size} children reported"))
         });
 
@@ -1490,6 +1495,114 @@ mod tests {
             report.contains("partial crew: 1 of 2 children reported"),
             "{report}"
         );
+    }
+
+    #[test]
+    fn a_compacted_transcript_never_mislabels_a_crew_as_missing() {
+        // Compaction drops the pre-boundary rows, so a fully reporting crew
+        // can arrive as zero REPORT rows (crewless-looking) or a short count
+        // (partial-looking). The missing-reporter gates read lifetime
+        // evidence the retained window no longer carries, so a compacted
+        // transcript holds them off: the row keeps its task outcome and
+        // scores inconclusive (the turn/cost lines are unknown over the
+        // same truncated counters), never a fabricated crew label — and
+        // never a silent pass.
+        let (seed, size, trial) = (1, 2, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 2);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let compaction_row = || {
+            json!({
+                "role": "compactionSummary",
+                "summary": "the crew replied",
+                "tokensBefore": 90_000,
+                "retainedMessageCount": 2,
+            })
+        };
+
+        // Crewless-looking: compaction dropped every REPORT row.
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    compaction_row(),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+
+        run(&daemon.socket, &config).expect("the compacted trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        assert_eq!(rows[0]["instant_fail"], Value::Null, "{rows:?}");
+        assert_eq!(rows[0]["verdict"], "inconclusive", "{rows:?}");
+
+        // Partial-looking: one of the two REPORT rows survived compaction.
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    compaction_row(),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({
+                        "role": "custom",
+                        "customType": "agent_message",
+                        "content": "[agent-message from child-a]\n\nREPORT",
+                        "details": { "from": { "activeSessionId": "child-a" } },
+                    }),
+                    json!({ "role": "assistant", "usage": { "input": 100, "output": 50 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+
+        run(&daemon.socket, &config).expect("the partially-retained trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        // The retained REPORT row still counts as an arrival; the
+        // partial-crew gate just cannot read lifetime evidence from it.
+        assert_eq!(rows[0]["arrivals"], 1, "{rows:?}");
+        assert_eq!(rows[0]["instant_fail"], Value::Null, "{rows:?}");
+        assert_eq!(rows[0]["verdict"], "inconclusive", "{rows:?}");
     }
 
     #[test]
