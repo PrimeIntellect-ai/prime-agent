@@ -550,6 +550,33 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 /// platforms take it too so the serialization is one lock everywhere.)
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The bound override resolves to a usable bound or the default - a
+/// non-positive value would tree-kill every child on its first poll.
+#[test]
+fn bootstrap_child_timeout_rejects_non_positive_overrides() {
+    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
+    let previous = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
+    let resolve = super::resolve_bootstrap_child_timeout_ms;
+    for (given, expected) in [
+        ("0", 600_000u64),
+        ("-5", 600_000),
+        ("abc", 600_000),
+        ("", 600_000),
+        ("2500", 2_500),
+    ] {
+        std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", given);
+        assert_eq!(
+            resolve(),
+            expected,
+            "the override {given:?} resolves to {expected:?}"
+        );
+    }
+    match previous {
+        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
+        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
+    }
+}
+
 /// A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override resolves through
 /// the DIRECT probe and never reads or writes any memo file.
 #[cfg(unix)]

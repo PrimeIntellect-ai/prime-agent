@@ -1621,6 +1621,112 @@ fn install_rust_sh_prewarm_runner_releases_the_captured_pipe() {
     );
 }
 
+/// The kill must contain a RESPAWNING launcher: still running between
+/// the walk and the kill, it can start another provisioning that the
+/// sampled tree, the kill list, and the stop verdict all miss. The gate
+/// block is extracted from the shipped script and driven against a
+/// launcher that spawns a fresh persistent child every second; after the
+/// watchdog expires, NOTHING it ever spawned may survive.
+#[test]
+fn install_rust_sh_prewarm_kill_contains_a_respawning_launcher() {
+    let script =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    let gate = script
+        .find("# THE PRE-WARM GATE")
+        .expect("the pre-warm gate exists");
+    let start = script[gate..]
+        .find("if uv_on_path")
+        .map(|at| gate + at)
+        .expect("the gate's guard if opens the block");
+    let end = script
+        .find("# --- verify: the launcher must answer --version")
+        .expect("the verify section follows the pre-warm");
+    let block = &script[start..end];
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let transcript = dir.path().join("transcript");
+    let spawned_log = dir.path().join("spawned");
+    let launcher = dir.path().join("launcher");
+    std::fs::write(
+        &launcher,
+        format!(
+            "#!/bin/sh\ntrap '' TERM INT\nwhile :; do\n  sleep 300 &\n  printf '%s\\n' \"$!\" >> {log}\n  sleep 0.3\ndone\n",
+            log = spawned_log.display(),
+        ),
+    )
+    .expect("write the respawning launcher");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))
+            .expect("launcher permissions");
+    }
+    let harness = format!(
+        "#!/bin/sh\n\
+         set -e\n\
+         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n\
+         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n\
+         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
+         uv_on_path() {{ return 0; }}\n\
+         launcher='{launcher}'\n\
+         prewarm_bound_s=2\n\
+         {block}\
+         printf 'flow-continued\\n' >> {transcript}\n\
+         exit 0\n",
+        transcript = transcript.display(),
+        launcher = launcher.display(),
+        block = block,
+    );
+    let harness_path = dir.path().join("harness.sh");
+    std::fs::write(&harness_path, harness).expect("write the harness");
+    let mut drive = Command::new("/bin/sh")
+        .arg(&harness_path)
+        .spawn()
+        .expect("spawn the harness");
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(done) = drive.try_wait().expect("drive alive") {
+            break done;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(30) {
+            let _ = drive.kill();
+            panic!("the respawn drive ran past the watchdog");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!(
+        status.success(),
+        "the install proceeds past a bounded pre-warm: {status:?}"
+    );
+    let flow = std::fs::read_to_string(&transcript).unwrap_or_default();
+    assert!(
+        flow.contains("flow-continued"),
+        "the install continues after expiry: {flow}"
+    );
+    let alive = |pid: u32| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -0 {pid} 2>/dev/null"))
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let spawned: Vec<u32> = std::fs::read_to_string(&spawned_log)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .collect();
+    assert!(
+        !spawned.is_empty(),
+        "the launcher published its spawns: the drive asserts something"
+    );
+    let survivors: Vec<u32> = spawned.into_iter().filter(|pid| alive(*pid)).collect();
+    assert!(
+        survivors.is_empty(),
+        "every launch the respawner ever made died with it: {survivors:?} survive; flow: {flow}"
+    );
+}
+
 /// Drives the pre-warm block under `sh` with a three-level hanging
 /// fixture, bounded by a kill guard (`None` on the guard). Liveness is
 /// measured before the cleanup kill; `hermetic_path` replaces PATH for

@@ -88,9 +88,13 @@ const REAP_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 /// `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS`.
 fn resolve_bootstrap_child_timeout_ms() -> u64 {
     match std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS") {
-        Ok(value) if !value.is_empty() => {
-            value.parse().unwrap_or(DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS)
-        }
+        // A non-positive bound would kill every child on its first poll;
+        // the sh pre-warm gate rejects the same values.
+        Ok(value) if !value.is_empty() => value
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| *ms > 0)
+            .unwrap_or(DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS),
         _ => DEFAULT_BOOTSTRAP_CHILD_TIMEOUT_MS,
     }
 }
@@ -217,6 +221,14 @@ async fn run_async(
                             });
                         }
                         None => drop(child),
+                    }
+                    // An unreaped child that dies later must not linger as
+                    // a zombie: it rides a reaper that waits for its exit.
+                    #[cfg(unix)]
+                    if !reaped {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
                     }
                     drop(drains);
                     let outcome = match (killed, reaped) {
