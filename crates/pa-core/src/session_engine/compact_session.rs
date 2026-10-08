@@ -106,8 +106,7 @@ pub struct CompactRun {
     pub result: CompactionResult,
     pub entry: pa_types::session::CompactionEntry,
     /// The whole compaction's wall duration (the run's
-    /// `compaction_duration_ms`; measured here once, centrally, for every
-    /// arm).
+    /// `compaction_duration_ms`).
     pub duration_ms: u64,
     /// The post-compaction `ipython_state` notice, when a kernel was running:
     /// the row is already durable and in the live context; surfaces broadcast it.
@@ -122,26 +121,39 @@ pub enum CompactOutcome {
     Skipped(&'static str),
 }
 
-/// Run compaction over the session: summarize the pre-cut prefix, persist the
-/// entry, and return the rebuilt post-compaction context messages.
-///
-/// # Errors
-///
-/// Returns an error when the preparation or the summarizer call fails,
-/// or the entry cannot be persisted; a skip is a normal `Ok` outcome.
-pub async fn execute_compaction(
-    session: &mut SessionManager,
-    options: CompactOptions<'_>,
-) -> anyhow::Result<CompactOutcome> {
-    let started_at = std::time::Instant::now();
+pub(crate) struct CompactionAttempt {
+    /// The session leaf at prepare: the commit is valid while the active
+    /// branch still grows through it with no compaction between.
+    prefix_leaf: Option<String>,
+    cut: CutPointResult,
+    previous_summary: Option<String>,
+    recent_state_anchor: Option<String>,
+    history: Vec<AgentMessage>,
+    turn_prefix_messages: Vec<AgentMessage>,
+    tokens_before: u64,
+    details: CompactionDetails,
+    first_kept_entry: String,
+    semantic_compaction: Option<super::semantic_edges::SemanticCompaction>,
+}
+
+pub(crate) struct PreparedCompaction {
+    pub(crate) result: CompactionResult,
+    pub(crate) entry: pa_types::session::CompactionEntry,
+}
+
+/// PREPARE under the caller's session lock: resolve the cut, begin the
+/// ledger guard, and record the leaf the commit's structural check walks
+/// back to.
+pub(crate) fn prepare_attempt(
+    session: &SessionManager,
+    options: &CompactOptions<'_>,
+) -> Result<CompactionAttempt, CompactSkip> {
     let entries = session.retained_entries().to_vec();
-    let preparation = match prepare_compaction(&entries, options.settings.keep_recent_tokens) {
-        Ok(preparation) => preparation,
-        Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
-    };
+    let prefix_leaf = session.get_leaf_id().map(str::to_string);
+    let preparation = prepare_compaction(&entries, options.settings.keep_recent_tokens)?;
     // TS `beginCompaction` after the preparation resolved: a skipped
     // compaction makes no events (the begin comes after the skip throw).
-    let mut semantic_compaction = options
+    let semantic_compaction = options
         .semantic_edges
         .as_ref()
         .map(|recorder| recorder.begin_compaction(options.abort));
@@ -193,7 +205,25 @@ pub async fn execute_compaction(
     file_op_messages.extend(turn_prefix_messages.iter().cloned());
     let details: CompactionDetails =
         details_for(&file_op_messages, &entries, prev_compaction_index);
+    Ok(CompactionAttempt {
+        prefix_leaf,
+        cut,
+        previous_summary,
+        recent_state_anchor,
+        history,
+        turn_prefix_messages,
+        tokens_before,
+        details,
+        first_kept_entry,
+        semantic_compaction,
+    })
+}
 
+/// SUMMARIZE: run the summarizer calls with no session lock held.
+pub(crate) async fn summarize_attempt(
+    attempt: &CompactionAttempt,
+    options: &CompactOptions<'_>,
+) -> anyhow::Result<PreparedCompaction> {
     // A run aborted before the summarizer request never starts one.
     pa_agent::abort::throw_if_aborted_signal(options.abort)?;
 
@@ -205,11 +235,11 @@ pub async fn execute_compaction(
     let (model, api_key, summary_headers) = match options.auxiliary {
         Some(context) => {
             let required = estimate_summary_request_tokens(
-                &history,
-                &turn_prefix_messages,
-                cut.is_split_turn,
-                previous_summary.as_deref(),
-                recent_state_anchor.as_deref(),
+                &attempt.history,
+                &attempt.turn_prefix_messages,
+                attempt.cut.is_split_turn,
+                attempt.previous_summary.as_deref(),
+                attempt.recent_state_anchor.as_deref(),
                 options.custom_instructions,
                 options.settings.reserve_tokens,
             );
@@ -253,7 +283,10 @@ pub async fn execute_compaction(
     let history_call = async {
         // The stand-in applies only inside the split arm; a cut without
         // a turn prefix makes the history call below.
-        if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+        if attempt.cut.is_split_turn
+            && !attempt.turn_prefix_messages.is_empty()
+            && attempt.history.is_empty()
+        {
             // The literal stand-in rides the live sink too, exactly
             // like the committed summary.
             if let Some(sink) = options.summary_delta.as_ref() {
@@ -269,17 +302,17 @@ pub async fn execute_compaction(
             });
         }
         let request = build_summarization_request(
-            &history,
+            &attempt.history,
             options.custom_instructions,
-            previous_summary.as_deref(),
-            recent_state_anchor.as_deref(),
+            attempt.previous_summary.as_deref(),
+            attempt.recent_state_anchor.as_deref(),
             options.settings.reserve_tokens,
         );
         // Each summary wire call carries its own request id under the
         // compaction's guard (TS `summaryCall`): the id's headers merge
         // over the routed model's.
         super::semantic_edges::summary_slice_call(
-            semantic_compaction.as_ref(),
+            attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             |headers| {
                 complete_summary_call(
@@ -296,12 +329,12 @@ pub async fn execute_compaction(
         .await
     };
     let turn_prefix_call = async {
-        if !cut.is_split_turn || turn_prefix_messages.is_empty() {
+        if !attempt.cut.is_split_turn || attempt.turn_prefix_messages.is_empty() {
             return Ok::<Option<SummarySlice>, anyhow::Error>(None);
         }
-        let request = build_turn_prefix_request(&turn_prefix_messages);
+        let request = build_turn_prefix_request(&attempt.turn_prefix_messages);
         let slice = super::semantic_edges::summary_slice_call(
-            semantic_compaction.as_ref(),
+            attempt.semantic_compaction.as_ref(),
             summary_headers.clone(),
             |headers| {
                 complete_summary_call(
@@ -355,8 +388,8 @@ pub async fn execute_compaction(
             None => String::new(),
         };
         remainder.push_str(&file_ops_block(
-            &details.read_files,
-            &details.modified_files,
+            &attempt.details.read_files,
+            &attempt.details.modified_files,
         ));
         if !remainder.is_empty() {
             sink(&remainder);
@@ -369,8 +402,8 @@ pub async fn execute_compaction(
         None => history_slice.summary.clone(),
     };
     summary.push_str(&file_ops_block(
-        &details.read_files,
-        &details.modified_files,
+        &attempt.details.read_files,
+        &attempt.details.modified_files,
     ));
     let mut slices = vec![history_slice];
     if let Some(prefix) = turn_prefix_slice {
@@ -378,8 +411,8 @@ pub async fn execute_compaction(
     }
     let result = CompactionResult {
         summary,
-        first_kept_entry_id: first_kept_entry.clone(),
-        tokens_before,
+        first_kept_entry_id: attempt.first_kept_entry.clone(),
+        tokens_before: attempt.tokens_before,
         usage: summed_usage(&slices),
     };
     // The digest snapshot and its fingerprint attach at the commit and never flow
@@ -399,35 +432,55 @@ pub async fn execute_compaction(
     );
     let entry = compaction_entry_for(
         &result,
-        &details,
+        &attempt.details,
         options.custom_instructions,
         harness_digest,
         harness_state_fingerprint,
     );
+    Ok(PreparedCompaction { result, entry })
+}
+
+/// COMMIT under the session lock: an aborted run never commits; the
+/// prepared prefix still decides the commit's validity; the ledger settles
+/// and the compaction row persists behind the mid-window tail.
+/// `Ok(false)` is a structural conflict — the caller re-prepares.
+///
+/// # Errors
+///
+/// The abort marker, or the durable append's I/O error (main's
+/// `append_entry` then pops only the compaction row; every acked row is
+/// already durable).
+pub(crate) fn commit_attempt(
+    session: &mut SessionManager,
+    attempt: &mut CompactionAttempt,
+    prepared: &PreparedCompaction,
+    abort: Option<&pa_agent::abort::AbortSignal>,
+) -> anyhow::Result<bool> {
+    pa_agent::abort::throw_if_aborted_signal(abort)?;
+    if !session.compaction_prefix_intact(attempt.prefix_leaf.as_deref()) {
+        return Ok(false);
+    }
     // Ledger before effect (TS: `compactionRecorded` and the terminal
     // event land before `appendCompaction`): a failed persist still
     // leaves a completed compaction on the ledger, exactly like TS.
-    if let Some(compaction) = semantic_compaction.as_mut() {
+    if let Some(compaction) = attempt.semantic_compaction.as_mut() {
         compaction.commit();
     }
     // TS `appendCompaction` persists the full record: `details`,
     // `fromHook`, `customInstructions`, `usage`, and the `harnessDigest`
     // snapshot ride on the durable row alongside the summary, boundary,
-    // and token count.
-    session.append_compaction(entry.clone())?;
+    // and token count. The row's parent is the CURRENT leaf, so the
+    // mid-window tail sits between `first_kept_entry` and the compaction
+    // row and rides the retained tail.
+    session.append_compaction(prepared.entry.clone())?;
     super::compaction_trace::trace(
         "compact.entry_appended",
         &serde_json::json!({
-            "firstKeptEntryId": first_kept_entry,
+            "firstKeptEntryId": attempt.first_kept_entry,
             "persisted": session.is_persisted(),
         }),
     );
-    Ok(CompactOutcome::Ran(Box::new(CompactRun {
-        result,
-        entry,
-        duration_ms: started_at.elapsed().as_millis() as u64,
-        ipython_state: None,
-    })))
+    Ok(true)
 }
 
 /// Rebuild the live agent context after compaction. Keep session-only roles

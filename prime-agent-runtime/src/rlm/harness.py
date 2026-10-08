@@ -9,13 +9,17 @@ Execution still belongs to Prime Agent's TypeScript host and the existing
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import math
 import os
 import re
 import stat
+import sys
+import time
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +28,9 @@ from typing import Any, Literal
 
 from .factory import require_factory_enabled, validate_factory_spec
 
+if sys.platform == "darwin":
+    import fcntl
+
 HarnessKind = Literal["prompt", "memory", "skill", "subagent", "factory"]
 HarnessScope = Literal["local", "global"]
 
@@ -31,6 +38,10 @@ _DEFAULT_FILE_NAME = "harness_state.json"
 _DEFAULT_HARNESS_DIR_NAME = "harness"
 _KINDS: tuple[HarnessKind, ...] = ("prompt", "memory", "skill", "subagent", "factory")
 _state_cache: dict[tuple[Path, HarnessScope], "HarnessState"] = {}
+_LOCK_STALE_AFTER = 10.0
+_LOCK_ATTEMPTS = 50
+_LOCK_RETRY_INTERVAL = 0.02
+_PROCESS_TOKEN = uuid4().hex
 
 
 def _now() -> str:
@@ -406,6 +417,7 @@ class HarnessState:
         # mtime of the file as of the last load/save, used to detect out-of-process
         # writes (e.g. the host `/refine` command) and avoid clobbering them.
         self._loaded_mtime: int | None = None
+        self._held_lock: tuple[Path, str] | None = None
         self.load()
 
     def _ensure_local_writable(self) -> None:
@@ -431,6 +443,83 @@ class HarnessState:
         """
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
+
+    @staticmethod
+    def _owner_dead(recorded: str) -> bool:
+        parts = recorded.strip().split(" ")
+        if len(parts) != 2 or not parts[1]:
+            return True
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            return True
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except (PermissionError, OSError):
+            return False
+        return False
+
+    @staticmethod
+    def _owner_matches(lock_path: Path, owner: str) -> bool:
+        try:
+            return (lock_path / "owner").read_text(encoding="utf-8").strip() == owner
+        except OSError:
+            return False
+
+    def _acquire_lock_dir(self, lock_path: Path) -> str:
+        owner = f"{os.getpid()} {_PROCESS_TOKEN}.{uuid4().hex}"
+        owner_path = lock_path / "owner"
+        for _ in range(_LOCK_ATTEMPTS):
+            try:
+                os.mkdir(lock_path)
+                try:
+                    os.chmod(lock_path, 0o700)
+                    owner_path.write_text(f"{owner}\n", encoding="utf-8")
+                    os.chmod(owner_path, 0o600)
+                except OSError:
+                    lock_path.rmdir()
+                    raise
+                return owner
+            except FileExistsError:
+                try:
+                    stale = time.time() - lock_path.stat().st_mtime > _LOCK_STALE_AFTER
+                except FileNotFoundError:
+                    continue
+                if stale:
+                    try:
+                        recorded = owner_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeError):
+                        recorded = None
+                    if recorded is None or self._owner_dead(recorded):
+                        with contextlib.suppress(FileNotFoundError):
+                            owner_path.unlink()
+                        with contextlib.suppress(FileNotFoundError):
+                            lock_path.rmdir()
+                        continue
+                time.sleep(_LOCK_RETRY_INTERVAL)
+        raise RuntimeError(f"harness state lock not acquired: {lock_path}")
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        if self.file_path is not None:
+            target = Path(os.path.realpath(self.file_path))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = target.with_name(f"{target.name}.lock")
+            self._held_lock = (lock_path, self._acquire_lock_dir(lock_path))
+        try:
+            self._sync_from_disk()
+            yield
+        finally:
+            if self._held_lock is not None:
+                lock_path, owner = self._held_lock
+                if self._owner_matches(lock_path, owner):
+                    (lock_path / "owner").unlink()
+                    lock_path.rmdir()
+                self._held_lock = None
 
     def load(self) -> "HarnessState":
         if self.file_path is None or not self.file_path.exists():
@@ -522,6 +611,8 @@ class HarnessState:
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
+        if self._held_lock is None:
+            raise RuntimeError("harness state lock not acquired")
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "schema": 1,
@@ -544,9 +635,23 @@ class HarnessState:
             descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             with os.fdopen(descriptor, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+                f.flush()
+                if sys.platform == "darwin":
+                    fcntl.fcntl(descriptor, fcntl.F_FULLFSYNC)
+                else:
+                    os.fsync(descriptor)
             if existing_mode is not None:
                 os.chmod(temp_path, existing_mode)
+            lock_path, owner = self._held_lock
+            if not self._owner_matches(lock_path, owner):
+                raise RuntimeError(f"harness state lock lost: {lock_path}")
             os.replace(temp_path, target_path)
+            if os.name == "posix":
+                directory_fd = os.open(target_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             temp_path.unlink(missing_ok=True)
         self._loaded_mtime = self._disk_mtime()
@@ -581,18 +686,18 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
-        return self._upsert(
-            kind,
-            title,
-            content,
-            id=id,
-            path=path,
-            reference=reference,
-            arguments=arguments,
-            metadata=metadata,
-            source=source,
-        )
+        with self._locked():
+            return self._upsert(
+                kind,
+                title,
+                content,
+                id=id,
+                path=path,
+                reference=reference,
+                arguments=arguments,
+                metadata=metadata,
+                source=source,
+            )
 
     def _upsert(
         self,
@@ -688,14 +793,14 @@ class HarnessState:
         if target := self._global_target(global_, kwargs):
             return target.delete(kind, id)
         self._ensure_local_writable()
-        self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
-        if id not in self.entries[kind]:
-            return False
-        del self.entries[kind][id]
-        self.save()
-        return True
+        with self._locked():
+            if kind not in self.entries:
+                raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+            if id not in self.entries[kind]:
+                return False
+            del self.entries[kind][id]
+            self.save()
+            return True
 
     def list(self, kind: HarnessKind | None = None, *, global_: bool = False, **kwargs: Any) -> list[HarnessEntry]:
         if target := self._global_target(global_, kwargs):
@@ -738,26 +843,26 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
-        _require_text(kind, _describe_entry(id, title), "title", title)
-        if id is not None:
-            _require_text(kind, _describe_entry(id, title), "id", id)
-        entry_id = id or _slug(title, kind)
-        if entry_id in self.entries[kind]:
-            raise ValueError(f"{kind} entry {entry_id!r} already exists")
-        return self._upsert(
-            kind,
-            title,
-            content,
-            id=entry_id,
-            path=path,
-            reference=reference,
-            arguments=arguments,
-            metadata=metadata,
-            source=source,
-        )
+        with self._locked():
+            if kind not in self.entries:
+                raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+            _require_text(kind, _describe_entry(id, title), "title", title)
+            if id is not None:
+                _require_text(kind, _describe_entry(id, title), "id", id)
+            entry_id = id or _slug(title, kind)
+            if entry_id in self.entries[kind]:
+                raise ValueError(f"{kind} entry {entry_id!r} already exists")
+            return self._upsert(
+                kind,
+                title,
+                content,
+                id=entry_id,
+                path=path,
+                reference=reference,
+                arguments=arguments,
+                metadata=metadata,
+                source=source,
+            )
 
     def update(
         self,
@@ -788,23 +893,23 @@ class HarnessState:
                 source=source,
             )
         self._ensure_local_writable()
-        self._sync_from_disk()
-        if kind not in self.entries:
-            raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
-        _require_text(kind, _describe_entry(id, title), "id", id)
-        if id not in self.entries[kind]:
-            raise ValueError(f"{kind} entry {id!r} does not exist")
-        return self._upsert(
-            kind,
-            title,
-            content,
-            id=id,
-            path=path,
-            reference=reference,
-            arguments=arguments,
-            metadata=metadata,
-            source=source,
-        )
+        with self._locked():
+            if kind not in self.entries:
+                raise ValueError(f"unknown harness kind {kind!r}; expected one of {_KINDS}")
+            _require_text(kind, _describe_entry(id, title), "id", id)
+            if id not in self.entries[kind]:
+                raise ValueError(f"{kind} entry {id!r} does not exist")
+            return self._upsert(
+                kind,
+                title,
+                content,
+                id=id,
+                path=path,
+                reference=reference,
+                arguments=arguments,
+                metadata=metadata,
+                source=source,
+            )
 
     def create_memory(
         self,
@@ -1047,24 +1152,24 @@ class HarnessState:
         if target := self._global_target(global_, kwargs):
             return target.record_refinement(trigger, changes, evidence=evidence, outcome=outcome, id=id)
         self._ensure_local_writable()
-        self._sync_from_disk()
-        _validate_refinement_event(trigger, changes, evidence=evidence, outcome=outcome)
-        if id is not None and (not isinstance(id, str) or not id):
-            raise ValueError(
-                f"refinement event rejected: id must be a non-empty string when provided, got {_type_name(id)}"
+        with self._locked():
+            _validate_refinement_event(trigger, changes, evidence=evidence, outcome=outcome)
+            if id is not None and (not isinstance(id, str) or not id):
+                raise ValueError(
+                    f"refinement event rejected: id must be a non-empty string when provided, got {_type_name(id)}"
+                )
+            event_id = id or f"refine_{len(self.refinements) + 1:04d}"
+            normalized_changes = [changes] if isinstance(changes, str) else list(changes)
+            event = RefinementEvent(
+                id=event_id,
+                trigger=trigger,
+                changes=normalized_changes,
+                evidence=evidence,
+                outcome=outcome,
             )
-        event_id = id or f"refine_{len(self.refinements) + 1:04d}"
-        normalized_changes = [changes] if isinstance(changes, str) else list(changes)
-        event = RefinementEvent(
-            id=event_id,
-            trigger=trigger,
-            changes=normalized_changes,
-            evidence=evidence,
-            outcome=outcome,
-        )
-        self.refinements.append(event)
-        self.save()
-        return event
+            self.refinements.append(event)
+            self.save()
+            return event
 
     def plan_refinement(
         self,

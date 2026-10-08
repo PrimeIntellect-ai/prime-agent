@@ -25,7 +25,7 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     let mut line = serde_json::to_string(record)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
@@ -51,7 +51,7 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
         lines.push(b'\n');
     }
     file.write_all(&lines)?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
