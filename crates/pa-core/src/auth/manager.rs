@@ -52,7 +52,7 @@ fn refresh_flight_lock(provider: &str) -> &'static std::sync::Mutex<()> {
     let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     {
         let mut registry = registry.lock().expect("auth refresh-flight registry");
-        *registry
+        registry
             .entry(provider.to_string())
             .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
     }
