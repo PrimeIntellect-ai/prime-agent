@@ -34,8 +34,11 @@ impl AgentSessionEngine {
     /// session-target fallback refresh from the same store, or the next
     /// model-turn attempt would reinstall the stale credentials. The MCP
     /// manager re-reads its settings and the shared auth store (the same
-    /// reload the connections view applies on open).
-    pub(crate) fn reload_live_inputs(&self) {
+    /// reload the connections view applies on open). The auth store's
+    /// reload failure propagates: a malformed document or an
+    /// unacquirable lock leaves the MCP manager on its previous
+    /// credentials, and the reload must report that instead of success.
+    pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
         // The armed route refreshes FIRST, the live slot SECOND: the
         // route lock fences the route's clone-and-install against this
         // refresh order (an attempt either installs the refreshed route
@@ -90,7 +93,11 @@ impl AgentSessionEngine {
             .mcp
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        manager.reload_auth_storage();
+        // The settings re-read runs even when the auth store failed: the
+        // settings half of the reload still applies, while the caller
+        // learns the auth half did not.
+        let auth_reload = manager.reload_auth_storage();
         manager.refresh();
+        auth_reload
     }
 }

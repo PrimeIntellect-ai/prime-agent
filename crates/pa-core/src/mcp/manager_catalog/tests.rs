@@ -764,7 +764,7 @@ fn api_key_credential_views_see_a_cross_instance_write_after_the_reload() {
         "the cached copy does not see the other instance's write"
     );
     // The view open's reload picks the stored key up.
-    manager.reload_auth_storage();
+    manager.reload_auth_storage().expect("the reload applies");
     assert!(
         manager
             .api_key_credential_views()

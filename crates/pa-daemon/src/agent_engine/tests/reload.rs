@@ -92,7 +92,7 @@ fn reload_rebinds_the_request_auth_from_the_credential_store() {
     });
     // A re-login from another process replaces the stored credential.
     write_oauth_credential(&agent_dir, "fresh-access");
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     let target = engine
         .provider_target
         .read()
@@ -142,7 +142,7 @@ fn reload_with_nothing_stored_keeps_the_target() {
         model,
         headers: None,
     });
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     let target = engine
         .provider_target
         .read()
@@ -230,7 +230,7 @@ fn reload_keeps_the_live_model_and_rebinds_its_auth() {
         model: routed,
         headers: None,
     });
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     let target = engine
         .provider_target
         .read()
@@ -258,7 +258,7 @@ fn reload_without_a_live_target_installs_nothing() {
     write_credential_backed_provider(&agent_dir);
     write_oauth_credential(&agent_dir, "fresh-access");
     let engine = credential_backed_engine(dir.path());
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     assert!(
         engine
             .provider_target
@@ -322,7 +322,7 @@ fn reload_refreshes_the_armed_image_route_target_auth() {
                 headers: None,
             }),
         });
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     let armed = engine
         .image_route
         .lock()
@@ -491,7 +491,7 @@ fn reload_clears_headers_when_the_fresh_credential_carries_none() {
     });
     // A re-login without the team replaces the stored credential.
     write_prime_inference_credential(&agent_dir, "solo-key", None);
-    engine.reload_live_inputs();
+    engine.reload_live_inputs().expect("the reload applies");
     let target = engine
         .provider_target
         .read()
@@ -538,5 +538,49 @@ fn restored_primary_target_serves_the_resolved_header_pair() {
     assert!(
         restored.headers.is_none(),
         "the resolved pair replaces the captured headers"
+    );
+}
+
+/// A reload over a malformed auth store reports the failure: the store
+/// cannot be parsed, so the MCP manager keeps its previous credentials
+/// and the reload answers with the storage error instead of a success
+/// the session did not apply.
+#[test]
+fn reload_reports_the_auth_store_failure() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stale-access");
+    let engine = credential_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("the custom model resolves");
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("stale-access".to_string()),
+        model,
+        headers: None,
+    });
+    // Another process corrupts the store: the reload's re-read fails.
+    std::fs::write(agent_dir.join("auth.json"), "not json").unwrap();
+    let error = engine
+        .reload_live_inputs()
+        .expect_err("the malformed store fails the reload");
+    assert!(!error.is_empty(), "the reload surfaces the storage error");
+    // A repaired store reloads cleanly again.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    engine
+        .reload_live_inputs()
+        .expect("the repaired store reloads");
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert!(
+        target.api_key.as_deref() == Some("fresh-access"),
+        "the repaired store rebinds the request auth"
     );
 }

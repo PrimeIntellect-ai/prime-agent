@@ -319,15 +319,29 @@ impl Worker {
         }
         if let Some(engine) = &self.agent_engine {
             let engine = std::sync::Arc::clone(engine);
-            if let Err(error) =
-                tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await
-            {
-                return response_failure(
-                    None,
-                    "reload",
-                    &format!("session reload failed: {error}"),
-                    None,
-                );
+            // The blocking thread's reload can fail two ways: the auth
+            // store's reload (a malformed document, an unacquirable lock)
+            // or the join itself (a panic). Both answer the client's
+            // reload with the failure, never a success the session did
+            // not apply.
+            match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return response_failure(
+                        None,
+                        "reload",
+                        &format!("session reload failed: {error}"),
+                        None,
+                    );
+                }
+                Err(error) => {
+                    return response_failure(
+                        None,
+                        "reload",
+                        &format!("session reload failed: {error}"),
+                        None,
+                    );
+                }
             }
         }
         response_success(None, "reload", None)
