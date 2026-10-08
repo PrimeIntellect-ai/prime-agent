@@ -701,10 +701,18 @@ impl LockDir {
                     // artifact must not stay orphaned at the path (a fresh
                     // orphan wedges every other holder for the whole
                     // staleness window). Remove it when it is still
-                    // verifiably ours - park-capture first, re-verify on the
-                    // parked name (the same discipline as the guarded
-                    // release), never the successor's.
-                    Self::remove_owned_artifact(&path, owned, probe);
+                    // verifiably ours - never the successor's.
+                    //
+                    // A LIVE HOLDER's WouldBlock is the one witness failure
+                    // whose directory is DEFINITELY somebody else's live
+                    // lock: a stalled creator that stamped its probe onto a
+                    // reclaimed successor's directory matches both identity
+                    // halves (they were captured from that directory), so
+                    // the removal is skipped here - a flocked directory is
+                    // never ours to delete.
+                    if error.kind() != io::ErrorKind::WouldBlock {
+                        Self::remove_owned_artifact(&path, owned, probe);
+                    }
                     return Err(error);
                 }
             }
@@ -906,6 +914,26 @@ impl LockDir {
         // run unverified, a failure surfaces its own error - never remapped
         // to a false collision - and nothing is removed (the artifact goes
         // to the staleness sweep).
+        //
+        // The identity is BOUND to the directory this attempt created: on
+        // unix it is read off the freshly opened directory FD (fstat), so
+        // a rename-swap of the path can never substitute a successor's
+        // reclaimed directory as this creator's identity - a creator that
+        // stalls mid-create and resumes with the path already reclaimed
+        // captures the FD's own inode, and every later gate against the
+        // path fails as plain collision instead of adopting the
+        // successor's directory. (The open-to-bind race window is two
+        // adjacent statements; a swap there requires the fresh directory
+        // to go stale in microseconds, which the protocol never judges.)
+        #[cfg(unix)]
+        let created = {
+            use std::os::unix::fs::MetadataExt;
+            fs::File::open(path)
+                .ok()
+                .and_then(|dir| dir.metadata().ok())
+                .map(|meta| meta.ino())
+        };
+        #[cfg(not(unix))]
         let created = Self::ownership_id(path);
         let our_path_now =
             |created: Option<u64>| created.map(|created| Self::ownership_id(path) == Some(created));
@@ -2400,6 +2428,37 @@ mod tests {
         assert!(
             !lock_of(&file).exists(),
             "the Drop retry removed the artifact"
+        );
+    }
+
+    /// The witness-failure cleanup never removes a live holder's
+    /// directory: a directory whose flock a live holder answers is
+    /// DEFINITELY somebody else's lock, whatever the identity halves say
+    /// (a stalled creator's resume can stamp its probe onto a reclaimed
+    /// successor's directory and match both halves).
+    #[test]
+    #[cfg(unix)]
+    fn a_flocked_directory_survives_the_witness_failure_cleanup() {
+        use std::os::fd::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.guard");
+        let probe = LockDir::create(&path, None)
+            .unwrap()
+            .expect("the unix probe");
+        // A live holder answers the flock (per-open-file-description, so a
+        // second flock from the same process conflicts on Linux).
+        let holder = fs::File::open(&path).unwrap();
+        assert_eq!(
+            unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0,
+            "the live holder takes the flock"
+        );
+        let error = LockDir::acquired(path.clone(), Some(probe), true, None)
+            .expect_err("a flocked directory is never adopted");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            path.is_dir(),
+            "the live holder's directory survives the witness-failure cleanup"
         );
     }
 
