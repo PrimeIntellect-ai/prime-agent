@@ -82,6 +82,10 @@ where
 {
     let mut retries_performed = 0u32;
     let mut auth_retries = 0u32;
+    // The auth seam's one quick retry, granted past the generic ladder:
+    // set when a rejection just refreshed and rebound, consumed by the
+    // retry it bought.
+    let mut auth_quick_retry = false;
     loop {
         let message = attempt().await?;
         if message.stop_reason != StopReason::Error {
@@ -157,6 +161,7 @@ where
             // This auth failure is being retried: the classification
             // counts it, so the next rejection settles the turn.
             auth_retries += 1;
+            auth_quick_retry = true;
         }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.
@@ -173,7 +178,10 @@ where
             ProviderRetryDelay::Wait { delay_ms } => {
                 // The server-requested-wait arm runs BEFORE the quick-retry
                 // exhaustion check: a quota-blocked final retry still parks.
-                if retries_performed > policy.max_retries {
+                // The auth seam's own retry still issues past the ladder
+                // (a rejection at the exhaustion boundary never wastes the
+                // refreshed credential's one shot).
+                if retries_performed > policy.max_retries && !auth_quick_retry {
                     emit(AutoRetryEvent::End {
                         success: false,
                         attempt: retries_performed - 1,
@@ -183,6 +191,7 @@ where
                     .await?;
                     return Ok(message);
                 }
+                auth_quick_retry = false;
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {

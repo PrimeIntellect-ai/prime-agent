@@ -169,17 +169,32 @@ impl ProviderOAuth {
             .map_err(|error| format!("the refresh thread could not be spawned: {error}"))?
             .join()
             .map_err(|_| "the refresh thread panicked".to_string())?
-            .map_err(|reason| sanitize_refresh_reason(&reason))
+            .map_err(|reason| sanitize_refresh_reason(&reason, credential))
     }
 }
 
 /// Credential-shaped material never reaches the log line or the re-login
 /// sentence: a provider error body can echo the rejected token back. The
-/// `body=` tail is dropped, and any word carrying a long credential-shaped
-/// run (an opaque token, a JWT) is redacted; short provider phrases like
-/// "expired" survive.
-fn sanitize_refresh_reason(reason: &str) -> String {
+/// loaded credential's exact access and refresh values are redacted
+/// wherever they appear (an opaque token has no minimum length), the
+/// `body=` tail is dropped, and any word carrying a long
+/// credential-shaped run (an opaque token, a JWT) is redacted; short
+/// provider phrases like "expired" survive.
+fn sanitize_refresh_reason(reason: &str, loaded: &AuthCredential) -> String {
     const SECRET_MIN_CHARS: usize = 16;
+    let exact_redacted = match loaded {
+        AuthCredential::Oauth {
+            access, refresh, ..
+        } => {
+            let mut redacted = reason.replace(access.as_str(), "[redacted]");
+            if let Some(refresh) = refresh.as_deref().filter(|refresh| !refresh.is_empty()) {
+                redacted = redacted.replace(refresh, "[redacted]");
+            }
+            redacted
+        }
+        _ => reason.to_string(),
+    };
+    let reason = exact_redacted.as_str();
     let truncated = match reason.find("body=") {
         Some(start) => &reason[..start],
         None => reason,
@@ -727,25 +742,100 @@ mod tests {
         );
     }
 
+    /// The stored credential's own short values are equally secret: a
+    /// 401 body echoing the five-character refresh token never reaches
+    /// the log line or the re-login reason.
+    #[test]
+    fn a_rejected_exchange_never_leaks_the_short_stored_token() {
+        let short_refresh = "r-old";
+        let logged = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink_logged = Arc::clone(&logged);
+        pa_ai::utils::log::set_log_sink(Some(Arc::new(
+            move |entry: &pa_ai::utils::log::LogEntry| {
+                sink_logged
+                    .lock()
+                    .expect("log capture lock")
+                    .push(serde_json::to_string(entry).unwrap_or_default());
+            },
+        )));
+        let mut codex = HashMap::new();
+        codex.insert(
+            "https://auth.openai.com/oauth/token".to_string(),
+            CodexHttpResponse {
+                status: 401,
+                body: format!("rejected {short_refresh}"),
+            },
+        );
+        let mut auth = crate::auth::AuthStorage::in_memory_without_env(
+            &{
+                let mut data = crate::auth::types::AuthStorageData::default();
+                data.insert(OPENAI_CODEX_PROVIDER_ID, &live_codex_credential());
+                data
+            },
+            std::sync::Arc::new(ProviderOAuth::with_transports(
+                std::sync::Arc::new(ScriptedHttp(codex)),
+                std::sync::Arc::new(ScriptedProviderHttp(HashMap::new())),
+            )),
+        );
+        let outcome = auth.force_refresh_oauth(OPENAI_CODEX_PROVIDER_ID);
+        pa_ai::utils::log::set_log_sink(None);
+        let reason = outcome.expect_err("the rejected exchange carries its reason");
+        assert!(
+            !reason.contains(short_refresh),
+            "the re-login reason never carries the stored refresh token: {reason}"
+        );
+        assert!(
+            reason.contains("[redacted]"),
+            "the echoed token is redacted, not silently trimmed: {reason}"
+        );
+        let logged = logged.lock().expect("log capture lock").join(" ");
+        assert!(
+            !logged.contains(short_refresh),
+            "the structured warn line never carries the stored refresh token: {logged}"
+        );
+    }
+
     #[test]
     fn the_reason_scrubber_keeps_provider_phrases_and_drops_secret_shapes() {
+        let loaded = live_codex_credential();
         assert_eq!(
-            sanitize_refresh_reason("OpenAI Codex token refresh failed (401): expired"),
+            sanitize_refresh_reason("OpenAI Codex token refresh failed (401): expired", &loaded),
             "OpenAI Codex token refresh failed (401): expired"
         );
         assert_eq!(
             sanitize_refresh_reason(
-                "Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=Error: HTTP request failed. status=401; url=https://platform.claude.com/v1/oauth/token; body=secret-tail"
+                "Anthropic token refresh request failed. url=https://platform.claude.com/v1/oauth/token; details=Error: HTTP request failed. status=401; url=https://platform.claude.com/v1/oauth/token; body=secret-tail",
+                &loaded
             ),
             "Anthropic token refresh request failed. [redacted] details=Error: HTTP request failed. status=401; [redacted]"
         );
         assert_eq!(
-            sanitize_refresh_reason("rejected: sk-ant-o01-echoed-caller-secret-credential"),
+            sanitize_refresh_reason(
+                "rejected: sk-ant-o01-echoed-caller-secret-credential",
+                &loaded
+            ),
             "rejected: [redacted]"
         );
         assert_eq!(
-            sanitize_refresh_reason("rejected: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"),
+            sanitize_refresh_reason(
+                "rejected: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+                &loaded
+            ),
             "rejected: [redacted]"
+        );
+        // The loaded credential's own values are redacted at any length:
+        // an opaque token has no minimum, so the shape heuristic alone
+        // never carries the stored `r-old` back out.
+        assert_eq!(
+            sanitize_refresh_reason(
+                "OpenAI Codex token refresh failed (401): rejected r-old",
+                &loaded
+            ),
+            "OpenAI Codex token refresh failed (401): rejected [redacted]"
+        );
+        assert_eq!(
+            sanitize_refresh_reason("the rejected-access token was echoed", &loaded),
+            "the [redacted] token was echoed"
         );
     }
 

@@ -275,11 +275,7 @@ impl AuthStorage {
         // The loaded credential itself, for the write guard's
         // same-credential check (the destructure below consumes it).
         let loaded = credential.clone();
-        let Some(AuthCredential::Oauth {
-            access: loaded_access,
-            ..
-        }) = credential
-        else {
+        let Some(AuthCredential::Oauth { .. }) = credential else {
             self.reload();
             return Err(format!(
                 "the stored credential for {provider_id} carries no refresh token"
@@ -298,12 +294,10 @@ impl AuthStorage {
             .ok()
             .and_then(|content| parse_storage_data(content.as_deref()).ok())
             .and_then(|data| data.credential(provider_id));
-        if let Some(peer) = peer.filter(|credential| {
-            matches!(
-                credential,
-                AuthCredential::Oauth { access, .. } if *access != loaded_access
-            )
-        }) {
+        // Any changed credential stands — a fresher OAuth grant from the
+        // expiry-gated path, an API-key replacement, a re-login to a
+        // different grant: none spends this attempt's refresh token.
+        if let Some(peer) = peer.filter(|peer| Some(peer) != loaded.as_ref()) {
             self.reload();
             return Ok(peer);
         }
@@ -319,12 +313,14 @@ impl AuthStorage {
                 // saw: it settles the recovery without surfacing the
                 // rejection this attempt got.
                 self.reload();
-                if let Some(credential) = self.data.credential(provider_id).filter(|credential| {
-                    matches!(
-                        credential,
-                        AuthCredential::Oauth { access, .. } if *access != loaded_access
-                    )
-                }) {
+                // A replacement credential the failed fetch never saw —
+                // an API-key swap, a re-login — settles the recovery
+                // without surfacing the rejection.
+                if let Some(credential) = self
+                    .data
+                    .credential(provider_id)
+                    .filter(|credential| Some(credential) != loaded.as_ref())
+                {
                     return Ok(credential);
                 }
                 return Err(reason);
@@ -360,12 +356,11 @@ impl AuthStorage {
             // Our write failed: serve whatever the store holds — a peer's
             // fresh credential if one landed, else the write failure.
             self.reload();
-            return match self.data.credential(provider_id).filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { access, .. } if *access != loaded_access
-                )
-            }) {
+            return match self
+                .data
+                .credential(provider_id)
+                .filter(|credential| Some(credential) != loaded.as_ref())
+            {
                 Some(credential) => Ok(credential),
                 None => Err("the refreshed credential could not be stored".to_string()),
             };

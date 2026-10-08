@@ -1155,3 +1155,58 @@ async fn an_auth_failure_after_unrelated_retries_still_recovers() {
         "the rate-limit retry, the auth failure, and the recovered retry"
     );
 }
+
+/// An auth failure at the exhaustion boundary still spends its one quick
+/// retry: the refreshed credential re-issues once even though the generic
+/// ladder is spent, instead of wasting the token exchange and surfacing
+/// the raw rejection.
+#[tokio::test]
+async fn an_auth_failure_at_the_exhaustion_boundary_still_uses_the_refreshed_credential() {
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &fast_policy(),
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(match index {
+                    0 | 1 | 2 => error_message(Some("rate_limit"), Some(429), None),
+                    3 => error_message(Some("auth"), Some(401), None),
+                    _ => ok_message(),
+                })
+            }
+        },
+        move |event| {
+            let _ = event;
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(message.stop_reason, StopReason::Stop);
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the recovery seam runs once despite the spent ladder"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        5,
+        "three rate-limit retries, the boundary auth failure, and the refreshed retry"
+    );
+}

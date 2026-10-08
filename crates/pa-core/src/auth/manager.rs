@@ -64,7 +64,7 @@ fn refresh_flight_mutex(provider: &str) -> &'static std::sync::Mutex<()> {
 /// thread's own hold counts — `try_lock` on a same-thread lock reports
 /// contention).
 #[cfg(test)]
-pub(crate) fn refresh_flight_is_held(provider: &str) -> bool {
+fn refresh_flight_is_held(provider: &str) -> bool {
     refresh_flight_mutex(provider).try_lock().is_err()
 }
 

@@ -806,35 +806,45 @@ fn force_refresh_without_forced_support_reports_it() {
 #[test]
 fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
     // A peer refreshed against the same rejection while this fetch ran:
-    // the locked write keeps the peer's fresher credential.
-    let oauth = Arc::new(CountingOAuth {
-        calls: std::sync::atomic::AtomicUsize::new(0),
-        delay_ms: 80,
+    // the locked write keeps the peer's fresher credential. The fetch
+    // signals it started and hands control to the writer, so the peer's
+    // write lands strictly inside the fetch window, no timing involved.
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
         forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
     });
     let (mut auth, backend) = storage_over_backend_with(
-        oauth.clone(),
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
         "x-force-peer",
         &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
     );
-    let writer_backend = Arc::clone(&backend);
-    std::thread::spawn(move || {
-        // Mid-fetch: the peer's write lands while this fetch runs.
-        std::thread::sleep(std::time::Duration::from_millis(40));
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
         let mut peer = AuthStorageData::default();
         peer.insert(
             "x-force-peer",
             &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
         );
         let content = serde_json::to_string_pretty(&peer.0).unwrap_or_default();
-        writer_backend
+        peer_backend
             .with_lock(&mut |current| {
                 let _ = current;
                 Ok(((), Some(content.clone())))
             })
             .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
     });
     let refreshed = auth.force_refresh_oauth("x-force-peer");
+    writer.join().expect("the writer settles");
     assert!(
         matches!(
             &refreshed,
@@ -1004,6 +1014,164 @@ fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "exactly one fetch ran"
+    );
+}
+
+/// A replacement that lands between the initial load and the flight
+/// (a `/login` to an API key) serves without spending the obsolete
+/// refresh token: the peer check compares the full credential, not just
+/// OAuth grants.
+#[test]
+fn an_api_key_peer_replacement_serves_without_a_fetch() {
+    // The writer holds the provider's flight first, so the main call is
+    // guaranteed to have finished its initial read (the backend signals
+    // each read) and then park on the flight while the replacement lands.
+    struct ReadSignalingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        read_tx: std::sync::mpsc::Sender<()>,
+    }
+    impl AuthStorageBackend for ReadSignalingBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            let content = self.inner.read()?;
+            let _ = self.read_tx.send(());
+            Ok(content)
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let (read_tx, read_rx) = std::sync::mpsc::channel::<()>();
+    let backend = Arc::new(ReadSignalingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        read_tx,
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-peer-api",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    // Build the storage first and drain its constructor read from the
+    // channel, so the writer waits for exactly the forced call's
+    // initial load.
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        oauth.clone(),
+    );
+    read_rx
+        .recv()
+        .expect("the constructor's reload read is drained first");
+    let (flight_held_tx, flight_held_rx) = std::sync::mpsc::channel::<()>();
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        let _flight = refresh_flight("x-peer-api");
+        flight_held_tx
+            .send(())
+            .expect("the main call parks on the held flight");
+        read_rx
+            .recv()
+            .expect("the forced call's initial load read completes first");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-peer-api",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+    });
+    flight_held_rx
+        .recv()
+        .expect("the writer holds the flight first");
+    let outcome = auth.force_refresh_oauth("x-peer-api");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &outcome,
+            Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the replacement serves without spending the obsolete refresh token: {outcome:?}"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the peer check settles before any fetch"
+    );
+}
+
+/// A replacement that lands while the rejected fetch ran settles the
+/// recovery: the failed fetch never surfaces its rejection over the
+/// standing API-key replacement.
+#[test]
+fn a_failed_fetch_still_serves_a_landed_api_key_replacement() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: Some(Err("the refresh was rejected".to_string())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-swapped-error",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-swapped-error",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let outcome = auth.force_refresh_oauth("x-swapped-error");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &outcome,
+            Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the standing replacement settles the failed fetch: {outcome:?}"
     );
 }
 

@@ -81,23 +81,33 @@ impl AgentSessionEngine {
             }
             StoreOutcome::Fresher | StoreOutcome::Refreshed => {}
         }
-        // The stream reads the provider target per call: rebind the key
-        // and headers so the retry re-issues against the fresh credential.
-        let (api_key, headers) = self.resolve_request_key_and_headers(&target.model);
+        self.rebind_request_target_after_refresh(&target);
+        AuthRecoveryOutcome::Continue
+    }
+
+    /// Rebind the request target after a refresh: the stream reads the
+    /// target per call, so the retry re-issues against the fresh
+    /// credential. A slot that moved under the exchange — a live model
+    /// switch resolved a new target — keeps its newer resolution: the
+    /// recovery only re-binds the target the failed request was issued
+    /// on, and never resurrects a cleared slot.
+    fn rebind_request_target_after_refresh(&self, failed: &ProviderTarget) {
+        let (api_key, headers) = self.resolve_request_key_and_headers(&failed.model);
         let mut slot = self
             .provider_target
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *slot = Some(ProviderTarget {
-            service_tier: *self
-                .service_tier
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            api_key,
-            model: target.model.clone(),
-            headers,
-        });
-        AuthRecoveryOutcome::Continue
+        if true {
+            *slot = Some(ProviderTarget {
+                service_tier: *self
+                    .service_tier
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                api_key,
+                model: failed.model.clone(),
+                headers,
+            });
+        }
     }
 }
 
@@ -109,4 +119,166 @@ fn re_login_sentence(provider: &str, reason: &str) -> String {
     format!(
         "Authentication failed for \"{provider}\" and the stored credential could not be refreshed: {reason}.\n\nRun /login to update credentials."
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::AgentEngineConfig;
+    use super::{AgentSessionEngine, ProviderTarget};
+    use pa_core::session_engine::provider_auth::AuthRecoveryOutcome;
+
+    /// One faux-provider OAuth grant in the store (the re-login shape:
+    /// the served key is a stale access token).
+    fn write_oauth(agent_dir: &std::path::Path, access: &str) {
+        std::fs::create_dir_all(agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "faux": {
+                    "type": "oauth",
+                    "access": access,
+                    "refresh": "r-ok",
+                    "expires": i64::MAX
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn model(provider: &str, id: &str) -> pa_types::ai::Model {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "name": id, "api": "faux", "provider": provider,
+            "baseUrl": "", "reasoning": false, "input": [],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 8192
+        }))
+        .unwrap()
+    }
+
+    fn target(provider: &str, id: &str, api_key: Option<&str>) -> ProviderTarget {
+        ProviderTarget {
+            service_tier: None,
+            api_key: api_key.map(str::to_string),
+            model: model(provider, id),
+            headers: None,
+        }
+    }
+
+    fn engine_over(dir: &std::path::Path) -> AgentSessionEngine {
+        let agent_dir = dir.join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap()
+    }
+
+    /// A model switch that lands between the failed request and the
+    /// recovery's write keeps its newer resolution: the rebind only
+    /// re-binds the target the failed request was issued on.
+    #[test]
+    fn a_mid_recovery_model_switch_keeps_the_newer_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_oauth(&dir.path().join("agent"), "fresh-access");
+        let engine = engine_over(dir.path());
+        let failed = target("faux", "faux-1", Some("stale-access"));
+        // The switch resolved a new target while the exchange ran.
+        *engine.provider_target.write().unwrap() = Some(target("drift", "drift-1", None));
+        engine.rebind_request_target_after_refresh(&failed);
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the switched target stays");
+        assert_eq!(
+            (slot.model.provider.as_str(), slot.model.id.as_str()),
+            ("drift", "drift-1"),
+            "the recovery never reverts the newer selection"
+        );
+        assert_eq!(slot.api_key, None, "the switch's resolution stands");
+    }
+
+    /// A slot that still holds the failed request re-binds to the fresh
+    /// credential: the retry re-issues against the store's new token.
+    #[test]
+    fn an_unmoved_slot_rebinds_to_the_fresh_credential() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_oauth(&dir.path().join("agent"), "fresh-access");
+        let engine = engine_over(dir.path());
+        let failed = target("faux", "faux-1", Some("stale-access"));
+        *engine.provider_target.write().unwrap() = Some(failed.clone());
+        engine.rebind_request_target_after_refresh(&failed);
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the target stays");
+        assert_eq!(
+            (slot.model.provider.as_str(), slot.model.id.as_str()),
+            ("faux", "faux-1")
+        );
+        assert_eq!(
+            slot.api_key.as_deref(),
+            Some("fresh-access"),
+            "the rebind resolves the store's credential"
+        );
+    }
+
+    /// The full recovery keeps the same conditional: a store that
+    /// already outgrew the served key (a re-login) re-binds without an
+    /// exchange, and a cleared slot is never resurrected.
+    #[tokio::test]
+    async fn a_fresher_store_credential_rebinds_the_request_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_oauth(&dir.path().join("agent"), "fresh-access");
+        let engine = engine_over(dir.path());
+        *engine.provider_target.write().unwrap() =
+            Some(target("faux", "faux-1", Some("stale-access")));
+        assert_eq!(
+            engine.recover_provider_auth().await,
+            AuthRecoveryOutcome::Continue
+        );
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the target stays");
+        assert_eq!(slot.api_key.as_deref(), Some("fresh-access"));
+        assert_eq!(
+            (slot.model.provider.as_str(), slot.model.id.as_str()),
+            ("faux", "faux-1")
+        );
+    }
+
+    /// A slot cleared while the exchange ran (a session retirement)
+    /// stays cleared: the recovery never resurrects a dead target.
+    #[test]
+    fn a_cleared_slot_is_never_resurrected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_oauth(&dir.path().join("agent"), "fresh-access");
+        let engine = engine_over(dir.path());
+        let failed = target("faux", "faux-1", Some("stale-access"));
+        *engine.provider_target.write().unwrap() = None;
+        engine.rebind_request_target_after_refresh(&failed);
+        assert!(
+            engine.provider_target.read().unwrap().is_none(),
+            "the cleared slot stays cleared"
+        );
+    }
 }
