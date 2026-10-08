@@ -67,7 +67,7 @@ impl Supervisor {
             // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                self.retire_worker_after_stop(resident).await;
+                self.retire_worker_after_stop(resident, false).await;
                 self.log_line(&format!(
                     "finished the tombstoned stop of session worker {}",
                     resident.worker_id
@@ -86,7 +86,7 @@ impl Supervisor {
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
-            self.retire_worker_after_stop(resident).await;
+            self.retire_worker_after_stop(resident, false).await;
             self.log_line(&format!(
                 "finished the tombstoned per-session stop of session worker {}",
                 resident.worker_id
@@ -721,7 +721,7 @@ impl Supervisor {
         }
         // The per-session stop shares the terminal-stop contract: the descriptor dies only
         // with a provably-gone process — a worker that missed the shutdown stays adoptable.
-        self.retire_worker_after_stop(resident).await;
+        self.retire_worker_after_stop(resident, false).await;
         // A client-owned (ephemeral) worker's scheduled jobs die with the
         // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
@@ -745,10 +745,18 @@ impl Supervisor {
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
     /// it behind its lease.
-    pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
-        let (pid, start_id) = {
+    pub(super) async fn retire_worker_after_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        keep_interrupted_work: bool,
+    ) {
+        let (pid, start_id, journal_path) = {
             let descriptor = resident.descriptor.lock().await;
-            (descriptor.pid as u32, descriptor.process_start_id.clone())
+            (
+                descriptor.pid as u32,
+                descriptor.process_start_id.clone(),
+                descriptor.recovery_journal_path.clone(),
+            )
         };
         // An unobservable identity never receives the escalation's signals; a live process
         // behind such a pid keeps its tombstoned descriptor like a SIGKILL survivor (the
@@ -770,10 +778,21 @@ impl Supervisor {
                 ));
             }
             _ => {
-                let _ = std::fs::remove_file(&resident.descriptor_path);
-                // The identity-pending side record dies with the descriptor it shadows
-                // (an orphaned pending would shadow the next identity).
-                let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                if keep_interrupted_work
+                    && crate::journal::WorkerRecoveryJournal::read_interrupted(Path::new(
+                        &journal_path,
+                    ))
+                {
+                    let mut descriptor = resident.descriptor.lock().await;
+                    descriptor.stop_requested_at = None;
+                    descriptor.archive_on_stop = None;
+                    let _ = persist_worker(&resident.descriptor_path, &descriptor);
+                } else {
+                    let _ = std::fs::remove_file(&resident.descriptor_path);
+                    // The identity-pending side record dies with the descriptor it shadows
+                    // (an orphaned pending would shadow the next identity).
+                    let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                }
             }
         }
     }

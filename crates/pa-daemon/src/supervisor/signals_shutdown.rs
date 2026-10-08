@@ -44,12 +44,12 @@ impl Supervisor {
                 .route_command_typed(
                     &resident,
                     "shutdown",
-                    json!({}),
+                    json!({ "daemonShutdown": true }),
                     ROUTE_TIMEOUT_MS,
                     RouteAdmission::SupervisorInternal,
                 )
                 .await;
-            self.retire_worker_after_stop(&resident).await;
+            self.retire_worker_after_stop(&resident, true).await;
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit; the gate alone

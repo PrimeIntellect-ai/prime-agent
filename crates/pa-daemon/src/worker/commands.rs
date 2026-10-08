@@ -118,7 +118,7 @@ impl Worker {
             "worker_deliver_message" => self.handle_worker_deliver_message(payload),
             "update_snapshot" => self.handle_update_snapshot(),
             "kill" => self.handle_kill(payload).await,
-            "shutdown" => self.handle_shutdown().await,
+            "shutdown" => self.handle_shutdown(payload).await,
             "rename" => self.handle_rename("rename", payload),
             "set_session_name" => self.handle_rename("set_session_name", payload),
             "mark_anthropic_warning_shown" => self.handle_mark_anthropic_warning_shown(),
