@@ -582,20 +582,22 @@ async fn finish_failure(
     // competing daemon that answered the socket is never touched - a live
     // competitor keeps the rollback's honest Failed.
     if let Some(rejected) = &failure.rejected {
-        let killed = crate::daemon_discovery::kill::force_kill_identity_crash(
+        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
             u32::try_from(rejected.pid).unwrap_or(0),
             rejected.process_start_id.as_deref(),
         );
-        if killed {
-            let identity = pa_types::daemon::update_flow::UpdateProcessIdentity {
-                pid: rejected.pid,
-                process_start_id: rejected.process_start_id.clone(),
-                supervisor_generation: None,
-                supervisor_owner_token: None,
-                rest: serde_json::Map::default(),
-            };
-            let _ = super::successor::wait_for_exit(&identity, options.budget.predecessor_exit_ms)
-                .await;
+        if !confirmed_dead {
+            // An UNCONFIRMED death never spawns the rollback against a
+            // possibly-live successor: the refused daemon could still own
+            // the socket, and a Failed rollback beside a serving new
+            // binary is the honest terminal state (the crash kill itself
+            // reports the conservative outcome - a liveness probe error
+            // counts as alive).
+            fail_hard(format!(
+                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            ))
+            .await;
+            return Ok(());
         }
     }
     // Close the stop window right before the rollback child spawns,

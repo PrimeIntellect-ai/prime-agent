@@ -21,33 +21,38 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// a DIRECT SIGKILL, never a SIGTERM first (the supervisor's signal drain
 /// handles TERM as a graceful stop that persists worker stop tombstones -
 /// the adopted sessions would be stopped permanently instead of left for
-/// the crash recovery), verified against the process start id before the
-/// signal so a reused pid is never killed (the crash-oracle rollback
-/// path). Returns false - killing nothing - when the identity no longer
-/// matches or the process is already gone.
+/// the crash recovery), verified against the process start id so a reused
+/// pid is never killed (the crash-oracle rollback path). Returns `true`
+/// when the named process is confirmed dead (already gone, killed and
+/// death-polled, or its pid visibly reused by another process); `false`
+/// when the death could not be confirmed. A liveness probe ERROR counts
+/// as alive (the conservative doctrine): an unprobeable process is never
+/// presumed dead, and the caller must refuse to spawn against it.
 pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> bool {
-    let identity_matches = || {
-        if !is_alive(pid) {
-            return false;
+    // Already gone: the child is confirmed dead without a signal.
+    if !is_alive(pid) {
+        return true;
+    }
+    // A start-id mismatch is a VISIBLE pid reuse: the process at this pid
+    // is somebody else's, so this coordinator's child - which owned the
+    // pid - has exited. Confirmed dead, never signaled.
+    if let Some(expected) = start_id {
+        if process_start_id(pid).as_deref() != Some(expected) {
+            return true;
         }
-        match start_id {
-            // No start id to pin: the pid alone decides (the caller holds
-            // no better identity).
-            None => true,
-            // A start-id mismatch is a reused pid: never signaled.
-            Some(expected) => process_start_id(pid).as_deref() == Some(expected),
-        }
-    };
-    if !identity_matches() {
-        return false;
     }
     let _ = kill_pid(pid as i32, Signal::Kill);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
-        // Confirmed death only while the identity still matches: a reused
-        // pid alive under the same number is NOT our process's death.
-        if !identity_matches() {
+        // Confirmed death when the process is gone or its identity
+        // visibly changed under the pid.
+        if !is_alive(pid) {
             return true;
+        }
+        if let Some(expected) = start_id {
+            if process_start_id(pid).as_deref() != Some(expected) {
+                return true;
+            }
         }
         if std::time::Instant::now() >= deadline {
             return false;
@@ -84,8 +89,11 @@ pub(super) fn kill_daemon(pid: u32) {
     }
 }
 
+/// Conservative liveness (the lane doctrine: an unprobeable process is
+/// never presumed dead): a probe error counts as ALIVE - a stop path that
+/// cannot observe the process must not claim its death.
 pub(super) fn is_alive(pid: u32) -> bool {
-    is_process_alive(pid).unwrap_or(false)
+    is_process_alive(pid).unwrap_or(true)
 }
 
 /// Remove a socket file if present; false when the unlink fails. Never-touch
@@ -408,14 +416,15 @@ mod tests {
             .expect("spawn a sleep child");
         let pid = child.id();
         let start_id = process_start_id(pid);
-        // A wrong start id is a reused pid: never signaled, the child
-        // lives.
+        // A wrong start id is a VISIBLE pid reuse: never signaled, the
+        // child lives, and the coordinator's own child is confirmed dead
+        // (the pid belongs to somebody else now).
         assert!(
-            !force_kill_identity_crash(pid, Some("bogus-start-id")),
-            "a mismatched start id is never killed"
+            force_kill_identity_crash(pid, Some("bogus-start-id")),
+            "a mismatched start id is confirmed dead without a signal"
         );
         let alive = child.try_wait().expect("the child is not reaped").is_none();
-        assert!(alive, "the un-killable-identity child survives");
+        assert!(alive, "the mismatched-identity child is never signaled");
         // The pinned identity dies.
         assert!(
             force_kill_identity_crash(pid, start_id.as_deref()),
@@ -425,24 +434,18 @@ mod tests {
     }
 
     #[test]
-    fn force_kill_identity_crash_signals_nothing_for_a_dead_pid() {
+    fn force_kill_identity_crash_confirms_a_dead_pid_without_signaling() {
         let mut child = std::process::Command::new("true")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn a true child");
         let pid = child.id();
-        let start_id = process_start_id(pid);
         let _ = child.wait();
-        // An already-dead pid is not ours to kill: false, never signaled -
-        // the caller proceeds without the redundant exit wait.
+        // An already-dead pid is confirmed dead without a signal.
         assert!(
-            !force_kill_identity_crash(pid, start_id.as_deref()),
-            "a dead pid is nothing to kill, never signaled"
-        );
-        assert!(
-            !force_kill_identity_crash(pid, Some("whatever")),
-            "the stale start id matches nothing"
+            force_kill_identity_crash(pid, process_start_id(pid).as_deref()),
+            "a dead pid is confirmed dead, never signaled"
         );
     }
 
