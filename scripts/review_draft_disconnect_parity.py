@@ -352,6 +352,14 @@ class Supervisor:
                                             "assistantMessages": 0, "toolCalls": 0, "toolResults": 0,
                                             "totalMessages": 0, "cost": 0, "tokens": {
                                             "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+                    elif name == "get_context_tree":
+                        # Pinned AgentSession.getContextTree / ContextTreeNode and
+                        # usage.emptyUsage: an empty session is a single active root.
+                        usage = {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                                 "totalTokens": 0, "cost": {"input": 0, "output": 0,
+                                 "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+                        response["data"] = {"id": "root", "label": "Draft fixture", "status": "active",
+                                            "ownUsage": usage, "totalUsage": usage, "children": []}
                     elif name == "get_model_catalog": response["data"] = {"models": [], "configuredProviders": []}
                     elif name == "get_commands": response["data"] = {"commands": []}
                     elif name == "list_kernel_bash": response["data"] = {"commands": []}

@@ -356,7 +356,7 @@ jobs:
           path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
           if-no-files-found: error
       - name: Run this shard's test subset
-        if: success() || steps.lifecycle_parity.outcome == 'failure'
+        if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
         run: |
           python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
