@@ -335,6 +335,29 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
         # spelling proves the process was killed, never completed.
         self.assertTrue(result.exit_code < 0 or result.exit_code >= 128)
 
+    async def test_refused_pins_home_for_the_spawn_window(self):
+        # Isolation contract behind every home=-pinned refusal case: the
+        # helper must hold HOME pinned to that temp home for the whole
+        # bash() window, so a missed refusal expands `~` against the temp
+        # dir instead of the runner's real home. The recording bash proves
+        # the pin without spawning: dropping the home= pin (or the
+        # helper's HOME patch) records the runner's real HOME and fails
+        # the equality below.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        seen = []
+
+        def recording_bash(cmd, **kwargs):
+            seen.append(os.environ["HOME"])
+            raise DestructiveChmodRefusalError(
+                "Refusing to run this recursive chmod/chown command"
+            )
+
+        with mock.patch(f"{__name__}.bash", recording_bash):
+            message = await self._refused("chmod -R 755 ~", home=home.name)
+        self.assertIn("Refusing to run this recursive chmod/chown command", message)
+        self.assertEqual(seen, [home.name])
+
     async def _refused_handle(self, build) -> None:
         try:
             handle = build()
@@ -660,6 +683,8 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_refuses_shell_c_wrapped_recursion(self):
         self._make_tree()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         for command in [
             "sh -c 'chmod -R 755 ~'",
             "bash -c 'chown -R user ~'",
@@ -667,7 +692,7 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
             "sh -c $(echo 'chmod -R 755 ~')",
         ]:
             with self.subTest(command=command):
-                message = await self._refused(command)
+                message = await self._refused(command, home=home.name)
                 self.assertIn("inside a quoted `sh -c` payload", message)
                 self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
 
@@ -850,6 +875,9 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_refuses_process_substitution_wrappers(self):
         self._make_tree()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        Path(home.name, "keep.txt").write_text("keep\n")
         for command in [
             "bash <(printf 'chmod -R 755 ~\\n')",
             "sh <(printf 'chmod -R 755 ~\\n')",
@@ -858,8 +886,9 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
             "bash >(printf 'chmod -R 755 ~\\n')",
         ]:
             with self.subTest(command=command):
-                message = await self._refused(command)
+                message = await self._refused(command, home=home.name)
                 self.assertIn("process substitution", message)
+                self.assertTrue(Path(home.name, "keep.txt").exists())
         # Process substitutions that never feed a shell wrapper stay fine.
         result = await self._run("cat <(echo hi)")
         self.assertEqual(result.exit_code, 0)
@@ -869,6 +898,9 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_refuses_nested_quoted_wrappers(self):
         self._make_tree()
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        Path(home.name, "keep.txt").write_text("keep\n")
         for command, needle in [
             ('eval \'bash -c "chmod -R 755 ~"\'', "in eval"),
             ('sh -c \'bash -c "chmod -R 755 ~"\'', "`sh -c`"),
@@ -878,9 +910,10 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
             ('bash -c $"chmod -R 755 ~"', "`sh -c`"),
         ]:
             with self.subTest(command=command):
-                message = await self._refused(command)
+                message = await self._refused(command, home=home.name)
                 self.assertIn(needle, message)
                 self.assertTrue(self._tracked("sub", "nested", "file.txt").exists())
+                self.assertTrue(Path(home.name, "keep.txt").exists())
         # Still-quoted data inside payloads stays inert.
         result = await self._run('sh -c \'echo "chmod -R 755 ~"\'')
         self.assertEqual(result.exit_code, 0)
@@ -1714,10 +1747,12 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_deep_heredoc_nesting_refuses_cleanly(self):
         # Heredoc bodies rescanned as shell code recurse; nesting must refuse.
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
         command = "chmod -R 755 ~"
         for level in range(800):
             command = "bash <<EOF%d\n%s\nEOF%d" % (level, command, level)
-        self.assertIn("nests more than", await self._refused(command))
+        self.assertIn("nests more than", await self._refused(command, home=home.name))
 
     async def test_deep_substitution_nesting_refuses_cleanly(self):
         # Hostile nesting must refuse with the guard's own error instead of
@@ -1799,7 +1834,7 @@ class RecursiveChmodGuardTest(unittest.IsolatedAsyncioTestCase):
             os.environ,
             {"PRIME_AGENT_BASH_COMMAND_PREFIX": "chmod -R 755 /"},
         ):
-            message = await self._refused("echo hi")
+            message = await self._refused("echo hi", home=home.name)
         self.assertIn("Refusing to run this recursive chmod/chown command", message)
 
     async def test_command_prefix_relocation_is_refused(self):
