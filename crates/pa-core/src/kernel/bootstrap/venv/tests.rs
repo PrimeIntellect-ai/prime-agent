@@ -550,6 +550,33 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 /// platforms take it too so the serialization is one lock everywhere.)
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The bound override resolves to a usable bound or the default - a
+/// non-positive value would tree-kill every child on its first poll.
+#[test]
+fn bootstrap_child_timeout_rejects_non_positive_overrides() {
+    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
+    let previous = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
+    let resolve = super::resolve_bootstrap_child_timeout_ms;
+    for (given, expected) in [
+        ("0", 600_000u64),
+        ("-5", 600_000),
+        ("abc", 600_000),
+        ("", 600_000),
+        ("2500", 2_500),
+    ] {
+        std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", given);
+        assert_eq!(
+            resolve(),
+            expected,
+            "the override {given:?} resolves to {expected:?}"
+        );
+    }
+    match previous {
+        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
+        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
+    }
+}
+
 /// A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override resolves through
 /// the DIRECT probe and never reads or writes any memo file.
 #[cfg(unix)]
@@ -1139,6 +1166,98 @@ async fn bootstrap_children_forward_piped_output_through_the_reporter() {
     );
 }
 
+/// A stream without newlines is drained in bounded pieces: one line may
+/// not buffer without bound while the child bound is still minutes away.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_newline_free_stream_is_drained_in_bounded_pieces() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         echo BEGIN_MARKER\n\
+         head -c 2097152 /dev/zero | tr '\\0' x\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    assert!(
+        collected.len() > 10,
+        "the cap-free stream reaches the reporter in pieces: {:?}",
+        collected.len()
+    );
+    let longest = collected.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest <= super::MAX_DRAIN_LINE_BYTES,
+        "no forwarded piece may exceed the cap: longest is {longest}, cap is {}",
+        super::MAX_DRAIN_LINE_BYTES
+    );
+    let pieces = collected
+        .iter()
+        .filter(|line| line.contains('x') && !line.contains("MARKER"))
+        .map(String::len)
+        .collect::<Vec<_>>();
+    let filled = pieces.iter().any(|length| *length >= 32_000);
+    assert!(
+        filled,
+        "the over-long line is forwarded in cap-sized pieces, not in every          reader-sized chunk (pieces: {pieces:?})"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("BEGIN_MARKER")),
+        "the stream's head reaches the reporter"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the stream's tail reaches the reporter"
+    );
+}
+
+/// A line shorter than the cap that spans several reader fills stays
+/// whole: only the cap splits a line, never the reader's chunk size.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_short_line_spanning_fills_is_forwarded_whole() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         head -c 20480 /dev/zero | tr '\\0' x\n\
+         echo\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    let whole = collected
+        .iter()
+        .find(|line| line.starts_with('x'))
+        .expect("the over-cap-free line reached the reporter");
+    assert_eq!(
+        whole.len(),
+        20480,
+        "a line under the cap arrives in one piece, spanning fills: {whole:?}"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the tail reaches the reporter"
+    );
+}
+
 /// A child that emits non-UTF-8 bytes mid-stream is forwarded mangled,
 /// never allowed to end the drain: the lines after the bad bytes still
 /// reach the reporter and the bootstrap still completes.
@@ -1342,86 +1461,5 @@ async fn bootstrap_venv_runs_uv_quietly_with_no_stdin() {
     assert!(
         !calls.join("\n").contains("stdin-leaked"),
         "the child's stdin is null, never inherited: {calls:?}"
-    );
-}
-
-/// A non-positive `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS` is not a bound:
-/// it falls back to the default instead of killing every child on sight.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_zero_bound_override_falls_back_to_the_default() {
-    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let _uv = fake_uv(dir.path(), "#!/bin/sh\nsleep 1\nexit 0\n");
-    let venv = dir.path().join("venv");
-    std::fs::create_dir_all(&venv).unwrap();
-    let previous_timeout = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
-    std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", "0");
-    let restore_path = prepend_path(dir.path());
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        bootstrap_venv(&venv, &[], &EnsureKernelPythonOptions::default()),
-    )
-    .await;
-    restore_path();
-    match previous_timeout {
-        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
-        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
-    }
-    let result = outcome.expect("the fallback bound keeps the bootstrap bounded");
-    assert!(
-        result.is_ok(),
-        "the child completes on the default bound: {result:?}"
-    );
-}
-
-/// One forwarded line is capped: a newline-free stream must not grow the
-/// drain's carry without bound - the pieces are forwarded as they cap,
-/// the pipe keeps draining, and the child completes.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_newline_free_stream_is_forwarded_in_capped_pieces() {
-    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
-    let dir = tempfile::tempdir().unwrap();
-    let _uv = fake_uv(
-        dir.path(),
-        "#!/bin/sh\nhead -c 200000 /dev/zero | tr '\\0' 'x'\necho LINE_CAP_MARKER\nexit 0\n",
-    );
-    let (reports, options) = report_collector();
-    let venv = dir.path().join("venv");
-    std::fs::create_dir_all(&venv).unwrap();
-    let restore_path = prepend_path(dir.path());
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        bootstrap_venv(&venv, &[], &options),
-    )
-    .await;
-    restore_path();
-    let result = outcome.expect("a capped drain keeps the bootstrap bounded");
-    assert!(result.is_ok(), "the bootstrap completes: {result:?}");
-    let lines = reports.lock().unwrap().clone();
-    assert!(
-        lines.iter().any(|line| line.contains("LINE_CAP_MARKER")),
-        "the post-bulk marker forwards: {lines:?}"
-    );
-    let bulk: Vec<&String> = lines
-        .iter()
-        .filter(|line| line.contains('x') && !line.contains("LINE_CAP_MARKER"))
-        .collect();
-    assert!(
-        !bulk.is_empty(),
-        "the newline-free bulk is forwarded in pieces: {lines:?}"
-    );
-    for piece in &bulk {
-        assert!(
-            piece.len() <= 64 * 1024,
-            "no forwarded piece exceeds the cap ({} bytes)",
-            piece.len()
-        );
-    }
-    let forwarded: usize = bulk.iter().map(|piece| piece.len()).sum();
-    assert!(
-        forwarded >= 190_000,
-        "the bulk still drains in full ({forwarded} bytes of 200000)"
     );
 }
