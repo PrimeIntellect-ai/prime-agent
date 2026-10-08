@@ -217,6 +217,18 @@ impl AgentSessionEngine {
         if let Some(agent) = agent {
             agent.set_model_override(None);
         }
+        // The clear's resolve-and-install serializes with `/reload`'s
+        // live-input refresh (the failover restore's fence): without the
+        // lock, a reload landing between the fresh resolution and the
+        // slot write is clobbered by the clear's older pair — a login
+        // that just reloaded never reaches the next turn. This runs on
+        // the turn's blocking thread (the worker parks the turn there),
+        // so the synchronous resolution never touches an async executor
+        // worker.
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut target = match self.resolve_model() {
             Ok(model) => {
                 let (api_key, headers) = self.resolve_request_key_and_headers(&model);
