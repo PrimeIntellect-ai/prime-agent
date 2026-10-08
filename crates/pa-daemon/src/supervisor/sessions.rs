@@ -920,6 +920,9 @@ mod tests {
         Supervisor::new(SupervisorOptions {
             socket_path: dir.join("daemon.sock"),
             agent_dir: dir.join("agent"),
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
         })
         .expect("supervisor")
     }
@@ -939,7 +942,14 @@ mod tests {
 
         let start = tokio::time::Instant::now();
         let response = supervisor
-            .handle_list("l1".to_string(), "list".to_string(), Some(true), None, None)
+            .handle_list(
+                "l1".to_string(),
+                "list".to_string(),
+                Some(true),
+                None,
+                None,
+                false,
+            )
             .await;
         let elapsed = start.elapsed();
 
