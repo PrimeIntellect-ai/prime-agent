@@ -555,17 +555,23 @@ pub fn build_orchestrator_prompt(config: &SwarmEvalConfig, size: usize, secrets:
 /// Ordinary prose before the real ANSWER line can mention `answer:` (the
 /// TS-era regex scanned forward past such mentions instead of pinning to
 /// the first substring), so every case-insensitive occurrence is tried.
-/// An occurrence wins only when its number list consumes the entire
-/// remaining text: the ANSWER line must end the assistant's turn, so at
-/// most one occurrence can win and trailing text never does.
+/// An occurrence wins only when the marker starts its line — anything but
+/// whitespace before it on that line is prose, so "I could not verify this
+/// answer: 123, 456" is a refusal, not a final answer — and its number
+/// list consumes the entire remaining text: the ANSWER line must end the
+/// assistant's turn, so at most one occurrence can win and trailing text
+/// never does.
 #[must_use]
 pub fn parse_answer_line(text: Option<&str>) -> Option<Vec<u64>> {
     let text = text?;
     let mut offset = 0;
     loop {
         let start = find_ascii_case_insensitive(text, "answer:", offset)?;
-        if let Some(numbers) = parse_answer_suffix(&text[start + "answer:".len()..]) {
-            return Some(numbers);
+        let line_prefix = text[..start].rsplit('\n').next().unwrap_or_default();
+        if line_prefix.trim().is_empty() {
+            if let Some(numbers) = parse_answer_suffix(&text[start + "answer:".len()..]) {
+                return Some(numbers);
+            }
         }
         offset = start + 1;
     }

@@ -507,6 +507,24 @@ fn parses_the_answer_line() {
 }
 
 #[test]
+fn a_mid_line_answer_mention_is_prose_not_the_answer_line() {
+    // The marker must start its line: prose that happens to end with
+    // "answer: <numbers>" is a refusal, not a final answer. Without the
+    // line-start rule the poll loop stops on it and credits the numbers as
+    // task success.
+    assert_eq!(
+        parse_answer_line(Some("I could not verify this answer: 123, 456")),
+        None
+    );
+    // An indented line-start marker is the orchestrator prompt's own shape
+    // ("   ANSWER: <numbers>").
+    assert_eq!(
+        parse_answer_line(Some("done.\n   ANSWER: 12, 34")),
+        Some(vec![12, 34])
+    );
+}
+
+#[test]
 fn parses_past_a_prose_answer_mention_before_the_real_answer_line() {
     // The TS-era regex scanned forward past prose `answer:` mentions; the
     // first substring occurrence must not hijack the real ANSWER line and
