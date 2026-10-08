@@ -137,7 +137,9 @@ impl AgentSessionEngine {
             {
                 continue;
             }
-            let _ = wiring.store.cancel(&job.id, crate::util::now_ms());
+            if let Err(error) = wiring.store.cancel(&job.id, crate::util::now_ms()) {
+                eprintln!("failed to cancel goal wake job: {error}");
+            }
         }
     }
 

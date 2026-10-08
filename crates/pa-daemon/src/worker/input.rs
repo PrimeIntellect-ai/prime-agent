@@ -316,7 +316,7 @@ impl Worker {
             Lane::Steering
         };
         let (id, queued, snapshot, target) = {
-            let mut core = self.core.lock().unwrap();
+            let (mut core, inputs) = self.summary_inputs();
             let pending = core.steering.len() + core.follow_up.len();
             if let Err(error) =
                 pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(
@@ -329,7 +329,7 @@ impl Worker {
             }
             let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
             let queued = core.busy;
-            let summary = self.summary_locked(&core);
+            let summary = self.summary_locked(&core, inputs);
             // The receiving session's endpoint: the receipt's `target`
             // and the delivered row's `details.target` share the one
             // shape.
