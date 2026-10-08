@@ -5,6 +5,7 @@ use crate::session_engine::messages::{
 };
 use pa_agent::agent::{AgentInitialState, AgentOptions};
 use pa_agent::scripted::ScriptedProvider;
+use pa_agent::types::{AgentTool, AgentToolResult};
 use pa_types::ai::AssistantMessage;
 
 fn test_model() -> pa_agent::types::Model {
@@ -280,31 +281,35 @@ fn refine_assistant_row(error: bool) -> SessionAgentMessage {
     })
 }
 
+/// The refiner seam's reply: one assistant row carrying the plan text.
+fn plan_reply(plan: &str) -> AssistantMessage {
+    AssistantMessage {
+        content: vec![pa_types::ai::AssistantContentBlock::Text(
+            pa_types::ai::TextContent {
+                text: plan.to_string(),
+                text_signature: None,
+                rest: serde_json::Map::default(),
+            },
+        )],
+        api: "openai-completions".to_string(),
+        provider: "test".to_string(),
+        model: "m".to_string(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: pa_types::ai::Usage::default(),
+        stop_reason: pa_types::ai::StopReason::Stop,
+        stop_reason_raw: None,
+        error_message: None,
+        timestamp: 0,
+        rest: serde_json::Map::default(),
+    }
+}
+
 fn refine_plan_call(plan: &'static str) -> crate::refinement::executor::RefinerFn {
     Box::new(move |_model, _system, _prompt| {
-        Box::pin(async move {
-            Ok(pa_types::ai::AssistantMessage {
-                content: vec![pa_types::ai::AssistantContentBlock::Text(
-                    pa_types::ai::TextContent {
-                        text: plan.to_string(),
-                        text_signature: None,
-                        rest: serde_json::Map::default(),
-                    },
-                )],
-                api: "openai-completions".to_string(),
-                provider: "test".to_string(),
-                model: "m".to_string(),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: pa_types::ai::Usage::default(),
-                stop_reason: pa_types::ai::StopReason::Stop,
-                stop_reason_raw: None,
-                error_message: None,
-                timestamp: 0,
-                rest: serde_json::Map::default(),
-            })
-        })
+        let reply = plan_reply(plan);
+        Box::pin(async move { Ok(reply) })
     })
 }
 
@@ -314,10 +319,18 @@ const EMPTY_PLAN: &str = r#"{"summary":"bench","edits":[]}"#;
 /// A persisted session over two seeded rows, with the live loop context
 /// built the way the resume path builds it (one rebuild).
 async fn refine_test_session() -> (AgentSession, tempfile::TempDir) {
-    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    refine_test_session_with(Arc::new(ScriptedProvider::new(test_model())), Vec::new()).await
+}
+
+/// [`refine_test_session`] over a caller-owned provider and tool set.
+async fn refine_test_session_with(
+    provider: Arc<ScriptedProvider>,
+    tools: Vec<Arc<dyn AgentTool>>,
+) -> (AgentSession, tempfile::TempDir) {
     let options = AgentOptions {
         initial_state: AgentInitialState {
             model: Some(test_model()),
+            tools: Some(tools),
             ..Default::default()
         },
         stream_fn: Some(provider.stream_fn()),
@@ -602,5 +615,197 @@ async fn refine_keeps_the_retry_drop_instead_of_resurrecting_the_error_row() {
     assert!(
         reference.iter().any(is_error_assistant),
         "the reference rebuild resurrects the dropped row; the push does not"
+    );
+}
+
+/// A tool that signals its start, then waits for one release: the turn that
+/// calls it stays mid-tool across the refinement's commit window.
+struct HeldTool {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+}
+
+impl AgentTool for HeldTool {
+    fn name(&self) -> &'static str {
+        "held"
+    }
+
+    fn description(&self) -> &'static str {
+        "Signals its start, then waits for one release."
+    }
+
+    fn parameters(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        SCHEMA.get_or_init(|| serde_json::json!({ "type": "object", "properties": {} }))
+    }
+
+    fn execute(
+        self: Arc<Self>,
+        _tool_call_id: String,
+        _params: serde_json::Value,
+        _signal: pa_agent::abort::AbortSignal,
+        _on_update: pa_agent::types::AgentToolUpdateCallback,
+    ) -> pa_agent::BoxFut<'static, anyhow::Result<AgentToolResult>> {
+        Box::pin(async move {
+            let _ = self.started.send(());
+            let _ = self.release.lock().await.recv().await;
+            Ok(AgentToolResult::text("released"))
+        })
+    }
+}
+
+/// The plan runs with no session lock (a read and a write complete
+/// mid-plan), and the rows commit only after a turn that is mid-tool when
+/// the plan resolves has settled — the outcome row lands after the tool
+/// result in both the durable entries and the live loop context.
+#[tokio::test]
+async fn refine_plans_without_the_session_lock_and_commits_after_a_running_turn_settles() {
+    let (tool_started, mut tool_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tool_release, tool_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let held_tool = Arc::new(HeldTool {
+        started: tool_started,
+        release: Arc::new(tokio::sync::Mutex::new(tool_release_rx)),
+    });
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling the tool"),
+        vec![("call-1", "held", serde_json::json!({}))],
+    );
+    provider.push_text_turn("done");
+    let (session, tmp) = refine_test_session_with(provider, vec![held_tool]).await;
+    let engine = Arc::new(session);
+    let global_dir = tmp.path().join("harness");
+
+    let (refine_started, mut refine_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (refine_release, mut refine_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let held_refiner: crate::refinement::executor::RefinerFn =
+        Box::new(move |_model, _system, _prompt| {
+            let _ = refine_started.send(());
+            Box::pin(async move {
+                let _ = refine_release_rx.recv().await;
+                Ok(plan_reply(EMPTY_PLAN))
+            })
+        });
+    let mut refine = {
+        let engine = Arc::clone(&engine);
+        let global_dir = global_dir.clone();
+        let model = session_ai_model();
+        tokio::spawn(async move {
+            engine
+                .refine_with_refiner(
+                    &refine::RefineOptions::default(),
+                    refine::RefinementSource::User,
+                    &model,
+                    held_refiner,
+                    global_dir,
+                )
+                .await
+        })
+    };
+    let window = std::time::Duration::from_secs(3);
+    let Ok(started) = tokio::time::timeout(window, refine_started_rx.recv()).await else {
+        panic!("the refiner request never started in the window");
+    };
+    started.expect("the refiner request started");
+
+    let read_entries = tokio::time::timeout(window, engine.entries())
+        .await
+        .expect(
+            "the session read completes while the refiner request is in flight; the window bounds this test's red failure, it is not a wait",
+        );
+    assert!(
+        !read_entries.is_empty(),
+        "the mid-request read sees the session's rows"
+    );
+    let (_, write_error) = tokio::time::timeout(window, async {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_message_retained(SessionAgentMessage::User(pa_types::ai::UserMessage {
+            content: pa_types::ai::UserContent::Text("mid-request row".to_string()),
+            timestamp: 0,
+            rest: pa_types::JsonMap::default(),
+        }))
+    })
+    .await
+    .expect(
+        "the session write completes while the refiner request is in flight; the window bounds this test's red failure, it is not a wait",
+    );
+    assert!(write_error.is_none(), "the mid-request row is durable");
+
+    let turn = {
+        let agent = Arc::clone(engine.agent());
+        tokio::spawn(async move { agent.prompt("run the tool").await })
+    };
+    let Ok(tool_running) = tokio::time::timeout(window, tool_started_rx.recv()).await else {
+        panic!("the tool call never started in the window");
+    };
+    tool_running.expect("the tool call started");
+
+    refine_release.send(()).expect("the refiner released");
+    let committed_mid_tool = tokio::time::timeout(window, &mut refine).await.is_ok();
+    assert!(
+        !committed_mid_tool,
+        "the refinement committed while the tool call was still running"
+    );
+    tool_release.send(()).expect("the tool released");
+    turn.await
+        .expect("the turn task joined")
+        .expect("the turn ran");
+    let result = refine
+        .await
+        .expect("the refine task joined")
+        .expect("the refinement ran");
+    assert!(
+        result.applied_edits.is_empty(),
+        "the empty plan applied nothing"
+    );
+
+    let entries = engine.entries().await;
+    let tool_result_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                FileEntry::Message {
+                    message: SessionAgentMessage::ToolResult(_),
+                    ..
+                }
+            )
+        })
+        .expect("the tool result row is in the entries");
+    let outcome_index = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry, FileEntry::CustomMessage { payload, .. }
+                if payload.custom_type == "refinement_outcome")
+        })
+        .expect("the refinement outcome row is in the entries");
+    assert!(
+        tool_result_index < outcome_index,
+        "the refinement's rows land after the running turn settled"
+    );
+    let state = engine.agent().state().await;
+    let live_tool_result = state
+        .messages
+        .iter()
+        .position(|message| {
+            matches!(
+                message,
+                AgentMessage::Standard(pa_agent::types::Message::ToolResult(_))
+            )
+        })
+        .expect("the tool result message is in the live context");
+    let live_outcome = state
+        .messages
+        .iter()
+        .position(|message| {
+            matches!(message, AgentMessage::Custom(custom)
+                if custom.payload.get("customType").and_then(serde_json::Value::as_str)
+                    == Some("refinement_outcome"))
+        })
+        .expect("the refinement outcome message is in the live context");
+    assert!(
+        live_tool_result < live_outcome,
+        "the live context carries the refinement's rows after the turn's tool result"
     );
 }
