@@ -256,18 +256,25 @@ impl CommandRecoveryJournal {
         Ok(())
     }
 
+    /// Rewrite the journal as the record grammar `load` replays: a
+    /// `received` record for every entry, then the `result` record that
+    /// restores a complete entry's cached response.
     fn compact(&mut self) -> Result<()> {
         let mut records = Vec::new();
         for (key, entry) in &self.entries {
-            let mut received = serde_json::json!({
+            records.push(serde_json::json!({
                 "version": 1,
                 "type": "received",
                 "key": key,
-            });
+            }));
             if let Some(response) = &entry.response {
-                received["response"] = response.clone();
+                records.push(serde_json::json!({
+                    "version": 1,
+                    "type": "result",
+                    "key": key,
+                    "response": response,
+                }));
             }
-            records.push(received);
         }
         rewrite_records(&self.path, &records, Finalize::RetryBusy)?;
         self.record_count = records.len();
@@ -776,6 +783,30 @@ mod tests {
         reloaded.begin("client", "c2", "kill").unwrap();
         let reloaded2 = CommandRecoveryJournal::open(&path).unwrap();
         assert_eq!(reloaded2.lookup("client", "c2").unwrap().status, "pending");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn command_journal_open_heals_torn_tail_keeping_results() {
+        let path = temp_path("torn-tail.command.jsonl");
+        let mut journal = CommandRecoveryJournal::open(&path).unwrap();
+        journal.begin("client", "c1", "create").unwrap();
+        let response =
+            serde_json::json!({"type": "response", "command": "create", "success": true});
+        journal.record_result("client", "c1", &response).unwrap();
+        journal.begin("client", "c2", "kill").unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"version":1,"type":"res"#).unwrap();
+        drop(file);
+
+        // The first open heals the torn tail; the reload proves the heal
+        // kept the completed command's cached result.
+        let _healed = CommandRecoveryJournal::open(&path).unwrap();
+        let reloaded = CommandRecoveryJournal::open(&path).unwrap();
+        let entry = reloaded.lookup("client", "c1").unwrap();
+        assert_eq!(entry.status, "complete");
+        assert_eq!(entry.response, Some(response));
+        assert_eq!(reloaded.lookup("client", "c2").unwrap().status, "pending");
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
