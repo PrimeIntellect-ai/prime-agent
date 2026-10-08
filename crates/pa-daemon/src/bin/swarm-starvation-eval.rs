@@ -424,7 +424,25 @@ fn run_trial(
     // session's fate is unknown, and the dir — its `cwd` and session
     // file — stays, with the name retained in the error, for a later
     // cleanup retry instead of being deleted out from under it.
-    let cleanup = kill_session(client, socket, &session_id).map(|_| ());
+    // The daemon's kill cascade closes the session's resident children, but
+    // a failed child close is swallowed (the kill envelope still
+    // succeeds), so a settled root kill does not prove the crew stopped.
+    // The crew is captured before the kill — `get_rlm_children` needs the
+    // live parent — and every child is confirmed dead after it: an
+    // already-dead child answers the settled nothing-to-kill, a survivor
+    // is killed now, and any child that cannot be confirmed keeps the
+    // trial dir, with the child's name retained in the error (the address
+    // a later retry can resolve; session ids never reach stderr), instead
+    // of retiring the directory under a still-spending crew.
+    let crew = trial_crew(client, &session_id);
+    let cleanup = kill_session(client, socket, &session_id)
+        .map(|_| ())
+        .and_then(|()| match &crew {
+            Ok(crew) => confirm_crew_killed(client, socket, crew),
+            Err(list_error) => Err(format!(
+                "the trial's children could not be listed for cleanup: {list_error}"
+            )),
+        });
     let note = retire_trial_dir(&trial_root, &name, cleanup.is_ok());
     match (outcome, cleanup) {
         (outcome, Ok(())) => outcome,
@@ -651,6 +669,64 @@ fn kill_session(client: &mut Client, socket: &Path, session_id: &str) -> Result<
 /// stopped, or a restore that settled in failure. Matching fails closed:
 /// any other wording reads as an unsettled rejection and keeps the trial
 /// dir.
+/// The crew the orchestrator spawned, as the daemon reports it: one
+/// (session id, name) pair per child row. Captured before the cleanup kill
+/// — `get_rlm_children` needs the live parent session, and after the kill
+/// these are the only addresses the confirm pass can reach the children's
+/// sessions by. A row without a session id leaves the crew unverifiable,
+/// so it errors instead of counting as an empty crew.
+fn trial_crew(client: &mut Client, session_id: &str) -> Result<Vec<(String, String)>, String> {
+    let data = command_data(
+        client,
+        &json!({ "type": "get_rlm_children", "activeSessionId": session_id }),
+        Duration::from_secs(30),
+    )?;
+    let rows = data
+        .get("children")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    rows.iter()
+        .map(|row| {
+            let id = row
+                .get("activeSessionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "a child row carried no session id".to_string())?;
+            let name = row
+                .get("sessionName")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            Ok((id.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// Confirm every crew member's session died with the root: the kill
+/// cascade's child closes are swallowed on failure, so each child gets its
+/// own id-addressed kill. An already-dead child answers the settled
+/// nothing-to-kill; a live one is stopped now; any child that cannot be
+/// confirmed leaves the cleanup unsettled with the child's name.
+fn confirm_crew_killed(
+    client: &mut Client,
+    socket: &Path,
+    crew: &[(String, String)],
+) -> Result<(), String> {
+    for (id, name) in crew {
+        kill_session(client, socket, id)
+            .map(|_| ())
+            .map_err(|error| {
+                let name = if name.is_empty() {
+                    "an unnamed child"
+                } else {
+                    name
+                };
+                format!("child '{name}' could not be confirmed stopped: {error}")
+            })?;
+    }
+    Ok(())
+}
+
 fn nothing_to_kill(response: &Value) -> bool {
     response
         .get("error")
@@ -2080,6 +2156,125 @@ mod tests {
                 || error.contains("failed to send command"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn cleanup_confirms_each_crew_session_died_with_the_root() {
+        // The daemon's kill cascade swallows a failed child close, so a
+        // successful root kill does not prove the crew stopped: a survivor
+        // keeps spending tokens while the driver retires the trial dir and
+        // reports cleanup settled. The cleanup must capture the crew before
+        // the kill and address every child session after it.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let scored_messages = json!({ "messages": [
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({
+                "role": "custom",
+                "customType": "agent_message",
+                "content": "[agent-message from worker]\n\nREPORT",
+                "details": { "from": { "activeSessionId": "s-child" } },
+            }),
+            json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+        ] });
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {secret}") }),
+            ),
+            (
+                "get_rlm_children",
+                json!({ "children": [
+                    json!({
+                        "id": "child-1",
+                        "activeSessionId": "s-child",
+                        "sessionName": "worker",
+                        "status": "done",
+                    }),
+                ] }),
+            ),
+            ("get_messages", scored_messages.clone()),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+
+        run(&daemon.socket, &config).expect("the one-child trial is a row");
+
+        // The child's own kill is id-addressed and lands after the root's;
+        // with the crew confirmed dead the row passes and the cleanup
+        // settles.
+        let commands = daemon.drain_until_killed("s-eval");
+        let root_kill = commands
+            .iter()
+            .position(|command| command["type"] == "kill" && command["activeSessionId"] == "s-eval")
+            .expect("the root kill");
+        let child_kill = commands
+            .iter()
+            .position(|command| {
+                command["type"] == "kill" && command["activeSessionId"] == "s-child"
+            })
+            .expect("the child kill");
+        assert!(child_kill > root_kill, "{commands:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
+        assert!(report.contains("All 1 trials passed"), "{report}");
+
+        // A crew row without a session id cannot be confirmed dead: the
+        // cleanup stays unsettled, the row carries the cleanup failure, and
+        // the trial dir is kept for a retry instead of being retired under
+        // an unverifiable crew.
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {secret}") }),
+            ),
+            (
+                "get_rlm_children",
+                json!({ "children": [
+                    json!({
+                        "id": "child-1",
+                        "sessionName": "worker",
+                        "status": "done",
+                    }),
+                ] }),
+            ),
+            ("get_messages", scored_messages),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+
+        run(&daemon.socket, &config).expect("the unverifiable-crew trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        let instant_fail = rows[0]["instant_fail"].as_str().expect("instant fail");
+        assert!(instant_fail.starts_with("cleanup failed:"), "{rows:?}");
+        assert!(
+            instant_fail.contains("a child row carried no session id"),
+            "{rows:?}"
+        );
+        assert!(
+            instant_fail.contains("was kept with the session named"),
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
     }
 
     #[test]
