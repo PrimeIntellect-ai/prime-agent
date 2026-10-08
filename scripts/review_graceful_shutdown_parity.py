@@ -313,6 +313,8 @@ def main():
     args = parser.parse_args()
     receipt_path = args.receipt.resolve()
     repo = Path(__file__).resolve().parent.parent
+    if receipt_path == repo or repo in receipt_path.parents:
+        parser.error("receipt must be outside the repository")
     receipt = {"fixture": "pr-3407-graceful-shutdown",
                "ts_reference": {"version": "0.9.8", "expected_archive_sha256":
                    TS_ARCHIVE_SHA256},
@@ -320,8 +322,6 @@ def main():
     try:
         if sys.platform != "linux":
             raise RuntimeError("this real-binary fixture requires Linux")
-        if receipt_path == repo or repo in receipt_path.parents:
-            raise RuntimeError("receipt must be outside the repository")
         archive = Path(os.environ["PA_TS_ARCHIVE"]).resolve()
         archive_sha = digest(archive)
         receipt["ts_reference"]["archive"] = str(archive)
