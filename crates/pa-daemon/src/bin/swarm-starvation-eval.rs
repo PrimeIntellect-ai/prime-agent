@@ -2558,11 +2558,14 @@ mod tests {
                 let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
                 let id = envelope.get("id").cloned().unwrap_or(Value::Null);
                 let mut response = json!({ "id": id, "type": "response", "success": true });
-                if kind == "kill"
-                    && command.get("activeSessionId").and_then(Value::as_str) == Some("s-eval")
-                {
-                    response["success"] = json!(false);
-                    response["error"] = json!("stop tombstone persist failed");
+                if kind == "kill" {
+                    // The parent's stop is rejected; the child's succeeds,
+                    // so the pin observes the confirm pass running — and
+                    // confirming — behind the failed parent kill.
+                    if command.get("activeSessionId").and_then(Value::as_str) == Some("s-eval") {
+                        response["success"] = json!(false);
+                        response["error"] = json!("stop tombstone persist failed");
+                    }
                 } else if let Some((_, data)) = by_type.iter().find(|(entry, _)| *entry == kind) {
                     response["data"] = data.clone();
                 } else {
@@ -2594,12 +2597,21 @@ mod tests {
             "{commands:?}"
         );
         assert!(result.task_success);
+        // The child was confirmed stopped (its kill succeeded), so the
+        // cleanup failure is the parent's rejection alone.
         let instant_fail = result.instant_fail.expect("the cleanup failed");
         assert!(
             instant_fail.starts_with("cleanup failed:"),
             "{instant_fail}"
         );
-        assert!(instant_fail.contains("kill rejected"), "{instant_fail}");
+        assert!(
+            instant_fail.contains("stop tombstone persist failed"),
+            "{instant_fail}"
+        );
+        assert!(
+            !instant_fail.contains("could not be confirmed stopped"),
+            "{instant_fail}"
+        );
         assert!(
             instant_fail.contains("was kept with the session named"),
             "{instant_fail}"
