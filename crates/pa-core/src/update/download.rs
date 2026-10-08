@@ -306,7 +306,7 @@ fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()>
     }
     std::fs::write(&path, install_source).with_context(|| format!("write {}", path.display()))?;
     std::fs::File::open(&path)?.sync_all()?;
-    super::install::sync_directory(release_dir)
+    Ok(super::install::sync_directory(release_dir)?)
 }
 
 /// Copy or extract the payload into staging scratch, check the release
@@ -395,7 +395,7 @@ fn sync_release_tree(root: &Path) -> Result<()> {
     for directory in directories.iter().rev() {
         super::install::sync_directory(directory)?;
     }
-    super::install::sync_directory(root)
+    Ok(super::install::sync_directory(root)?)
 }
 
 /// Validate a staged payload, write the installer metadata, and rename it into
