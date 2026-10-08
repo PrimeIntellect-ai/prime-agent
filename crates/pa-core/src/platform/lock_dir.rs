@@ -343,7 +343,14 @@ fn reclaim_guard_path(path: &Path) -> PathBuf {
     // unstattable parent (the lock's directory must exist for every
     // protocol participant) falls back to the raw text - degraded but
     // deterministic for a lock that could not have been acquired anyway.
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    // A bare relative lock ("state.json.lock") has an EMPTY parent (not
+    // None): normalize it to "." before canonicalizing, or it hashes a
+    // different sidecar than the absolute spelling of the same lock.
+    let parent = match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Path::new("."),
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
     let canonical = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
     let filename = path
         .file_name()
@@ -1666,6 +1673,20 @@ mod tests {
             "the placeholder stays until its own process clears it"
         );
         let _ = remove_candidate_dir(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guard_sidecar_matches_for_bare_relative_locks() {
+        // A bare relative lock name and the absolute spelling of the same
+        // lock must derive the SAME sidecar: the empty parent normalizes
+        // to "." and canonicalizes against the process's working
+        // directory. No chdir needed - the absolute spelling is derived
+        // from the current one.
+        let cwd = std::env::current_dir().unwrap();
+        let bare = reclaim_guard_path(Path::new("state.json"));
+        let absolute = reclaim_guard_path(&cwd.join("state.json"));
+        assert_eq!(bare, absolute, "one lock, one guard, any spelling");
     }
 
     #[cfg(target_os = "linux")]
