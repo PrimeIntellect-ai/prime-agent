@@ -51,6 +51,28 @@ fn write_oauth_credential(agent_dir: &std::path::Path, access: &str) {
     .unwrap();
 }
 
+fn credential_backed_engine_with_override(
+    dir: &std::path::Path,
+    api_key: Option<&str>,
+) -> AgentSessionEngine {
+    AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.to_path_buf(),
+        agent_dir: dir.join("agent"),
+        provider: Some("battery".to_string()),
+        model: Some("mock-1".to_string()),
+        api_key: api_key.map(str::to_string),
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine")
+}
+
 fn credential_backed_engine(dir: &std::path::Path) -> AgentSessionEngine {
     AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.to_path_buf(),
@@ -613,5 +635,46 @@ fn reload_reports_the_auth_store_failure() {
     assert!(
         target.api_key.as_deref() == Some("fresh-access"),
         "the repaired store rebinds the request auth"
+    );
+}
+
+/// A create-config key override stands in memory regardless of the store:
+/// when the store read fails, the restore keeps the override key and the
+/// captured headers (the last-good team context), never the header-less
+/// resolution the broken store produced.
+#[test]
+fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_failed_store() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "stored-key");
+    let engine = credential_backed_engine_with_override(dir.path(), Some("override-key"));
+    let primary = engine.resolve_model().expect("the primary resolves");
+    // The store becomes unreadable mid-failover.
+    std::fs::write(agent_dir.join("auth.json"), "not json").unwrap();
+    let restored = engine.restored_primary_target(
+        &primary,
+        Some("override-key".to_string()),
+        Some(team_headers("team-1")),
+    );
+    assert!(
+        restored.api_key.as_deref() == Some("override-key"),
+        "the override key stands in memory off a failed store"
+    );
+    assert!(
+        restored.headers.as_ref() == Some(&team_headers("team-1")),
+        "a failed store read keeps the captured headers: {:?}",
+        restored.headers
+    );
+    // A healthy store still resolves the override pair fresh.
+    write_oauth_credential(&agent_dir, "stored-key");
+    let restored = engine.restored_primary_target(
+        &primary,
+        Some("override-key".to_string()),
+        Some(team_headers("team-1")),
+    );
+    assert!(
+        restored.api_key.as_deref() == Some("override-key"),
+        "the healthy restore keeps the override key"
     );
 }

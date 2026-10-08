@@ -336,6 +336,17 @@ impl AgentSessionEngine {
                         let agent_model = json_round_trip(&primary_model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         {
+                            // The restore serializes with `/reload`'s
+                            // live-input refresh: without this fence a
+                            // reload landing between the restore's
+                            // resolution and its slot write is clobbered
+                            // by the restore's older pair — the lock
+                            // makes whichever runs last leave the newest
+                            // store standing.
+                            let _reload_serialized = self
+                                .reload_lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             // The armed-route install goes through the
                             // fenced helper (no provider-slot lock held
                             // across the route read).

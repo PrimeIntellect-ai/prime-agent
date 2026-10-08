@@ -401,9 +401,12 @@ impl AgentSessionEngine {
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path. The override lives in
-            // memory, so the pair stands regardless of the store's health.
-            return (Some(api_key.clone()), resolved.headers, true);
+            // `getApiKeyAndHeaders` override path. The pair's health is the
+            // store's, not the override's: the key stands in memory, but the
+            // resolved headers still ride the store read, so a health-gated
+            // caller keeps the captured headers (a pair that carries the
+            // same override key) when the store fails.
+            return (Some(api_key.clone()), resolved.headers, store_healthy);
         }
         (resolved.api_key, resolved.headers, store_healthy)
     }
@@ -423,14 +426,23 @@ impl AgentSessionEngine {
     /// The primary target a failover episode restores: the captured model
     /// with the request auth RE-RESOLVED from the store (a credential
     /// rotated — and reloaded — during the failover serves from the store,
-    /// never the pre-failover capture; the capture only backs a resolution
-    /// that yields nothing).
+    /// never the pre-failover capture). The capture also backs a
+    /// resolution whose store read FAILED — an unreadable `auth.json`
+    /// resolves the configured fallback key, which is not a credential,
+    /// the same overwrite `/reload`'s gate avoids — and the create-config
+    /// key override stands in memory regardless, keeping the captured
+    /// headers when the store read fails.
     pub(crate) fn restored_primary_target(
         &self,
         primary: &Model,
         captured_api_key: Option<String>,
         captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
+        // The create-config key override stands in memory, whatever the
+        // store's health; its headers still ride the store read, so a
+        // failed read keeps the captured headers — the last-good team
+        // context — instead of the header-less resolution.
+        let override_key = self.current_selection().api_key;
         let (api_key, headers, store_healthy) =
             self.resolve_request_key_and_headers_and_store_health(primary);
         // The capture backs the restore when the store resolves nothing
@@ -439,9 +451,17 @@ impl AgentSessionEngine {
         // which is not a credential — the captured pair is the last-good
         // one, exactly the overwrite `/reload`'s gate avoids. A healthy
         // resolution REPLACES the pair, headers included.
-        let (api_key, headers) = match api_key {
-            Some(api_key) if store_healthy => (Some(api_key), headers),
-            _ => (captured_api_key, captured_headers),
+        let (api_key, headers) = if let Some(override_key) = override_key {
+            if store_healthy {
+                (Some(override_key), headers)
+            } else {
+                (Some(override_key), captured_headers.or(headers))
+            }
+        } else {
+            match api_key {
+                Some(api_key) if store_healthy => (Some(api_key), headers),
+                _ => (captured_api_key, captured_headers),
+            }
         };
         pa_core::session_engine::provider_adapter::ProviderTarget {
             service_tier: *self.service_tier.read().expect("service tier lock"),
