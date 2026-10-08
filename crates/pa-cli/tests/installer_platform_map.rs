@@ -1421,12 +1421,12 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
     );
 }
 
-/// The mktemp guard (the macroscope finding): the pre-warm is best-effort
-/// end to end - a machine whose TMPDIR cannot host the scratch directory
-/// (unwritable, full) must still finish the install, not abort under
-/// `set -e` after the payload is published. The gate block is extracted
-/// from the shipped script and driven under `sh` WITH `set -e` (as
-/// shipped) and a dead TMPDIR; the launcher must never run.
+/// The pre-warm is best-effort end to end: a machine whose TMPDIR cannot
+/// host the scratch directory (unwritable, full) must still finish the
+/// install, never abort under `set -e` after the payload is published.
+/// The gate block is extracted from the shipped script and driven under
+/// `sh` WITH `set -e` (as shipped) and a dead TMPDIR; the launcher must
+/// never run.
 #[test]
 fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
     let script =
@@ -1477,11 +1477,9 @@ fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
         "the install proceeds after the skipped pre-warm: {flow}"
     );
 
-    // The sweep is best-effort too (the cursor bot's second location): a
-    // scratch the cleanup cannot remove (a surviving pre-warm descendant
-    // holds it busy on a live install) warns and the install continues -
-    // under `set -e` an unguarded `rm -rf` would abort the whole install
-    // after a SUCCESSFUL pre-warm. The stubbed `rm` fails on purpose.
+    // The sweep is best-effort too: a scratch the cleanup cannot remove
+    // (a surviving pre-warm descendant holds it busy) warns and the
+    // install continues, never aborts after a successful pre-warm.
     let transcript2 = dir.path().join("transcript2");
     let rm_stub = dir.path().join("fail-rm");
     std::fs::create_dir_all(&rm_stub).expect("rm stub dir");

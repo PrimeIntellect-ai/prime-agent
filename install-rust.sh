@@ -3078,8 +3078,7 @@ if uv_on_path \
   # The scratch is best-effort exactly like the pre-warm it serves: an
   # unwritable TMPDIR must SKIP the step, never abort the install under
   # `set -e` - at this point the payload is already published, so the
-  # verify and the summary below must still run. The guarded body keeps
-  # its own indentation: a reviewed surface this guard wraps, not edits.
+  # verify and the summary below must still run.
   if prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX" 2>/dev/null)"; then
   prewarm_out="$prewarm_scratch/out"
   prewarm_done="$prewarm_scratch/done"
@@ -3177,9 +3176,8 @@ if uv_on_path \
     note "  retries it online:"
     note "$(cat "$prewarm_out" 2>/dev/null || true)"
   fi
-  # The sweep is best-effort too (the payload is already live): a scratch
-  # a surviving pre-warm descendant holds busy warns like the superseded-
-  # layout cleanup does, never aborts the install under `set -e`.
+  # The sweep is best-effort too: a scratch a surviving pre-warm
+  # descendant still holds busy warns, never aborts a live install.
   if ! rm -rf "$prewarm_scratch" 2>/dev/null; then
     note "warning: could not remove the kernel pre-warm scratch ${prewarm_scratch}; remove it by hand"
   fi

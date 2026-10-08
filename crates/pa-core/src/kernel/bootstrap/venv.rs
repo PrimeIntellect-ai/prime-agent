@@ -112,9 +112,6 @@ fn drain_child_stream<R: std::io::Read + Send + 'static>(
         loop {
             bytes.clear();
             match std::io::BufRead::read_until(&mut pipe, b'\n', &mut bytes) {
-                // EOF and a genuine read error both end the drain; the
-                // lossy decode below is what keeps encoding errors from
-                // ending it.
                 Ok(0) | Err(_) => break,
                 Ok(_) => {}
             }

@@ -1139,11 +1139,9 @@ async fn bootstrap_children_forward_piped_output_through_the_reporter() {
     );
 }
 
-/// The lossy-drain pin (the macroscope finding): a child that emits
-/// non-UTF-8 bytes mid-stream is forwarded mangled, never allowed to end
-/// the drain - the lines after the bad bytes still reach the reporter and
-/// the bootstrap still completes (`BufRead::lines` errors on the bad line
-/// and drops every diagnostic after it).
+/// A child that emits non-UTF-8 bytes mid-stream is forwarded mangled,
+/// never allowed to end the drain: the lines after the bad bytes still
+/// reach the reporter and the bootstrap still completes.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_non_utf8_child_line_never_stops_the_drain() {
