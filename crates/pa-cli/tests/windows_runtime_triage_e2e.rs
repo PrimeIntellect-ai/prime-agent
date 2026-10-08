@@ -459,19 +459,10 @@ async fn tui_reopen_renders_the_old_history() {
         height: 30,
     };
     let reopened = run_headless_bounded(options, plan).await;
-    // The triage loop's shape row: the windows runner's logs carry the
-    // attach's ids (the durable id rides the state snapshot; an empty
-    // one means the resumed worker served no store).
-    eprintln!(
-        "REOPEN DIAGNOSTIC: active={} session_id={} frames={} notice={:?} view={}",
-        reopened.active_session_id,
-        reopened.session_id,
-        reopened.frames.len(),
-        reopened.agents_view_notice,
-        reopened.return_to_agents_view,
-    );
     // The panes dump BEFORE the asserts: a red run uploads its evidence
-    // (the workflow's red-runs-too contract).
+    // (the workflow's red-runs-too contract). The durable identity is
+    // asserted below - the triage loop reads the ids from the failure
+    // message itself, never from a log row.
     dump_frames("reopen-history", &reopened.frames);
     assert_eq!(
         reopened.session_id, session_id,
