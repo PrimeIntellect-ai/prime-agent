@@ -32,6 +32,11 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
 /// Unix only: every taker of the cleanup lock sits behind the unix stale-file wall.
 #[cfg(unix)]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
+/// The bounded grace a lease refresh tolerates a stale-reclaim dance's
+/// transient displacement before declaring compromise (a live dance
+/// completes in microseconds; only persisting displacements count).
+#[cfg(unix)]
+const LEASE_DISPLACEMENT_GRACE: Duration = Duration::from_millis(250);
 /// Live-lock retry cadence and cap (600 retries): ~15s total.
 #[cfg(unix)]
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -43,11 +48,21 @@ const LOCK_RETRIES: u32 = 600;
 /// competing startup worker cannot bind a live listener in between.
 #[cfg(unix)]
 async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir> {
+    let lock_path = path.to_path_buf();
     for attempt in 0..=LOCK_RETRIES {
-        match pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) {
-            Ok(lock) => return Ok(lock),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(anyhow!("Daemon socket cleanup lock: {error}")),
+        // The acquisition can wait up to the reclaim-guard budget on the
+        // sidecar while a stale-reclaim dance holds it - off the async
+        // executor, never blocking a Tokio worker thread.
+        let attempt_path = lock_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            pa_core::platform::LockDir::acquire(&attempt_path, LOCK_STALE_AFTER)
+        })
+        .await
+        {
+            Ok(Ok(lock)) => return Ok(lock),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(Err(error)) => return Err(anyhow!("Daemon socket cleanup lock: {error}")),
+            Err(join_error) => return Err(anyhow!("Daemon socket cleanup lock: {join_error}")),
         }
         if attempt == LOCK_RETRIES {
             break;
@@ -141,9 +156,20 @@ impl SocketLease {
                     || task_dir.set_modified(std::time::SystemTime::now()).is_err()
                     || !lock_identity_matches(&task_path, &task_identity)
                 {
-                    task_compromised.store(true, std::sync::atomic::Ordering::Release);
-                    task_tx.send_replace(true);
-                    break;
+                    // A stale-reclaim dance may hold this lease's
+                    // directory displaced for the microseconds of its
+                    // exchange: tolerate a bounded grace before
+                    // declaring compromise - a live dance restores the
+                    // directory and the lease keeps serving; only a
+                    // displacement that persists past the grace (a
+                    // suspended dance's token-protected placeholder, or
+                    // a real takeover) is a compromise.
+                    std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+                    if !lock_identity_matches(&task_path, &task_identity) {
+                        task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                        task_tx.send_replace(true);
+                        break;
+                    }
                 }
             }
         });
@@ -358,6 +384,11 @@ impl SocketLease {
 /// identity check and the removal cannot have its own lock unlinked.
 #[cfg(target_os = "linux")]
 fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
+    // Serialize with any concurrent stale-reclaim dance (the sidecar's
+    // flock): the lease's release choreography and the dance's
+    // exchanges must never interleave on the same lock directory.
+    let guarded =
+        pa_core::platform::try_reclaim_guard(lock_path, std::time::Duration::from_millis(100));
     let claim = match claim_lock_dir_under_private_name(lock_path) {
         Ok(claim) => claim,
         Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
@@ -382,6 +413,7 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
         // Remove the orphan instead of leaking it.
         let _ = std::fs::remove_dir(&claim);
     }
+    drop(guarded);
 }
 
 /// Claim the lock directory under a private name in its own directory:

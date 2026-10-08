@@ -330,7 +330,8 @@ fn process_owner_record() -> String {
 /// a crashed or suspended holder releases it with the process - no
 /// staleness protocol of its own, no judge recursion.
 #[cfg(target_os = "linux")]
-fn reclaim_guard_path(path: &Path) -> PathBuf {
+#[must_use]
+pub fn reclaim_guard_path(path: &Path) -> PathBuf {
     // A component-independent short name: the sidecar must not overflow
     // the filesystem's component limit for a near-limit lock name, so
     // the guard is derived from a stable FNV-1a hash of the lock's
@@ -367,7 +368,8 @@ fn reclaim_guard_path(path: &Path) -> PathBuf {
 
 /// Take the reclaim guard for `path` within `budget`, or `None`.
 #[cfg(target_os = "linux")]
-fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
+#[must_use]
+pub fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
     use std::os::unix::io::AsRawFd;
     let file = fs::OpenOptions::new()
         .create(true)
@@ -414,6 +416,18 @@ fn mark_released_through(dir: &fs::File) {
 /// True when a lock directory carries this guard's release marker.
 fn released_marker(path: &Path) -> bool {
     path.join("released").exists()
+}
+
+/// The outcome of the Linux inode-anchored release pass.
+#[cfg(target_os = "linux")]
+enum InodeRelease {
+    /// The guard's directory was removed (or was already gone).
+    Done,
+    /// No `renameat2(RENAME_EXCHANGE)` here: the caller runs the
+    /// pathname floor instead.
+    Unsupported,
+    /// An I/O error aborted the pass; nothing was removed.
+    Failed,
 }
 
 /// The outcome of a Linux stale-incumbent reclaim attempt.
@@ -766,9 +780,14 @@ impl LockDir {
     #[cfg(target_os = "linux")]
     fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<StaleClaim> {
         // The cheap pre-check: a successor that already replaced the
-        // incumbent is detected without moving anything.
-        if identity_at(path) != incumbent {
-            return Ok(StaleClaim::Successor);
+        // incumbent is detected without moving anything, and a path that
+        // vanished since the judge's snapshot is retry material, never
+        // contention - a one-shot acquire on a now-free path must
+        // succeed.
+        match identity_at(path) {
+            Some(identity) if Some(identity) != incumbent => return Ok(StaleClaim::Successor),
+            None => return Ok(StaleClaim::Vanished),
+            Some(_) => {}
         }
         let Some(parent) = path.parent() else {
             return Ok(StaleClaim::Unsupported);
@@ -855,6 +874,14 @@ impl LockDir {
                         // removed by a displaced holder's release.
                         if let Err(error) = remove_candidate_dir(&placeholder) {
                             if error.kind() != io::ErrorKind::NotFound {
+                                // An un-removable incumbent (foreign
+                                // entries in a judged-dead directory)
+                                // must not wedge the public path behind
+                                // this process's live token: clear the
+                                // placeholder and surface the error. The
+                                // incumbent stays at the inert private
+                                // dotname, never at the public path.
+                                let _ = remove_candidate_dir(path);
                                 return Err(error);
                             }
                         }
@@ -873,6 +900,7 @@ impl LockDir {
                     if released_marker(&placeholder) {
                         if let Err(error) = remove_candidate_dir(&placeholder) {
                             if error.kind() != io::ErrorKind::NotFound {
+                                let _ = remove_candidate_dir(path);
                                 return Err(error);
                             }
                         }
@@ -911,7 +939,15 @@ impl LockDir {
                             return Ok(StaleClaim::Vanished);
                         }
                         Err(error) => {
-                            let _ = remove_candidate_dir(&placeholder);
+                            // The swap-back failed: the private name
+                            // still holds the displaced holder's
+                            // directory - never remove it (the dance's
+                            // whole point is that another holder's lock
+                            // is never unlinked). The public path keeps
+                            // the token-protected placeholder until this
+                            // process exits, and the displaced holder's
+                            // release finds its directory through the
+                            // placeholder's claimed-at note.
                             return Err(error);
                         }
                     }
@@ -1167,7 +1203,7 @@ impl LockDir {
                         use std::os::unix::fs::MetadataExt;
                         Some((metadata.dev(), metadata.ino()))
                     };
-                    let guarded = try_reclaim_guard(path, Duration::from_millis(500));
+                    let guarded = try_reclaim_guard(path, Duration::from_millis(100));
                     if guarded.is_none() {
                         // Another reclaim dance (or release pass) holds the
                         // serialization guard - likely suspended mid-flight
@@ -1192,24 +1228,31 @@ impl LockDir {
                     }
                     drop(guarded);
                 }
-                // The floor reclaim (no no-replace rename): remove the
-                // owner file, then the directory, by pathname - the same
-                // residual check-then-act window proper-lockfile's own
-                // reclaim has. A successor replacing the incumbent inside
-                // this window can be removed here; unreachable on
-                // supported Linux (the claim above) and documented on the
-                // mounts and platforms without the primitive.
-                match fs::remove_file(&owner_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                // Stale: remove and let the caller retry.
-                match fs::remove_dir(path) {
+                // The floor reclaim (no no-replace rename): remove every
+                // protocol note (owner, claimed-at, and any release
+                // marker - a leftover marker makes the plain remove_dir
+                // fail ENOTEMPTY and error the next acquire), then the
+                // directory, by pathname - the same residual
+                // check-then-act window proper-lockfile's own reclaim
+                // has. A successor replacing the incumbent inside this
+                // window can be removed here; unreachable on supported
+                // Linux (the claim above) and documented on the mounts
+                // and platforms without the primitive.
+                #[cfg(unix)]
+                match remove_candidate_dir(path) {
                     Ok(()) => return Ok(()),
                     // A racing holder released it first.
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error),
+                }
+                #[cfg(not(unix))]
+                {
+                    match fs::remove_dir(path) {
+                        Ok(()) => return Ok(()),
+                        // A racing holder released it first.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                        Err(error) => return Err(error),
+                    }
                 }
             }
         }
@@ -1267,11 +1310,28 @@ impl LockDir {
             // the release instead: the dance consumes a marked directory
             // instead of restoring it, and no judge refuses a marked
             // directory behind its live pid record.
-            if let Some(guard) = try_reclaim_guard(&self.path, Duration::from_millis(500)) {
+            if let Some(guard) = try_reclaim_guard(&self.path, Duration::from_millis(100)) {
                 #[cfg(unix)]
                 drop(self.dir.take());
+                #[cfg(target_os = "linux")]
                 if let Some(pinned) = pinned {
-                    self.release_by_inode(&pinned);
+                    match self.release_by_inode(&pinned) {
+                        InodeRelease::Unsupported => {
+                            // A mount without RENAME_EXCHANGE (the mkdir
+                            // fallback's home): release by pathname under
+                            // the same guard - every protocol note first,
+                            // then the directory - or the fresh lock
+                            // leaks behind a working acquisition.
+                            if let Some(owner) = &self.owner {
+                                if !Self::owner_matches(&self.path, owner) {
+                                    drop(guard);
+                                    return;
+                                }
+                            }
+                            let _ = remove_candidate_dir(&self.path);
+                        }
+                        InodeRelease::Done | InodeRelease::Failed => {}
+                    }
                 }
                 drop(guard);
             } else {
@@ -1318,12 +1378,17 @@ impl LockDir {
     /// matches the pinned handle, and a mismatch is swapped back home
     /// atomically, where occupancy cannot fail. The pass re-reads its
     /// candidate locations every attempt until the removal completes.
+    /// On mounts without `RENAME_EXCHANGE` (NFS, FUSE - the same mounts
+    /// whose acquisitions took the mkdir fallback) the pass reports
+    /// `Unsupported` so the caller releases by pathname instead of
+    /// leaking a fresh lock behind a working acquisition.
     #[cfg(target_os = "linux")]
-    fn release_by_inode(&self, pinned: &(u64, u64)) {
+    fn release_by_inode(&self, pinned: &(u64, u64)) -> InodeRelease {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |age| age.as_nanos());
         let pid = std::process::id();
+        let mut unsupported = false;
         for attempt in 0..8 {
             let mut locations: Vec<PathBuf> = vec![self.path.clone()];
             if let Some(parent) = self.path.parent() {
@@ -1343,7 +1408,7 @@ impl LockDir {
                     if error.kind() == io::ErrorKind::AlreadyExists {
                         continue;
                     }
-                    return;
+                    return InodeRelease::Failed;
                 }
                 // The placeholder is token-protected and private-moded for
                 // the whole interval it may sit at the location.
@@ -1353,12 +1418,12 @@ impl LockDir {
                     if fs::set_permissions(&placeholder, fs::Permissions::from_mode(0o700)).is_err()
                     {
                         let _ = remove_candidate_dir(&placeholder);
-                        return;
+                        return InodeRelease::Failed;
                     }
                 }
                 if fs::write(placeholder.join("owner"), process_owner_record()).is_err() {
                     let _ = remove_candidate_dir(&placeholder);
-                    return;
+                    return InodeRelease::Failed;
                 }
                 #[cfg(unix)]
                 {
@@ -1377,24 +1442,36 @@ impl LockDir {
                             // the location so the lock path is empty.
                             let _ = remove_candidate_dir(&placeholder);
                             let _ = remove_candidate_dir(&location);
-                            return;
+                            return InodeRelease::Done;
                         }
                         // Not this guard's content: swap it home atomically
-                        // (both paths exist) and clear the placeholder at
-                        // its private name.
-                        let _ = rename_noreplace::exchange(&location, &placeholder);
-                        let _ = remove_candidate_dir(&placeholder);
+                        // (both paths exist) and clear the placeholder
+                        // ONLY after the swap-back succeeded - a failed
+                        // swap-back leaves the other holder's directory
+                        // at the private name, and removing it would
+                        // unlink another holder's lock.
+                        if rename_noreplace::exchange(&location, &placeholder).is_ok() {
+                            let _ = remove_candidate_dir(&placeholder);
+                        }
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
                         let _ = remove_candidate_dir(&placeholder);
                     }
+                    Err(error) if Self::rename_noreplace_unsupported(&error) => {
+                        let _ = remove_candidate_dir(&placeholder);
+                        unsupported = true;
+                    }
                     Err(_) => {
                         let _ = remove_candidate_dir(&placeholder);
-                        return;
+                        return InodeRelease::Failed;
                     }
                 }
             }
+            if unsupported {
+                return InodeRelease::Unsupported;
+            }
         }
+        InodeRelease::Done
     }
 }
 

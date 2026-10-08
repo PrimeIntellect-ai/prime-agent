@@ -10,7 +10,7 @@ pub mod process;
 pub mod shell;
 
 #[cfg(target_os = "linux")]
-pub use lock_dir::move_without_replacing;
+pub use lock_dir::{move_without_replacing, reclaim_guard_path, try_reclaim_guard};
 
 pub use fs::fsync;
 pub use lock_dir::LockDir;
