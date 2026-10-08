@@ -290,6 +290,19 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch (the same slot
                         // `set_model` swaps).
                         {
+                            // The switch's resolve-and-install serializes
+                            // with `/reload`'s live-input refresh — the
+                            // restore path in the sibling callback takes
+                            // the same lock: a reload landing between
+                            // this resolution and its slot write must not
+                            // be clobbered by the switch's older pair. The
+                            // turn runs on the blocking pool, so the
+                            // synchronous resolution never touches an
+                            // async executor worker.
+                            let _reload_serialized = self
+                                .reload_lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             // A routed episode keeps serving the route's
                             // target across the failover switch — through
                             // the fenced install (the route lock covers
