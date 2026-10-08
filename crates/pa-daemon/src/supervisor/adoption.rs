@@ -407,11 +407,11 @@ impl Supervisor {
                 Err(error) => {
                     let message = format!("{error:#}");
                     // The definitive unknown-worker refusal is observable (log + telemetry)
-                    // and the worker retires on it: a live worker with no descriptor would
-                    // otherwise hold its lease forever.
+                    // and the worker retires on it: a live worker this supervisor will
+                    // never adopt would otherwise hold its lease forever.
                     if message.starts_with(crate::registration::UNKNOWN_SESSION_WORKER_PREFIX) {
                         self.log_line(&format!(
-                            "session worker {active_session_id} registration refused (no descriptor on this supervisor); the worker retires and its session file stays resumable"
+                            "session worker {active_session_id} registration refused; the worker retires"
                         ));
                         self.note_daemon_event("registration_refused", None);
                     }
@@ -570,7 +570,9 @@ impl Supervisor {
         self.apply_identity_pending(&resident).await;
         // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s stopRequestedAt
         // branch): adoption finishes the stop and never adopts the worker as healthy.
-        // The refusal is transient: the next attempt converges on the stop's completion.
+        // The refusal is definitive: the registrant is the process the stop must
+        // retire, so it exits on the verdict instead of re-registering into the
+        // same unfinished stop.
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
             // The registering process is the identity the stop must retire: the persisted
             // descriptor carries the stopped worker's stale pid, so observing the
@@ -588,8 +590,9 @@ impl Supervisor {
             }
             self.finish_tombstoned_stop(&resident, true).await;
             return Err(anyhow!(
-                "session worker {} is stopping: the stop was forwarded; registration refused",
-                registration.active_session_id
+                crate::registration::tombstoned_registration_refusal(
+                    &registration.active_session_id
+                )
             ));
         }
         self.connect_worker(&resident, worker_connect_deadline())
