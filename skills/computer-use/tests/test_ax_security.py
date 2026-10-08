@@ -689,5 +689,33 @@ class SecureRoleOnlyTests(unittest.TestCase):
         self.assertIsNone(described["value"])
 
 
+class SelectRangeWrapTests(unittest.TestCase):
+    def test_the_selected_text_range_is_wrapped_in_an_ax_value_ref(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+            kAXValueCFRangeType = "cf-range"
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def CFRangeMake(self, location: int, length: int) -> Any:
+                return ("bare-range", location, length)
+
+            def AXValueCreate(self, value_type: Any, value: Any) -> Any:
+                return ("wrapped", value_type, value)
+
+            def AXUIElementSetAttributeValue(self, ref: Any, attribute: str, value: Any) -> Any:
+                self.set_calls.append((attribute, value))
+                return 0
+
+        services = Services()
+        services.set_calls = []
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            ax._select_text_range("ref", 4, 2)
+        self.assertEqual(services.set_calls[0][0], "AXSelectedTextRange")
+        self.assertEqual(services.set_calls[0][1], ("wrapped", "cf-range", (4, 2)))
+        self.assertNotIn("bare-range", str(services.set_calls[0][1]))
+
+
 if __name__ == "__main__":
     unittest.main()

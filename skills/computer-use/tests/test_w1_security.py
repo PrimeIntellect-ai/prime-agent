@@ -1053,5 +1053,30 @@ class SystemDenyRecoveryTests(unittest.TestCase):
         self.assertNotIn("apps.system_deny", result.reason)
 
 
+class FirstDiffGuideTests(AppTestCase):
+    async def test_the_guide_survives_the_first_diff_after_a_growth_from_empty(self) -> None:
+        env = self.make_env(
+            bundle="com.tinyspeck.slackmacgap",
+            tree=fakes.window(children=[]),
+        )
+        app = await env.get_app()  # the bind renders the empty window: no guide yet
+        self.assertNotIn("Compose without sending", app._state)
+        env.set_tree(fakes.small_tree())  # the app gains its first elements
+        text = await app.get_ax_state()  # the default diff path
+        self.assertIn("Compose without sending", text, "the per-app guide must reach the caller")
+
+    async def test_the_guide_is_shown_exactly_once(self) -> None:
+        env = self.make_env(
+            bundle="com.tinyspeck.slackmacgap",
+            tree=fakes.window(children=[]),
+        )
+        app = await env.get_app()
+        env.set_tree(fakes.small_tree())
+        first = await app.get_ax_state()
+        second = await app.get_ax_state()
+        self.assertIn("Compose without sending", first)
+        self.assertNotIn("Compose without sending", second)
+
+
 if __name__ == "__main__":
     unittest.main()

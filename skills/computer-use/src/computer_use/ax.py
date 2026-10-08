@@ -376,12 +376,21 @@ def _set_value(ref: Any, value: str) -> None:
 
 
 def _select_text_range(ref: Any, location: int, length: int) -> None:
-    """Set the element's selected text range, leaving its content untouched."""
+    """Set the element's selected text range, leaving its content untouched.
+
+    AXSelectedTextRange takes an AXValueRef of the CFRange kind, so the range
+    is wrapped with AXValueCreate: a bare CFRange is refused by the setter.
+    """
     app_services = _require_mac().app_services
     _set_messaging_timeout(app_services, ref)
-    error = app_services.AXUIElementSetAttributeValue(
-        ref, "AXSelectedTextRange", app_services.CFRangeMake(location, length)
-    )
+    range_value = app_services.AXValueCreate(app_services.kAXValueCFRangeType, (location, length))
+    if range_value is None:
+        raise ComputerUseError(
+            "ACTION_UNSUPPORTED",
+            f"could not build the selection range ({location}, {length})",
+            {"location": location, "length": length},
+        )
+    error = app_services.AXUIElementSetAttributeValue(ref, "AXSelectedTextRange", range_value)
     if error != app_services.kAXErrorSuccess:
         raise ComputerUseError(
             "ACTION_UNSUPPORTED",

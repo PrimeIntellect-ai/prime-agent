@@ -859,15 +859,15 @@ class App:
         # the walk can take up to its deadline on an unresponsive app
         observation = await asyncio.to_thread(ax._observe, self._pid)
         lines = diff._serialize(observation.tree)
-        full = self._render_full(observation, lines)
         if diff_on and self._lines is not None:
             text = diff._diff(self._lines, lines) or "(no changes since the previous observation)"
             if observation.truncated:
                 # a truncated snapshot may look like removals in the diff:
                 # the hidden-controls warning must survive the diff path
                 text += "\nTRUNCATED: the observation stopped at its element/depth/time bounds, some controls are hidden"
+            text += self._guide(len(observation.refs))
         else:
-            text = full
+            text = self._render_full(observation, lines)
         self._observation = observation
         self._lines = lines
         self._state = text
@@ -889,13 +889,20 @@ class App:
                 "some controls are hidden"
             )
         body = "\n".join(lines)
-        instructions = ""
-        if count and self._bundle_id not in _instruction_shown:
-            _instruction_shown.add(self._bundle_id)
-            loaded = ax._load_instructions(self._bundle_id)
-            if loaded:
-                instructions = "\n" + loaded
-        return "\n".join(part for part in (header, body) if part) + instructions
+        return "\n".join(part for part in (header, body) if part) + self._guide(count)
+
+    def _guide(self, element_count: int) -> str:
+        """The per-app instructions on first use, marked shown exactly when returned.
+
+        The guide rides the first rendered text the caller actually receives -
+        the full render or a diff - so a snapshot growth from an empty window
+        cannot consume it on a text the caller never sees.
+        """
+        if not element_count or self._bundle_id in _instruction_shown:
+            return ""
+        _instruction_shown.add(self._bundle_id)
+        loaded = ax._load_instructions(self._bundle_id)
+        return f"\n{loaded}" if loaded else ""
 
     async def _action(self, action: str, dispatch: Callable[[], None], settle: bool = False) -> None:
         """Run one guarded action, wait for its UI effects, and emit telemetry.
