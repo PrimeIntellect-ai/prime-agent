@@ -179,14 +179,15 @@ impl AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let auth_recovery: Option<pa_core::session_engine::provider_auth::AuthRecoveryCallback> =
-            Some(&mut move |_message: &pa_agent::types::AssistantMessage| {
+            Some(&mut move |message: &pa_agent::types::AssistantMessage| {
                 let engine_weak = auth_recovery_engine.clone();
+                let failed_provider = message.provider.clone();
                 Box::pin(async move {
                     let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
                     else {
                         return pa_core::session_engine::provider_auth::AuthRecoveryOutcome::Continue;
                     };
-                    engine.recover_provider_auth().await
+                    engine.recover_provider_auth(failed_provider).await
                 })
             });
         let result = self.runtime.block_on(

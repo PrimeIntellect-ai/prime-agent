@@ -306,6 +306,11 @@ mod tests {
 
     use super::*;
 
+    /// The process-global log sink is shared test state: every test that
+    /// swaps it holds this lock for its whole body, so concurrent tests
+    /// never capture each other's lines or clobber the sink mid-exchange.
+    static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A scripted Codex transport (url -> response); unknown urls fail
     /// the request.
     struct ScriptedHttp(HashMap<String, CodexHttpResponse>);
@@ -694,6 +699,7 @@ mod tests {
     /// material and drops `body=` tails.
     #[test]
     fn a_rejected_exchange_never_leaks_the_echoed_token() {
+        let _sink_guard = SINK_LOCK.lock().expect("log sink lock");
         let echoed_token = "sk-ant-o01-echoed-caller-secret-credential";
         let logged = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sink_logged = Arc::clone(&logged);
@@ -747,6 +753,7 @@ mod tests {
     /// the log line or the re-login reason.
     #[test]
     fn a_rejected_exchange_never_leaks_the_short_stored_token() {
+        let _sink_guard = SINK_LOCK.lock().expect("log sink lock");
         let short_refresh = "r-old";
         let logged = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sink_logged = Arc::clone(&logged);

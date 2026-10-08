@@ -3,6 +3,7 @@
 //! rebind, and the re-login sentence when the grant is rejected.
 use super::{AgentSessionEngine, ProviderTarget};
 use pa_core::session_engine::provider_auth::AuthRecoveryOutcome;
+use pa_types::ai::Provider;
 
 /// What the credential store holds for the failing provider.
 enum StoreOutcome {
@@ -26,7 +27,10 @@ impl AgentSessionEngine {
     /// ends the turn with the re-login sentence. A provider without a
     /// stored OAuth credential (an env or provider-config key) keeps the
     /// ordinary ladder — there is no grant to refresh.
-    pub(in crate::agent_engine) async fn recover_provider_auth(&self) -> AuthRecoveryOutcome {
+    pub(in crate::agent_engine) async fn recover_provider_auth(
+        &self,
+        failed_provider: Provider,
+    ) -> AuthRecoveryOutcome {
         // A create-config key override owns the request's credential: a
         // rejection under it is a bad override, not a dead OAuth session
         // (the preflight gate's same check).
@@ -42,6 +46,13 @@ impl AgentSessionEngine {
             return AuthRecoveryOutcome::Continue;
         };
         let provider = target.model.provider.clone();
+        // A failure from a superseded selection (a model switch outran the
+        // response) never touches the newer selection's grant: the retry
+        // re-issues against the newer target with its own credential — a
+        // genuine rejection there runs its own recovery round.
+        if provider != failed_provider {
+            return AuthRecoveryOutcome::Continue;
+        }
         let agent_dir = self.config.agent_dir.clone();
         let served_key = target.api_key.clone();
         let closure_provider = provider.clone();
@@ -82,7 +93,7 @@ impl AgentSessionEngine {
             StoreOutcome::Fresher | StoreOutcome::Refreshed => {}
         }
         self.rebind_request_target_after_refresh(&target);
-        AuthRecoveryOutcome::Continue
+        AuthRecoveryOutcome::NewCredential
     }
 
     /// Rebind the request target after a refresh: the stream reads the
@@ -97,10 +108,9 @@ impl AgentSessionEngine {
             .provider_target
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if slot
-            .as_ref()
-            .is_some_and(|current| current.model == failed.model && current.api_key == failed.api_key)
-        {
+        if slot.as_ref().is_some_and(|current| {
+            current.model == failed.model && current.api_key == failed.api_key
+        }) {
             *slot = Some(ProviderTarget {
                 service_tier: *self
                     .service_tier
@@ -130,21 +140,23 @@ mod tests {
     use super::{AgentSessionEngine, ProviderTarget};
     use pa_core::session_engine::provider_auth::AuthRecoveryOutcome;
 
-    /// One faux-provider OAuth grant in the store (the re-login shape:
-    /// the served key is a stale access token).
-    fn write_oauth(agent_dir: &std::path::Path, access: &str) {
+    /// One provider's OAuth grant in the store (the re-login shape: the
+    /// served key is a stale access token).
+    fn write_oauth(agent_dir: &std::path::Path, provider: &str, access: &str) {
         std::fs::create_dir_all(agent_dir).unwrap();
+        let mut root = serde_json::Map::new();
+        root.insert(
+            provider.to_string(),
+            serde_json::json!({
+                "type": "oauth",
+                "access": access,
+                "refresh": "r-ok",
+                "expires": i64::MAX
+            }),
+        );
         std::fs::write(
             agent_dir.join("auth.json"),
-            serde_json::json!({
-                "faux": {
-                    "type": "oauth",
-                    "access": access,
-                    "refresh": "r-ok",
-                    "expires": i64::MAX
-                }
-            })
-            .to_string(),
+            serde_json::Value::Object(root).to_string(),
         )
         .unwrap();
     }
@@ -195,7 +207,7 @@ mod tests {
     #[test]
     fn a_mid_recovery_model_switch_keeps_the_newer_target() {
         let dir = tempfile::TempDir::new().unwrap();
-        write_oauth(&dir.path().join("agent"), "fresh-access");
+        write_oauth(&dir.path().join("agent"), "faux", "fresh-access");
         let engine = engine_over(dir.path());
         let failed = target("faux", "faux-1", Some("stale-access"));
         // The switch resolved a new target while the exchange ran.
@@ -220,7 +232,7 @@ mod tests {
     #[test]
     fn an_unmoved_slot_rebinds_to_the_fresh_credential() {
         let dir = tempfile::TempDir::new().unwrap();
-        write_oauth(&dir.path().join("agent"), "fresh-access");
+        write_oauth(&dir.path().join("agent"), "faux", "fresh-access");
         let engine = engine_over(dir.path());
         let failed = target("faux", "faux-1", Some("stale-access"));
         *engine.provider_target.write().unwrap() = Some(failed.clone());
@@ -248,12 +260,13 @@ mod tests {
     #[tokio::test]
     async fn a_fresher_store_credential_rebinds_the_request_target() {
         let dir = tempfile::TempDir::new().unwrap();
-        write_oauth(&dir.path().join("agent"), "fresh-access");
+        write_oauth(&dir.path().join("agent"), "faux", "fresh-access");
         let engine = engine_over(dir.path());
-        *engine.provider_target.write().unwrap() = Some(target("faux", "faux-1", Some("stale-access")));
+        *engine.provider_target.write().unwrap() =
+            Some(target("faux", "faux-1", Some("stale-access")));
         assert_eq!(
-            engine.recover_provider_auth().await,
-            AuthRecoveryOutcome::Continue
+            engine.recover_provider_auth("faux".to_string()).await,
+            AuthRecoveryOutcome::NewCredential
         );
         let slot = engine
             .provider_target
@@ -268,12 +281,50 @@ mod tests {
         );
     }
 
+    /// A failure from a superseded selection never touches the newer
+    /// grant: the failed request belongs to a provider the slot already
+    /// outgrew (a model switch outran the response), so the recovery
+    /// neither spends the newer provider's refresh token nor rebinds its
+    /// target — the retry re-issues against the newer selection as-is.
+    #[tokio::test]
+    async fn a_failure_from_a_superseded_selection_never_touches_the_newer_grant() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // The newer selection's store grant outgrew its own served key:
+        // without the superseded guard the recovery would treat it as a
+        // re-login and rebind.
+        write_oauth(&dir.path().join("agent"), "drift", "fresh-drift");
+        let engine = engine_over(dir.path());
+        *engine.provider_target.write().unwrap() =
+            Some(target("drift", "drift-1", Some("stale-drift")));
+        assert_eq!(
+            engine.recover_provider_auth("faux".to_string()).await,
+            AuthRecoveryOutcome::Continue,
+            "a superseded provider's rejection never refreshes the newer grant"
+        );
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the newer target stays");
+        assert_eq!(
+            slot.api_key.as_deref(),
+            Some("stale-drift"),
+            "the newer selection's served key is untouched"
+        );
+        assert_eq!(
+            (slot.model.provider.as_str(), slot.model.id.as_str()),
+            ("drift", "drift-1"),
+            "the newer selection's resolution stands"
+        );
+    }
+
     /// A slot cleared while the exchange ran (a session retirement)
     /// stays cleared: the recovery never resurrects a dead target.
     #[test]
     fn a_cleared_slot_is_never_resurrected() {
         let dir = tempfile::TempDir::new().unwrap();
-        write_oauth(&dir.path().join("agent"), "fresh-access");
+        write_oauth(&dir.path().join("agent"), "faux", "fresh-access");
         let engine = engine_over(dir.path());
         let failed = target("faux", "faux-1", Some("stale-access"));
         *engine.provider_target.write().unwrap() = None;

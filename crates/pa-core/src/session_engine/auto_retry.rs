@@ -146,9 +146,9 @@ where
                 Some(recovery) => recovery(&message).await,
                 None => AuthRecoveryOutcome::Continue,
             };
-            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = outcome {
+            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = &outcome {
                 let mut message = message;
-                message.error_message = Some(sentence);
+                message.error_message = Some(sentence.clone());
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: retries_performed,
@@ -159,9 +159,12 @@ where
                 return Ok(message);
             }
             // This auth failure is being retried: the classification
-            // counts it, so the next rejection settles the turn.
+            // counts it, so the next rejection settles the turn. Only a
+            // credential the failed attempt never served earns the
+            // beyond-budget one-shot; an unchanged key retries inside the
+            // ordinary ladder.
             auth_retries += 1;
-            auth_quick_retry = true;
+            auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
         }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.

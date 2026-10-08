@@ -15,9 +15,15 @@ use pa_agent::types::AssistantMessage;
 /// Resolution of one auth-recovery consultation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthRecoveryOutcome {
-    /// The credential was refreshed (or nothing was applicable): the
-    /// quick retry re-issues with the re-resolved key.
+    /// Nothing changed the credential the retry would carry (no stored
+    /// OAuth grant, an env or config key, a superseded selection): the
+    /// quick retry re-issues inside the ordinary retry budget only.
     Continue,
+    /// The retry will carry a credential the failed attempt never served
+    /// (a forced exchange refreshed the stored grant, or a re-login
+    /// outran the stale target): the one auth retry may spend past the
+    /// ordinary budget rather than waste the fresh grant.
+    NewCredential,
     /// The grant is dead — the refresh was rejected; the sentence is the
     /// final turn error.
     ReLoginRequired(String),
@@ -27,7 +33,8 @@ pub enum AuthRecoveryOutcome {
 /// blocking token exchange off the async runtime.
 pub type AuthRecoveryFuture = Pin<Box<dyn Future<Output = AuthRecoveryOutcome> + Send>>;
 
-/// The retry chains consult this on an auth-class failure: `Continue` lets
-/// the quick retry proceed, `ReLoginRequired` ends the turn with the
-/// returned sentence.
+/// The retry chains consult this on an auth-class failure: `Continue`
+/// lets the quick retry proceed inside the ordinary budget, `NewCredential`
+/// re-issues with the changed credential (one retry past a spent budget),
+/// `ReLoginRequired` ends the turn with the returned sentence.
 pub type AuthRecoveryCallback<'a> = &'a mut dyn FnMut(&AssistantMessage) -> AuthRecoveryFuture;
