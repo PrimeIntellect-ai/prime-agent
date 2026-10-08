@@ -1216,7 +1216,7 @@ fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
             "$prewarm.WaitForExit($prewarmBoundSec * 1000)",
         ),
         (
-            "the expiry arm tree-kills the launcher tree",
+            "the expiry arm tree-kills the launcher tree (the launch itself rides the best-effort try)",
             "$taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\taskkill.exe')",
         ),
         (
@@ -1848,6 +1848,13 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
     assert!(
         helper.contains("prewarm_release_frontier"),
         "the release walk collects descendants, not only the registered pids"
+    );
+    // The release tree is CLEARED when the gate ends: the exit trap's
+    // release exists for the gate's freeze windows, never for stale pids
+    // a finished pre-warm long recycled.
+    assert!(
+        script.contains("  prewarm_tree=\"\"\nelse"),
+        "the gate clears the release tree before the verify section"
     );
 }
 

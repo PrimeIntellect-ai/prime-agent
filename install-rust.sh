@@ -3300,6 +3300,10 @@ if uv_on_path \
     note "! The kernel pre-warm was skipped (its scratch directory could not be created);"
     note "  the first session bootstraps the kernel itself and needs the network once."
   fi
+  # The gate is over: its pids may be long gone when the exit trap fires,
+  # and a release that walks stale numbers could signal whatever recycled
+  # them. The trap's release exists for the gate's own freeze windows.
+  prewarm_tree=""
 else
   note "! The kernel pre-warm was skipped (no uv); the first session sets the"
   note "  kernel up itself and needs the network once."

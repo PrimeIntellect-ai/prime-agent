@@ -819,8 +819,8 @@ if ($uvKnown) {
         # dead tree. The taskkill itself is BOUNDED like the Rust helper's
         # own: a stuck one is killed after the grace instead of blocking
         # the install the watchdog exists to end.
-        $taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList '/PID', $prewarm.Id, '/T', '/F' -WindowStyle Hidden -PassThru
         try {
+            $taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList '/PID', $prewarm.Id, '/T', '/F' -WindowStyle Hidden -PassThru
             if (-not $taskkill.WaitForExit(5000)) {
                 $null = $taskkill.Kill()
                 $null = $taskkill.WaitForExit(5000)
