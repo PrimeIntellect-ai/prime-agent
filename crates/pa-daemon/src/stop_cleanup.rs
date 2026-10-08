@@ -100,7 +100,7 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
     sessions_dir: &Path,
     root_session_file: &Path,
     live_files: &HashSet<String>,
-) -> usize {
+) -> Result<usize> {
     let members = session_tree(agent_dir, sessions_dir, root_session_file);
     if members.iter().any(|member| {
         live_files.contains(
@@ -109,7 +109,7 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
                 .to_string(),
         )
     }) {
-        return 0;
+        return Ok(0);
     }
     let store = AgentCronJobStore::for_session_artifacts();
     let mut registered = false;
@@ -127,7 +127,7 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
         registered = true;
     }
     if !registered {
-        return 0;
+        return Ok(0);
     }
     let now = crate::util::now_ms();
     let mut cancelled = 0;
@@ -140,10 +140,10 @@ pub(crate) fn cancel_scheduled_jobs_for_tree(
                     session_file: Some(member.session_file.to_string_lossy().to_string()),
                 },
                 now,
-            )
+            )?
             .len();
     }
-    cancelled
+    Ok(cancelled)
 }
 
 /// The killed session's `archived` state belt: when the worker died before its close
@@ -176,6 +176,10 @@ pub(crate) fn finalize_archived_stop(
 ) -> (usize, Option<anyhow::Error>) {
     let cancelled =
         cancel_scheduled_jobs_for_tree(agent_dir, sessions_dir, root_session_file, live_files);
+    let (cancelled, cancel_error) = match cancelled {
+        Ok(count) => (count, None),
+        Err(error) => (0, Some(error)),
+    };
     // A live worker covering the tree owns its stores again — including the session
     // file's state — so the belt skips covered trees like the cancel does.
     let covered = session_tree(agent_dir, sessions_dir, root_session_file)
@@ -188,10 +192,10 @@ pub(crate) fn finalize_archived_stop(
             )
         });
     if covered {
-        return (cancelled, None);
+        return (cancelled, cancel_error);
     }
     let archive_error = ensure_archived_state(root_session_file).err();
-    (cancelled, archive_error)
+    (cancelled, cancel_error.or(archive_error))
 }
 
 /// The kill route's deleted-child finalize (the `rlmLedgerDelete` marker):
@@ -474,6 +478,13 @@ impl Supervisor {
             Path::new(&root_session_file),
             &live,
         );
+        let cancelled = match cancelled {
+            Ok(count) => count,
+            Err(error) => {
+                self.log_line(&format!("owned stop: cron cancel failed: {error}"));
+                return;
+            }
+        };
         if cancelled > 0 {
             self.log_line(&format!(
                 "owned stop: cancelled {cancelled} scheduled job(s) of {root_session_file}"
