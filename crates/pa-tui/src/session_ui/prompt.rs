@@ -921,13 +921,12 @@ impl SessionUi {
                     );
                     return Ok(());
                 }
-                // A DIRECT-link transport failure after the frame was queued: the daemon may have
-                // admitted the turn, so the draft stays consumed like the timeout arm.
-                let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
-                    && rendered
-                        .to_lowercase()
-                        .contains("session connection closed");
-                if direct_sent {
+                // A transport failure after the frame was queued (a direct link, or the
+                // supervisor socket closing mid-flight): the daemon may have admitted the turn,
+                // so the draft stays consumed like the timeout arm.
+                let sent_then_closed = crate::daemon_client::is_daemon_unreachable(&error)
+                    && rendered.to_lowercase().contains("connection closed");
+                if sent_then_closed {
                     self.error_row(
                         &format!(
                             "{rendered} — the request may have been sent; the turn may still start"

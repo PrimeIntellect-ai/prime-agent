@@ -627,11 +627,21 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
 }
 
 /// Handled, not fatal (operator directive: the user never loses their TUI to a daemon hiccup);
-/// the loss is surfaced twice, never silently swallowed.
+/// the loss is surfaced twice, and the close-after-send draft stays consumed so the natural
+/// resubmit never runs the prompt twice.
 #[test]
-fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
+fn dead_connection_on_prompt_keeps_the_draft_consumed_and_arms_the_reconnect() {
     let steps = vec![
         HeadlessStep::Type("hello".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "the daemon connection closed — reconnecting".to_string(),
+            timeout_ms: 2000,
+        },
+        HeadlessStep::WaitRender {
+            needle: "Daemon reconnected".to_string(),
+            timeout_ms: 4000,
+        },
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ];
@@ -639,10 +649,7 @@ fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
         supervisor.close_on_prompt = true;
     })
     .expect("a dead connection keeps the run mounted");
-    let all = run.frames.join(
-        "
-",
-    );
+    let all = run.frames.join("\n");
     assert!(
         all.contains("\u{26a0} Error: the daemon connection closed"),
         "the dead connection surfaces as the error row:\n{all}"
@@ -651,9 +658,15 @@ fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
         all.contains("the daemon connection closed — reconnecting"),
         "the reconnect driver is armed for the loss:\n{all}"
     );
+    assert_eq!(
+        run.prompt_requests.len(),
+        1,
+        "the close-after-send prompt never dispatches twice"
+    );
+    let last = run.frames.last().map(String::as_str).unwrap_or_default();
     assert!(
-        all.contains("hello"),
-        "the dead-connection draft returned to the editor:\n{all}"
+        !last.contains("hello"),
+        "the draft stays consumed after the close:\n{last}"
     );
 }
 
