@@ -1,6 +1,7 @@
 //! Consent-gated automatic delivery. The detached process-wide runtime owns all
 //! reads, recovery and delivery; hosts only record bounded intent and wake it.
 use super::*;
+use std::io::Read;
 use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -138,7 +139,17 @@ impl ContinuousTraceUpload {
     /// A cwd change starts with consent off until the background reader verifies it.
     #[must_use]
     pub fn rebind(&self, cwd: &Path, path: &Path) -> Arc<Self> {
-        let consent = self.consent.lock().unwrap();
+        let Ok(consent) = self.consent.lock() else {
+            return Self::install(
+                cwd,
+                &self.agent_dir,
+                Some(path),
+                TraceConsentSnapshot {
+                    enabled: false,
+                    generation: ConsentGeneration::read(cwd, &self.agent_dir),
+                },
+            );
+        };
         let snapshot = TraceConsentSnapshot {
             enabled: cwd == self.cwd && consent.0,
             generation: if cwd == self.cwd {
@@ -175,7 +186,10 @@ impl ContinuousTraceUpload {
             cancel: TraceUploadCancel::new(),
         });
         let service = service();
-        let mut registrations = service.controllers.lock().unwrap();
+        let Ok(mut registrations) = service.controllers.lock() else {
+            tracing::warn!("trace registration failed; durable intent retained for recovery");
+            return controller;
+        };
         registrations.retain(|item| item.strong_count() > 0);
         if registrations.len() < MAX_CONTROLLERS {
             registrations.push(Arc::downgrade(&controller));
@@ -195,7 +209,9 @@ impl ContinuousTraceUpload {
         if session_file.as_os_str().is_empty() {
             return;
         }
-        let consent = self.consent.lock().unwrap();
+        let Ok(consent) = self.consent.lock() else {
+            return;
+        };
         if !consent.0
             || consent.1 .0.iter().any(Result::is_err)
             || consent.1 != ConsentGeneration::read(&self.cwd, &self.agent_dir)
@@ -211,7 +227,9 @@ impl ContinuousTraceUpload {
             elapsed_us = began.elapsed().as_micros() as u64,
             "trace pending marker duration"
         );
-        let mut pending = self.pending.lock().unwrap();
+        let Ok(mut pending) = self.pending.lock() else {
+            return;
+        };
         let (path, schedule) =
             pending.get_or_insert_with(|| (session_file.to_path_buf(), Schedule::default()));
         if path != session_file {
@@ -281,7 +299,6 @@ fn prune_entry(entry: &Path, observed: &str, missing_session: Option<&Path>) {
     if mutation.try_lock().is_err() {
         return;
     }
-    use std::io::Read;
     let mut current = String::new();
     let Ok(file) = std::fs::File::open(entry) else {
         return;

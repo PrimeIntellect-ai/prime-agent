@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent_traces::tests::{response, Fixture, ScriptedTraceHttp};
+use std::io::Write;
 
 fn controller(fixture: &Fixture, path: &Path, enabled: bool) -> Arc<ContinuousTraceUpload> {
     Arc::new(ContinuousTraceUpload {
@@ -169,7 +170,6 @@ fn measure_synchronous_pending_marker_cost() {
     );
     // Explicit stdout retains this informational measurement in hosted CI logs
     // even when the test harness captures println output for passing tests.
-    use std::io::Write;
     std::io::stdout().write_all(report.as_bytes()).unwrap();
 }
 
