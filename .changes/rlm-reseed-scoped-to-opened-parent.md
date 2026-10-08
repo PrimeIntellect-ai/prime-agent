@@ -1,0 +1,1 @@
+- Opening a session no longer scans the whole RLM spawn ledger and the whole session-artifacts tree: only the opened parent's own subagents are re-listed, and a create that makes a brand-new session skips the scan, so session opens stay fast as the ledger grows.

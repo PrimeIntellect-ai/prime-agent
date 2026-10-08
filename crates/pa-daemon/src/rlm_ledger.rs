@@ -129,6 +129,36 @@ pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
     agent_dir.join(RLM_LEDGER_DIR).join(format!("{hash}.jsonl"))
 }
 
+/// The liveness pass shared by the live-edge reads: deleted edges and
+/// edges the pre-resolution `selected` filter rejects never resolve;
+/// the survivors' recorded endpoints do - a dead endpoint drops the
+/// edge, a moved path resolves through its durable session id - and
+/// the resolved paths replace the recorded ones.
+fn resolve_live_edges(
+    state: &ReplayState,
+    resolver: &mut LivePathResolver,
+    selected: impl Fn(&RlmLedgerEdge) -> bool,
+) -> Vec<RlmLedgerEdge> {
+    let mut edges = Vec::with_capacity(state.edges.len());
+    for edge in &state.edges {
+        if edge.deleted.is_some() || !selected(edge) {
+            continue;
+        }
+        let (Some(child), Some(parent)) = (
+            resolver.resolve(&edge.child),
+            resolver.resolve(&edge.parent),
+        ) else {
+            continue;
+        };
+        edges.push(RlmLedgerEdge {
+            parent: parent.to_string_lossy().to_string(),
+            child: child.to_string_lossy().to_string(),
+            ..edge.clone()
+        });
+    }
+    edges
+}
+
 impl RlmSpawnLedger {
     /// Ledger over one sessions dir, with a caller-supplied log sink for
     /// degraded reads and seed skips.
@@ -546,23 +576,31 @@ impl RlmSpawnLedger {
         let state = self.replay_cached()?;
         let mut resolver =
             LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
-        let mut edges = Vec::with_capacity(state.edges.len());
-        for edge in &state.edges {
-            if edge.deleted.is_some() {
-                continue;
-            }
-            let (Some(child), Some(parent)) = (
-                resolver.resolve(&edge.child),
-                resolver.resolve(&edge.parent),
-            ) else {
-                continue;
-            };
-            edges.push(RlmLedgerEdge {
-                parent: parent.to_string_lossy().to_string(),
-                child: child.to_string_lossy().to_string(),
-                ..edge.clone()
-            });
-        }
+        Ok(resolve_live_edges(&state, &mut resolver, |_| true))
+    }
+
+    /// The opened parent file's live edges: edges whose recorded parent
+    /// carries the parent file's durable session id (its file-name
+    /// stem - the same id a MOVED file resolves through) pass the
+    /// liveness pass, and only those whose resolved parent IS the
+    /// parent file remain. A parent's read never stats, or walks the
+    /// artifacts tree for, another parent's edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized
+    /// ledger); a missing ledger replays empty, and only the liveness
+    /// resolution drops edges.
+    pub fn live_edges_of_parent(&self, parent_file: &Path) -> Result<Vec<RlmLedgerEdge>> {
+        self.seed_once()?;
+        let state = self.replay_cached()?;
+        let parent_file = canonical_session_path(parent_file);
+        let mut resolver =
+            LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
+        let mut edges = resolve_live_edges(&state, &mut resolver, |edge| {
+            Path::new(&edge.parent).file_stem() == parent_file.file_stem()
+        });
+        edges.retain(|edge| canonical_session_path(Path::new(&edge.parent)) == parent_file);
         Ok(edges)
     }
 
