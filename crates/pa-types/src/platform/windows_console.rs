@@ -113,6 +113,7 @@ mod winapi {
 /// the originals; later calls re-apply the same values); a no-op when
 /// stdout is not a console (pipes, redirects, headless runs) and on
 /// non-Windows hosts. Returns whether a live console was prepared.
+#[must_use = "the console-prepare verdict decides whether the exit funnel owes a restore"]
 pub fn init() -> bool {
     #[cfg(windows)]
     {
