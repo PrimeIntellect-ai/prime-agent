@@ -280,7 +280,10 @@ fn collapsed_line(
     // in the same slot, clipped exactly as before.
     if live_timer {
         let separator_width = str_width(" \u{00b7} ");
-        let used = parts.iter().map(|p| crate::width::line_width(p)).sum::<usize>()
+        let used = parts
+            .iter()
+            .map(|p| crate::width::line_width(p))
+            .sum::<usize>()
             + separator_width * parts.len().saturating_sub(1)
             + 1;
         if used > width {

@@ -263,11 +263,7 @@ fn running_cell_summary_ticks_live_elapsed() {
     // leading second (a descheduled render must not flake the shape).
     let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
     assert!(
-        duration_part.ends_with('s')
-            && duration_part
-                .trim_end_matches('s')
-                .parse::<f64>()
-                .is_ok(),
+        duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok(),
         "the live duration ticks in its own slot: {text}"
     );
     assert!(!text.contains("Took "), "got: {text}");
@@ -295,11 +291,7 @@ fn running_cell_long_preview_keeps_live_duration_visible() {
     // segment is a fragment of the line counts, never a duration.
     let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
     assert!(
-        duration_part.ends_with('s')
-            && duration_part
-                .trim_end_matches('s')
-                .parse::<f64>()
-                .is_ok(),
+        duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok(),
         "the live duration stays on screen as its own segment: {text}"
     );
     assert!(crate::width::str_width(&text) <= 80, "got: {text}");
