@@ -140,11 +140,20 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         &json!({ "type": "abort", "activeSessionId": paused_session }),
     );
     assert_eq!(client.read_response("a3")["success"], true);
-    client.send_command(
-        "w3",
-        &json!({ "type": "wait_for_idle", "activeSessionId": paused_session }),
-    );
-    assert_eq!(client.read_response("w3")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        client.send_command(
+            "w3",
+            &json!({ "type": "get_state", "activeSessionId": paused_session }),
+        );
+        let state = client.read_response("w3");
+        assert_eq!(state["success"], true);
+        if state["data"]["isStreaming"] == false {
+            break;
+        }
+        assert!(Instant::now() < deadline, "user-aborted turn never settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     client.send_command(
         "g3",
         &json!({ "type": "get_queue", "activeSessionId": paused_session }),
