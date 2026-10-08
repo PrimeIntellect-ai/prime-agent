@@ -333,19 +333,29 @@ fn process_owner_record() -> String {
 fn reclaim_guard_path(path: &Path) -> PathBuf {
     // A component-independent short name: the sidecar must not overflow
     // the filesystem's component limit for a near-limit lock name, so
-    // the guard is derived from a stable FNV-1a hash of the full path -
-    // every process derives the same sidecar for the same lock, and a
+    // the guard is derived from a stable FNV-1a hash of the lock's
+    // RESOLVED identity - the canonicalized parent directory plus the raw
+    // file name. Two spellings of one lock path (relative vs absolute,
+    // dot-dot segments, symlinked parents) must derive the SAME sidecar,
+    // or two processes could hold "exclusive" guards for one lock. A
     // hash collision between two different locks in one directory only
-    // over-serializes (both contend on one guard), never corrupts.
-    let bytes = path.as_os_str().to_string_lossy().into_owned();
+    // over-serializes (both contend on one guard), never corrupts; an
+    // unstattable parent (the lock's directory must exist for every
+    // protocol participant) falls back to the raw text - degraded but
+    // deterministic for a lock that could not have been acquired anyway.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let bytes = format!("{}/{filename}", canonical.display());
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes.bytes() {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".r{hash:016x}"))
+    canonical.join(format!(".r{hash:016x}"))
 }
 
 /// Take the reclaim guard for `path` within `budget`, or `None`.
@@ -1656,6 +1666,19 @@ mod tests {
             "the placeholder stays until its own process clears it"
         );
         let _ = remove_candidate_dir(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guard_sidecar_is_spelling_independent() {
+        // Two spellings of one lock path must serialize on the SAME
+        // sidecar - or two processes could hold "exclusive" guards for
+        // one lock and race the protocol.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("x")).unwrap();
+        let plain = reclaim_guard_path(&dir.path().join("state.json"));
+        let dotted = reclaim_guard_path(&dir.path().join("x").join("..").join("state.json"));
+        assert_eq!(plain, dotted, "one lock, one guard");
     }
 
     #[cfg(target_os = "linux")]
