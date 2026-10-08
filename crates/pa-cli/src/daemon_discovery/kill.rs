@@ -23,8 +23,8 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// the adopted sessions would be stopped permanently instead of left for
 /// the crash recovery), verified against the process start id before the
 /// signal so a reused pid is never killed (the crash-oracle rollback
-/// path; macroscope's findings). Returns false - killing nothing - when
-/// the identity no longer matches or the process is already gone.
+/// path). Returns false - killing nothing - when the identity no longer
+/// matches or the process is already gone.
 pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> bool {
     let identity_matches = || {
         if !is_alive(pid) {
@@ -394,8 +394,8 @@ mod tests {
         assert!(force_kill_daemon(pid));
     }
 
-    /// The crash-oracle rollback kill (cursor's finding: the contract was
-    /// untested): a matching start id confirms the death, a MISMATCHED
+    /// The crash-oracle rollback kill's contract: a matching start id
+    /// confirms the death, a MISMATCHED
     /// start id never signals (a reused pid is never killed), and a dead
     /// pid is reported dead without a signal.
     #[test]

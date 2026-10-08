@@ -67,7 +67,7 @@ struct PhaseFailure {
     /// The successor this coordinator spawned and then refused (a
     /// validation failure or a silent boot): still running when the
     /// failure lands, so the rollback must stop it before it spawns onto
-    /// the socket the rejected daemon still owns (cursor's finding).
+    /// the socket the rejected daemon still owns.
     rejected: Option<super::successor::SpawnedSuccessor>,
 }
 
@@ -143,13 +143,13 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // same one the failed spawn booted with): the rejected
             // successor's crash-oracle kill leaves its adopted workers'
             // recovery journals on disk, and the rollback boot re-adopts
-            // them from the roster (macroscope's finding - a bare rollback
-            // spawn would strand those sessions).
+            // them from the roster - a bare rollback spawn would strand
+            // those sessions.
             let prepared_dir = update_prepared_dir(&socket_dir, &update_id);
             let roster_path = update_roster_path(&prepared_dir);
             // The successor's boot sweep has usually deleted the
-            // original already (cursor's finding): the prepare-time copy
-            // beside the status record is the surviving artifact.
+            // original already: the prepare-time copy beside the status
+            // record is the surviving artifact.
             let backup = rollback_roster_path(&options.status_path);
             let roster = if backup.is_file() {
                 Some(backup)
@@ -233,7 +233,7 @@ async fn drive(
         // The roster artifact is the successor's input (consumed from the
         // env at its boot, spec §6 step 2); the coordinator never parses it.
         roster_path = Some(update_roster_path(&prepared_dir));
-        // The rollback's roster insurance (cursor's finding): the
+        // The rollback's roster insurance: the
         // successor's `boot_sweep` deletes the socket's WHOLE update
         // directory - the roster included - before it greets, so a
         // rollback that must re-adopt a rejected child's workers would
@@ -246,8 +246,8 @@ async fn drive(
             // rename) and its failure ABORTS the update before the stop:
             // a partial backup could win over the intact original and the
             // rollback would report completion without restoring sessions
-            // (macroscope's finding), and an update that cannot secure
-            // its own rollback insurance must not stop the daemon.
+            // a session-losing rollback - and an update that cannot
+            // secure its own rollback insurance must not stop the daemon.
             let backup = rollback_roster_path(&options.status_path);
             let partial = {
                 let mut name = backup.file_name().unwrap_or_default().to_os_string();
@@ -564,25 +564,17 @@ async fn finish_failure(
         return Ok(());
     }
     // The rejected successor, still running from the failed spawn, is
-    // stopped HERE - bounded and best-effort, while the admission still
-    // holds the window: the rollback child cannot bind a socket the
-    // refused daemon still owns (cursor's finding - without the stop the
-    // rollback always fails against a squatter we ourselves created). A
-    // surviving squatter after the bounded attempt surfaces as the same
-    // honest Failed as before.
-    // The rejected successor, still running from the failed spawn, is
     // stopped HERE by an identity-verified DIRECT SIGKILL of the pid this
     // coordinator spawned - never an RPC to the socket, and never a
-    // SIGTERM: the graceful Shutdown AND the TERM signal drain both
-    // persist worker stop tombstones (durable stop intent; macroscope's
-    // finding), while the direct kill is the crash path the protocol
-    // already trusts - the adopted workers die with the supervisor,
-    // their recovery journals persist, and the roster'd rollback boot
-    // below re-adopts them (cursor's squatter finding: the socket frees
-    // for the rollback). The start-id check means a reused pid is never
-    // signaled. No RPC also means a competing daemon that answered the
-    // socket is never touched; a live competitor keeps the rollback's
-    // honest Failed.
+    // SIGTERM: both the graceful Shutdown and the TERM signal drain
+    // persist worker stop tombstones (a durable stop that kills the
+    // sessions), while the direct kill is the crash path the protocol
+    // already trusts - the adopted workers die with the supervisor, their
+    // recovery journals persist, and the roster'd rollback boot below
+    // re-adopts them while the socket frees for the rollback. The
+    // start-id check means a reused pid is never signaled, and a
+    // competing daemon that answered the socket is never touched - a live
+    // competitor keeps the rollback's honest Failed.
     if let Some(rejected) = &failure.rejected {
         let killed = crate::daemon_discovery::kill::force_kill_identity_crash(
             u32::try_from(rejected.pid).unwrap_or(0),

@@ -1,6 +1,5 @@
 //! The supervisor-ownership registry's shutdown-admission and
-//! startup-fence arms (port of TS `daemon-supervisor-ownership.ts`; the
-//! bind-choreography parity audit's D3 fix).
+//! startup-fence arms (port of TS `daemon-supervisor-ownership.ts`).
 //!
 //! TS closes the update-restart stop window with two durable records under
 //! `~/.prime/supervisor-owners` (`defaultDaemonSupervisorRegistryDir`,
@@ -123,8 +122,8 @@ fn registry_dir() -> Result<PathBuf> {
 /// absolute, `.`/`..` folded, no symlink resolution; the registry keys and
 /// the fence records spell the socket this way). A non-UTF-8 path never
 /// rides through a lossy conversion - distinct raw paths would collapse
-/// onto one U+FFFD-laced identity (macroscope's finding: two endpoints
-/// sharing one fence file, each able to block or overwrite the other's) -
+/// onto one U+FFFD-laced identity (two endpoints would share one fence
+/// file, each able to block or overwrite the other's) -
 /// so its identity is the raw bytes, hex-encoded behind a marker TS strings
 /// cannot produce. TS's JS has no way to spell these paths at all, so no
 /// TS/Rust cross-protocol form exists to stay compatible with.
@@ -166,8 +165,8 @@ fn normalize_socket_path(socket_path: &Path) -> String {
 /// socket path (`to_string_lossy` in `supervision.rs`) and the compare
 /// runs lossy-to-lossy - never against the raw-bytes identity, whose
 /// `raw:` hex could never equal its own hello's spelling and every
-/// legitimate gate would fail closed (cursor's finding on the non-UTF-8
-/// fix). The raw identity stays what the fence FILE keys on.
+/// legitimate gate would fail closed. The raw identity stays what the
+/// fence FILE keys on.
 #[must_use]
 pub fn hello_socket_path_matches(hello_socket_path: &str, socket_path: &Path) -> bool {
     let our_hello_spelling = socket_path.to_string_lossy();
@@ -1362,8 +1361,8 @@ mod tests {
     }
 
     /// The hello gate accepts a non-UTF-8 socket's OWN lossy spelling
-    /// (cursor's finding on the raw-identity fix: the daemon's hello is
-    /// JSON, so it emits `to_string_lossy` - comparing that against the
+    /// (the daemon's hello is JSON, so it emits `to_string_lossy` -
+    /// comparing that against the
     /// `raw:` identity failed closed on every legitimate hello).
     #[test]
     #[cfg(unix)]
@@ -1398,8 +1397,8 @@ mod tests {
     }
 
     /// Distinct non-UTF-8 socket paths keep DISTINCT identities
-    /// (macroscope's finding: the lossy conversion collapsed them onto one
-    /// U+FFFD-laced spelling, so two endpoints shared one fence file and
+    /// (the lossy conversion would collapse them onto one U+FFFD-laced
+    /// spelling, so two endpoints shared one fence file and
     /// each could block or overwrite the other's), while UTF-8 paths
     /// spell exactly as before.
     #[test]

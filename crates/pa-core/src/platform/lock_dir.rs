@@ -405,7 +405,7 @@ pub struct LockDir {
     /// equivalent path. Held in a mutex and TAKEN by whichever of
     /// `release` or `Drop` runs first - never unregistered twice (a
     /// repeat unregister after a same-process re-acquire would remove
-    /// the NEW holder's entry, cursor's finding).
+    /// the NEW holder's entry).
     held_key: Mutex<Option<PathBuf>>,
     /// The (sec, nsec) mtime probe this guard last wrote (proper-lockfile's
     /// `lock.mtime`: the updater records the exact value its `utimes` call
@@ -882,7 +882,7 @@ impl LockDir {
     /// the mkdir lands: a stalled creator's path can be reclaimed by a
     /// successor mid-create, and resuming must never truncate the
     /// successor's owner record, delete its directory, or write its
-    /// probe (the reviewer's P1). A create that can no longer prove the
+    /// probe. A create that can no longer prove the
     /// path is its own fails as plain collision; an unobservable
     /// identity cleans nothing (the artifact goes to the staleness
     /// sweep, the fail-safe).
@@ -892,9 +892,9 @@ impl LockDir {
         use std::os::unix::fs::PermissionsExt;
         fs::create_dir(path)?;
         // The GATE runs BEFORE every mutating step and before the probe
-        // is handed up (cursor's follow-up: a post-hoc error remap alone
-        // let a stalled creator's resume write the successor's owner record
-        // and probe FIRST, and a succeeded foreign write adopt). An
+        // is handed up (a post-hoc error remap alone would let a stalled
+        // creator's resume write the successor's owner record and probe
+        // FIRST, and a succeeded foreign write adopt). An
         // UNOBSERVABLE identity (`None`) cannot gate or clean: the steps
         // run unverified, a failure surfaces its own error - never remapped
         // to a false collision - and nothing is removed (the artifact goes
@@ -959,7 +959,7 @@ impl LockDir {
     /// successor's live lock and let a third process acquire the path
     /// under it. The unverified artifact goes to the protocol's own
     /// staleness sweep instead - the same discipline as the abandoned
-    /// artifact (macroscope's read-back finding).
+    /// artifact instead.
     fn read_back_probe(path: &Path) -> io::Result<Option<(i64, i64)>> {
         let Some(stored) = Self::observed_mtime(path) else {
             return Err(io::Error::other(format!(
@@ -1080,7 +1080,7 @@ impl LockDir {
             Err(error) => return Err(error),
         };
         // The owner discipline's PRE-PARK gate (#3380's durability
-        // classes, the reviewer's P1): a LIVE owned lock is never parked -
+        // classes): a LIVE owned lock is never parked -
         // the park vacates the public path for the owner-read interval,
         // and a third acquirer could take the path under a live owner
         // (owned locks take no flock, so the witness gate above passes
@@ -1516,9 +1516,9 @@ impl LockDir {
         // A released guard no longer holds the path: the registry entry
         // must not answer contention for a later same-process acquire that
         // legitimately retakes the freed path while this guard object is
-        // still alive (macroscope's finding). The key is TAKEN here -
+        // still alive. The key is TAKEN here -
         // never unregistered twice (a repeat would remove a later
-        // holder's entry, cursor's finding).
+        // holder's entry).
         #[cfg(unix)]
         if let Some(key) = self
             .held_key
@@ -1854,7 +1854,7 @@ mod tests {
         let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        // The reviewer's P1 regression: a live owned lock is never PARKED
+        // A live owned lock is never PARKED
         // off the public path during the takeover attempt - the owner gate
         // refuses before any capture, so the path itself never goes vacant
         // under the live owner.
@@ -1901,7 +1901,7 @@ mod tests {
     }
 
     /// The recorded probe is the value the FILESYSTEM stored, not the
-    /// one the write requested (macroscope's coarse-granularity finding:
+    /// one the write requested (coarse-granularity filesystems:
     /// a rounding filesystem self-rejected every acquisition it made;
     /// proper-lockfile records the stat'ed mtime, and so does `create`
     /// now).
@@ -1920,10 +1920,10 @@ mod tests {
     }
 
     /// An equivalent alias of a held path (a symlinked component) is the
-    /// SAME held lock (macroscope's alias finding: a path-spelling key
-    /// let a second same-process acquire bypass the registry and
-    /// stale-reclaim the first guard's live directory on the per-process
-    /// flock platforms): the canonical registry key answers the alias
+    /// SAME held lock (a path-spelling key would let a second
+    /// same-process acquire bypass the registry and stale-reclaim the
+    /// first guard's live directory on the per-process flock platforms):
+    /// the canonical registry key answers the alias
     /// with contention, and the path is free again once the guard drops.
     #[test]
     #[cfg(unix)]
@@ -1948,7 +1948,7 @@ mod tests {
     }
 
     /// The degrade set: every unwitnessable errno degrades the witness
-    /// to the mtime-only protocol (macroscope's finding: only EACCES did,
+    /// to the mtime-only protocol (a permission error alone did,
     /// so an EISDIR/EBADF-style answer failed every registry-guarded boot
     /// on such a filesystem outright), while contention (EWOULDBLOCK)
     /// and genuine I/O errors never degrade.
@@ -2219,7 +2219,7 @@ mod tests {
     /// The unwinding acquisition's cleanup: the just-created artifact is
     /// removed when it is still verifiably ours, and a successor's
     /// replacement at the path is restored untouched (the witness-failure
-    /// path - cursor's orphaned-lock-directory finding).
+    /// path).
     #[test]
     #[cfg(unix)]
     fn the_unwitnessed_artifact_cleans_up_only_when_ours() {
@@ -2295,8 +2295,7 @@ mod tests {
     }
 
     /// The plain-rename restore (the non-Linux arm, and the Linux
-    /// degrade for filesystems without `RENAME_NOREPLACE` - cursor's
-    /// missing-degraded-fallback finding): a free path takes the park
+    /// degrade for filesystems without `RENAME_NOREPLACE`): a free path takes the park
     /// back atomically enough for the protocol, and a park that
     /// vanished to a concurrent cleanup is a success, never an error.
     #[test]
