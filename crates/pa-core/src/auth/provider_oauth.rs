@@ -180,7 +180,10 @@ impl ProviderOAuth {
 /// grant dead; the rest keep the ordinary retry ladder.
 pub(crate) fn is_grant_rejection(reason: &str) -> bool {
     [400, 401, 403].iter().any(|status| {
-        reason.contains(&format!("({status})"))
+        // Copilot's failure format leads with the bare status
+        // ("401 Unauthorized: ...").
+        reason.starts_with(&format!("{status} "))
+            || reason.contains(&format!("({status})"))
             || reason.contains(&format!("(HTTP {status})"))
             || reason.contains(&format!("status={status}"))
     })
@@ -837,6 +840,12 @@ mod tests {
         ));
         assert!(is_grant_rejection(
             "xAI OAuth token refresh failed (HTTP 400): authorization expired or revoked; sign in again"
+        ));
+        assert!(is_grant_rejection(
+            "401 Unauthorized: the token was revoked"
+        ));
+        assert!(!is_grant_rejection(
+            "503 Service Unavailable: try again later"
         ));
         assert!(is_grant_rejection(
             "Anthropic token refresh request failed. url=[redacted] details=Error: HTTP request failed. status=403; url=[redacted]"
