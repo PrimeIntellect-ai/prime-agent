@@ -41,6 +41,8 @@
 //! store reads - is platform-neutral product code.
 
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -68,24 +70,29 @@ impl Drop for Supervisor {
 /// the shutdown works on every host.
 fn stop_supervisor(supervisor: &mut Supervisor) {
     let socket = supervisor.socket.clone();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("shutdown runtime");
-    runtime.block_on(async move {
-        let Ok((client, events)) = pa_tui::daemon_client::DaemonClient::connect(&socket).await
-        else {
-            return;
-        };
-        let shutdown = pa_types::daemon::DaemonCommand::Shutdown {
-            id: None,
-            force: Some(true),
-            rest: Map::default(),
-        };
-        let _ = client.request_with_timeout(shutdown, 1_500).await;
-        client.close();
-        drop(events);
+    // The shutdown rides its own thread: `Drop` can run inside the async
+    // test's runtime, where `block_on` would be a nested runtime.
+    let shutdown = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("shutdown runtime");
+        runtime.block_on(async move {
+            let Ok((client, events)) = pa_tui::daemon_client::DaemonClient::connect(&socket).await
+            else {
+                return;
+            };
+            let shutdown = pa_types::daemon::DaemonCommand::Shutdown {
+                id: None,
+                force: Some(true),
+                rest: Map::default(),
+            };
+            let _ = client.request_with_timeout(shutdown, 1_500).await;
+            client.close();
+            drop(events);
+        });
     });
+    let _ = shutdown.join();
     let _ = supervisor.child.kill();
     let _ = supervisor.child.wait();
 }
@@ -224,6 +231,7 @@ fn tui_options(socket: &Path, session_dir: &Path, script: &Path) -> InteractiveO
         session_has_children: false,
         restore_dock_focus: false,
         client_settings: None,
+        prompt_stash: std::sync::Arc::default(),
     }
 }
 
@@ -313,7 +321,10 @@ async fn create_session_via_daemon(
         .await
         .expect("create session");
     client.close();
-    data.get("activeSessionId")
+    // The DURABLE identity: `sessionId` is the session file's header id
+    // (`activeSessionId` is the live worker's ephemeral id - the worker's
+    // lifecycle rows publish both).
+    data.get("sessionId")
         .or_else(|| data.get("id"))
         .and_then(Value::as_str)
         .expect("session id")
@@ -402,7 +413,7 @@ async fn tui_reopen_renders_the_old_history() {
     // The cold reopen: the daemon (and its live worker) are gone; a fresh
     // supervisor boots against the same store.
     stop_supervisor(&mut supervisor);
-    let mut second_supervisor = spawn_supervisor(dir.path());
+    let second_supervisor = spawn_supervisor(dir.path());
     wait_for_daemon(&second_supervisor.socket).await;
 
     // Run 2: the stored session reopens and renders the OLD messages.
@@ -448,7 +459,7 @@ async fn subagent_session_stays_a_distinct_store_entry() {
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    let mut supervisor = spawn_supervisor(dir.path());
+    let supervisor = spawn_supervisor(dir.path());
     wait_for_daemon(&supervisor.socket).await;
 
     // The parent session (a real daemon create, scripted engine).
@@ -488,7 +499,7 @@ async fn subagent_session_stays_a_distinct_store_entry() {
     assert_eq!(files.len(), 2, "two distinct store entries: {files:?}");
     let child_path = files
         .iter()
-        .find(|path| *path != parent_path)
+        .find(|path| path.as_path() != parent_path.as_path())
         .expect("the child's own file")
         .clone();
     let parent_header = pa_daemon::session_store::read_session_header(&parent_path)
@@ -615,7 +626,7 @@ async fn agent_message_rows_dump_their_glyphs() {
         json!({ "responses": [ { "text": "the glyph battery reply" } ] }).to_string(),
     )
     .expect("write script");
-    let mut supervisor = spawn_supervisor(dir.path());
+    let supervisor = spawn_supervisor(dir.path());
     wait_for_daemon(&supervisor.socket).await;
     let mut options = tui_options(&supervisor.socket, &session_dir, &script_path);
     options.cwd = dir.path().to_path_buf();

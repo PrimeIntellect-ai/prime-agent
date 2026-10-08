@@ -192,12 +192,13 @@ fn the_tui_battery_job_boots_the_binary_and_dumps_the_panes() {
     // windows runner).
     let needs = job
         .get("needs")
-        .and_then(serde_yaml::Value::as_sequence)
-        .map(|entries| {
-            entries
+        .map(|needs| match needs {
+            serde_yaml::Value::Sequence(entries) => entries
                 .iter()
                 .filter_map(serde_yaml::Value::as_str)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            serde_yaml::Value::String(single) => vec![single.as_str()],
+            _ => Vec::new(),
         })
         .unwrap_or_default();
     assert!(
