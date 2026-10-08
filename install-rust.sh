@@ -668,8 +668,9 @@ migrated_note=""
 # processes frozen with the kernel venv lock held. No-op whenever no walk
 # collected a tree. Defined before the traps that call it.
 prewarm_tree_release() {
+  # KILLED FROZEN, never thawed first: a CONT would hand the launcher a
+  # respawn window, and SIGKILL reaches stopped processes.
   for prewarm_node in ${prewarm_tree:-}; do
-    kill -CONT "-$prewarm_node" 2>/dev/null || kill -CONT "$prewarm_node" 2>/dev/null || true
     kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
   done
 }
@@ -3119,6 +3120,9 @@ if uv_on_path \
       prewarm_timed_out="yes"
       prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
       if [ -n "$prewarm_pid" ]; then
+        # The launcher joins the release tree BEFORE its freeze: a signal
+        # between the two must find the trap able to kill it.
+        prewarm_tree="$prewarm_pid"
         # The launcher is FROZEN before anything else: still running, it
         # can start another provisioning between the walk and the kill,
         # and that one would escape the tree, the kill list, and the stop
@@ -3129,7 +3133,6 @@ if uv_on_path \
         # descendants reparent and no sweep can find them). A descendant
         # that leads its own process group (the product's uv) is
         # group-killed with its own subtree.
-        prewarm_tree="$prewarm_pid"
         prewarm_seen=""
         prewarm_frontier="$prewarm_pid"
         if [ "$prewarm_pgrep" = "yes" ]; then
@@ -3169,6 +3172,12 @@ if uv_on_path \
                 *" $prewarm_node "*) continue ;;
               esac
               prewarm_reseen="$prewarm_reseen $prewarm_node"
+              # The node joins the release tree with its freeze: a signal
+              # between the two must find the trap able to kill it.
+              case " $prewarm_tree " in
+                *" $prewarm_node "*) ;;
+                *) prewarm_tree="$prewarm_tree $prewarm_node" ;;
+              esac
               # Freeze BEFORE sampling: a node still running can spawn
               # between its sampling and the KILL pass and escape the
               # tree and the verdict.

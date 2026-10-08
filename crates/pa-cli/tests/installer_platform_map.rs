@@ -1763,6 +1763,38 @@ fn install_rust_sh_releases_the_frozen_prewarm_tree_on_every_exit() {
         release_at < traps_at,
         "the helper is defined before the trap that calls it is armed"
     );
+    // The release KILLS FROZEN, never thaws first: a CONT would hand the
+    // launcher a respawn window no re-walk then covers.
+    let release_end = release_at + script[release_at..].find('}').expect("the helper closes");
+    let helper = &script[release_at..release_end];
+    assert!(
+        !helper.contains("kill -CONT"),
+        "the release helper never thaws: {helper}"
+    );
+    // Each frozen process joins the release tree at its freeze: a signal
+    // between the two must find the trap able to kill it.
+    let freeze_at = script
+        .find("kill -STOP \"-$prewarm_pid\"")
+        .expect("the launcher freeze");
+    let launcher_tree_at = script
+        .find("prewarm_tree=\"$prewarm_pid\"")
+        .expect("the launcher tree");
+    assert!(
+        launcher_tree_at < freeze_at,
+        "the launcher joins the release tree before its freeze"
+    );
+    let rewalk_stop_at = script[release_at..]
+        .find("kill -STOP \"-$prewarm_node\"")
+        .map(|at| release_at + at)
+        .expect("the re-walk freeze");
+    let rewalk_merge_at = script[release_at..]
+        .find("prewarm_tree=\"$prewarm_tree $prewarm_node\"")
+        .map(|at| release_at + at)
+        .expect("the re-walk merge");
+    assert!(
+        rewalk_merge_at < rewalk_stop_at,
+        "the re-walk merges each node into the release tree before its freeze"
+    );
 }
 
 /// Drives the pre-warm block under `sh` with a three-level hanging
