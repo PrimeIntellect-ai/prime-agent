@@ -1377,3 +1377,61 @@ async fn a_superseded_rejection_keeps_the_recovery_budget() {
         "two auth rejections and the recovered retry"
     );
 }
+
+/// A rejected grant still surfaces its re-login guidance with retries
+/// disabled: the seam's verdict is error messaging, not a retry — the
+/// raw provider 401 never hides the run /login sentence.
+#[tokio::test]
+async fn a_rejected_grant_still_surfaces_guidance_with_retries_disabled() {
+    let mut disabled = fast_policy();
+    disabled.enabled = false;
+    let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+    let mut seam = move |_message: &AssistantMessage| {
+        let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+        Box::pin(async move {
+            recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::session_engine::provider_auth::AuthRecoveryOutcome::ReLoginRequired(
+                "re-login sentence".to_string(),
+            )
+        }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+    };
+    let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let attempts_for_closure = Arc::clone(&attempts);
+    let message = run_turn_with_auto_retry(
+        &disabled,
+        0,
+        None,
+        move || {
+            let attempts = Arc::clone(&attempts_for_closure);
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(error_message(Some("auth"), Some(401), None))
+            }
+        },
+        move |event| {
+            let _ = event;
+            async { Ok(()) }
+        },
+        |_| async { true },
+        None,
+        Some(&mut seam),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        message.error_message.as_deref(),
+        Some("re-login sentence"),
+        "the disabled ladder still carries the re-login sentence"
+    );
+    assert_eq!(
+        recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the seam was consulted once for the guidance"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no retry issues under the disabled policy"
+    );
+}

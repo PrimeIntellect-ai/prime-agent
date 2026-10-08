@@ -186,7 +186,13 @@ fn sanitize_refresh_reason(reason: &str, loaded: &AuthCredential) -> String {
         AuthCredential::Oauth {
             access, refresh, ..
         } => {
-            let mut redacted = reason.replace(access.as_str(), "[redacted]");
+            // An empty stored value never replaces: `str::replace` with an
+            // empty pattern inserts at every character boundary.
+            let mut redacted = if access.is_empty() {
+                reason.to_string()
+            } else {
+                reason.replace(access.as_str(), "[redacted]")
+            };
             if let Some(refresh) = refresh.as_deref().filter(|refresh| !refresh.is_empty()) {
                 redacted = redacted.replace(refresh, "[redacted]");
             }
@@ -843,6 +849,17 @@ mod tests {
         assert_eq!(
             sanitize_refresh_reason("the rejected-access token was echoed", &loaded),
             "the [redacted] token was echoed"
+        );
+        // An empty stored access never replaces: `str::replace` with an
+        // empty pattern would insert at every character boundary.
+        let mut empty_access = live_codex_credential();
+        if let AuthCredential::Oauth { access, .. } = &mut empty_access {
+            *access = String::new();
+        }
+        assert_eq!(
+            sanitize_refresh_reason("expired", &empty_access),
+            "expired",
+            "an empty stored access leaves the reason intact"
         );
     }
 

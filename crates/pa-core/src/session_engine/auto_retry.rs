@@ -117,6 +117,27 @@ where
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
+            // A rejected OAuth grant still surfaces its re-login guidance
+            // with retries disabled: the seam's verdict is error
+            // messaging, not a retry, and the refresh it performed heals
+            // the store for the turns after this one.
+            if is_provider_auth_failure(&message) && !non_retryable {
+                if let Some(recovery) = auth_recovery.as_deref_mut() {
+                    if let AuthRecoveryOutcome::ReLoginRequired(sentence) = recovery(&message).await
+                    {
+                        let mut message = message;
+                        message.error_message = Some(sentence);
+                        emit(AutoRetryEvent::End {
+                            success: false,
+                            attempt: retries_performed,
+                            final_error: Some(final_error_of(&message)),
+                            restored_model: None,
+                        })
+                        .await?;
+                        return Ok(message);
+                    }
+                }
+            }
             // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
             // outcome row is FAILURE-scoped, not episode-scoped. TS emits retry
             // events only once a retry was attempted; here a provider failure
