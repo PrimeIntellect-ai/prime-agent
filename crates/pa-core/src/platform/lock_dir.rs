@@ -1190,9 +1190,14 @@ impl LockDir {
     fn park_name_of(path: &Path) -> PathBuf {
         static PARK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
         let sequence = PARK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let mut name = path.as_os_str().to_os_string();
-        name.push(format!(".park.{}.{}", std::process::id(), sequence));
-        PathBuf::from(name)
+        // A BOUNDED sibling basename (never the lock name appended to - a
+        // lock basename near the filesystem's component limit would push
+        // the park name past it and the rename would fail ENAMETOOLONG,
+        // wedging every acquisition behind a stale lock nobody could
+        // reclaim): the parent directory is preserved - the rename stays
+        // on one filesystem - and the park is created by exactly one
+        // process, so nothing ever looks the name up.
+        path.with_file_name(format!(".park.{}.{}", std::process::id(), sequence))
     }
 
     /// The unwinding acquisition's cleanup (unix): remove the just-created
@@ -1508,9 +1513,13 @@ impl LockDir {
                 return;
             }
         }
+        let mut removed = true;
         if let Err(error) = fs::remove_dir(&self.path) {
-            if error.kind() != io::ErrorKind::NotFound {
+            if error.kind() == io::ErrorKind::NotFound {
+                removed = true;
+            } else {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                removed = false;
             }
         }
         // A released guard no longer holds the path: the registry entry
@@ -1527,11 +1536,14 @@ impl LockDir {
         {
             unregister_locally_held(&key);
         }
-        // And the plain release runs at most once: a guard released
-        // explicitly must never remove the lock directory a later
-        // acquire_at() recreated at the freed path when this guard
-        // finally drops.
-        self.finished.store(true, Ordering::Relaxed);
+        // The plain release is marked finished only when the directory is
+        // actually gone (or was never there): a guard whose removal FAILED
+        // keeps `finished` unset, so its Drop retries the cleanup instead
+        // of leaving the artifact to block every later acquisition until
+        // it ages stale.
+        if removed {
+            self.finished.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Whether the directory at the lock path is still the one this guard
@@ -2295,6 +2307,74 @@ mod tests {
         assert!(
             lock_of(&file).is_dir(),
             "a foreign mtime is never ours to remove"
+        );
+    }
+
+    /// The park basename is BOUNDED regardless of the lock name: a lock
+    /// basename near the filesystem's component limit must not push the
+    /// park name past it (the rename would fail ENAMETOOLONG and wedge
+    /// every acquisition behind a stale lock nobody could reclaim).
+    #[test]
+    #[cfg(unix)]
+    fn the_park_name_stays_bounded_next_to_a_maximal_lock_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "l".repeat(240);
+        let lock = dir.path().join(format!("{long}.lock"));
+        let parked = LockDir::park_name_of(&lock);
+        assert!(
+            parked
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".park.")),
+            "the park is a short sibling basename"
+        );
+        assert!(
+            parked
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap()
+                .len()
+                < 64,
+            "the park basename is bounded, whatever the lock name's length"
+        );
+        // And the stale takeover of a maximal-name lock succeeds end to
+        // end (the rename neither overflows nor misses).
+        let file = dir.path().join(format!("{long}.json"));
+        std::fs::write(&file, "{}").unwrap();
+        let incumbent = lock_of(&file);
+        std::fs::create_dir(&incumbent).unwrap();
+        set_mtime(&incumbent, 1, 0).unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE)
+            .expect("a maximal-basename stale lock reclaims cleanly");
+        drop(guard);
+        assert!(!incumbent.exists(), "the stale incumbent is gone");
+    }
+
+    /// A failed removal keeps the guard `unfinished`, so its Drop retries
+    /// the cleanup: the artifact must not survive release + drop on a
+    /// transiently failing filesystem (a read-only parent).
+    #[test]
+    #[cfg(unix)]
+    fn a_failed_release_keeps_the_drop_retry_alive() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        // A read-only parent makes the removal fail.
+        std::fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        guard.release();
+        assert!(
+            !guard.finished.load(Ordering::Relaxed),
+            "a failed removal leaves the plain release unfinished"
+        );
+        assert!(lock_of(&file).is_dir(), "the artifact is still there");
+        // The permissions back, the guard's Drop retries and cleans.
+        std::fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        drop(guard);
+        assert!(
+            !lock_of(&file).exists(),
+            "the Drop retry removed the artifact"
         );
     }
 
