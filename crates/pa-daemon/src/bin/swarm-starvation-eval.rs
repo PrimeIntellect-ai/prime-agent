@@ -807,7 +807,10 @@ fn running_children(client: &mut Client, session_id: &str) -> Result<usize, Stri
 /// child that re-sends its REPORT must not mask a silent sibling — so the
 /// partial-crew gate scores distinct children, not rows. An arrival with no
 /// sender id proves exactly one reporter (never two), so the unattributed
-/// arrivals count as one between them: the gate fails closed on a
+/// arrivals count as one between them — and never as an extra child beyond
+/// the attributed senders: the row builder passes the sender endpoint
+/// through verbatim (`from: null` included), so that one reporter may be a
+/// child an attributed row already names. The gate fails closed on a
 /// transcript it cannot attribute rather than crediting an unverifiable
 /// crew.
 fn distinct_reporting_children(messages: &[Value]) -> usize {
@@ -829,7 +832,7 @@ fn distinct_reporting_children(messages: &[Value]) -> usize {
             _ => unattributed = true,
         }
     }
-    senders.len() + usize::from(unattributed)
+    senders.len().max(usize::from(unattributed))
 }
 
 /// A rate-limit model error during the trial is an instant failure.
@@ -1310,6 +1313,88 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+    }
+
+    #[test]
+    fn an_unattributed_row_never_counts_as_an_extra_child() {
+        // One child of two reported, then re-sent its REPORT; the duplicate
+        // arrived without a sender endpoint (`from: null` is a real row
+        // shape — the row builder passes the sender through verbatim). The
+        // sibling stayed silent, so crediting the unattributed row as a
+        // second, distinct reporter would read this partial crew as a full
+        // one and skip the gate — the same masking the duplicate-sender pin
+        // exists to stop, one seam over: the unattributed class never adds
+        // a reporter beyond the attributed set.
+        let (seed, size, trial) = (1, 2, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 2);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    // Two plain orchestrator steps before the REPORTs and
+                    // one small ingestion step after them: every defense
+                    // line passes, so only the partial-crew class fails the
+                    // row.
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({
+                        "role": "custom",
+                        "customType": "agent_message",
+                        "content": "[agent-message from child-a]\n\nREPORT",
+                        "details": { "from": { "activeSessionId": "child-a" } },
+                    }),
+                    json!({
+                        "role": "custom",
+                        "customType": "agent_message",
+                        "content": "[agent-message from a child]\n\nREPORT",
+                        "details": { "from": null },
+                    }),
+                    json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+
+        run(&daemon.socket, &config).expect("the mixed-attribution trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        // Two arrival rows (one attributed sender, one sender-less re-send):
+        // the report keeps #2352's row-counting arrivals, but only one
+        // child is verifiable.
+        assert_eq!(rows[0]["arrivals"], 2, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "partial crew: 1 of 2 children reported",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
+        assert!(report.contains("1/1 trials failed"), "{report}");
+        assert!(
+            report.contains("partial crew: 1 of 2 children reported"),
+            "{report}"
+        );
     }
 
     #[test]
