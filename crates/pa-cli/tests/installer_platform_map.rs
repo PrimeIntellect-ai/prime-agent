@@ -1332,6 +1332,15 @@ fn install_rust_sh_prewarm_watchdog_bounds_a_hung_launcher() {
         .find("# --- verify: the launcher must answer --version")
         .expect("the verify section follows the pre-warm");
     let block = &script[start..end];
+    // The runner wait is skipped after expiry: the runner can itself be
+    // stuck on an unkillable launcher, and waiting for it would trade the
+    // watchdog for a new hang that never reaches the degradation note.
+    assert!(
+        block.contains(
+            "if [ -z \"$prewarm_timed_out\" ]; then\n    wait \"$prewarm_runner\" 2>/dev/null || true\n  fi"
+        ),
+        "the runner wait runs only on a normal pre-warm: {block}"
+    );
 
     let drive = drive_sh_prewarm_block(block, "2", None);
     let status = drive.status.unwrap_or_else(|| {

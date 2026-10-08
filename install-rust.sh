@@ -3143,7 +3143,12 @@ if uv_on_path \
     fi
     sleep 1
   done
-  wait "$prewarm_runner" 2>/dev/null || true
+  # A runner exit is only provable after a normal pre-warm: after expiry the
+  # runner can itself be stuck on an unkillable launcher, so waiting for it
+  # would trade the watchdog for a new hang.
+  if [ -z "$prewarm_timed_out" ]; then
+    wait "$prewarm_runner" 2>/dev/null || true
+  fi
   if [ -n "$prewarm_timed_out" ]; then
     # Only an OBSERVED whole-tree stop counts: without the walk the
     # tree's state is unknown, and a survivor anywhere means provisioning

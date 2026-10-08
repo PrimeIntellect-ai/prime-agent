@@ -180,8 +180,17 @@ async fn run_async(
                     // what was proven, and the drains are never joined -
                     // a descendant that inherited the pipes can outlive
                     // the kill.
-                    let killed =
-                        crate::platform::process::kill_process_group_or_pid(child.id() as i32);
+                    // The helper is bounded by the same grace: on Windows
+                    // it waits on taskkill.exe, and an unbounded helper
+                    // would trade the bound for a new hang; an answer that
+                    // does not arrive in time counts as not killed.
+                    let pid = child.id() as i32;
+                    let (kill_tx, kill_rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ =
+                            kill_tx.send(crate::platform::process::kill_process_group_or_pid(pid));
+                    });
+                    let killed = kill_rx.recv_timeout(REAP_GRACE).unwrap_or(false);
                     let reap_deadline = std::time::Instant::now() + REAP_GRACE;
                     let mut reaped = false;
                     while std::time::Instant::now() < reap_deadline {
