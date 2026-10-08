@@ -198,19 +198,29 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// parked on a reaper that owns its handle - the call never blocks on it.
 /// The caller parks the target child on the same contract, so a late kill
 /// can only ever meet its own target's reserved pid.
+/// Windows: `taskkill /F /T /PID <pid>` from the absolute System32 path -
+/// a bare `taskkill` name could resolve a planted CWD executable. True
+/// only when taskkill exited 0, the same proof TS's `result.status === 0`
+/// requires.
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
-    let (killed, released) = kill_process_group_or_pid_pinned(pid);
-    // A parked helper that outlives its own kill may still act on the pid:
-    // this caller cannot hold the target's handle, so the wrapper waits one
-    // more grace for the helper to die before returning. The callers that
-    // own their target use the pinned variant, whose pin holds for as long
-    // as the helper can act.
-    if let Some(released) = released {
-        let _ = released.recv_timeout(TASKKILL_GRACE);
+    if pid <= 0 {
+        return false;
     }
-    killed
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
+    let taskkill = std::path::Path::new(&system_root)
+        .join("System32")
+        .join("taskkill.exe");
+    let mut command = Command::new(&taskkill);
+    command
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    set_no_window(&mut command);
+    command.status().is_ok_and(|status| status.success())
 }
 
 /// The bootstrap arm: like [`kill_process_group_or_pid`], and on the
