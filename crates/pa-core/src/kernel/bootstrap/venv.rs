@@ -198,6 +198,14 @@ async fn run_async(
                             Err(_) => break,
                         }
                     }
+                    // On Windows the kill helper may still be parking its
+                    // own reap: the child rides a parked reaper here so
+                    // its pid stays reserved until it exits, and a late
+                    // kill can only ever meet its own target.
+                    #[cfg(windows)]
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
                     drop(drains);
                     let outcome = match (killed, reaped) {
                         (true, true) => "was terminated",

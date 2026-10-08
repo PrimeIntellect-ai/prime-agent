@@ -193,10 +193,11 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// only when taskkill exited 0, the same proof TS's `result.status === 0`
 /// requires.
 ///
-/// The wait on taskkill is bounded: on expiry the helper kills its OWN
-/// child, so a hung tree walk cannot hang the caller, and the call stays
-/// synchronous - the target's handle is still open in the caller, so a
-/// late kill can never reach a recycled pid.
+/// The wait on taskkill is bounded: a helper that misses the grace is
+/// killed and given one more grace, and a helper that survives both is
+/// parked on a reaper that owns its handle - the call never blocks on it.
+/// The caller parks the target child on the same contract, so a late kill
+/// can only ever meet its own target's reserved pid.
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
@@ -223,8 +224,21 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
         match helper.try_wait() {
             Ok(Some(status)) => return status.success(),
             Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = helper.kill();
-                let _ = helper.wait();
+                // The helper gets one kill and one more grace to take it;
+                // a helper that survives both is parked on a reaper that
+                // owns its handle - this call never waits on it.
+                if helper.kill().is_ok() {
+                    let reap_deadline = std::time::Instant::now() + TASKKILL_GRACE;
+                    while std::time::Instant::now() < reap_deadline {
+                        match helper.try_wait() {
+                            Ok(Some(_)) => return false,
+                            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        }
+                    }
+                }
+                std::thread::spawn(move || {
+                    let _ = helper.wait();
+                });
                 return false;
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
