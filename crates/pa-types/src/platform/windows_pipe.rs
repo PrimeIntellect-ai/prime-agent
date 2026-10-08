@@ -239,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn second_bind_on_a_live_pipe_name_fails() {
         let path = test_pipe("bind-conflict");
-        bind_transport(&path).await.expect("first bind");
+        let _listener = bind_transport(&path).await.expect("first bind");
         let error = bind_transport(&path)
             .await
             .err()
