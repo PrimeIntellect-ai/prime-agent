@@ -754,12 +754,6 @@ bitflags! {
         ///
         /// **Note:** this is set for the initial press of Num Lock itself.
         const NUM_LOCK = 0b0000_0100;
-        /// The key event was parsed from a Kitty-protocol `CSI u` sequence rather than a
-        /// raw key byte (vendored flag). The parser folds both encodings into the same
-        /// `KeyEvent` for printable keys; pa-tui's enhanced-key filters need the origin to
-        /// reproduce the TS sequence-level behavior (the raw-text duplicate of one CSI-u
-        /// keypress collapses; a raw pair never does).
-        const KITTY_CSI_U = 0b0000_1000;
         const NONE = 0b0000_0000;
     }
 }

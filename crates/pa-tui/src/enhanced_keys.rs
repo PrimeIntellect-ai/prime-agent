@@ -13,16 +13,6 @@
 //! levels — bare pops after the alt-screen leave, clamped no-ops at
 //! spec depth zero (see `STALE_LEVEL_DRAIN`).
 //!
-//! THE PUSH ORDERING (the per-screen flags stack): the kitty flags are PER-SCREEN in
-//! Ghostty (`Screen.zig` owns the `kitty_keyboard` stack; a fresh alternate screen starts
-//! empty), so the push must land while the ALTERNATE screen is active. The interactive
-//! surface defers its alt-screen enter to the first draw's flush (one-paint doctrine), so
-//! the setup's push QUEUES for the mount (`queue_mount_or_push_kitty_flags`) and the first
-//! draw writes it right after the enter (app.rs `mount_push`). A push written at setup
-//! time arms the PRIMARY screen and the app runs with kitty disabled — a legacy-mode
-//! Ghostty then encodes shift+enter as the xterm modifyOtherKeys `CSI 27;2;13~`, which
-//! the unpatched crossterm parser drops whole (the 2026-10-07 shift+enter report).
-//!
 //! The kitty query runs on a probe thread that holds no UI state: it
 //! blocks inside crossterm's terminal support check until the terminal
 //! answers (or its patched 250ms budget lapses) while the fallback timer
@@ -70,19 +60,9 @@
 //! 250ms — measured: the raced suspend's teardown waits to ~250ms on a
 //! silent pty and lands at its dispatch on every answered class).
 //!
-//! DIVERGENCE FROM TS (the shift-modified printable bug class): this port
-//! never arms modifyOtherKeys mode 2 and instead resets it
-//! (`\x1b[>4;0m`) at every surface start. TS parses the resulting
-//! `CSI 27;<mods>;<key>~` sequences itself (keys.ts
-//! `parseModifyOtherKeysSequence`), but crossterm 0.28 has no case for
-//! them and drops the whole pending input buffer on the parse error
-//! (`Parser::advance` clears on `Err`) — a terminal in mode 2 (a sticky
-//! mode any other pane or process may have armed) makes shift-modified
-//! printables like `shift+=` vanish entirely. The reset returns such
-//! terminals to legacy encodings (shift+= arrives as the produced `+`),
-//! and the kitty path covers the enhanced-reporting surface crossterm
-//! can parse (kitty CSI-u with shifted alternates resolves to the
-//! produced character in crossterm's own parser).
+//! We reset modifyOtherKeys mode 2 at each surface start to keep legacy
+//! printable-key behavior. Some terminals still emit modifyOtherKeys for
+//! modified control keys; the vendored parser accepts those reports.
 //!
 //! Every mode-flag transition is serialized (a module-wide lock pairs each
 //! flag write with its escape write), and the force-quit exit path marks
@@ -154,9 +134,6 @@ static MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// time: an in-flight kitty probe must stand down instead of pushing the
 /// flags back on after the exit restore popped them.
 static EXIT_RELEASE: AtomicBool = AtomicBool::new(false);
-/// The kitty flags push was deferred to the alt-screen mount (the flags stack is
-/// per-screen; see `queue_mount_or_push_kitty_flags`).
-static MOUNT_PUSH_QUEUED: AtomicBool = AtomicBool::new(false);
 
 fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
     MODE_LOCK
@@ -164,10 +141,10 @@ fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Whether the kitty probe's answer window is open. The input reader keys
-/// its bounded poll cadence on this so its park cannot starve the probe.
-pub(crate) fn query_in_flight() -> bool {
-    QUERY_IN_FLIGHT.load(Ordering::SeqCst)
+/// Whether Kitty setup or its probe is pending. Keep input polls bounded even
+/// before the first draw starts the probe, so an idle reader cannot starve it.
+pub(crate) fn kitty_probe_pending() -> bool {
+    !KITTY_PROBED.load(Ordering::SeqCst) || QUERY_IN_FLIGHT.load(Ordering::SeqCst)
 }
 
 /// Mark the terminal released for process exit, before writing the restore
@@ -296,6 +273,11 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         write_all(out, ENABLE_BRACKETED_PASTE)?;
     }
     write_all(out, MODIFY_OTHER_KEYS_RESET)?;
+    // Ghostty keeps keyboard flags per screen. The first draw enables Kitty once
+    // the alternate screen is painted; bracketed paste is already safe to enable.
+    if !crate::altscreen::active() {
+        return Ok(());
+    }
     match kitty_action(
         KITTY_SUPPORTED.load(Ordering::SeqCst),
         KITTY_PROBED.load(Ordering::SeqCst),
@@ -309,12 +291,16 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
                 KeyboardCapability::Supported => {
                     KITTY_PROBED.store(true, Ordering::SeqCst);
                     record_kitty_supported();
-                    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-                        // The push lands on the ACTIVE screen, or queues for the pending
-                        // alt-screen mount — the flags stack is per-screen (see
-                        // `queue_mount_or_push_kitty_flags`); the stale-level drain inside it
-                        // clears the levels a killed session (or a miscounting relay) left.
-                        queue_mount_or_push_kitty_flags(out)?;
+                    if !KITTY_ACTIVE.load(Ordering::SeqCst) {
+                        // The stale-level drain: clear the levels a
+                        // killed session (or a miscounting relay) left
+                        // before this process's own push (see
+                        // STALE_LEVEL_DRAIN).
+                        for _ in 0..STALE_LEVEL_DRAIN {
+                            write_all(out, POP_KITTY_FLAGS)?;
+                        }
+                        write_all(out, ENABLE_KITTY_FLAGS)?;
+                        KITTY_ACTIVE.store(true, Ordering::SeqCst);
                     }
                 }
                 KeyboardCapability::Unsupported => {
@@ -329,12 +315,15 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
             }
         }
         KittyAction::PushFlags => {
-            if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-                // The push lands on the ACTIVE screen, or queues for the pending
-                // alt-screen mount (the flags stack is per-screen); a suspend's pop and
-                // resume's re-push stay balanced, and the drain inside clears a stale
-                // level from a killed session (see STALE_LEVEL_DRAIN).
-                queue_mount_or_push_kitty_flags(out)?;
+            if !KITTY_ACTIVE.load(Ordering::SeqCst) {
+                // The stale-level drain (see STALE_LEVEL_DRAIN): a
+                // suspend's pop and resume's re-push stay balanced; a
+                // stale level from a killed session levels out here.
+                for _ in 0..STALE_LEVEL_DRAIN {
+                    write_all(out, POP_KITTY_FLAGS)?;
+                }
+                write_all(out, ENABLE_KITTY_FLAGS)?;
+                KITTY_ACTIVE.store(true, Ordering::SeqCst);
             }
         }
         KittyAction::None => {}
@@ -430,8 +419,8 @@ const DRAIN_IDLE: Duration = Duration::from_millis(50);
 /// second Ctrl+C, 1.5s of which elapses before the watchdog fires.
 const EXIT_DRAIN_MAX: Duration = Duration::from_millis(400);
 
-/// Whether the kitty keyboard protocol is active. The LF and ESC-CR mappings (both are
-/// shift+enter under kitty, enter/alt+enter in legacy mode) and the kitty-printable
+/// Whether the kitty keyboard protocol is active. The LF mapping (`\n` is
+/// shift+enter under kitty, enter in legacy mode) and the kitty-printable
 /// dedup only apply while kitty events can arrive.
 pub(crate) fn kitty_active() -> bool {
     KITTY_ACTIVE.load(Ordering::SeqCst)
@@ -441,13 +430,6 @@ pub(crate) fn kitty_active() -> bool {
 #[cfg(test)]
 pub(crate) fn set_kitty_active_for_tests(active: bool) {
     KITTY_ACTIVE.store(active, Ordering::SeqCst);
-}
-
-/// Set the alt-screen mount state for unit tests of the push deferral (the states are
-/// process-global; the caller restores them before releasing the test lock).
-#[cfg(test)]
-pub(crate) fn set_mount_for_tests(mount_pending: bool) {
-    crate::altscreen::set_for_tests(!mount_pending, mount_pending);
 }
 
 /// The lock every test that flips the process-global enhanced-keys state holds.
@@ -487,35 +469,6 @@ fn write_all(out: &mut Stdout, sequence: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// The kitty flags push, written onto the ACTIVE screen or queued for the pending
-/// alt-screen mount (see [`queue_mount_or_push_kitty_flags`]): Ghostty keeps the kitty
-/// keyboard flags per screen — a fresh alternate screen starts with an empty stack
-/// (`Screen.zig` owns `kitty_keyboard` and resets it), so a push written before the
-/// alt-screen enter arms the PRIMARY screen and the app runs with kitty disabled
-/// (the 2026-10-07 shift+enter report: a legacy-mode Ghostty then encodes shift+enter as
-/// the xterm modifyOtherKeys `CSI 27;2;13~`, which the unpatched crossterm parser drops
-/// whole).
-fn queue_mount_or_push_kitty_flags(out: &mut Stdout) -> Result<()> {
-    if crate::altscreen::mount_pending() {
-        MOUNT_PUSH_QUEUED.store(true, Ordering::SeqCst);
-        return Ok(());
-    }
-    for _ in 0..STALE_LEVEL_DRAIN {
-        write_all(out, POP_KITTY_FLAGS)?;
-    }
-    write_all(out, ENABLE_KITTY_FLAGS)
-}
-
-/// The deferred flags push of a pending mount: the first draw has already entered the
-/// alternate screen, so the push lands on the screen the app runs on. The fresh alternate
-/// stack is empty, so no stale-level drain runs here.
-pub(crate) fn mount_push(out: &mut Stdout) -> Result<()> {
-    if MOUNT_PUSH_QUEUED.swap(false, Ordering::SeqCst) {
-        write_all(out, ENABLE_KITTY_FLAGS)?;
-    }
-    Ok(())
-}
-
 /// Enable the kitty protocol (TS writes `\x1b[>7u` when the query answer
 /// arrives). Skipped when the surface that started the probe is already
 /// gone — a stray enable would leave the flags pushed over the next
@@ -531,10 +484,13 @@ fn enable_kitty(out: &mut Stdout) {
     if EXIT_RELEASE.load(Ordering::SeqCst) {
         return;
     }
-    if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
-        // The push lands on the active screen, or queues for the pending alt-screen mount
-        // (the stale-level drain inside queues with it).
-        let _ = queue_mount_or_push_kitty_flags(out);
+    if !KITTY_ACTIVE.load(Ordering::SeqCst) {
+        // The stale-level drain (see STALE_LEVEL_DRAIN): the probe
+        // answer's push drains the stale levels too.
+        for _ in 0..STALE_LEVEL_DRAIN {
+            let _ = write_all(out, POP_KITTY_FLAGS);
+        }
+        KITTY_ACTIVE.store(write_all(out, ENABLE_KITTY_FLAGS).is_ok(), Ordering::SeqCst);
     }
 }
 
@@ -669,40 +625,6 @@ mod tests {
         KITTY_SUPPORTED.store(false, Ordering::SeqCst);
         KITTY_PROBED.store(false, Ordering::SeqCst);
         EXIT_RELEASE.store(false, Ordering::SeqCst);
-        MOUNT_PUSH_QUEUED.store(false, Ordering::SeqCst);
-    }
-
-    /// The kitty flags push defers while the alt-screen mount is pending (the flags stack is
-    /// per-screen: a push at setup time would arm the primary screen, and the fresh alternate
-    /// screen would run in legacy mode), and the mount's push consumes the queue. With the
-    /// alternate screen already active — a later surface, a resume — the push writes at the
-    /// enable and queues nothing.
-    #[test]
-    fn kitty_push_defers_to_the_pending_alt_screen_mount() {
-        let _lock = lock_state();
-        reset_state();
-
-        // The pending mount: the push queues for the first draw.
-        set_mount_for_tests(true);
-        queue_mount_or_push_kitty_flags(&mut std::io::stdout()).unwrap();
-        assert!(
-            MOUNT_PUSH_QUEUED.load(Ordering::SeqCst),
-            "the pending mount defers the flags push"
-        );
-        // The mount has entered the screen by the time it runs: the queued push lands.
-        set_mount_for_tests(false);
-        mount_push(&mut std::io::stdout()).unwrap();
-        assert!(
-            !MOUNT_PUSH_QUEUED.load(Ordering::SeqCst),
-            "the mount consumes the queued push"
-        );
-
-        // The alternate screen already active: no deferral, nothing queued.
-        queue_mount_or_push_kitty_flags(&mut std::io::stdout()).unwrap();
-        assert!(
-            !MOUNT_PUSH_QUEUED.load(Ordering::SeqCst),
-            "an active screen pushes at the enable"
-        );
     }
 
     #[test]

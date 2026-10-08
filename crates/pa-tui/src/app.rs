@@ -249,14 +249,10 @@ pub(crate) fn draw(
     // The mount sequences (the alt-screen adopt/enter, the queued clear, the cursor hide) ride
     // THIS draw's single flush: the first paint is the mount, and a mid-gap flush can never
     // carry the clear out early over it.
-    if crate::altscreen::take_first_draw_mount() {
+    let mounting = crate::altscreen::take_first_draw_mount();
+    if mounting {
         let mut out = std::io::stdout();
         crate::altscreen::enter_queued(&mut out)?;
-        // The deferred kitty flags push lands HERE — after the alternate-screen enter, on
-        // the screen the app runs on (the flags stack is per-screen in Ghostty; a push
-        // written at setup time would arm the primary screen and leave the alternate
-        // screen in legacy mode).
-        crate::enhanced_keys::mount_push(&mut out)?;
         crossterm::queue!(
             out,
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -314,7 +310,12 @@ pub(crate) fn draw(
     // Always release the terminal's pending update, including on paint errors.
     crossterm::execute!(stdout(), terminal::EndSynchronizedUpdate)?;
     painted?;
-    markers
+    markers?;
+    if mounting {
+        // Mode setup flushes stdout, so it must follow the completed first paint.
+        crate::enhanced_keys::enable(&mut stdout())?;
+    }
+    Ok(())
 }
 
 /// Write OSC 133 zone-marker sequences at their frame rows. The sequences are zero-width: only

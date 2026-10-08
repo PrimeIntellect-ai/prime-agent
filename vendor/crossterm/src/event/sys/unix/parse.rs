@@ -610,7 +610,7 @@ pub(crate) fn parse_csi_u_encoded_key_code(buffer: &[u8]) -> io::Result<Option<I
         keycode,
         modifiers,
         kind,
-        state_from_keycode | state_from_modifiers | KeyEventState::KITTY_CSI_U,
+        state_from_keycode | state_from_modifiers,
     ));
 
     Ok(Some(InternalEvent::Event(input_event)))
@@ -622,18 +622,30 @@ pub(crate) fn parse_csi_special_key_code(buffer: &[u8]) -> io::Result<Option<Int
 
     let s = std::str::from_utf8(&buffer[2..buffer.len() - 1])
         .map_err(|_| could_not_parse_event_error())?;
-    // Vendored (pa-tui): the xterm modifyOtherKeys functional form `CSI 27;<mods>;<key>~` —
-    // Ghostty's legacy encoding for modified function keys (its shift+enter, ctrl+tab, ...).
-    // crossterm 0.28 has no case for it, and the parse error drops the whole pending
-    // input buffer, so a legacy-mode terminal's shift+enter would vanish; TS parses the
-    // same form (keys.ts `parseModifyOtherKeysSequence`).
-    if s.starts_with("27;") {
-        return parse_csi_modify_other_keys(buffer);
-    }
     let mut split = s.split(';');
 
     // This CSI sequence can be a list of semicolon-separated numbers.
     let first = next_parsed::<u8>(&mut split)?;
+
+    // Ghostty emits modifyOtherKeys for modified control keys when Kitty is inactive.
+    if first == 27 {
+        let modifiers = parse_modifiers(next_parsed::<u8>(&mut split)?);
+        let codepoint = next_parsed::<u32>(&mut split)?;
+        if split.next().is_some() {
+            return Err(could_not_parse_event_error());
+        }
+        let keycode = match char::from_u32(codepoint).ok_or_else(could_not_parse_event_error)? {
+            '\r' => KeyCode::Enter,
+            '\x1b' => KeyCode::Esc,
+            '\t' if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+            '\t' => KeyCode::Tab,
+            '\x7f' => KeyCode::Backspace,
+            c => KeyCode::Char(c),
+        };
+        return Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            keycode, modifiers,
+        )))));
+    }
 
     let (modifiers, kind, state) =
         if let Ok((modifier_mask, kind_code)) = modifier_and_kind_parsed(&mut split) {
@@ -665,52 +677,6 @@ pub(crate) fn parse_csi_special_key_code(buffer: &[u8]) -> io::Result<Option<Int
         keycode, modifiers, kind, state,
     ));
 
-    Ok(Some(InternalEvent::Event(input_event)))
-}
-
-/// Vendored (pa-tui): the xterm modifyOtherKeys key report `CSI 27;<mods>;<key>~` — the
-/// legacy functional-key encoding Ghostty (and mode-2 xterm/iTerm2) terminals emit for
-/// modified function keys when the kitty protocol is not active on the current screen.
-/// The modifier mask is one-indexed like the kitty CSI-u mask (bit 1 shift, 2 alt, 4
-/// ctrl, ...); the third field is the key's keysym (13 enter, 27 escape, 9 tab, 127
-/// backspace, else the character). The four-field text form is not handled (TS's regex
-/// does not admit it either).
-fn parse_csi_modify_other_keys(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
-    assert!(buffer.starts_with(&[b'\x1B', b'['])); // ESC [
-    assert!(buffer.ends_with(&[b'~']));
-
-    let s = std::str::from_utf8(&buffer[2..buffer.len() - 1])
-        .map_err(|_| could_not_parse_event_error())?;
-    let mut fields = s.split(';');
-    if fields.next() != Some("27") {
-        return Err(could_not_parse_event_error());
-    }
-    let modifier_mask = next_parsed::<u8>(&mut fields)?;
-    let codepoint = next_parsed::<u32>(&mut fields)?;
-    if fields.next().is_some() {
-        return Err(could_not_parse_event_error());
-    }
-    let modifiers = parse_modifiers(modifier_mask);
-    let keycode = match char::from_u32(codepoint) {
-        Some('\r') => KeyCode::Enter,
-        Some('\x1B') => KeyCode::Esc,
-        Some('\t') => {
-            if modifiers.contains(KeyModifiers::SHIFT) {
-                KeyCode::BackTab
-            } else {
-                KeyCode::Tab
-            }
-        }
-        Some('\x7f') => KeyCode::Backspace,
-        Some(c) => KeyCode::Char(c),
-        None => return Err(could_not_parse_event_error()),
-    };
-    let input_event = Event::Key(KeyEvent::new_with_kind_and_state(
-        keycode,
-        modifiers,
-        KeyEventKind::Press,
-        KeyEventState::NONE,
-    ));
     Ok(Some(InternalEvent::Event(input_event)))
 }
 
@@ -1269,29 +1235,23 @@ mod tests {
     fn test_parse_basic_csi_u_encoded_key_code() {
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('a'),
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;2u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('A'),
-                KeyModifiers::SHIFT,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::SHIFT
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;7u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('a'),
-                KeyModifiers::ALT | KeyModifiers::CONTROL,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::ALT | KeyModifiers::CONTROL
             )))),
         );
     }
@@ -1300,56 +1260,44 @@ mod tests {
     fn test_parse_basic_csi_u_encoded_key_code_special_keys() {
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[13u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Enter,
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[27u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Esc,
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57358u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::CapsLock,
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57376u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::F(13),
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57428u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Media(MediaKeyCode::Play),
-                KeyModifiers::empty(),
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::empty()
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57441u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Modifier(ModifierKeyCode::LeftShift),
                 KeyModifiers::SHIFT,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
     }
@@ -1363,7 +1311,7 @@ mod tests {
                     KeyCode::Char('0'),
                     KeyModifiers::empty(),
                     KeyEventKind::Press,
-                    KeyEventState::KEYPAD | KeyEventState::KITTY_CSI_U,
+                    KeyEventState::KEYPAD,
                 )
             ))),
         );
@@ -1374,7 +1322,7 @@ mod tests {
                     KeyCode::Up,
                     KeyModifiers::empty(),
                     KeyEventKind::Press,
-                    KeyEventState::KEYPAD | KeyEventState::KITTY_CSI_U,
+                    KeyEventState::KEYPAD,
                 )
             ))),
         );
@@ -1384,47 +1332,42 @@ mod tests {
     fn test_parse_csi_u_encoded_key_code_with_types() {
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;1u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Char('a'),
                 KeyModifiers::empty(),
                 KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;1:1u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Char('a'),
                 KeyModifiers::empty(),
                 KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;5:1u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Char('a'),
                 KeyModifiers::CONTROL,
                 KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;1:2u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Char('a'),
                 KeyModifiers::empty(),
                 KeyEventKind::Repeat,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;1:3u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Char('a'),
                 KeyModifiers::empty(),
                 KeyEventKind::Release,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
     }
@@ -1433,47 +1376,39 @@ mod tests {
     fn test_parse_csi_u_encoded_key_code_has_modifier_on_modifier_press() {
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57449u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Modifier(ModifierKeyCode::RightAlt),
                 KeyModifiers::ALT,
                 KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57449;3:3u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind(
                 KeyCode::Modifier(ModifierKeyCode::RightAlt),
                 KeyModifiers::ALT,
                 KeyEventKind::Release,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57450u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Modifier(ModifierKeyCode::RightSuper),
                 KeyModifiers::SUPER,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57451u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Modifier(ModifierKeyCode::RightHyper),
                 KeyModifiers::HYPER,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[57452u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Modifier(ModifierKeyCode::RightMeta),
                 KeyModifiers::META,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
     }
@@ -1482,29 +1417,23 @@ mod tests {
     fn test_parse_csi_u_encoded_key_code_with_extra_modifiers() {
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;9u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('a'),
-                KeyModifiers::SUPER,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
+                KeyModifiers::SUPER
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;17u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('a'),
                 KeyModifiers::HYPER,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             parse_csi_u_encoded_key_code(b"\x1B[97;33u").unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('a'),
                 KeyModifiers::META,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
     }
@@ -1518,7 +1447,7 @@ mod tests {
                     KeyCode::Char('a'),
                     KeyModifiers::empty(),
                     KeyEventKind::Press,
-                    KeyEventState::CAPS_LOCK | KeyEventState::KITTY_CSI_U,
+                    KeyEventState::CAPS_LOCK,
                 )
             ))),
         );
@@ -1529,7 +1458,7 @@ mod tests {
                     KeyCode::Char('1'),
                     KeyModifiers::empty(),
                     KeyEventKind::Press,
-                    KeyEventState::NUM_LOCK | KeyEventState::KITTY_CSI_U,
+                    KeyEventState::NUM_LOCK,
                 )
             ))),
         );
@@ -1540,65 +1469,46 @@ mod tests {
         assert_eq!(
             // A-S-9 is equivalent to A-(
             parse_event(b"\x1B[57:40;4u", false).unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('('),
                 KeyModifiers::ALT,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
         assert_eq!(
             // A-S-minus is equivalent to A-_
             parse_event(b"\x1B[45:95;4u", false).unwrap(),
-            Some(InternalEvent::Event(Event::Key(KeyEvent::new_with_kind_and_state(
+            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
                 KeyCode::Char('_'),
                 KeyModifiers::ALT,
-                KeyEventKind::Press,
-                KeyEventState::KITTY_CSI_U
             )))),
         );
     }
 
     #[test]
-    fn test_parse_csi_modify_other_keys() {
-        // The xterm modifyOtherKeys functional form (vendored for pa-tui: Ghostty's
-        // legacy shift+enter and friends).
-        assert_eq!(
-            parse_csi_modify_other_keys(b"\x1B[27;2;13~").unwrap(),
-            Some(InternalEvent::Event(Event::Key(
-                KeyEvent::new_with_kind_and_state(
-                    KeyCode::Enter,
-                    KeyModifiers::SHIFT,
-                    KeyEventKind::Press,
-                    KeyEventState::NONE,
-                )
-            ))),
-        );
-        assert_eq!(
-            parse_csi_modify_other_keys(b"\x1B[27;5;13~").unwrap(),
-            Some(InternalEvent::Event(Event::Key(
-                KeyEvent::new_with_kind_and_state(
-                    KeyCode::Enter,
-                    KeyModifiers::CONTROL,
-                    KeyEventKind::Press,
-                    KeyEventState::NONE,
-                )
-            ))),
-        );
-        // Shift+tab is the BackTab identity, like the kitty CSI-u form.
-        assert_eq!(
-            parse_csi_modify_other_keys(b"\x1B[27;2;9~").unwrap(),
-            Some(InternalEvent::Event(Event::Key(
-                KeyEvent::new_with_kind_and_state(
-                    KeyCode::BackTab,
-                    KeyModifiers::SHIFT,
-                    KeyEventKind::Press,
-                    KeyEventState::NONE,
-                )
-            ))),
-        );
-        // The four-field text form is not handled (TS's regex does not admit it either).
-        assert!(parse_csi_modify_other_keys(b"\x1B[27;2;13;13~").is_err());
+    fn test_parse_modify_other_keys() {
+        for (sequence, code, modifiers) in [
+            ("\x1b[27;2;13~", KeyCode::Enter, KeyModifiers::SHIFT),
+            ("\x1b[27;5;13~", KeyCode::Enter, KeyModifiers::CONTROL),
+            ("\x1b[27;3;27~", KeyCode::Esc, KeyModifiers::ALT),
+            ("\x1b[27;2;9~", KeyCode::BackTab, KeyModifiers::SHIFT),
+            ("\x1b[27;5;9~", KeyCode::Tab, KeyModifiers::CONTROL),
+            ("\x1b[27;3;127~", KeyCode::Backspace, KeyModifiers::ALT),
+            ("\x1b[27;5;97~", KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                parse_event(sequence.as_bytes(), false).unwrap(),
+                Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+                    code, modifiers
+                )))),
+                "{sequence:?}"
+            );
+        }
+        for sequence in ["\x1b[27;2~", "\x1b[27;2;13;13~", "\x1b[27;2;1114112~"] {
+            assert!(
+                parse_event(sequence.as_bytes(), false).is_err(),
+                "{sequence:?}"
+            );
+        }
     }
 
     #[test]
