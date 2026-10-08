@@ -498,15 +498,16 @@ fn reload_clears_headers_when_the_fresh_credential_carries_none() {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
         .expect("the reload keeps the target set");
-    assert_eq!(
-        target.api_key.as_deref(),
-        Some("solo-key"),
+    // The resolved credential never formats into a failure message: an
+    // api key is sensitive data (CodeQL's cleartext-logging rule), so the
+    // assertion compares without the assert_eq! formatting sink.
+    assert!(
+        target.api_key.as_deref() == Some("solo-key"),
         "the reload rebinds the request auth to the fresh stored credential"
     );
     assert!(
         target.headers.is_none(),
-        "the fresh credential clears the stale team header: {:?}",
-        target.headers
+        "the fresh credential clears the stale team header"
     );
 }
 
@@ -527,14 +528,15 @@ fn restored_primary_target_serves_the_resolved_header_pair() {
         Some("captured-key".to_string()),
         Some(team_headers("old-team")),
     );
-    assert_eq!(
-        restored.api_key.as_deref(),
-        Some("solo-key"),
+    // The resolved credential never formats into a failure message: an
+    // api key is sensitive data (CodeQL's cleartext-logging rule), so the
+    // assertion compares without the assert_eq! formatting sink.
+    assert!(
+        restored.api_key.as_deref() == Some("solo-key"),
         "the restored primary serves the stored credential"
     );
     assert!(
         restored.headers.is_none(),
-        "the resolved pair replaces the captured headers: {:?}",
-        restored.headers
+        "the resolved pair replaces the captured headers"
     );
 }
