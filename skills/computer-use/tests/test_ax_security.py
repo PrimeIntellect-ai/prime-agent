@@ -351,7 +351,7 @@ class LiveIsSecureFailClosedTests(unittest.TestCase):
                 if attribute == "AXRole":
                     return (0, "AXTextField")
                 if attribute == "AXSubrole":
-                    return (-25212, None)  # the subrole read itself fails
+                    return (-25204, None)  # the subrole read cannot complete
                 if attribute == "AXValue":
                     return (0, "hunter2")
                 return (0, None)
@@ -620,6 +620,73 @@ class ObserveFocusReadTests(unittest.TestCase):
         with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=app)):
             ax._observe(4242)
         self.assertNotIn("AXFocusedUIElement", read_attributes)
+
+
+class NoValueSubroleTests(unittest.TestCase):
+    def test_a_novalue_subrole_reads_as_an_ordinary_field(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXRole":
+                    return (0, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (-25212, None)  # kAXErrorNoValue: the subrole exists and is empty
+                if attribute == "AXValue":
+                    return (0, "hello")
+                return (0, None)
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIs(ax._focused_is_secure(4242), False)
+            self.assertIs(ax._live_is_secure("ref"), False)
+        described = ax._describe(services, "element")
+        self.assertIsNone(described["subrole"])
+        self.assertEqual(described["value"], "hello")
+
+
+class SecureRoleOnlyTests(unittest.TestCase):
+    def test_a_role_only_secure_field_is_refused_everywhere(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedWindow":
+                    return (0, self)
+                if attribute == "AXFocusedUIElement":
+                    return (0, self.focused)
+                if attribute == "AXRole":
+                    return (0, "AXSecureTextField")  # the secure role exposed directly
+                if attribute == "AXSubrole":
+                    return (-25205, None)  # no subrole attribute at all
+                if attribute == "AXValue":
+                    return (0, "hunter2")
+                return (0, None)
+
+        services = Services()
+        focus = object()
+        services.focused = focus
+        self.assertTrue(ax._is_secure_field({"role": "AXSecureTextField", "subrole": None}))
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertTrue(ax._focused_is_secure(4242))
+            self.assertTrue(ax._live_is_secure("ref"))
+            fingerprint = ax._window_fingerprint(4242)
+        self.assertEqual(fingerprint[4], "", "the settle fingerprint never reads a secure field's value")
+        described = ax._describe(services, "element")
+        self.assertEqual(described["subrole"], "AXSecureTextField")
+        self.assertIsNone(described["value"])
 
 
 if __name__ == "__main__":

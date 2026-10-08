@@ -31,8 +31,10 @@ _SECURE_SUBROLE = "AXSecureTextField"
 _WINDOW_ID_ATTRIBUTE = "_AXWindowID"
 
 # kAXErrorAttributeUnsupported answers authoritatively: the element has no
-# such attribute, a definitive absence rather than an unverifiable read.
+# such attribute. kAXErrorNoValue answers that the attribute exists with no
+# value. Both are determinate absences, not unverifiable reads.
 _AX_ERROR_ATTRIBUTE_UNSUPPORTED = -25205
+_AX_ERROR_NO_VALUE = -25212
 
 _SKILL_ROOT = Path(__file__).resolve().parents[2]
 _PACKAGED_INSTRUCTIONS_DIR = Path(__file__).resolve().parent / "references" / "app-instructions"
@@ -58,8 +60,14 @@ class Observation(NamedTuple):
 
 
 def _is_secure_field(element: dict[str, Any]) -> bool:
-    """Report whether one element is a secure text field (password input)."""
-    return element.get("role") == _SECURE_ROLE and element.get("subrole") == _SECURE_SUBROLE
+    """Report whether one element is a secure text field (password input).
+
+    AppKit normally marks a password input as AXTextField with the
+    AXSecureTextField subrole, but elements that expose the secure role
+    directly are refused the same way: the secure marker decides, wherever
+    it appears.
+    """
+    return _SECURE_SUBROLE in (element.get("role"), element.get("subrole"))
 
 
 def _flatten(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -224,14 +232,15 @@ def _read_attribute(app_services: Any, element: Any, attribute: str, timeout_sec
 
 
 def _read_subrole(app_services: Any, element: Any, timeout_seconds: float | None = None) -> tuple[bool, str | None]:
-    """Read AXSubrole, telling an unsupported attribute from a failed read.
+    """Read AXSubrole, telling a determinate absence from a failed read.
 
-    Most controls have no subrole attribute at all: kAXErrorAttributeUnsupported
-    answers that authoritatively (ok=True, None), so an ordinary field is
-    never unverifiable and never fails the secure gate. Every other error stays
-    (ok=False, None) and callers fail closed on it. Only the subrole read is
-    allowed this: a role read that comes back unsupported is anomalous, not
-    evidence of an ordinary control.
+    Most controls have no subrole: kAXErrorAttributeUnsupported means the
+    element has no such attribute and kAXErrorNoValue means the attribute
+    exists with no value - both answer authoritatively (ok=True, None), so
+    an ordinary field is never unverifiable and never fails the secure gate.
+    Every other error stays (ok=False, None) and callers fail closed on it.
+    Only the subrole read is allowed this: a role read that comes back
+    unsupported is anomalous, not evidence of an ordinary control.
     """
     _set_messaging_timeout(app_services, element, timeout_seconds)
     try:
@@ -241,7 +250,7 @@ def _read_subrole(app_services: Any, element: Any, timeout_seconds: float | None
     error, value = _split_result(app_services, result)
     if error == app_services.kAXErrorSuccess:
         return True, _text(value)
-    if error == _AX_ERROR_ATTRIBUTE_UNSUPPORTED:
+    if error in (_AX_ERROR_ATTRIBUTE_UNSUPPORTED, _AX_ERROR_NO_VALUE):
         return True, None
     return False, None
 
@@ -312,7 +321,7 @@ def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple
         return (title, count, None, None, None)
     role_ok, role = read_attribute(focused, "AXRole")
     subrole_ok, subrole = read_subrole(focused)
-    if not role_ok or not subrole_ok or (role == _SECURE_ROLE and subrole == _SECURE_SUBROLE):
+    if not role_ok or not subrole_ok or _is_secure_field({"role": role, "subrole": subrole}):
         value_head = ""  # an unverifiable or secure field's value is never read
     else:
         value = read(focused, "AXValue")
@@ -460,6 +469,10 @@ def _describe(app_services: Any, element: Any, deadline: float | None = None) ->
     if not subrole_ok and (not role_ok or role == _SECURE_ROLE):
         # an unreadable subrole fails closed whenever the role could be a
         # text field, including when the role itself could not be read
+        subrole = _SECURE_SUBROLE
+    if _is_secure_field({"role": role, "subrole": subrole}):
+        # a secure marker in any shape - role-only included - never reads
+        # the field's value
         subrole = _SECURE_SUBROLE
     value = None if subrole == _SECURE_SUBROLE else _cap(_text(read("AXValue")))
     return {
