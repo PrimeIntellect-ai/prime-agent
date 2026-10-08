@@ -194,9 +194,8 @@ impl Renderer {
                 if mouse {
                     crate::mouse_tracking::enable(&mut std::io::stdout())?;
                 }
-                // Bracketed paste and the kitty keyboard protocol come up with the raw-mode
-                // bracket: pastes arrive as one chunk, and the kitty probe (once per process —
-                // see `enhanced_keys`) runs before the reader thread starts polling.
+                // Enable bracketed paste before the reader starts. On a fresh alternate
+                // screen, Kitty setup waits until the first draw finishes painting.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 spawn_session_reader(ui_tx.clone(), exit_guard.clone());
                 let terminal = Terminal::new(crate::hyperlinks::stdout_backend())?;
