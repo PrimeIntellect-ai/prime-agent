@@ -1,13 +1,7 @@
-//! Session-tree operations over the worker's session store.
-//!
-//! Port of the tree/branch/fork half of `core/session-manager.ts` over the
-//! worker's [`SessionFile`]: leaf moves (`branch`/`resetLeaf`), the
-//! `branch_summary` and `label` entries, the flat tree the `/tree` view
-//! reads, the user-message fork points, and the branched-file creation
-//! behind `fork`. Tree queries over typed entries go through
-//! `pa_types::session::FileEntry` round-trips so the pa-core helpers
-//! (branch-summary collection, context rebuilds) operate on the same
-//! wire-identical data the TS product persists.
+//! Session-tree operations over the worker's session store: leaf moves
+//! (`branch`/`resetLeaf`), the `branch_summary` and `label` entries, the flat
+//! tree the `/tree` view reads, and the branched-file creation behind `fork`.
+//! Typed-entry queries round-trip through `pa_types::session::FileEntry`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,8 +12,7 @@ use serde_json::{json, Value};
 use crate::session_store::{new_entry_id, session_file_name, SessionEntry, SessionFile};
 use pa_types::session::FileEntry;
 
-/// The active label state: latest `label` entry per target (TS
-/// `labelsById`/`labelTimestampsById`).
+/// The active label state: latest `label` entry per target (TS `labelsById`/`labelTimestampsById`).
 #[derive(Debug, Default)]
 pub struct LabelState {
     pub labels: HashMap<String, String>,
@@ -65,8 +58,8 @@ pub fn file_entries(store: &SessionFile) -> Vec<FileEntry> {
         .collect()
 }
 
-/// `get_session_tree` (TS `getFlatTree`): every entry in file order with its
-/// active label, the wire `flatNodes` shape.
+/// `get_session_tree`: every entry in file order with its active label, the
+/// wire `flatNodes` shape.
 #[must_use]
 pub fn flat_tree(store: &SessionFile) -> Vec<Value> {
     let labels = LabelState::from_entries(store.entries());
@@ -91,8 +84,7 @@ pub fn flat_tree(store: &SessionFile) -> Vec<Value> {
         .collect()
 }
 
-/// `get_user_messages_for_forking`: user messages with their text, in file
-/// order (TS `getUserMessagesForForking`).
+/// `get_user_messages_for_forking`: user messages with their text, in file order.
 #[must_use]
 pub fn user_messages_for_forking(store: &SessionFile) -> Vec<Value> {
     store
@@ -110,8 +102,7 @@ pub fn user_messages_for_forking(store: &SessionFile) -> Vec<Value> {
 }
 
 /// The durable entry id of one message value: messages persist as the only
-/// entry kind carrying a `message` field, so the owning entry matches by
-/// identity.
+/// entry kind carrying a `message` field, so the owning entry matches by identity.
 fn entry_id_of(store: &SessionFile, message: &Value) -> String {
     store
         .entries()
@@ -125,8 +116,7 @@ fn message_role(message: &Value) -> Option<&str> {
     message.get("role").and_then(Value::as_str)
 }
 
-/// Concatenated text of a message's string or text-block content (TS
-/// `_extractUserMessageText`).
+/// Concatenated text of a message's string or text-block content.
 fn message_text(message: &Value) -> String {
     match message.get("content") {
         Some(Value::String(text)) => text.clone(),
@@ -141,13 +131,12 @@ fn message_text(message: &Value) -> String {
 }
 
 impl SessionFile {
-    /// `branch` (TS `SessionManager.branch`): move the leaf onto an
-    /// existing entry; the next append parents from there.
+    /// `branch`: move the leaf onto an existing entry; the next append
+    /// parents from there.
     ///
     /// # Errors
     ///
-    /// Returns an error when the target entry does not exist in the
-    /// session; a `None` id clears the leaf and never errors.
+    /// Returns an error when the target entry does not exist; a `None` id clears the leaf.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
         match id {
             Some(id) => {
@@ -167,8 +156,7 @@ impl SessionFile {
     ///
     /// # Errors
     ///
-    /// Returns an error when the branch target does not exist or the
-    /// summary entry cannot be persisted.
+    /// Returns an error when the target does not exist or the summary cannot be persisted.
     pub fn append_branch_summary(
         &mut self,
         from_id: Option<&str>,
@@ -191,10 +179,8 @@ impl SessionFile {
             fields["usage"] = usage;
         }
         if let Some((provider, model_id)) = model {
-            // The serving model of the summary call (TS #2411's
-            // auxiliary routing): the per-model cost fold bills the
-            // row's spend on the model that billed it rather than the
-            // branch timeline.
+            // The serving model of the summary call: the per-model cost fold
+            // bills the row on the model that billed it.
             fields["provider"] = json!(provider);
             fields["modelId"] = json!(model_id);
         }
@@ -206,8 +192,7 @@ impl SessionFile {
     ///
     /// # Errors
     ///
-    /// Returns an error when the target entry does not exist or the
-    /// label entry cannot be persisted.
+    /// Returns an error when the target does not exist or the label entry cannot be persisted.
     pub fn append_label_change(&mut self, target_id: &str, label: Option<&str>) -> Result<String> {
         if self.entry(target_id).is_none() {
             return Err(anyhow!("Entry {target_id} not found"));
@@ -230,17 +215,14 @@ impl SessionFile {
             .collect()
     }
 
-    /// `createBranchedSession` (TS fork): write a new session file holding
-    /// the root-to-`leaf_id` path (label entries dropped from the path,
-    /// their targets' labels re-recorded as fresh label entries), with a
-    /// new header whose `parentSession` is this file. The caller re-points
-    /// the worker at the returned store.
+    /// `createBranchedSession`: write a new session file holding the
+    /// root-to-`leaf_id` path, with a new header whose `parentSession` is
+    /// this file. The caller re-points the worker at the returned store.
     ///
     /// # Errors
     ///
-    /// Returns an error when the leaf entry does not exist, the fork's
-    /// lease cannot be acquired, or the forked session file cannot be
-    /// written.
+    /// Returns an error when the leaf does not exist, the lease cannot be acquired, or
+    /// the forked file cannot be written.
     pub fn create_branched_file(&self, leaf_id: &str, session_dir: &Path) -> Result<SessionFile> {
         let path = self
             .branch_path_entries(leaf_id)
@@ -260,8 +242,7 @@ impl SessionFile {
         );
         forked.header.git =
             pa_core::session::manager::capture_git_context(Path::new(&self.header.cwd));
-        // Same directory as the source session, like TS
-        // `createUniqueSessionFileTarget(this.getSessionDir())`.
+        // Same directory as the source session, like TS `createUniqueSessionFileTarget`.
         let file = session_dir.join(session_file_name(forked.session_id()));
         forked.set_path(file);
         if let Some(lease) = &self.lease {
@@ -296,9 +277,8 @@ impl SessionFile {
         Ok(forked)
     }
 
-    /// The root-to-`leaf_id` entry path (None when the leaf is unknown).
-    /// The root-to-leaf path, guarded against a corrupt parent cycle
-    /// (like `SessionFile::branch` and `build_session_context`).
+    /// The root-to-`leaf_id` entry path (None when the leaf is unknown),
+    /// guarded against a corrupt parent cycle.
     fn branch_path_entries(&self, leaf_id: &str) -> Option<Vec<SessionEntry>> {
         let mut path = Vec::new();
         let mut visited = std::collections::HashSet::new();
@@ -324,14 +304,12 @@ impl SessionFile {
         self.entries.push(entry);
     }
 
-    /// In-memory fork (TS non-persisted `createBranchedSession`): replace
-    /// this store's entries with the root-to-`leaf_id` path, carrying the
-    /// labels of the kept entries.
+    /// In-memory fork: replace this store's entries with the root-to-`leaf_id`
+    /// path, carrying the labels of the kept entries.
     ///
     /// # Errors
     ///
-    /// Returns an error when the leaf entry does not exist (a `None` id
-    /// clears the session and never errors).
+    /// Returns an error when the leaf does not exist (a `None` id clears and never errors).
     pub fn replace_with_branch(&mut self, leaf_id: Option<&str>) -> Result<()> {
         let path: Vec<SessionEntry> = match leaf_id {
             Some(leaf_id) => self
@@ -379,17 +357,15 @@ impl SessionFile {
     }
 }
 
-/// The `parentSession` of a forked header: the source file's path, like TS
-/// `persist ? previousSessionFile : undefined` (empty for an in-memory
-/// session).
+/// The `parentSession` of a forked header: the source file's path; empty
+/// for an in-memory session.
 fn parent_session_of(store: &SessionFile) -> Option<&str> {
     (!store.path.as_os_str().is_empty())
         .then(|| store.path.to_str())
         .flatten()
 }
 
-/// Extract the plain text of a user-message entry (TS
-/// `_extractUserMessageText` over string or text-block content).
+/// Extract the plain text of a user-message entry (string or text-block content).
 #[must_use]
 pub fn user_entry_text(entry: &SessionEntry) -> Option<String> {
     if entry.type_ != "message" {
@@ -518,9 +494,8 @@ mod tests {
         assert_eq!(store.leaf_id(), Some(summary.as_str()));
     }
 
-    /// A summary served by an auxiliary model (TS #2411) persists its
-    /// serving identity on the entry: the per-model cost fold bills the
-    /// row on the model that billed it, not the branch timeline.
+    /// A summary served by an auxiliary model persists its serving identity on
+    /// the entry: the per-model cost fold bills the row on the model that billed it.
     #[test]
     fn branch_summary_entry_records_the_serving_model() {
         let (_dir, mut store) = temp_store();

@@ -1,29 +1,15 @@
 //! The session-hold refusal: what a create or open answers when a live
 //! process this daemon does not host holds the session file's runtime lease.
 //!
-//! The TS and Rust products share one session store (`~/.prime/agent`,
-//! the sessions dir and its `session-leases` table) but never share a
-//! daemon, so the holder of a refused file is, in the everyday case, the
-//! *other* product: a session open in the TypeScript version refuses to
-//! open in this one (and vice versa). The refusal names the holder's
-//! product by resolving its pid to the process image and classifying the
-//! executable - best-effort by design, the same contract as the liveness
-//! probes: an unresolvable holder stays anonymous rather than a wrong
-//! claim - and it is actionable (operator-directed): the two paths out
-//! carry copy-pasteable commands, never a bare description - continue in
-//! the holder's product (the exact `--resume` command for it), or take the
-//! session over on this daemon (`kill` the holder, then retry). The daemon
-//! logs every refused create (the supervisor's rotating log), so a
-//! silent-looking failure still leaves a clear record.
+//! The holder is usually the other product (named best-effort from its
+//! pid); the refusal stays actionable and every refused create is logged.
 
 use crate::lease::SessionAlreadyActiveError;
 use crate::protocol::{response_failure, DaemonResponse};
 use std::path::Path;
 
-/// The live holder of a refused session file, as the lease record names
-/// it: the process identity (pid) and, when the holder recorded one, its
-/// active session id. Both the daemon's typed lease rejection and the
-/// CLI's read-only lease probe reduce to this shape before rendering.
+/// The live holder of a refused session file, as the lease record names it:
+/// the pid and, when recorded, the active session id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoldIdentity {
     pub pid: Option<u32>,
@@ -31,8 +17,7 @@ pub struct HoldIdentity {
 }
 
 impl HoldIdentity {
-    /// From the typed lease rejection (the create/open failure the
-    /// worker raises against a live foreign owner).
+    /// From the typed lease rejection.
     fn from_error(error: &SessionAlreadyActiveError) -> Self {
         Self {
             pid: error.holder_pid,
@@ -57,29 +42,23 @@ impl HoldIdentity {
     }
 }
 
-/// Which product a live holder's process image belongs to. The
-/// classification is a claim about *what to tell the user*, not a
-/// security boundary: it errs toward the generic wording whenever the
-/// executable cannot be resolved or does not match a known shape.
+/// Which product a live holder's process image belongs to. A claim about
+/// *what to tell the user*, not a security boundary: it errs toward the
+/// generic wording whenever the executable cannot be resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HolderFlavor {
-    /// This Rust build (another window or daemon of the same binary, an
-    /// install under the `prime-agent` keyword's share dir or the
-    /// pre-takeover `prime-agent-rust` dir, or a cargo dev build).
+    /// This Rust build (another window/daemon of this binary, the takeover
+    /// or pre-takeover install dirs, or a cargo dev build).
     ThisBuild,
-    /// The TypeScript product: its release binary is named `prime-agent`
-    /// (the Mach-O and npm installs both), and source/dev installs run
-    /// under node, bun, or deno.
+    /// The TypeScript product: its release binary is named `prime-agent`,
+    /// and source/dev installs run under node, bun, or deno.
     TypeScriptProduct,
     /// A process the classifier cannot name.
     AnotherProcess,
 }
 
-/// Resolve a live holder's process image, classified: the pid maps to
-/// the executable (best-effort, the liveness-probe contract), which names
-/// the product flavor and the take-over line's what-you-are-killing
-/// annotation. `None` (unresolvable) classifies anonymously and resolves
-/// no executable.
+/// Resolve a live holder's process image, classified (best-effort);
+/// `None` resolves no executable.
 fn holder_process(pid: Option<u32>) -> (HolderFlavor, Option<std::path::PathBuf>) {
     let exe = pid
         .and_then(pa_types::platform::process::process_executable_path)
@@ -91,13 +70,9 @@ fn holder_process(pid: Option<u32>) -> (HolderFlavor, Option<std::path::PathBuf>
     (flavor, exe)
 }
 
-/// The classification core, factored for tests: `exe` is the holder's
-/// resolved process image, `own_exe` this process's own. Order matters —
-/// the rust checks run first and the TS claim is never made about a rust
-/// binary — and the path checks match whole path COMPONENTS (platform
-/// separators, no raw substrings): an arbitrary parent directory named
-/// `target` must not claim a TypeScript holder, and a Windows cargo build
-/// (`target\debug\prime-agent.exe`) classifies the same as a Unix one.
+/// The classification core: `exe` is the holder's resolved process image,
+/// `own_exe` this process's own. Order matters (the rust checks run
+/// first), and the path checks match whole path COMPONENTS.
 fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
     let Some(exe) = exe else {
         return HolderFlavor::AnotherProcess;
@@ -112,9 +87,8 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
         .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect();
     // Linux `/proc/<pid>/exe` appends " (deleted)" for an unlinked image
-    // (a daemon still running from a swept rollback tree); the suffix is
-    // a procfs artifact, not part of the file name, so the payload binary
-    // keeps its claims.
+    // (a daemon still running from a swept rollback tree); a procfs
+    // artifact, not part of the file name.
     if components
         .last()
         .is_some_and(|last| last.ends_with(" (deleted)"))
@@ -132,33 +106,24 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
     {
         return HolderFlavor::ThisBuild;
     }
-    // The keyword-takeover install layout (install-rust.sh): the payload
-    // sits DIRECTLY inside the share dir — `.../share/prime-agent/prime-agent`
-    // — while a TS release binary always sits one level deeper
-    // (`.../releases/<name>/prime-agent`), so the parent component plus the
-    // absence of `releases` claims this product without ever claiming the
-    // TS tree (including the preserved `prime-agent-legacy` tree). The
-    // publish byproducts — `prime-agent.old.<pid>/` and
-    // `prime-agent.stage.<...>/` (a daemon still running from the renamed
-    // rollback or stage tree) — carry the same claim.
+    // The keyword-takeover install layout: the payload sits DIRECTLY
+    // inside the share dir (`.../share/prime-agent/prime-agent`), while a
+    // TS release binary sits one level deeper
+    // (`.../releases/<name>/prime-agent`), so the parent component claims
+    // this product.
     if components.len() >= 2 && components.last().map(String::as_str) == Some("prime-agent") {
         let parent = components[components.len() - 2].as_str();
-        // The parent alone is the layout signal: a TS release binary always
-        // sits one level deeper (`releases/<name>/prime-agent` — its parent
-        // is the release name, never `prime-agent`), so no ancestor scan is
-        // needed — and an ancestor scan would mis-reject a Rust install
-        // under a prefix that happens to contain a `releases` component.
+        // The parent alone is the layout signal (a TS release binary's
+        // parent is the release name, never `prime-agent`).
         let is_publish_byproduct =
             parent.starts_with("prime-agent.old.") || parent.starts_with("prime-agent.stage.");
         if parent == "prime-agent" || is_publish_byproduct {
             return HolderFlavor::ThisBuild;
         }
     }
-    // The exe filename gate above keeps a node/bun/deno runtime that merely
-    // RUNS FROM a `prime-agent`-named directory (a TS source checkout's
-    // `/work/prime-agent/node`) from claiming this build: only the payload
-    // binary itself, named `prime-agent`, is claimed; the runtimes fall
-    // through to the TypeScript product below.
+    // The exe filename gate keeps a node/bun/deno runtime that merely runs
+    // FROM a `prime-agent`-named directory from claiming this build: only
+    // the payload binary named `prime-agent` is claimed.
     if let Some(index) = components
         .iter()
         .position(|component| component == "target")
@@ -189,10 +154,7 @@ fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
 
 /// The user-facing refusal for a session file a live foreign process
 /// holds: the holder's pid is resolved and classified live, then rendered
-/// with the session's identity (the footer grounds the message in what
-/// the picker names). `session_path` is the refused file (the name probe
-/// is best-effort: an unreadable file renders without the name, never
-/// fails the refusal).
+/// with the session's identity.
 #[must_use]
 pub fn refusal_message(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     let (flavor, holder_exe) = holder_process(hold.pid);
@@ -215,13 +177,9 @@ fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     )
 }
 
-/// The session's name from its durable file, for the footer (best-effort:
-/// the lease is held, but reading the file for its name never fails the
-/// refusal). A bounded-cost scan, not a full load: the refusal fires
-/// while the holder is live and the file may be large or still growing,
-/// so this reads line by line (constant memory) and parses only the
-/// `session_info` candidates — the latest one wins, exactly like
-/// `SessionFile::session_name`.
+/// The session's name from its durable file, for the footer (best-effort).
+/// A bounded-cost scan, not a full load: reads line by line (constant
+/// memory); the latest `session_info` candidate wins.
 fn session_name_of(session_path: Option<&Path>) -> Option<String> {
     use std::io::BufRead;
     let path = session_path?;
@@ -261,17 +219,15 @@ fn single_line(value: &str) -> String {
 }
 
 /// A single-quoted shell word: the recorded id cannot break out of the
-/// argument (the one character a quoted word cannot hold, the quote
-/// itself, is re-quoted as `'\''`), so pasting the command always runs
-/// `--resume` with exactly the id the lease recorded.
+/// argument, so pasting the command always runs `--resume` with exactly
+/// the id the lease recorded.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// The take-over option: kill the holder and retry. With a resolved pid
 /// the `kill` is the surgical command; without one the state-root sweep
-/// (`shutdown --force`, which stops every daemon it discovers) is the
-/// honest fallback. The sweep binary is the flavor's own product.
+/// (`shutdown --force`) is the honest fallback.
 fn take_over_lines(
     hold: &HoldIdentity,
     sweep_binary: &str,
@@ -279,14 +235,8 @@ fn take_over_lines(
 ) -> Vec<String> {
     let mut lines = vec!["• Take over on this daemon:".to_string()];
     if let Some(pid) = hold.pid {
-        // The kill line names what would be killed when the resolved
-        // image is known: a stale pid could belong to a reused pid by
-        // the time the user runs it, and the annotation lets a human
-        // sanity-check before the signal (the retry path needs no
-        // kill at all once the holder exits - the lease unlocks).
-        // The annotation rides behind a `#`, so pasting the WHOLE
-        // line still runs exactly `kill <pid>` - the shell stops at
-        // the comment instead of parsing the image name as arguments.
+        // The kill line names what would be killed, behind a `#` so
+        // pasting the WHOLE line still runs exactly `kill <pid>`.
         let kill = match holder_exe
             .and_then(|exe| exe.file_name())
             .map(|name| name.to_string_lossy().to_string())
@@ -317,16 +267,10 @@ fn session_footer(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     }
 }
 
-/// The refusal text for a classified holder: what happened (the
-/// classified headline), then the paths out with copy-pasteable commands
-/// (operator-directed): continue in the holder's product, or take the
-/// session over on this daemon. The TypeScript product owns the session
-/// it holds, so its continue option is the TS `--resume` command — the
-/// one product that daemon serves; this-build holders point at the other
-/// daemon's socket (the `--daemon-socket` flag connects to it), and an
-/// anonymous holder claims nothing. Split from [`refusal_message`] so the
-/// exact wording stays testable against a synthetic classification, not a
-/// live foreign process.
+/// The refusal text for a classified holder: the classified headline,
+/// then the paths out (continue in the holder's product, or take the
+/// session over on this daemon). Split from [`refusal_message`] so the
+/// exact wording stays testable against a synthetic classification.
 pub fn refusal_for_flavor(
     flavor: HolderFlavor,
     hold: &HoldIdentity,
@@ -348,20 +292,15 @@ the same daemon, so this build cannot open the file while that process holds it.
             ));
             lines.push(String::new());
             lines.push("• Continue where you left off:".to_string());
-            // The Rust port owns the `prime-agent` keyword (install-rust.sh's
-            // takeover), so naming `prime-agent --resume` here would launch
-            // THIS build — which refuses the same lease again. The continue
-            // path names the TypeScript binary that holds the lease, derived
-            // from the holder's live process image; it survives the takeover
-            // wherever the installer preserved it.
+            // The Rust port owns the `prime-agent` keyword, so naming
+            // `prime-agent --resume` here would launch THIS build. The
+            // continue path names the TypeScript binary that holds the
+            // lease, derived from the holder's live process image.
             match (holder_exe, id) {
-                // The holder binary rides quoted, and only when the image IS
-                // the TypeScript payload binary: control-free (a hostile
-                // image with a newline must never reach a command line) and
-                // named `prime-agent` — a source/npm holder runs under
-                // node/bun/deno, and `'/usr/bin/node' --resume` would be a
-                // broken command, so those fall back to the takeover
-                // wording below.
+                // The holder binary rides quoted, and only when the image
+                // IS the TypeScript payload binary (control-free, named
+                // `prime-agent`): a runtime holder would be a broken
+                // command, so those fall back to the takeover wording below.
                 (Some(exe), Some(id))
                     if !exe.to_string_lossy().chars().any(char::is_control)
                         && exe.file_name().is_some_and(|name| name == "prime-agent") =>
@@ -430,10 +369,8 @@ runtime lease."
     lines.join("\n")
 }
 
-/// The create response for a create the runtime lease refused: the typed
-/// rejection answers with the user-facing refusal and its wire info
-/// (`session_already_active`, the TS `serializeDaemonError` shape); any
-/// other create failure keeps its raw error text.
+/// The create response for a refused create: the typed rejection answers
+/// with the refusal and its wire info; other failures keep their raw text.
 pub(crate) fn create_failure_response(error: &anyhow::Error) -> DaemonResponse {
     match error.downcast_ref::<SessionAlreadyActiveError>() {
         Some(active) => response_failure(
@@ -454,13 +391,8 @@ mod tests {
     use super::*;
     use pa_types::daemon::DaemonErrorInfo;
 
-    /// The full message for a TypeScript-product holder, byte-for-byte:
-    /// the classified headline, the two actionable paths (continue with
-    /// the EXACT holder binary — the `prime-agent` keyword is the Rust
-    /// port's after the takeover, so the TS path names the live process
-    /// image; take over on this daemon with the exact kill), and the
-    /// session footer. No third "open a different session" option: the
-    /// user is already in the picker (operator-directed, 2026-09-24).
+    /// No third "open a different session" option: the user is already
+    /// in the picker (operator-directed, 2026-09-24).
     #[test]
     fn the_typescript_refusal_is_exact() {
         let hold = HoldIdentity {
@@ -490,9 +422,6 @@ the same daemon, so this build cannot open the file while that process holds it.
 Session: ts01ab";
         assert_eq!(message, expected);
 
-        // Without a resolvable holder image the continue path states the
-        // takeover (the `prime-agent` keyword launches THIS build — naming
-        // it as the TS command would send the user to a refusal loop).
         let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, None, None);
         assert!(
             message.contains("the prime-agent keyword launches this Rust build"),
@@ -504,11 +433,6 @@ Session: ts01ab";
         );
     }
 
-    /// A hostile recorded id cannot escape the paste-safe commands: the
-    /// resume argument rides as one quoted shell word (control characters
-    /// collapse first) behind the holder's own quoted binary, and a
-    /// holder image carrying a newline never reaches ANY command line —
-    /// not the continue command, not the kill line's comment.
     #[test]
     fn hostile_values_stay_paste_safe() {
         let hold = HoldIdentity {
@@ -534,9 +458,6 @@ Session: ts01ab";
             "the newline image drops the kill annotation entirely: {message}"
         );
 
-        // A clean payload-named holder binary (here in a spaced directory)
-        // rides quoted, and the hostile id still rides as one quoted word
-        // behind it.
         let message = refusal_for_flavor(
             HolderFlavor::TypeScriptProduct,
             &hold,
@@ -548,8 +469,6 @@ Session: ts01ab";
             "the binary and the id each ride as one quoted word: {message}"
         );
 
-        // A runtime image (a source/npm holder under node/bun/deno) never
-        // renders as the resume command — the takeover wording carries it.
         let message = refusal_for_flavor(
             HolderFlavor::TypeScriptProduct,
             &hold,
@@ -581,11 +500,6 @@ Session: ts01ab";
         );
     }
 
-    /// The this-build refusal carries the `--daemon-socket` attach shape
-    /// (the exact flag a client uses to reach another daemon) and the
-    /// rust sweep binary; an anonymous holder gets the take-over path
-    /// only — no product is claimed for a process the classifier cannot
-    /// name.
     #[test]
     fn the_thisbuild_and_anonymous_refusals_stay_actionable() {
         let hold = HoldIdentity {
@@ -621,9 +535,6 @@ Session: ts01ab";
         );
     }
 
-    /// The footer carries the session's name when the file resolves one
-    /// (a real session file), and falls back to the file path when the
-    /// holder recorded no session id.
     #[test]
     fn the_footer_reads_the_session_name_and_the_path_fallback() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -658,8 +569,6 @@ Session: ts01ab";
             "without a holder id the footer names the file and its name: {message}"
         );
 
-        // A persisted name with a newline cannot add footer lines: the
-        // interpolation collapses control characters first.
         std::fs::write(
             &file,
             concat!(
@@ -679,19 +588,12 @@ Session: ts01ab";
         );
     }
 
-    /// The classification matrix: this build's own exe, the takeover and
-    /// pre-takeover install layouts (plus the publish-byproduct trees), a
-    /// cargo dev build under `/target/`, the deployed TS Mach-O binary
-    /// (including the preserved legacy tree), a node-run TS install, and
-    /// the shapes that stay anonymous. The rust shapes contain the
+    /// The classification matrix. The rust shapes contain the
     /// `prime-agent` substring family, so their checks must win first.
     #[test]
     fn the_holder_classification_matrix() {
         let own = Path::new("/Users/k/.local/share/prime-agent/prime-agent");
-        // This build's own exe: another window of it.
         assert_eq!(classify_from(Some(own), Some(own)), HolderFlavor::ThisBuild);
-        // The takeover install layout (install-rust.sh): the payload sits
-        // directly inside the share dir.
         assert_eq!(
             classify_from(
                 Some(Path::new("/Users/k/.local/share/prime-agent/prime-agent")),
@@ -725,9 +627,8 @@ Session: ts01ab";
             ),
             HolderFlavor::ThisBuild
         );
-        // The deployed TS release binary: the Mach-O named `prime-agent`,
-        // resolved through its managed root — and the preserved
-        // `prime-agent-legacy` tree after the takeover reads the same.
+        // The deployed TS release binary, and the preserved legacy tree
+        // after the takeover reads the same.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -746,16 +647,14 @@ Session: ts01ab";
             ),
             HolderFlavor::TypeScriptProduct
         );
-        // A node runtime running FROM a prime-agent-named directory (a TS
-        // source checkout): the filename gate keeps it from claiming this
-        // build — it is the TypeScript product.
+        // A node runtime running FROM a prime-agent-named directory: the
+        // TypeScript product.
         assert_eq!(
             classify_from(Some(Path::new("/work/prime-agent/node")), Some(own)),
             HolderFlavor::TypeScriptProduct
         );
         // A prefix that happens to CONTAIN a `releases` component does not
-        // mis-reject the flat takeover layout (the parent, not an ancestor,
-        // is the signal).
+        // mis-reject the flat takeover layout.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -765,8 +664,6 @@ Session: ts01ab";
             ),
             HolderFlavor::ThisBuild
         );
-        // Linux /proc/<pid>/exe appends " (deleted)" for an unlinked image:
-        // a daemon still running from a swept rollback tree keeps the claim.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -776,9 +673,8 @@ Session: ts01ab";
             ),
             HolderFlavor::ThisBuild
         );
-        // The TS public-bin symlink shape inside a dir NAMED prime-agent
-        // (a pre-takeover TS root): still the TS product, never ours —
-        // only the payload DIRECTLY inside the share dir is this product.
+        // The TS public-bin symlink shape inside a dir NAMED prime-agent:
+        // still the TS product.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -793,8 +689,8 @@ Session: ts01ab";
             classify_from(Some(Path::new("/usr/local/bin/prime-agent")), Some(own)),
             HolderFlavor::TypeScriptProduct
         );
-        // A TS binary one level deeper than the takeover layout (a release
-        // dir) never claims this product even without the managed root.
+        // A TS binary one level deeper than the takeover layout never
+        // claims this product.
         assert_eq!(
             classify_from(
                 Some(Path::new(
@@ -824,8 +720,6 @@ Session: ts01ab";
         assert_eq!(classify_from(Some(dev), Some(dev)), HolderFlavor::ThisBuild);
     }
 
-    /// The typed create response carries the refusal and the wire info;
-    /// untyped failures keep their raw text.
     #[test]
     fn the_create_failure_response_splits_typed_and_untyped() {
         let hold = SessionAlreadyActiveError {

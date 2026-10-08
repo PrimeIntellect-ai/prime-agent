@@ -1,12 +1,10 @@
-//! Sparse fullscreen windows. Unknown global row totals are resolved only
-//! for callers that require absolute coordinates (selection and scroll info).
+//! Sparse fullscreen windows. Unknown global row totals are resolved
+//! only for callers that require absolute coordinates.
 use super::{layout::EntryLayout, layout::EntryRows, layout::RowPack, AgentView};
 use crate::chat::Detail;
 
-/// The row count above which packing frees a large enough transient that
-/// the freed heap is returned to the OS immediately (allocator plumbing;
-/// no output-path effect). Ordinary transcript entries render far fewer
-/// rows; only a resumed session's pad-scale row sets cross this.
+/// Row count above which the freed heap is returned to the OS
+/// immediately; only a resumed session's pad-scale row sets cross this.
 const HUGE_PACKED_ROWS: usize = 8192;
 
 use crate::chrome::render_splash;
@@ -15,8 +13,7 @@ use crate::Line;
 #[cfg(test)]
 thread_local! {
     /// Splash renders the last sparse walk spent (the lazy end-section
-    /// verifier: a frame whose window cannot reach the splash renders it
-    /// zero times).
+    /// verifier).
     pub(super) static SPLASH_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Tail renders the last sparse walk spent (see [`SPLASH_RENDERS`]).
     pub(super) static TAIL_RENDERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -81,26 +78,16 @@ impl SparseWindow {
 }
 
 impl AgentView {
-    /// Whether the sparse window anchors to the transcript end (its
-    /// selection coordinates are tail-relative) or to an absolute row.
+    /// Whether the sparse window anchors to the transcript end
+    /// (tail-relative selection coordinates) or to an absolute row.
     pub(super) fn sparse_window_is_tail_anchored(&self) -> bool {
         self.sparse_window
             .is_some_and(|window| matches!(window.anchor, Anchor::Tail(_)))
     }
 
-    /// Fold a chat append or entry growth of `delta` rows at entry
-    /// `index` into the sparse window's bookkeeping (TS keeps `scrollTop`
-    /// while content changes: a paused window stays on its absolute row,
-    /// and the scroll room below it grows with the content). A paused
-    /// Tail-anchored window keeps that absolute row wherever the growth
-    /// lands: the anchor distance grows by `delta`, the tail-relative
-    /// selection endpoints move with growth at or below them, and a
-    /// walked cursor above the growth re-walks the shifted rows through
-    /// `pending`. A Top-anchored window (absolute rows) never moves;
-    /// only the scroll bound grows. A following window re-derives from
-    /// the end, so its distance stays zero. Without a sparse window
-    /// (exact geometry) the next frame's layout pass recomputes
-    /// everything.
+    /// Fold a chat append or entry growth of `delta` rows at entry `index` into the sparse window's
+    /// bookkeeping (TS keeps `scrollTop` while content changes): a paused window stays on its
+    /// absolute row while the scroll room grows.
     pub(super) fn sparse_tail_delta(&mut self, delta: isize, index: usize) {
         if delta == 0 {
             return;
@@ -112,19 +99,16 @@ impl AgentView {
         match window.anchor {
             Anchor::Top(_) => {}
             Anchor::Tail(distance) => {
-                // Whether the growth sits above the window's first visible
-                // entry: with a walked cursor that is the cursor's
-                // section, without one (a following window re-derived
-                // from the end) only the tail entry itself is in view.
+                // Whether the growth sits above the window's first visible entry: the cursor's
+                // section, or the tail entry without a cursor.
                 let above = match window.cursor {
                     Some((section, _)) => index + 1 < section,
                     None => index + 1 < self.chat.len(),
                 };
                 if !self.following {
                     window.anchor = Anchor::Tail((distance as isize + delta).max(0) as usize);
-                    // The cursor still points at the content it was
-                    // placed on; growth above the window shifted that
-                    // content down, so the window start re-walks to it.
+                    // The cursor still points at the content it was placed on; growth above the
+                    // window shifted it down, so the window start re-walks to it.
                     if above && window.cursor.is_some() {
                         window.pending = window.pending.saturating_sub(delta);
                     }
@@ -137,8 +121,8 @@ impl AgentView {
         self.sparse_window = Some(window);
     }
 
-    /// The delta of a just-appended entry: the push landed, so its rows are
-    /// countable under the window's geometry.
+    /// The delta of a just-appended entry, countable because the push
+    /// landed.
     pub(super) fn sparse_note_append(&mut self) {
         let Some(window) = self.sparse_window else {
             return;
@@ -160,9 +144,8 @@ impl AgentView {
         }
     }
 
-    /// Extract a logical row range from the current exact sparse cursor.
-    /// The coordinate origin cancels in the displacement, so tail selections
-    /// need neither a global row count nor a transcript-wide layout pass.
+    /// Extract a logical row range from the exact sparse cursor: the coordinate origin cancels
+    /// in the displacement, so tail selections need no transcript-wide layout pass.
     pub(crate) fn sparse_selection_rows(
         &mut self,
         start: usize,
@@ -183,17 +166,14 @@ impl AgentView {
         let last = self.chat.len() + 1;
         let mut splash: Option<std::sync::Arc<Vec<Line>>> = None;
         let mut tail: Option<std::sync::Arc<Vec<Line>>> = None;
-        // The end sections render only when the walk reaches them: a
-        // selection inside the transcript never pays for the splash or
-        // the streaming tail content it cannot show.
+        // The end sections render only when the walk reaches them.
         let mut section_rows = |view: &mut Self, section: usize| {
             if section == 0 {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the
-                    // sparse walker skips zero-row sections exactly
-                    // like an empty tail.
+                    // The suppressed splash is an empty section: the sparse walker skips
+                    // zero-row sections like an empty tail.
                     if view.splash_suppressed {
                         std::sync::Arc::new(Vec::new())
                     } else {
@@ -250,10 +230,8 @@ impl AgentView {
             return;
         };
         self.sparse_enabled = false;
-        // A window resolved while its detail went stale carries the
-        // mode exit to the next composition's dense arm (the resolved
-        // geometry is the old mode's; the first frame after it
-        // re-derives the follow state — operator directive 2026-09-26).
+        // A window resolved while its detail went stale carries the mode exit to the next
+        // composition's dense arm (operator directive 2026-09-26).
         self.detail_transition = self.detail_transition || window.detail != self.detail;
         let detail = self.detail;
         self.detail = window.detail;
@@ -277,14 +255,11 @@ impl AgentView {
         width: usize,
         height: usize,
     ) -> (Vec<Line>, usize) {
-        // The window build restarts the click surface's section recording
-        // (view/click.rs): a fresh window's spans replace the last
-        // frame's, ahead of the two paths below.
+        // The window build restarts the click surface's section
+        // recording: a fresh window's spans replace the last frame's.
         self.click.window_sections.clear();
         // A paused width change preserves the reference's absolute row
-        // offset; a paused detail change keeps the walked cursor (the
-        // window re-renders its entries under the new detail without
-        // measuring the transcript around it).
+        // offset; a paused detail change keeps the walked cursor.
         if self.sparse_window.is_some_and(|window| {
             !self.following && (window.width != width
                 || matches!(window.anchor, Anchor::Tail(distance) if height > self.window_rows.saturating_add(distance)))
@@ -328,10 +303,8 @@ impl AgentView {
             self.sparse_enabled = true;
             // Only visible entries acquired Lines; exact heights remain cached.
             self.window_shows_tail = self.scroll_top >= self.last_max_scroll;
-            // The mode exit's dense arm: the clamped scroll position
-            // already sits at the bottom when the transition collapsed
-            // the layout past the paused offset — the same rule
-            // `scroll_by` re-derives following by.
+            // The mode exit's dense arm: the clamped scroll already sits at the bottom when
+            // the transition collapsed the layout past the paused offset.
             if self.detail_transition {
                 self.detail_transition = false;
                 if !self.following && self.window_shows_tail {
@@ -349,12 +322,6 @@ impl AgentView {
             }
         }
         self.prepare_layout(width);
-        // The mode exit's follow-state recompute (operator directive
-        // 2026-09-26): a detail change rides the same walked window, and
-        // the first composition after it re-derives the follow state
-        // from the post-transition geometry below — a paused window
-        // whose re-walked rows still reach the transcript tail is at
-        // the bottom, not paused above new content.
         let detail_transition = window.detail != self.detail;
         window.detail = self.detail;
         window.width = width;
@@ -367,8 +334,7 @@ impl AgentView {
         } else {
             match window.anchor {
                 // The cursorless tail window walks down from the end, so
-                // its tail section is in view: render it now (the walk
-                // below reuses the same rows).
+                // its tail section is in view: render it now.
                 Anchor::Tail(distance) => {
                     let rows = tail.get_or_insert_with(|| {
                         #[cfg(test)]
@@ -384,18 +350,14 @@ impl AgentView {
                 Anchor::Top(offset) => (0, 0, offset as isize),
             }
         };
-        // The end sections render only when a walk reaches them: a paused
-        // window in the middle of the transcript never pays for the splash
-        // or the streaming tail content (the shortcut guide, the pending
-        // bash output, the loaders) its rows cannot show.
+        // The end sections render only when a walk reaches them.
         let mut section_rows = |view: &mut Self, section: usize| -> EntryRows {
             if section == 0 {
                 let splash = splash.get_or_insert_with(|| {
                     #[cfg(test)]
                     SPLASH_RENDERS.with(|count| count.set(count.get() + 1));
-                    // The suppressed splash is an empty section: the
-                    // sparse walker skips zero-row sections exactly
-                    // like an empty tail.
+                    // The suppressed splash is an empty section: the sparse walker skips
+                    // zero-row sections like an empty tail.
                     if view.splash_suppressed {
                         std::sync::Arc::new(Vec::new())
                     } else {
@@ -447,9 +409,8 @@ impl AgentView {
         window.pending = 0;
         window.cursor = Some((section, row));
         let mut rows = Vec::with_capacity(height);
-        // Whether the fill consumed through the tail section's end: the
-        // window shows the transcript tail (the follow-hint rule — the
-        // walk's own truth, no extra geometry pass).
+        // Whether the fill consumed through the tail section's end
+        // (the walk's own bottom signal).
         let mut shows_tail = false;
         // Whether the last consumed section ended exactly at the
         // window's bottom (the height-exact boundary).
@@ -463,7 +424,7 @@ impl AgentView {
             filled_to_section_end = to == source.len();
             shows_tail = section == last && to == source.len();
             // The entry's visible span feeds the click surface's window
-            // map (view/click.rs) — bounded by the rows on screen.
+            // map — bounded by the rows on screen.
             if before < rows.len() && section >= 1 && section < last {
                 self.click
                     .record_window_section(section - 1, before, rows.len());
@@ -471,13 +432,8 @@ impl AgentView {
             section += 1;
             row = 0;
         }
-        // The height-exact boundary: the window filled through a
-        // section's end, so the sections below the boundary decide the
-        // bottom signal — an empty tail (and hidden zero-row entries)
-        // leaves the window at the transcript end even though the fill
-        // loop never enters the empty tail section to set the flag
-        // itself (the boundary case the review bots flagged: a window
-        // that exactly ends on the final chat entry).
+        // The height-exact boundary: the window filled through a section's end, so the sections
+        // below decide the bottom signal — an empty tail leaves the window at the transcript end.
         if rows.len() == height && section <= last && filled_to_section_end {
             let mut peek = section;
             while peek <= last && section_rows(self, peek).is_empty() {
@@ -485,16 +441,13 @@ impl AgentView {
             }
             shows_tail = peek > last;
         }
-        // A top-origin window reaching the tail needs the same bottom clamp
-        // as the full renderer. Re-anchor from the end once, not per draw.
+        // A top-origin window reaching the tail needs the same bottom
+        // clamp as the full renderer. Re-anchor once, not per draw.
         if rows.len() < height && matches!(window.anchor, Anchor::Top(_)) && !self.chat.is_empty() {
             if self.has_selection() {
-                // The walk ran out of content, so the transcript's total
-                // row count is the window's start plus the rows it walked:
-                // the selection endpoints rebase onto the tail frame
-                // without an exact geometry pass (and without losing the
-                // highlight, which the old full resolve could not express
-                // against the re-anchored window).
+                // The walk ran out of content: the transcript's total is the window's start plus
+                // the rows it walked, so the selection rebases onto the tail frame without an
+                // exact geometry pass.
                 let Anchor::Top(offset) = window.anchor else {
                     unreachable!("the branch matched a top anchor");
                 };
@@ -526,12 +479,8 @@ impl AgentView {
         window.visible_rows = rows.len();
         self.sparse_window = Some(window);
         self.window_shows_tail = shows_tail;
-        // The mode-exit follow-state recompute: a detail change whose
-        // re-walked window still reaches the tail is at the bottom —
-        // the pause distance measured in the previous mode's rows
-        // collapsed along with the layout, so the window resumes
-        // following instead of hinting at a scroll that shows nothing
-        // new (operator directive 2026-09-26).
+        // The mode-exit follow-state recompute (operator directive 2026-09-26): a paused window
+        // whose re-walked rows reach the tail is at the bottom.
         if detail_transition && !self.following && shows_tail {
             self.following = true;
         }
@@ -554,7 +503,7 @@ impl AgentView {
             Detail::All => 2,
         };
         let entry = &self.chat[index];
-        // TS `precededByToolActivity` = the compact set (see layout pass).
+        // TS `precededByToolActivity` = the compact set.
         let preceded_by_tool = index > 0 && Self::is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         if Self::entry_cacheable(entry) {
@@ -572,29 +521,16 @@ impl AgentView {
             preceded_by_tool,
         ));
         if Self::entry_cacheable(entry) {
-            // The cache is storage, not output: the entry's rows stay
-            // resident for the process lifetime, so they are stored
-            // packed (byte-exact expansion on read) instead of as the
-            // renderers' fragment-sized spans — a scroll walk's
-            // retention is the per-span chunk overhead, not the text.
-            // `pack` refuses entries its records cannot represent
-            // exactly, so an oversized entry keeps its Fresh rows.
+            // The cache is storage, not output: rows stay resident for
+            // the process lifetime, so they store packed.
             if let Some(packed) = RowPack::pack(&rows) {
                 let packed = std::sync::Arc::new(packed);
                 self.entry_layout[index][detail] = Some(EntryLayout {
                     spacing,
                     rows: packed.clone(),
                 });
-                // A huge entry's rendered rows are the transcript's
-                // biggest single transient (the pad row set of a
-                // resumed large session): the pack just replaced them,
-                // and the freed pages only return to the OS if the
-                // allocator's trim can reach them — so the expanded
-                // rows drop BEFORE the trim, and the caller reads the
-                // packed form (byte-exact expansion) instead of the
-                // pad it would otherwise hold past the trim. Gate on
-                // the row count so ordinary entries never pay a trim
-                // call — only the rare huge materialization.
+                // A huge entry's rendered rows are the transcript's biggest single transient, so
+                // the rows drop BEFORE the trim; the gate keeps ordinary entries from paying one.
                 let huge = rows.len() >= HUGE_PACKED_ROWS;
                 drop(rows);
                 if huge {

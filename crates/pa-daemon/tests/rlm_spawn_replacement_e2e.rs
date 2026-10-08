@@ -1,45 +1,17 @@
 //! RLM child admission vs worker replacement: concurrent spawns stay
-//! admitted and every child's task prompt lands exactly once even when a
-//! child's worker process is killed between its admission and the prompt.
-//!
-//! The regression (the lane's forensics: 69/172 spawned children never
-//! received their prompt): the admission path re-read the child's session
-//! file from a second racy `get_state`, so a worker replacement racing the
-//! admission tore down healthy children; and the detached task prompt fired
-//! into a worker mid-replacement (crash backoff, relaunch, create replay)
-//! where the route hit a dead socket - the prompt was lost and the
-//! relaunched child was killed by the prompt task's error path.
-//!
-//! The fixed invariants this verifier pins:
-//!
-//! 1. Concurrent spawns all admit: every `rlm.spawn` returns a handle even
-//!    while another worker is being replaced (admission reads the create
-//!    response, never a second `get_state`).
-//! 2. A child whose worker is replaced between admission and its task
-//!    prompt still receives the prompt EXACTLY ONCE: the replacement-aware
-//!    route waits out the replacement (the create replay restores the same
-//!    session file), so the prompt neither bounces off the dead socket nor
-//!    duplicates onto the relaunched worker.
-//! 3. No admission teardown of a healthy child: the replaced child is
-//!    relaunched with the same worker id, its session file is not archived,
-//!    and it settles with its answer.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! admitted, a child replaced between admission and its task prompt still
+//! receives the prompt exactly once, and no admitted child is torn down.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -94,17 +66,15 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         ))
         .env("PA_DAEMON_DEBUG", "1")
         // A supervisor killed at teardown must not leak its session workers
-        // into later test binaries: the worker's supervisor-lost exit (TS
-        // `exitIfSupervisorOrphanedForTooLong`) runs on this short window
-        // instead of the 5-minute default.
+        // into later test binaries: the worker's supervisor-lost exit runs
+        // on this short window instead of the 5-minute default.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
         )
-        // The worker-connect budget (probe + connect + auth) must survive
-        // parallel-load e2e runs: this test launches four workers while
-        // the whole workspace runs around them. The override stays under
-        // the spawn admission's 120s link budget.
+        // The worker-connect budget must survive parallel-load e2e runs
+        // (four workers while the whole workspace runs around them); stays
+        // under the spawn admission's 120s link budget.
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -121,7 +91,6 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never came up");
 }
 
-/// Minimal JSONL supervisor client (list).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -163,9 +132,8 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        // Generous: under parallel load the supervisor process competes
-        // for CPU with the whole workspace run, and a line can lag far
-        // past an interactive box's latency.
+        // Generous: under parallel load a line can lag far past an
+        // interactive box's latency.
         let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
@@ -198,7 +166,6 @@ impl Client {
     }
 }
 
-/// The supervisor roster's session summaries (the `list` wire surface).
 fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
     client.send_command(id, &json!({ "type": "list" }));
     let list = client.read_response(id);
@@ -209,7 +176,6 @@ fn roster_summaries(client: &mut Client, id: &str) -> Vec<Value> {
         .expect("sessions array")
 }
 
-/// Poll a sync probe (JSONL supervisor client) until it yields a value.
 fn wait_until<T>(budget: Duration, context: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + budget;
     loop {
@@ -224,7 +190,6 @@ fn wait_until<T>(budget: Duration, context: &str, mut probe: impl FnMut() -> Opt
     }
 }
 
-/// The child's scripted engine: one immediate response per child session.
 fn write_script(dir: &Path, answer: &str) -> PathBuf {
     let script = dir.join("script.json");
     std::fs::write(
@@ -235,8 +200,6 @@ fn write_script(dir: &Path, answer: &str) -> PathBuf {
     script
 }
 
-/// Children registry bound to the running supervisor, with a parent identity
-/// rooted at `agent_dir`.
 fn children(socket: &Path, agent_dir: &Path, script: &Path) -> SupervisorChildSessions {
     let sessions = SupervisorChildSessions::new(
         Arc::new(SupervisorLink::new(socket.to_path_buf())),
@@ -268,11 +231,10 @@ fn spawn_request(name: &str, prompt: &str) -> RlmSpawnRequest {
         model: None,
         thinking: None,
         cell_source_code: None,
+        spawned_by_request_id: None,
     }
 }
 
-/// The child's persisted session file (the per-child artifacts dir holds
-/// exactly one `.jsonl`).
 fn child_session_file(agent_dir: &Path, child_id: &str) -> PathBuf {
     let dir = agent_dir
         .join("session-artifacts")
@@ -293,8 +255,6 @@ fn child_session_file(agent_dir: &Path, child_id: &str) -> PathBuf {
     )
 }
 
-/// One child's worker pid, from its supervisor descriptor (the live process
-/// behind the roster row).
 fn worker_pid(agent_dir: &Path, socket: &Path, worker_id: &str) -> u32 {
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(agent_dir, socket);
     let path = descriptor_dir.join(format!("{worker_id}.json"));
@@ -307,8 +267,6 @@ fn worker_pid(agent_dir: &Path, socket: &Path, worker_id: &str) -> u32 {
         .expect("worker descriptor pid") as u32
 }
 
-/// Concurrent spawns + a mid-window worker replacement: every child's task
-/// prompt lands exactly once and no admitted child is torn down.
 // Multi-thread runtime: the detached task prompts (`tokio::spawn` inside
 // `SupervisorChildSessions`) must progress while the test thread blocks in
 // its synchronous JSONL/file polls.
@@ -324,7 +282,6 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     let script = write_script(dir.path(), "replacement kid answer");
     let children = children(&socket, &agent_dir, &script);
 
-    // Four concurrent spawns, each with a unique prompt marker.
     let (a, b, c, d) = tokio::join!(
         children.spawn(spawn_request(
             "kid-a",
@@ -355,7 +312,6 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         assert_eq!(handle.name, *name);
     }
 
-    // The supervisor roster carries all four resident children.
     for name in names {
         wait_until(
             Duration::from_mins(2),
@@ -372,9 +328,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     }
 
     // The replacement: kill kid-a's worker between its admission and its
-    // task prompt (the detached prompt fires at the parent's turn
-    // boundary, released below). The supervisor restarts the worker
-    // (backoff + relaunch + create replay) while the prompt is in flight.
+    // task prompt (the detached prompt fires at the turn boundary, below).
     let kid_a_worker_id = {
         let row = wait_until(Duration::from_mins(1), "kid-a roster row", || {
             roster_summaries(&mut client, "l1")
@@ -394,20 +348,28 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         .expect("kill kid-a worker");
     assert!(killed.success(), "kill -9 {kid_a_pid}");
 
-    // Release the detached task prompts (the parent's turn boundary): all
-    // four fire now - kid-a's into a worker mid-replacement.
     children.notify_turn_done();
 
-    // Exactly-once: each child's session file carries its prompt marker
-    // exactly once. kid-a's prompt must survive the replacement (the
-    // budget covers the replacement window end to end).
+    // kid-a's prompt must survive the replacement; the budget covers the
+    // replacement window end to end.
     for (child_id, name) in child_ids.iter().zip(names.iter()) {
         let marker = format!("marker-replacement-e2e-{}", name.trim_start_matches("kid-"));
         let session_file = child_session_file(&agent_dir, child_id);
         let deadline = Instant::now() + Duration::from_secs(150);
         let content = loop {
             let content = std::fs::read_to_string(&session_file).unwrap_or_default();
-            if content.matches(&marker).count() == 1 {
+            let kickoff_rows = content
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|entry| {
+                    entry.get("type").and_then(Value::as_str) == Some("custom_message")
+                        && entry
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.contains(&marker))
+                })
+                .count();
+            if kickoff_rows == 1 {
                 break content;
             }
             if Instant::now() >= deadline {
@@ -435,8 +397,6 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
         );
     }
 
-    // The replaced child is alive again - the same worker id, relaunched,
-    // not archived - and every child settles with its answer.
     {
         let row = wait_until(
             Duration::from_secs(150),

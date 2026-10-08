@@ -1,19 +1,8 @@
-//! Direct peer transport on the worker's own socket (TS `daemon-mode.ts`
-//! worker branch: `peer_auth`, `worker_register_peer_transport`, and the
-//! in-memory `peerGrants` map).
-//!
-//! A session client never learns the worker's bootstrap token. Instead the
-//! supervisor issues a single-use grant (TTL 10s) and pushes it to the worker
-//! over its supervisor connection; the client presents the grant on the
-//! worker socket via `peer_auth`. The grant burns on first use - before the
-//! token is even checked - so a leaked or replayed ticket is worthless.
-//!
-//! Roles on one worker-socket connection:
-//! - [`ConnectionRole::Supervisor`]: authenticated with the bootstrap token;
-//!   full worker command set, unconditional event fan-out.
-//! - [`ConnectionRole::SessionClient`]: authenticated with a burned grant;
-//!   session-plane commands for the grant's session only, and event fan-out
-//!   only while the client holds an attach on the session.
+//! Direct peer transport on the worker's own socket: a session client
+//! never learns the worker's bootstrap token — the supervisor issues a
+//! single-use grant (TTL 10s), the client presents it via `peer_auth`, and
+//! it burns on first use (before the token is even checked), so a leaked
+//! or replayed ticket is worthless.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -67,8 +56,7 @@ pub(crate) enum ConnectionRole {
         session: Arc<PeerSession>,
     },
     /// A peer worker admitted through `peer_auth` with a single-use
-    /// `worker`-purpose grant: agent-message delivery only, no session
-    /// events (thin-supervisor stage 3).
+    /// `worker`-purpose grant: delivery only, no session events.
     PeerWorker {
         session: Arc<PeerSession>,
     },
@@ -137,8 +125,7 @@ impl PeerGrantStore {
     /// TS `worker_register_peer_transport` validation: the grant must name
     /// this exact worker instance and one of its live sessions, expire in
     /// the future but no further out than the TTL limit, and fit under the
-    /// grant cap after the expired sweep. Rejected grants return the TS
-    /// error string; the reason is logged by the caller.
+    /// grant cap after the expired sweep.
     pub(crate) fn register(
         &self,
         grant: DaemonWorkerPeerGrant,
@@ -244,8 +231,8 @@ pub(crate) fn parse_grant_registration(
     serde_json::from_value::<DaemonWorkerCommand>(payload.clone()).map_err(|_| PEER_GRANT_INVALID)
 }
 
-/// Command gate for a peer-worker connection (stage 3): agent-message
-/// delivery only, addressed to the grant's session.
+/// Command gate for a peer-worker connection: agent-message delivery
+/// only, addressed to the grant's session.
 pub(crate) fn worker_peer_command_allowed(
     command_type: &str,
     payload: &Value,
@@ -280,8 +267,7 @@ pub(crate) fn peer_auth_success_data(grant: &DaemonWorkerPeerGrant) -> Value {
 
 impl Worker {
     /// One `peer_auth` presentation on an unauthenticated connection: burn
-    /// the grant, validate it, promote the connection to a session client,
-    /// and write the response. Failure ends the connection.
+    /// the grant, validate it, promote the connection, write the response.
     pub(crate) async fn handle_peer_auth(
         self: &Arc<Self>,
         payload: &Value,
@@ -330,8 +316,7 @@ impl Worker {
     }
 
     /// `worker_register_peer_transport` (supervisor role only): accept one
-    /// single-use grant into the worker-memory store. The grant's issuer
-    /// generation must match the authenticated supervisor's.
+    /// single-use grant; the issuer generation must match the supervisor's.
     pub(crate) fn handle_worker_register_peer_transport(
         &self,
         payload: &Value,
@@ -424,7 +409,6 @@ mod tests {
             .authenticate(&peer_auth("secret"), &context, NOW)
             .expect("auth");
         assert_eq!(admitted.active_session_id, "abc123");
-        // Single use: the second presentation of the same grant fails.
         let replay = store.authenticate(&peer_auth("secret"), &context, NOW);
         assert_eq!(replay.unwrap_err(), PEER_AUTH_FAILED);
     }
@@ -458,7 +442,6 @@ mod tests {
         store
             .register(grant(&soon(NOW, 10_000)), &context, "sup:1", NOW)
             .expect("register");
-        // Past the TTL window: the grant is expired.
         let later = NOW + 10_001;
         assert_eq!(
             store
@@ -472,7 +455,6 @@ mod tests {
     fn grant_registration_rejects_bad_shape() {
         let store = PeerGrantStore::new();
         let context = grant_context();
-        // Expired at registration time.
         let mut expired = grant(&soon(NOW, 10_000));
         expired.expires_at = soon(NOW, -1);
         assert_eq!(
@@ -486,14 +468,12 @@ mod tests {
                 .unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // Wrong purpose.
         let mut purpose = grant(&soon(NOW, 10_000));
         purpose.purpose = "supervisor".to_string();
         assert_eq!(
             store.register(purpose, &context, "sup:1", NOW).unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // Wrong worker instance.
         let mut instance = grant(&soon(NOW, 10_000));
         instance.worker_instance_id = "inst-2".to_string();
         assert_eq!(
@@ -502,14 +482,12 @@ mod tests {
                 .unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // Unknown session.
         let mut session = grant(&soon(NOW, 10_000));
         session.active_session_id = "other".to_string();
         assert_eq!(
             store.register(session, &context, "sup:1", NOW).unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // Not yet created session.
         let mut uncreated = grant_context();
         uncreated.session_created = false;
         assert_eq!(
@@ -518,14 +496,12 @@ mod tests {
                 .unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // Issued by a different supervisor generation.
         assert_eq!(
             store
                 .register(grant(&soon(NOW, 10_000)), &context, "sup:2", NOW)
                 .unwrap_err(),
             PEER_GRANT_INVALID
         );
-        // A fresh grant is still accepted after the rejects.
         store
             .register(grant(&soon(NOW, 10_000)), &context, "sup:1", NOW)
             .expect("register");
@@ -556,7 +532,6 @@ mod tests {
         store
             .register(fresh, &context, "sup:1", later)
             .expect("swept the expired grants");
-        // The swept grants are gone: presenting one no longer authenticates.
         let mut stale_auth = peer_auth("secret");
         let DaemonPeerCommand::PeerAuth {
             grant_id: stale_id, ..
@@ -619,15 +594,12 @@ mod tests {
             .authenticate(&presentation, &context, NOW)
             .expect("worker grant authenticates");
         assert_eq!(admitted.purpose, "worker");
-        // Single use, like the session-client grant.
         assert_eq!(
             store
                 .authenticate(&presentation, &context, NOW)
                 .unwrap_err(),
             PEER_AUTH_FAILED
         );
-        // The peer-worker gate: only worker_deliver_message, only for the
-        // grant's session.
         let delivery = serde_json::json!({ "targetActiveSessionId": "abc123" });
         let wrong = serde_json::json!({ "targetActiveSessionId": "other" });
         assert!(worker_peer_command_allowed(
@@ -643,7 +615,6 @@ mod tests {
         assert!(!worker_peer_command_allowed("get_state", &delivery, &grant));
         assert!(!worker_peer_command_allowed("list", &delivery, &grant));
         assert!(!worker_peer_command_allowed("shutdown", &delivery, &grant));
-        // Worker connections never stream session events.
         let role = ConnectionRole::PeerWorker {
             session: Arc::new(PeerSession::new(grant)),
         };

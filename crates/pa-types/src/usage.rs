@@ -1,8 +1,5 @@
-//! Context-usage estimation over raw message JSON: pure data helpers shared
-//! by crates that read session files in different representations
-//! (pa-daemon's wire-shaped session store, pa-core's typed session manager).
-//! Port of `estimateContextTokens` / `estimateTokens` / `getAssistantUsage`
-//! from the TS core (compaction + agent-session).
+//! Context-usage estimation over raw message JSON, shared by crates that read session files in
+//! different representations.
 
 use serde_json::Value;
 
@@ -33,8 +30,7 @@ pub fn calculate_context_tokens(usage: &Value) -> u64 {
         })
 }
 
-/// Assistant usage that is safe to read (TS `getAssistantUsage` skips
-/// aborted and error stops).
+/// Assistant usage safe to read (TS `getAssistantUsage` skips aborted and error stops).
 pub fn valid_assistant_usage(message: &Value) -> Option<Value> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
@@ -48,9 +44,8 @@ pub fn valid_assistant_usage(message: &Value) -> Option<Value> {
         .filter(|usage| !usage.is_null())
 }
 
-/// Chars/4 heuristic token estimate (TS `estimateTokens`): text and thinking
-/// content counts, tool calls count their serialized arguments, images count
-/// as 4800 chars.
+/// Chars/4 heuristic token estimate: text and thinking count, tool calls count their serialized
+/// arguments, images count as 4800 chars.
 pub fn estimate_tokens(message: &Value) -> u64 {
     let role = message
         .get("role")
@@ -161,8 +156,7 @@ mod tests {
                 { "type": "image" },
             ],
         });
-        // The tool-call block counts its name plus the serialized arguments
-        // (`{"code":"x = 1"}` = 17 chars).
+        // The tool-call block counts its name plus the serialized arguments.
         let expected = (4_u64 + 4 + 7 /*name*/ + 17 /*arguments*/ + 4800).div_ceil(4);
         assert_eq!(estimate_tokens(&message), expected);
         // Plain-string content only counts for user/custom/toolResult roles.

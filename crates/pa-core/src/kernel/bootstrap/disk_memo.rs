@@ -1,39 +1,20 @@
-//! The cross-process runtime-ready memo: a tiny on-disk map of probe
-//! verdicts keyed by the same identity composite as the in-process memo
-//! ([`super::venv::runtime_probe_key`]). A fresh process — every cold open
-//! boots a fresh worker, and every spawned child is one too — starts with
-//! an empty in-process map, so this file is what carries the verdict
-//! across process boundaries while the key (recomputed fresh on every
-//! check: interpreter stat + installed `rlm`/`dill` content walk +
-//! runtime identity + raw `.bootstrap-version` text) stays the damage
-//! detector. Only the two interpreter probes are skipped on a hit, never
-//! the witnesses.
-//!
-//! The file lives inside the venv directory: its trust domain is the
-//! venv's own (anyone who can write here can already inject kernel
-//! Python — the memo adds no attack surface), and its lifetime is the
-//! venv's own (a rebuild removes it by construction). Every I/O error is
-//! fail-open: an unreadable, corrupt, or unwritable memo costs one
-//! re-probe, never a verdict.
-//!
-//! Managed-venv path only: a caller-owned `PRIME_AGENT_KERNEL_PYTHON`
-//! override never reads or writes this memo (the d14 ruling — the
-//! override path keeps the direct probe).
+//! The cross-process runtime-ready memo: a tiny on-disk map of probe verdicts
+//! keyed by the same identity composite as the in-process memo
+//! ([`super::venv::runtime_probe_key`]). Only the two interpreter probes are skipped
+//! on a hit; every I/O error is fail-open. A caller-owned `PRIME_AGENT_KERNEL_PYTHON`
+//! override never reads or writes this memo (the d14 ruling).
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The on-disk schema. Bumped when the memo key format changes; every
-/// entry written under an older schema then reads as a miss and
-/// re-probes.
+/// The on-disk schema. Bumped when the memo key format changes; every entry
+/// written under an older schema then reads as a miss and re-probes.
 pub(crate) const DISK_MEMO_SCHEMA: u64 = 1;
 pub(crate) const DISK_MEMO_FILE: &str = ".runtime-probe-memo.json";
 
-/// Same bound and same clear-at-cap rule as the in-process memo: one
-/// rule, two layers. A map (not a single entry) because keys churn with
-/// the runtime identity — a single entry would re-probe on every
-/// alternating binary in a shared venv.
+/// Same bound and same clear-at-cap rule as the in-process memo: one rule, two layers. A map (not a
+/// single entry) because keys churn with the runtime identity.
 const DISK_MEMO_CAP: usize = 16;
 
 #[derive(Serialize, Deserialize)]
@@ -46,9 +27,8 @@ pub(crate) fn disk_memo_path(venv: &Path) -> PathBuf {
     venv.join(DISK_MEMO_FILE)
 }
 
-/// A hit requires a regular file at the memo path: a symlink or a
-/// directory reads as a miss (fail-open), and the write side replaces a
-/// symlink at the destination rather than following it.
+/// A hit requires a regular file at the memo path: a symlink or a directory reads as a miss
+/// (fail-open).
 pub(crate) fn disk_memo_hit(path: &Path, key: &str) -> bool {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return false;
@@ -65,14 +45,10 @@ pub(crate) fn disk_memo_hit(path: &Path, key: &str) -> bool {
     memo.schema == DISK_MEMO_SCHEMA && memo.keys.iter().any(|k| k == key)
 }
 
-/// Publish a successful probe verdict. The temp file is written inside
-/// the venv dir and renamed over the memo path (rename replaces a symlink
-/// at the destination instead of following it), so the map is never
-/// observed half-written; same-process writers serialize on the
-/// in-process probe-memo lock the caller holds, so the per-process temp
-/// name cannot collide. Fail-open: an unwritable venv skips persistence
-/// silently. A concurrent process's read-modify-write can lose the other
-/// side's key — that costs one re-probe, never a verdict.
+/// Publish a successful probe verdict. The temp file is written inside the venv dir
+/// and renamed over the memo path (replacing a symlink at the destination instead of
+/// following it), so the map is never observed half-written. Fail-open: an unwritable
+/// venv skips persistence.
 pub(crate) fn disk_memo_write(path: &Path, key: &str) {
     let mut keys = read_keys(path);
     keys.retain(|k| k != key);
@@ -83,14 +59,10 @@ pub(crate) fn disk_memo_write(path: &Path, key: &str) {
     write_map(path, &keys);
 }
 
-/// Ensure the memo at `path` serves no hits. Tries the delete first and
-/// falls back to an atomic empty-map overwrite (an empty map serves no
-/// hits by construction), so a delete failure after a failed kernel
-/// start cannot resurrect the stale verdict on the retry. `false` means
-/// both failed: the venv directory is read-only, in which case no
-/// rebuild-based heal is possible in any design (the bootstrap itself
-/// cannot rewrite `.bootstrap-version` there either) — the equivalence,
-/// not a divergence, is the guarantee.
+/// Ensure the memo at `path` serves no hits: delete first, then fall back to an
+/// atomic empty-map overwrite, so a delete failure after a failed kernel start
+/// cannot resurrect the stale verdict on the retry. `false` means both failed: a
+/// read-only venv admits no rebuild-based heal.
 pub(crate) fn disk_memo_invalidate(path: &Path) -> bool {
     match std::fs::remove_file(path) {
         Ok(()) => true,
@@ -176,7 +148,6 @@ mod tests {
         assert_eq!(memo_keys(&path), vec!["k1".to_string()], "dedupe");
         disk_memo_write(&path, "k2");
         assert_eq!(memo_keys(&path), vec!["k1".to_string(), "k2".to_string()]);
-        // The published file is regular and parseable.
         assert!(std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()));
     }
 
@@ -200,27 +171,22 @@ mod tests {
     fn stale_and_forged_entries_never_hit() {
         let dir = tempfile::tempdir().unwrap();
         let path = disk_memo_path(dir.path());
-        // Wrong key, right shape.
         disk_memo_write(&path, "other");
         assert!(!disk_memo_hit(&path, "mine"));
-        // Wrong schema.
         std::fs::write(
             &path,
             serde_json::json!({"schema": DISK_MEMO_SCHEMA + 1, "keys": ["mine"]}).to_string(),
         )
         .unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
-        // Corrupt JSON and an empty file.
         std::fs::write(&path, "{not-json").unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
         std::fs::write(&path, "").unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
-        // A directory at the memo path is never a hit.
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(!disk_memo_hit(&path, "mine"));
         std::fs::remove_dir(&path).unwrap();
-        // A symlink at the memo path is never followed to a hit.
         #[cfg(unix)]
         {
             let target = dir.path().join("target.json");
@@ -230,7 +196,6 @@ mod tests {
                 !disk_memo_hit(&path, "mine"),
                 "a linked memo file reads as a miss, never followed"
             );
-            // The write side replaces the symlink itself, not the target.
             disk_memo_write(&path, "fresh");
             assert!(std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()));
             assert!(disk_memo_hit(&path, "fresh"));
@@ -252,15 +217,11 @@ mod tests {
         assert!(!path.exists(), "plain delete removed the file");
         // Missing file: still true (nothing to serve).
         assert!(disk_memo_invalidate(&path));
-        // The fallback's empty map serves no hits by construction.
         disk_memo_write(&path, "k1");
         write_map(&path, &[]);
         assert!(!disk_memo_hit(&path, "k1"), "the empty map serves no hits");
         assert!(disk_memo_invalidate(&path));
         assert!(!path.exists(), "plain delete removed the file again");
-        // Both fail (a directory occupies the memo path): documented
-        // equivalence — a read-only venv admits no rebuild-based heal in
-        // any design.
         std::fs::create_dir(&path).unwrap();
         assert!(!disk_memo_invalidate(&path));
         std::fs::remove_dir(&path).unwrap();
@@ -271,10 +232,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("missing-venv");
         let path = disk_memo_path(&missing);
-        // A missing venv dir: the write skips persistence silently.
         disk_memo_write(&path, "k1");
         assert!(!path.exists());
-        // The read side misses too, never panics.
         assert!(!disk_memo_hit(&path, "k1"));
     }
 }

@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design.
+// too_many_lines: style gate only (the harness fns are intentionally linear).
+// Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,9 +11,7 @@
 )]
 
 //! pa-cli: the `prime-agent` binary. The argument surface, command routing,
-//! help output, and validation are faithful ports of the TypeScript product's
-//! `packages/coding-agent/src/main.ts` and `src/cli/*.ts`. Runtime execution
-//! lives behind the [`mode::Runtime`] boundary.
+//! help output, and validation are faithful ports of the TypeScript product.
 
 // Internal ported modules are crate-private: the only public API is the
 // runtime boundary below (see crates/pa-cli/README.md).
@@ -37,6 +28,7 @@ pub(crate) mod daemon_command;
 pub(crate) mod daemon_discovery;
 pub(crate) mod daemon_mode;
 pub(crate) mod daemon_session_list;
+pub(crate) mod factory_command;
 pub(crate) mod file_processor;
 pub(crate) mod global_flags;
 pub(crate) mod headless_autonomous;
@@ -106,9 +98,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         std::env::set_var(crate::config::ENV_OFFLINE, "1");
     }
 
-    // Install-time kernel preparation (TS cli-main.ts): the installer invokes
-    // `prime-agent --prime-agent-bootstrap` after extracting a release, so
-    // the venv is ready before the first session.
+    // Install-time kernel preparation: the installer invokes `--prime-agent-bootstrap`
+    // after extracting a release, so the venv is ready before the first session.
     if args.len() == 1 && args[0] == "--prime-agent-bootstrap" {
         return run_runtime_bootstrap();
     }
@@ -161,9 +152,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     if parsed.export.is_some() {
-        // The TS product only reaches the export subsystem through the
-        // `session export <file> [output]` rewrite; a standalone `--export`
-        // already exited as a removed-flag diagnostic above.
+        // The TS product only reaches the export subsystem through the `session
+        // export <file> [output]` rewrite (a standalone `--export` exits above).
         return session_export::run(&parsed, &crate::config::get_agent_dir());
     }
 
@@ -175,10 +165,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         return Err("@file arguments are not supported in RPC, daemon, or ACP mode".to_string());
     }
 
-    // Daemon worker processes start with the worker role env var set (TS
-    // `isDaemonWorkerProcess`, scoped to daemon-mode argv, checked after the
-    // shared mode validations): route straight into the worker runtime. The
-    // supervisor launches workers as `prime-agent worker`.
+    // Daemon worker processes start with the worker role env var set: route
+    // straight into the worker runtime.
     let is_worker_process =
         std::env::var(pa_daemon::worker::WORKER_ROLE_ENV).unwrap_or_default() == "1";
     if is_worker_process
@@ -208,7 +196,6 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         let _ = fork;
     }
 
-    // cwd: chdir before anything cwd-bound runs.
     let cwd = match &parsed.cwd {
         Some(cwd) => {
             let cwd = crate::config::expand_tilde_path(cwd);
@@ -240,8 +227,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 
     let agent_dir = crate::config::get_agent_dir();
-    // Telemetry opt-in resolution (TS main.ts): env override, then settings.
-    // The runtime config only carries the disabled case.
+    // Telemetry opt-in resolution: env override, then settings; the
+    // runtime config only carries the disabled case.
     let telemetry_disabled = crate::mode::telemetry_disabled(
         &pa_core::settings::SettingsManager::create(&cwd, &agent_dir),
     );
@@ -250,14 +237,13 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         .as_deref()
         .map(crate::config::expand_tilde_path)
         .or_else(crate::config::get_session_dir_env_override)
-        // main.ts sessionDir resolution: the cwd-scoped settings manager is
+        // sessionDir resolution: the cwd-scoped settings manager is
         // consulted after the flag and env overrides, before the default.
         .or_else(|| pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_session_dir());
 
     let mut cli_messages = parsed.messages.clone();
-    // TS main's startup branches read piped stdin for every mode but the
-    // stdio-protocol ones (rpc/acp/daemon keep stdin for the transport),
-    // with the idle window so an open, silent pipe cannot hang the boot.
+    // Startup branches read piped stdin for every mode but the stdio-protocol ones
+    // (rpc/acp/daemon keep stdin); the idle window keeps a silent pipe from hanging.
     let stdin_content = if matches!(app_mode, AppMode::Rpc | AppMode::Acp | AppMode::Daemon) {
         None
     } else {
@@ -267,9 +253,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
                 .as_deref(),
         ))
     };
-    // TS `prepareInitialMessage`: `@file` arguments expand into text and
-    // image attachments for the initial prompt; the file blocks ride
-    // every mode's first message, the images the non-interactive prompt.
+    // `@file` arguments expand into text and image attachments for the initial
+    // prompt; the file blocks ride every mode's first message.
     let (file_text, initial_images) = if parsed.file_args.is_empty() {
         (None, Vec::new())
     } else {
@@ -281,7 +266,6 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
                 processed.images,
             ),
             Err(error) => {
-                // TS prints the failure through chalk on stderr and exits.
                 eprintln!("{}", error.message);
                 return Ok(1);
             }
@@ -330,10 +314,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
     }
 }
 
-/// Prepare the kernel runtime at install time (TS `runtime-bootstrap.ts`):
-/// resolve or bootstrap the kernel Python and print its path. Failures print
-/// the bootstrap error text and exit 1 (the installer surfaces them and the
-/// retry happens on first Python use).
+/// Prepare the kernel runtime at install time: resolve or bootstrap the kernel
+/// Python and print its path. Failures print the error and exit 1.
 fn run_runtime_bootstrap() -> Result<i32, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

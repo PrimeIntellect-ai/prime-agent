@@ -1,9 +1,7 @@
 //! Parity verifier: parse the real catalog payload (a byte-faithful
-//! snapshot of the `PrimeIntellect-ai/prime-agent-catalog`
-//! `models/catalog.v1.json` aggregate — headers stripped, prime-inference
-//! excluded, provider/id sorted; refresh with `scripts/generate-catalog-fixture.py`)
-//! against the strict schema and transport pinning. Real data, real scale:
-//! 1,197 entries across 31 providers, 0 skipped.
+//! snapshot of `prime-agent-catalog` `models/catalog.v1.json`; refresh
+//! with `scripts/generate-catalog-fixture.py`) against the strict
+//! schema and transport pinning.
 
 use pa_models::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use pa_models::schema::{parse_model_catalog, InvalidEntries};
@@ -54,7 +52,6 @@ fn passes_the_packer_gates() {
         .map(|m| (m.provider.as_str(), m.api.as_str(), m.base_url.as_str()))
         .collect();
     assert!(tuples.len() >= 42, "packer gate: >=42 transport tuples");
-    // Compiled table agrees entry-by-entry with the fixture's tuples.
     let compiled: std::collections::HashSet<(String, String, String)> =
         transports::compiled_models()
             .iter()

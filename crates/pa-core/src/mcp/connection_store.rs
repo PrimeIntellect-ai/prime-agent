@@ -1,14 +1,7 @@
-//! Durable MCP connection records (port of
-//! `packages/coding-agent/src/core/mcp/connection-store.ts`, the record
-//! core): the verified connection state per connectionId — the stable alias
-//! the kernel dispatches through — plus the catalog serviceId it connects
-//! and the endpoint the verification ran against. Tokens never live here.
-//!
-//! The record endpoint is the ENDPOINT PIN: an installed connection keeps
-//! its approved endpoint for dispatch and management even if the catalog
-//! later changes the service URL, and the resolver pins vanished sources
-//! from it. Writes are locked read-modify-write (the auth-storage pattern:
-//! lockfile + atomic temp-file rename at mode 0600).
+//! Durable MCP connection records. Tokens never live here. The record endpoint is
+//! the ENDPOINT PIN: an installed connection keeps its approved endpoint even if the
+//! catalog URL later changes. Writes are locked read-modify-write (lockfile + atomic
+//! temp-file rename at mode 0600).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::storage::atomic_write;
+use crate::settings::storage::{atomic_write_with, AtomicWriteOptions};
 
 /// The connections file version.
 const FILE_VERSION: u8 = 1;
@@ -75,10 +68,8 @@ struct ConnectionsFile {
     connections: HashMap<String, McpConnectionRecord>,
 }
 
-/// Durable connection-record store. One instance per process is fine: every
-/// mutating op re-reads the latest on-disk state under the lockfile and
-/// applies only this call's change, so the interactive client and the daemon
-/// worker can both mutate the file.
+/// Durable connection-record store. One instance per process is fine: every mutating op re-reads
+/// the latest on-disk state under the lockfile.
 #[derive(Debug)]
 pub struct McpConnectionStore {
     path: PathBuf,
@@ -143,9 +134,8 @@ impl McpConnectionStore {
         self.records.get(connection_id)
     }
 
-    /// Insert or update one record (locked read-modify-write: the on-disk
-    /// state wins for every OTHER id first). Install paths and tests that
-    /// build records by hand.
+    /// Insert or update one record (locked read-modify-write: the on-disk state wins
+    /// for every OTHER id first).
     #[cfg(test)]
     pub fn upsert(&mut self, record: &McpConnectionRecord) -> Result<(), anyhow::Error> {
         self.with_disk_state(|records| {
@@ -160,12 +150,8 @@ impl McpConnectionStore {
         })
     }
 
-    /// Apply one verification outcome under the shared guard: a stale probe
-    /// (the credential changed) never marks a newer grant or a logged-out
-    /// connection verified — the result is discarded and the caller is
-    /// told. A fresh install (no record yet) commits only when the probe's
-    /// credential is still the stored one; a vanished record (removed
-    /// mid-probe) commits nothing.
+    /// Apply one verification outcome under the shared guard: a stale probe never marks a newer
+    /// grant or a logged-out connection verified — the result is discarded.
     pub fn apply_verify_result(
         &mut self,
         record: &McpConnectionRecord,
@@ -245,7 +231,11 @@ fn write_records(
         "version": FILE_VERSION,
         "connections": ordered,
     });
-    atomic_write(path, &serde_json::to_string_pretty(&doc)?)?;
+    atomic_write_with(
+        path,
+        &serde_json::to_string_pretty(&doc)?,
+        AtomicWriteOptions { fsync: true },
+    )?;
     Ok(())
 }
 
@@ -276,12 +266,10 @@ pub fn new_pending_record(
 mod tests {
     use super::*;
 
-    /// Per-call-site served-path oracle (mcp/connection-store.ts:890
-    /// passes only `{ mode: 0o600 }`): the registry write goes through the
-    /// real `write_records` writer and takes NO fsync branch, landing the
-    /// exact serialized document bytes.
+    /// Per-call-site served-path oracle: the registry write goes through the real
+    /// `write_records` writer and takes exactly one fsync branch.
     #[test]
-    fn registry_write_takes_the_ts_default_no_sync() {
+    fn registry_write_takes_exactly_one_fsync() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("connections.json");
         let record = McpConnectionRecord {
@@ -308,8 +296,8 @@ mod tests {
         write_records(&path, &records).unwrap();
         assert_eq!(
             crate::settings::storage::opt_in_fsync_calls(),
-            before,
-            "the TS-default registry write must not sync"
+            before + 1,
+            "the registry write must flush the temp file before the rename"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }

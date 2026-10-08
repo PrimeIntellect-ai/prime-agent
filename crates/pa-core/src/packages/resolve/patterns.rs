@@ -1,11 +1,8 @@
-//! Resource-filter patterns: plain and glob includes, `!` excludes, and the
-//! `+`/`-` force-include/force-exclude override forms, applied against paths
-//! relative to a base directory.
-//!
-//! Matching is minimatch-compatible via globset with literal separators:
-//! `*` and `?` never cross `/`, `**` spans segments, character classes and
-//! brace alternates work. A pattern that fails to compile matches nothing
-//! (the TS product treats invalid patterns as non-matches).
+//! Resource-filter patterns: plain and glob includes, `!` excludes, and
+//! `+`/`-` force forms, applied against paths relative to a base directory.
+//! Matching is minimatch-compatible via globset with literal separators
+//! (`*`/`?` never cross `/`, `**` spans segments); invalid patterns match
+//! nothing (TS treats them as non-matches).
 
 use std::path::{Path, PathBuf};
 
@@ -31,7 +28,6 @@ pub(crate) fn has_glob_pattern(entry: &str) -> bool {
     entry.contains('*') || entry.contains('?')
 }
 
-/// Split entries into plain paths and patterns.
 pub(crate) fn split_patterns(entries: &[String]) -> (Vec<String>, Vec<String>) {
     let mut plain = Vec::new();
     let mut patterns = Vec::new();

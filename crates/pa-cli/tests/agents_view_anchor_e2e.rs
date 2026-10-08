@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,9 +12,8 @@
 
 //! End-to-end verifier for the agents-view entry anchor: the agents-back
 //! handoff opens the view anchored on the session just left (TS
-//! `launchAgentsView`), and the entry selection lands on that session's row
-//! instead of the first row — proven by Enter opening the anchor's file,
-//! not the first-listed session's.
+//! `launchAgentsView`), and Enter opens the anchor's file, not the
+//! first-listed session's.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -42,9 +34,8 @@ struct Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        // Stop by protocol so the supervisor shuts its workers down, then
-        // kill the child when the protocol path fails (a failing test must
-        // not leak worker processes).
+        // Stop by protocol so the supervisor shuts its workers down; kill the
+        // child when it fails (a failing test must not leak workers).
         graceful_shutdown(&self.socket);
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -123,9 +114,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// One saved-session fixture: header, display name, and a user/assistant
-/// exchange. Identical timestamps across fixtures make the list order fall
-/// to the title tie-break, so "cron keeper" lists before "gateway worker".
+/// One saved-session fixture: header, display name, and an exchange.
+/// Identical timestamps make the list order fall to the title tie-break.
 fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> PathBuf {
     let path = dir.join(format!("{id}.jsonl"));
     let mut content = format!(
@@ -148,9 +138,7 @@ fn write_fixture(dir: &Path, id: &str, name: &str, turns: &[(&str, &str)]) -> Pa
     path
 }
 
-/// The agents-back handoff reopens the view anchored on the session just
-/// left: the entry selection lands on the anchor's row, so Enter opens the
-/// anchor's file — not the first-listed session's.
+/// Enter opens the anchor's file, not the first-listed session's.
 #[tokio::test]
 async fn entry_anchor_selects_the_left_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -160,11 +148,8 @@ async fn entry_anchor_selects_the_left_session() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The fixture roster: two saved sessions. Rows sort by last activity
-    // (the saved file's mtime) with the title as the tie-break, so the
-    // later-written cron session lists first either way: a first-row default
-    // would open the cron session, and the anchor is the second-listed
-    // gateway session.
+    // The fixture roster: rows sort by last activity (mtime), so the cron session
+    // lists first — the anchor is the second-listed gateway session.
     let gateway_path = write_fixture(
         &session_dir,
         "gateway-01",
@@ -198,8 +183,8 @@ async fn entry_anchor_selects_the_left_session() {
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // The roster snapshot precedes streaming pushes and the saved
-            // catalog lands right after open; settle before the open key.
+            // The roster snapshot precedes streaming pushes and the saved catalog lands right after
+            // open; settle before the open key.
             AgentsStep::WaitSettle { timeout_ms: 1000 },
             AgentsStep::Key("enter".to_string()),
         ],
@@ -212,8 +197,7 @@ async fn entry_anchor_selects_the_left_session() {
             .expect("agents view run")
             .outcome;
     assert!(!outcome.frames.is_empty(), "frames were captured");
-    // The entry selection sat on the anchor row: Enter opens the gateway
-    // session's file, not the first-listed cron session's.
+    // Enter opened the anchor's file, not the first-listed cron session's.
     assert_eq!(
         outcome.selection,
         Some(SessionSelection::Resume(gateway_path.clone())),
@@ -226,12 +210,8 @@ async fn entry_anchor_selects_the_left_session() {
     );
 }
 
-/// The `--continue` launch's view contract (P6 continue-recent safety): the
-/// CLI resolves the newest saved session for the cwd, opens the agents view
-/// preselected on it, and the status line names the candidate. Enter opens
-/// the candidate — the user confirms what continues, never a blind
-/// newest-session resume. This is exactly the option set the CLI's
-/// continue-recent flow passes (`anchor` + `notice`).
+/// The `--continue` launch's view contract (P6 continue-recent safety): preselect the
+/// newest saved session; Enter opens the candidate — the user confirms.
 #[tokio::test]
 async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -241,9 +221,8 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // Two saved sessions for the launch cwd; the second write is the newest,
-    // so the continue candidate is the second one even though the first
-    // would list first without the anchor (the title tie-break).
+    // Two saved sessions for the launch cwd; the second write is the newest, so
+    // the continue candidate is the second one even though the first would list first.
     let older_path = write_fixture(
         &session_dir,
         "aaaa-candidate",
@@ -288,8 +267,8 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // The saved catalog lands right after open; settle so the
-            // anchor preselection applies before the open key.
+            // The saved catalog lands right after open; settle so the anchor preselection applies
+            // before the open key.
             AgentsStep::WaitSettle { timeout_ms: 1000 },
             AgentsStep::Key("enter".to_string()),
         ],
@@ -307,7 +286,6 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
         rendered.contains("Most recent session for this directory: bbbb-candidate"),
         "the continue notice rendered in the status line:\n{rendered}"
     );
-    // Enter opened the preselected candidate, not the first-listed row.
     assert_eq!(
         outcome.selection,
         Some(SessionSelection::Resume(candidate_path.clone())),
@@ -321,12 +299,8 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
     drop(supervisor);
 }
 
-/// The ctrl+r rename through the real daemon (the
-/// `rename_saved_session` wire path — the supervisor's name reservation
-/// ladder and the offline catalog rename, which a unit test cannot
-/// exercise): the saved fixture row renames, the status reports TS's
-/// row, the final frame lists the new name, and the file on disk gains
-/// the `session_info` name entry.
+/// Through the real daemon (`rename_saved_session` wire path, which a unit test cannot
+/// exercise): the row renames in place, the file gains the name.
 #[tokio::test]
 async fn rename_saved_session_renames_the_row_and_the_file() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -362,8 +336,8 @@ async fn rename_saved_session_renames_the_row_and_the_file() {
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // The saved catalog lands right after open; settle so the
-            // fixture's row is selectable before the rename key.
+            // The saved catalog lands right after open; settle so the fixture's row is selectable
+            // before the rename key.
             AgentsStep::WaitSettle { timeout_ms: 1000 },
             AgentsStep::Key("ctrl+r".to_string()),
             AgentsStep::Key("ctrl+u".to_string()),
@@ -394,9 +368,8 @@ async fn rename_saved_session_renames_the_row_and_the_file() {
             .is_some_and(|frame| frame.contains("renamed agent")),
         "the final frame lists the new name:\n{rendered}"
     );
-    // The old name left the row: the catalog loads once and is never
-    // refetched, so this pins the in-place saved-row patch in
-    // `rename_result` (the status alone never proves it).
+    // The old name left the row: the catalog loads once, never refetched, so
+    // this pins the in-place saved-row patch in `rename_result`.
     assert!(
         outcome
             .frames

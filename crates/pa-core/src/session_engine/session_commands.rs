@@ -1,13 +1,7 @@
 //! Session slash-command execution: the daemon-side behavior behind
-//! `/compact`, `/refine`, `/goal`, and `/autonomous`. Port of
-//! agent-session.ts `_executeSelectedSessionCommand` (the durable echo
-//! row) and `_executeQueuedSessionCommand` (the per-command executors and
-//! their result rows).
-//!
-//! The host runtime owns persistence of what this returns: the messages
-//! (echo, result, status rows), the compaction record, and any follow-up
-//! prompt to admit as a turn (goal start/resume). Errors carry the exact
-//! TS message; the host renders the `Command failed: ...` result row.
+//! `/compact`, `/refine`, `/goal`, and `/autonomous`. The host runtime owns
+//! persistence of what this returns; errors carry the exact TS message and
+//! the host renders the `Command failed: ...` result row.
 
 use std::sync::Arc;
 
@@ -35,13 +29,10 @@ pub use crate::autonomous::AUTONOMOUS_STATUS_CUSTOM_TYPE;
 
 /// Inputs the host runtime supplies to one execution.
 pub struct SessionCommandParams<'a> {
-    /// The resolved model for summarizer/refiner calls.
     pub model: &'a pa_types::ai::Model,
     /// Resolved API key (None falls back to provider resolution).
     pub api_key: Option<String>,
-    /// The global harness directory (refinement history).
     pub global_harness_dir: std::path::PathBuf,
-    /// The session's autonomous runtime state, held by the host runtime.
     pub autonomous: &'a mut AutonomousRuntimeState,
 }
 
@@ -60,29 +51,23 @@ pub struct CompactionExecution {
 /// What one execution produced.
 #[derive(Debug, Default)]
 pub struct SessionCommandExecution {
-    /// Durable custom messages in order: the command echo, then any result
-    /// or status rows.
+    /// The command echo, then any result or status rows.
     pub messages: Vec<CustomMessage>,
     /// A compaction that ran (no result row: the TS `/compact` outcome is
     /// the compaction record itself).
     pub compaction: Option<CompactionExecution>,
-    /// A compaction skipped (TS `CompactionSkippedError`): the message the
-    /// wire `compaction_end` event carries so attached surfaces can warn
-    /// (the durable transcript itself records nothing, matching the TS
-    /// queued-command catch arm that returns silently).
+    /// A compaction skipped: the message the wire `compaction_end`
+    /// event carries (the durable transcript records nothing).
     pub compaction_skipped: Option<&'static str>,
-    /// An injected custom row the follow-up turn runs on (goal
-    /// start/resume): the loop admission carries the row itself, so the
-    /// transcript holds ONE representation of the turn (the custom row),
-    /// like TS's prepared-turn primary record. It is NOT part of
-    /// `messages` — the loop's `message_end` persists it once the turn
-    /// is admitted.
+    /// An injected custom row the follow-up turn runs on (goal start/resume):
+    /// the transcript holds ONE representation of the turn, NOT part of
+    /// `messages` — the loop's `message_end` persists it once admitted.
     pub continuation_message: Option<CustomMessage>,
-    /// The command failed: the TS error message. The failure result row
-    /// (`Command failed: ...`) is already appended to `messages`.
+    /// The command failed: the TS error message (the failure result row
+    /// is already appended to `messages`).
     pub error: Option<String>,
-    /// A refinement run's structured outcome (host transports surface it as
-    /// a completion event; the result row in `messages` stays display-only).
+    /// A refinement run's structured outcome; the result row in
+    /// `messages` stays display-only.
     pub refinement: Option<crate::refinement::RefinementResult>,
     /// A refinement run failed: the raw run error (option-parse failures
     /// leave this `None`; they are command failures, not refinement events).
@@ -102,9 +87,8 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-/// The durable command echo row (`session_slash_command`). Public for the
-/// host transports that emit the echo before execution (TS
-/// `_executeSelectedSessionCommand` records it before the command runs).
+/// The durable command echo row. Public for the host transports that
+/// emit the echo before execution.
 #[must_use]
 pub fn session_command_echo_row(command: &SessionSlashCommand) -> CustomMessage {
     CustomMessage {
@@ -128,9 +112,8 @@ fn command_details(command: &SessionSlashCommand) -> serde_json::Value {
     })
 }
 
-/// The failure result row for a command that failed before or during
-/// execution: hosts append it so the transcript still records the attempt
-/// (TS `_executeQueuedSessionCommand` catch arm).
+/// Hosts append it so the transcript still records the failed
+/// attempt.
 #[must_use]
 pub fn session_command_failure_row(command: &SessionSlashCommand, error: &str) -> CustomMessage {
     slash_command_result(
@@ -168,7 +151,7 @@ fn slash_command_result(
     }
 }
 
-/// The goal status line (`Goal <status>: <objective>` / `No active goal.`).
+/// The goal status line.
 fn goal_status_text(state: &crate::goals::GoalState) -> String {
     match &state.objective {
         Some(objective) if state.status != GoalStatus::Idle => {
@@ -178,20 +161,16 @@ fn goal_status_text(state: &crate::goals::GoalState) -> String {
     }
 }
 
-/// Execute one session command against the engine's session. The echo row
-/// is durable whether the command succeeds or fails (TS
-/// `_executeSelectedSessionCommand` appends it before execution); a failure
-/// appends the `Command failed: ...` result row and reports `error`.
+/// Execute one session command. The echo row is durable whether the command
+/// succeeds or fails; a failure appends the failure row and reports `error`.
 pub async fn execute_session_command(
     engine: &SessionEngine,
     params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
 ) -> SessionCommandExecution {
     let mut execution = SessionCommandExecution::default();
-    // TS `_appendDurableSessionCommandMessage` records the attempted
-    // command BEFORE the queue runs it, so the command's own work (the
-    // compaction branch, the refinement snapshot) sees the echo row in the
-    // session branch.
+    // The echo row is recorded BEFORE the command runs, so the command's
+    // own work sees it in the session branch.
     let echo = session_command_echo_row(command);
     execution.push_message(echo.clone());
     if let Err(error) = persist_rows(engine, std::iter::once(&echo)).await {
@@ -216,8 +195,7 @@ pub async fn execute_session_command(
         ));
         execution.error = Some(message);
     }
-    // The echo row is already durable (persisted ahead of the command);
-    // the result and status rows follow in order.
+    // The echo row is already durable; the rest follow in order.
     if let Err(error) = persist_rows(engine, execution.messages.iter().skip(1)).await {
         execution.error = Some(error);
     }
@@ -225,13 +203,9 @@ pub async fn execute_session_command(
     execution
 }
 
-/// The live agent context mirrors the durable rows (TS
-/// `_appendDurableSessionCommandMessage` pushes each row onto
-/// `agent.state.messages`, so the next admitted turn's request and every
-/// state snapshot carry them). The post-execution rebuild is idempotent
-/// for the compaction path, which rebuilds mid-execution; the refinement
-/// path pushes its rows mid-execution and this rebuild then normalizes
-/// the command path's live context onto the durable one.
+/// The live agent context mirrors the durable rows (so the next admitted
+/// turn's request carries them); the rebuild is idempotent — the compaction
+/// path rebuilds mid-execution, the refinement path pushes rows mid-execution.
 async fn sync_live_context(engine: &SessionEngine) {
     let session = engine.session.session_handle().clone();
     let rebuilt = {
@@ -328,9 +302,8 @@ async fn execute_refine(
     Ok(())
 }
 
-/// `/goal`: status, clear, pause, resume, and start (which schedules the
-/// first continuation turn). The status result row precedes the durable
-/// goal-context row of the scheduled turn.
+/// `/goal`: status, clear, pause, resume, and start (which schedules
+/// the first continuation turn).
 async fn execute_goal(
     engine: &SessionEngine,
     command: &SessionSlashCommand,
@@ -352,12 +325,9 @@ async fn execute_goal(
     {
         let mut driver = driver.lock().await;
         let mut session = session.lock().await;
-        // The clear's reply reflects the action, not the post-clear
-        // state (the operator's 2026-09-25 bug report): TS answers
-        // "No active goal." either way, which reads as the command
-        // having failed on the goal it just cleared. A clear that
-        // removed a goal record answers "Goal cleared."; the
-        // nothing-to-clear case keeps the plain status text.
+        // The clear's reply reflects the action, not the post-clear state
+        // (the operator's 2026-09-25 bug report): a clear that removed a goal
+        // record answers "Goal cleared."; nothing-to-clear keeps the plain status.
         let mut cleared_goal = false;
         match goal {
             GoalCommand::Status => {}
@@ -411,9 +381,9 @@ async fn execute_goal(
             true,
         ));
     }
-    // TS `_runOrQueueGoalContext`: the goal-context row becomes the
-    // turn's primary record (an injected custom row), never an early
-    // durable row — the loop admission appends it once.
+    // The goal-context row becomes the turn's primary record (an
+    // injected custom row), never an early durable row — the loop
+    // admission appends it once.
     execution.continuation_message = context_message;
     // The goal command's observed result at this seam (the driver applied
     // the action), counted as `feature_goal_completed_count`.
@@ -423,8 +393,8 @@ async fn execute_goal(
     Ok(())
 }
 
-/// `/autonomous`: status, on (with budget flags), off. Emits the durable
-/// `autonomous_status` row (TS `_emitAutonomousStatus`).
+/// `/autonomous`: status, on (with budget flags), off; emits the
+/// durable `autonomous_status` row.
 fn execute_autonomous(
     params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
@@ -451,9 +421,8 @@ fn execute_autonomous(
     Ok(())
 }
 
-/// The rows are durable in the session's own entry chain: the live
-/// context rebuild and a later `/compact` see the same rows the host
-/// runtime persists (TS pushes each row onto `agent.state.messages`).
+/// The rows are durable in the session's own entry chain: the live context
+/// rebuild and a later `/compact` see the same rows the host runtime persists.
 async fn persist_rows<'a>(
     engine: &SessionEngine,
     messages: impl Iterator<Item = &'a CustomMessage>,
@@ -556,8 +525,7 @@ mod tests {
 
     #[tokio::test]
     async fn autonomous_status_row_emitted() {
-        // A scripted engine is not needed: the executor's autonomous branch
-        // touches only the runtime state.
+        // The autonomous branch touches only the runtime state.
         let mut autonomous = crate::autonomous::create_autonomous_runtime_state(None, None);
         let mut execution = SessionCommandExecution::default();
         execute_autonomous(

@@ -1,17 +1,6 @@
 //! Cross-process directory locks, byte-compatible with the TS product's
-//! `proper-lockfile` 4.1.2 convention.
-//!
-//! The TS product (auth.json, settings.json, cron state, session-lease
-//! guards) locks a file by creating an EMPTY DIRECTORY at `{file}.lock`,
-//! bumping its mtime, and removing the directory on release. Staleness is
-//! judged from that mtime alone - there is no pid or owner file. A regular
-//! file at the lock path is not a valid lock in this protocol; it is removed
-//! on acquisition (older Rust builds left flock files there, which broke TS
-//! startup with ENOTDIR).
-//!
-//! Held locks are expected to be short (read-modify-write of one small JSON
-//! document); long holds rely on the caller re-checking, as in the TS
-//! product, whose sync lock keeps its mtime fresh via an unref'd timer.
+//! `proper-lockfile` 4.1.2 convention: ordinary locks are empty directories
+//! at `{file}.lock`; harness-state locks add an owner file for safe stale reclaim.
 
 use std::fs;
 use std::io;
@@ -33,8 +22,8 @@ fn probe_mtime() -> (i64, i64) {
     (seconds, 5_000_000)
 }
 
-// The `libc::timespec` field names are the syscall's own vocabulary -
-// the struct-literal shorthand below is the point of the params.
+// The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
+// below is the point.
 #[allow(clippy::similar_names)]
 #[cfg(unix)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
@@ -55,12 +44,11 @@ fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     Ok(())
 }
 
-/// Windows: the directory's last-write time via `CreateFileW` (the only
-/// way to open a directory is `FILE_FLAG_BACKUP_SEMANTICS`) +
-/// `SetFileTime` - the mtime probe proper-lockfile performs with
-/// `utimensat` on Unix.
-// The `libc::timespec` field names are the syscall's own vocabulary -
-// the struct-literal shorthand below is the point of the params.
+/// Windows: set the directory's last-write time via `CreateFileW` (with
+/// `FILE_FLAG_BACKUP_SEMANTICS`, the only way to open a directory) +
+/// `SetFileTime` - the mtime probe `utimensat` performs on Unix.
+// The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
+// below is the point.
 #[allow(clippy::similar_names)]
 #[cfg(windows)]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
@@ -89,8 +77,8 @@ mod win32 {
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     /// `winbase.h`: write access to the file's times.
     const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
-    /// `winnt.h` `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`:
-    /// a concurrent stat of the lock dir must not be blocked.
+    /// `winnt.h` `FILE_SHARE_READ | WRITE | DELETE`: a concurrent stat of the lock dir must not be
+    /// blocked.
     const FILE_SHARE_ALL: u32 = 0x0000_0007;
     /// `winbase.h` `OPEN_EXISTING`.
     const OPEN_EXISTING: u32 = 3;
@@ -182,6 +170,7 @@ mod win32 {
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
+    owner: Option<String>,
 }
 
 impl LockDir {
@@ -194,30 +183,34 @@ impl LockDir {
     }
 
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
-    /// bump its mtime. A fresh lock held by another process surfaces as
-    /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); callers
-    /// own retry policy. A lock older than `stale_after` is removed and
-    /// retried once, so a crashed holder cannot wedge the file.
+    /// bump its mtime. A fresh foreign lock surfaces as
+    /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); a lock
+    /// older than `stale_after` is removed and retried once.
     ///
     /// # Errors
     ///
-    /// Returns [`io::ErrorKind::WouldBlock`] when a fresh lock is held by
-    /// another process, and any underlying I/O error (missing parent,
-    /// permissions, stale-reclaim failures) as-is.
+    /// [`io::ErrorKind::WouldBlock`] for a fresh foreign lock; other I/O errors as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
+        Self::acquire_with_owner(file, stale_after, None)
+    }
+
+    fn acquire_with_owner(
+        file: &Path,
+        stale_after: Duration,
+        owner: Option<String>,
+    ) -> io::Result<Self> {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
-        match Self::create(&path) {
-            Ok(()) => Ok(LockDir { path }),
-            // Only an existing path is a lock collision; any other failure
-            // (missing parent, permissions) is a real error, like the TS
-            // protocol's non-EEXIST path - never masked as contention.
+        match Self::create(&path, owner.as_deref()) {
+            Ok(()) => Ok(LockDir { path, owner }),
+            // Only an existing path is a lock collision; other failures
+            // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 Self::judge_and_reclaim(&path, stale_after)?;
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
-                match Self::create(&path) {
-                    Ok(()) => Ok(LockDir { path }),
+                match Self::create(&path, owner.as_deref()) {
+                    Ok(()) => Ok(LockDir { path, owner }),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -231,39 +224,158 @@ impl LockDir {
         }
     }
 
-    /// The mkdir is the acquisition signal: EEXIST is the only collision.
-    #[cfg(unix)]
-    fn create(path: &Path) -> io::Result<()> {
-        fs::create_dir(path)?;
-        let (sec, nanos) = probe_mtime();
-        if let Err(error) = set_mtime(path, sec, nanos) {
-            // Never leave a lock artifact behind a failed probe.
-            let _ = fs::remove_dir(path);
-            return Err(error);
+    /// [`Self::acquire`] with a bounded retry: only a fresh foreign lock
+    /// (`WouldBlock`) is retried, sleeping `interval` between attempts;
+    /// any other error returns immediately, and the final `WouldBlock`
+    /// is returned after the last attempt.
+    ///
+    /// # Errors
+    ///
+    /// The last [`io::ErrorKind::WouldBlock`] when all attempts contend;
+    /// other I/O errors as-is.
+    pub fn acquire_retrying(
+        file: &Path,
+        stale_after: Duration,
+        attempts: u32,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        let mut attempt = 0;
+        loop {
+            match Self::acquire(file, stale_after) {
+                Ok(guard) => return Ok(guard),
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(interval);
+                }
+            }
+        }
+    }
+
+    /// Acquire a harness-state lock with a PID and per-process token.
+    /// Only a provably dead owner can be reclaimed after `stale_after`.
+    ///
+    /// # Errors
+    ///
+    /// Returns lock contention or an I/O error from acquisition.
+    pub fn acquire_owned_retrying(
+        file: &Path,
+        stale_after: Duration,
+        attempts: u32,
+        interval: Duration,
+    ) -> io::Result<Self> {
+        static PROCESS_TOKEN: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+        let token = PROCESS_TOKEN.get_or_init(uuid::Uuid::new_v4);
+        let owner = format!("{} {token}.{}", std::process::id(), uuid::Uuid::new_v4());
+        let mut attempt = 0;
+        loop {
+            match Self::acquire_with_owner(file, stale_after, Some(owner.clone())) {
+                Ok(guard) => return Ok(guard),
+                Err(error) if error.kind() != io::ErrorKind::WouldBlock => return Err(error),
+                Err(error) => {
+                    attempt += 1;
+                    if attempt >= attempts {
+                        return Err(error);
+                    }
+                    std::thread::sleep(interval);
+                }
+            }
+        }
+    }
+
+    /// Check that an owned lock is still held before writing its state file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the owner file no longer matches this guard.
+    pub fn ensure_owned(&self) -> io::Result<()> {
+        if self
+            .owner
+            .as_ref()
+            .is_some_and(|owner| !Self::owner_matches(&self.path, owner))
+        {
+            return Err(io::Error::other(format!(
+                "harness state lock lost: {}",
+                self.path.display()
+            )));
         }
         Ok(())
     }
 
-    /// The mkdir is the acquisition signal; the mtime probe makes the
-    /// staleness judgment meaningful on NTFS too (directory mtimes would
-    /// otherwise sit on the second, and stale takeovers would misjudge).
-    #[cfg(windows)]
-    fn create(path: &Path) -> io::Result<()> {
-        fs::create_dir(path)?;
-        let (sec, nanos) = probe_mtime();
-        if let Err(error) = set_mtime(path, sec, nanos) {
-            // Never leave a lock artifact behind a failed probe.
-            let _ = fs::remove_dir(path);
-            return Err(error);
+    fn owner_matches(path: &Path, owner: &str) -> bool {
+        fs::read_to_string(path.join("owner")).is_ok_and(|recorded| recorded.trim() == owner)
+    }
+
+    fn owner_dead(recorded: &str) -> bool {
+        let Some((pid, token)) = recorded.trim().split_once(' ') else {
+            return true;
+        };
+        if token.is_empty() {
+            return true;
         }
-        Ok(())
+        let Ok(pid) = pid.parse::<u32>() else {
+            return true;
+        };
+        if pid == 0 || pid > i32::MAX as u32 {
+            return true;
+        }
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::kill(pid as i32, 0) };
+            result != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        }
+        #[cfg(windows)]
+        {
+            matches!(
+                pa_types::platform::process::is_process_alive(pid),
+                Ok(false)
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
+    }
+
+    /// The mkdir is the acquisition signal: EEXIST is the only collision.
+    #[cfg(any(unix, windows))]
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir(path)?;
+        let result = (|| {
+            if let Some(owner) = owner {
+                #[cfg(unix)]
+                {
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                }
+                fs::write(path.join("owner"), format!("{owner}\n"))?;
+                #[cfg(unix)]
+                fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
+            }
+            let (sec, nanos) = probe_mtime();
+            set_mtime(path, sec, nanos)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(path.join("owner"));
+            let _ = fs::remove_dir(path);
+        }
+        result
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn create(path: &Path) -> io::Result<()> {
-        // No mtime probe on this platform: staleness is judged from the
-        // filesystem's own directory mtime.
-        fs::create_dir(path)
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
+        fs::create_dir(path)?;
+        if let Some(owner) = owner {
+            if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Decide the fate of an incumbent at `path`. Returns only when the
@@ -279,8 +391,7 @@ impl LockDir {
         if metadata.is_file() {
             // A regular file is not a lock in this protocol (a pre-compat
             // Rust build or foreign artifact): remove it and retry - but
-            // only when no live flock holder guards it, so a concurrently
-            // running pre-compat binary is not clobbered mid-write.
+            // only when no live flock holder guards it.
             #[cfg(unix)]
             {
                 if Self::legacy_flock_held(path) {
@@ -303,6 +414,22 @@ impl LockDir {
                 .duration_since(modified)
                 .unwrap_or_default();
             if age > stale_after {
+                let owner_path = path.join("owner");
+                let recorded = fs::read_to_string(&owner_path).ok();
+                if recorded
+                    .as_deref()
+                    .is_some_and(|owner| !Self::owner_dead(owner))
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
+                match fs::remove_file(&owner_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
                 // Stale: remove and let the caller retry.
                 match fs::remove_dir(path) {
                     Ok(()) => return Ok(()),
@@ -333,10 +460,18 @@ impl LockDir {
     }
 
     /// Release: remove the lock directory. A missing directory means someone
-    /// else already reclaimed it (e.g. a stale takeover) - matching the TS
-    /// release, which tolerates ENOENT. Other failures are surfaced to the
-    /// trace log; `Drop` cannot propagate.
+    /// else already reclaimed it (the TS release tolerates ENOENT); other
+    /// failures go to the trace log (`Drop` cannot propagate).
     pub fn release(&self) {
+        if let Some(owner) = &self.owner {
+            if !Self::owner_matches(&self.path, owner) {
+                return;
+            }
+            if let Err(error) = fs::remove_file(self.path.join("owner")) {
+                tracing::warn!("failed to release lock {}: {error}", self.path.display());
+                return;
+            }
+        }
         if let Err(error) = fs::remove_dir(&self.path) {
             if error.kind() != io::ErrorKind::NotFound {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
@@ -386,8 +521,7 @@ mod tests {
             .unwrap()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap();
-        // Ceil to the next second plus 5ms, so millisecond-precision
-        // filesystems never record a time "on the second".
+
         assert_eq!(modified.as_millis() % 1000, 5);
         assert!(
             modified.as_millis()
@@ -424,11 +558,59 @@ mod tests {
         assert!(!stale.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn live_owned_lock_cannot_be_stolen_after_stale_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let guard =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        set_mtime(&guard.path, 1, 0).unwrap();
+        let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        guard.ensure_owned().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dead_owned_lock_is_reclaimed_and_old_guard_cannot_remove_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let old =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        fs::write(old.path.join("owner"), format!("{dead_pid} dead-token\n")).unwrap();
+        set_mtime(&old.path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        assert!(old.ensure_owned().is_err());
+        drop(old);
+        next.ensure_owned().unwrap();
+        drop(next);
+        assert!(!LockDir::path_for(&file).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unparseable_owned_lock_is_reclaimed_by_age() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("harness_state.json");
+        let path = LockDir::path_for(&file);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("owner"), [0xff]).unwrap();
+        set_mtime(&path, 1, 0).unwrap();
+        let next =
+            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
+        next.ensure_owned().unwrap();
+    }
+
     #[test]
     fn legacy_lock_file_is_removed_not_choked_on() {
-        // A pre-compat Rust build left flock FILES at the lock path; the TS
-        // product rmdir()s them and dies with ENOTDIR. Acquision must heal
-        // the artifact instead of failing.
+        // A pre-compat Rust build left flock FILES at the lock path (the TS
+        // product rmdir()s them and dies with ENOTDIR): acquisition must heal.
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("auth.json");
         std::fs::write(&file, "{}").unwrap();

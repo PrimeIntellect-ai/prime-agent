@@ -1,8 +1,7 @@
-//! The `ipython` tool-call card, a port of the TS `ipython-cell.ts`:
-//! a fixed collapsed summary line (marker, language, preview, line counts,
-//! duration, error name) plus, in the expanded conversation-detail mode,
-//! the full cell source and its output below. The top line never changes
-//! with expansion, so toggling detail never shifts the layout.
+//! The `ipython` tool-call card: a fixed collapsed summary line (marker,
+//! language, preview, line counts, duration, error name), plus in expanded
+//! mode the full cell source and output. The top line never changes with
+//! expansion, so toggling detail never shifts the layout.
 
 mod output;
 
@@ -81,9 +80,8 @@ impl CardStatus {
 }
 
 /// Whether the cell's final result carries a still-running background
-/// shell (the renderer's own `Running` case): the cell itself settled,
-/// but the spawned shell keeps working, so the summary line keeps
-/// animating (the working icon) - the card's rows must not cache.
+/// shell: the summary line keeps animating — the card's rows must not
+/// cache.
 pub(crate) fn background_shell_running(card: &ToolCallCard) -> bool {
     if card.result_partial {
         return false;
@@ -149,8 +147,6 @@ fn layout(
         .as_ref()
         .and_then(|result| read_background_shell(code, &result.details));
 
-    // The top line is identical collapsed or expanded, so detail toggles
-    // never shift the layout or indentation.
     lines.push(|| {
         collapsed_line(
             card,
@@ -162,9 +158,8 @@ fn layout(
             code,
         )
     });
-    // TS renders the sent-message receipt rows below the code (and below
-    // the diff rows, which this card does not render) even when the cell
-    // is collapsed; the body opens up only when expanded.
+    // TS renders the sent-message receipt rows even when the cell is
+    // collapsed; the body opens up only when expanded.
     if !detail.tool_output_expanded() {
         render_sent_agent_messages(lines, &details, false, theme, width);
         return;
@@ -172,9 +167,8 @@ fn layout(
     let has_code = render_code(lines, code, theme, width);
     render_sent_agent_messages(lines, &details, true, theme, width);
     render_output(card, &details, lines, has_code, show_images, theme, width);
-    // Image blocks render below the card when shown (TS the
-    // `N images rendered below` note refers to these rows, which
-    // `tool-execution.ts` adds for every tool shell).
+    // Image blocks render below the card when shown (TS adds these rows
+    // for every tool shell).
     lines.images(card.result.as_ref(), show_images, theme);
 }
 
@@ -322,8 +316,8 @@ pub(crate) fn bash_dominated_stats(card: &ToolCallCard) -> Option<BashCellStats>
 }
 
 /// `\u{2191}in \u{2193}out lines` (TS `lineCounts`): non-empty input
-/// lines, output lines from the structured fields (edits show the diff, so
-/// their output counts zero).
+/// lines; output from the structured fields (edits show the diff, so
+/// count zero).
 fn line_counts(card: &ToolCallCard, details: &IpythonDetails, code: &str) -> Option<String> {
     let input = input_line_count(code);
     let has_diffs = !details.diffs.is_empty();
@@ -464,10 +458,9 @@ fn render_code(lines: &mut RowOutput, code: &str, theme: &Theme, width: usize) -
     true
 }
 
-/// TS `renderSentAgentMessages`: one summary row per sent receipt below
-/// the code (blank-separated when expanded), the `╰─`-guttered body only
-/// in the expanded view. The summary carries no body preview (the TS
-/// sent rows are the receipt summary alone).
+/// TS `renderSentAgentMessages`: one summary row per sent receipt, the
+/// `╰─`-guttered body only in the expanded view (the TS sent rows are
+/// the receipt summary alone).
 fn render_sent_agent_messages(
     lines: &mut RowOutput,
     details: &IpythonDetails,
@@ -521,8 +514,8 @@ fn render_sent_agent_messages(
 }
 
 /// One indented card row (TS `addWrapped`): the first wrapped row carries
-/// `prefix`, continuation rows the matching indent; each row is truncated
-/// to the width so a narrow pane cannot overflow.
+/// `prefix`, continuation rows the matching indent; each row truncates
+/// to the width.
 fn add_wrapped(lines: &mut RowOutput, prefix: &Line, body: &Line, width: usize) {
     let prefix_width: usize = prefix.iter().map(|s| str_width(&s.content)).sum();
     let available = width.saturating_sub(1 + prefix_width).max(1);

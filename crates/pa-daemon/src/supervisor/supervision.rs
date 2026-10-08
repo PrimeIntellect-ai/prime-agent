@@ -1,36 +1,60 @@
 //! Worker supervision: the watch loop, the restart backoff, and
 //! the spawn/connect plumbing.
-use super::routing::fail_unsent_request;
+use super::routing::{fail_unsent_request, WORKER_REQUEST_TIMEOUT_MS, WORKER_SOCKET_CLOSED};
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
     persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
     Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
     ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
-    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, LONG_ROUTE_TIMEOUT_MS,
-    ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
+    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
+    WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
 
 pub(super) const MAX_CONSECUTIVE_FAILURES: u32 = 5;
-/// A crash-path child that lived at least this long proved health: its death
-/// resets the failure count (a fresh count) instead of accumulating toward
-/// the give-up cap. Below it, a spawn-dies-fast child counts as another
-/// consecutive failure - the restart storm's counter could never grow.
+/// A crash-path child that lived at least this long proved health: its death resets
+/// the failure count instead of accumulating toward the give-up cap.
 pub(super) const STABLE_LIFETIME_MS: u64 = 30_000;
 const BASE_BACKOFF_MS: u64 = 250;
 const MAX_BACKOFF_MS: u64 = 30_000;
+
+/// A failed/cancelled authentication must close both pump-owned socket halves.
+struct PreAuthPumps {
+    writer: tokio::task::JoinHandle<()>,
+    reader: tokio::task::JoinHandle<()>,
+    resident: Arc<ResidentWorker>,
+    epoch: u64,
+    installed: bool,
+}
+
+impl Drop for PreAuthPumps {
+    fn drop(&mut self) {
+        if !self.installed {
+            self.writer.abort();
+            self.reader.abort();
+            self.resident.note_connection_lost(self.epoch);
+            // A cancelled auth future skips route_command_on's timed-out
+            // cleanup. Its dropped oneshot receiver identifies only this
+            // attempt's pending slot, without disturbing newer routes.
+            let resident = Arc::clone(&self.resident);
+            tokio::spawn(async move {
+                resident
+                    .pending
+                    .lock()
+                    .await
+                    .retain(|_, reply| !reply.is_closed());
+            });
+        }
+    }
+}
 /// The adopted-worker liveness poll used only where the kernel exit watch
 /// cannot register (no pidfd, descriptor exhaustion, Windows).
 const ADOPTED_EXIT_FALLBACK_POLL: Duration = Duration::from_secs(30);
 
 impl Supervisor {
-    /// Watch a worker process: on unexpected exit, restart with backoff.
-    /// The crash path's failure-count update: a child that lived past the
-    /// stable window was healthy, so its death starts a fresh count; a
-    /// spawn-dies-fast child (or an adopted pid with no spawn time of our
-    /// own) accumulates toward the give-up cap - the storm's counter could
-    /// never grow while relaunch-spawns kept resetting it.
+    /// The crash path's failure-count update: a stable-lifetime child was healthy, so its
+    /// death starts a fresh count; a spawn-dies-fast child (or an adopted pid) accumulates.
     pub(super) fn next_failure_count(resident: &ResidentWorker, now_ms: u64) -> u32 {
         let spawned_at = resident.spawned_at_ms.load(Ordering::SeqCst);
         let stable = spawned_at > 0 && now_ms.saturating_sub(spawned_at) >= STABLE_LIFETIME_MS;
@@ -103,22 +127,18 @@ impl Supervisor {
                 }
             }
             self.note_daemon_event("worker_exited", Some("crash"));
-            // A hard-killed parent bypasses every worker-side close (#246's
-            // teardowns never ran): the supervisor closes its resident RLM
-            // children here, before the restart, so a relaunched parent
-            // never resumes beside an orphaned child worker (TS children
-            // die with the in-process parent).
+            // A hard-killed parent bypasses every worker-side close (#246): close the
+            // resident RLM children here, before the restart, so a relaunched parent
+            // never resumes beside an orphaned child worker.
             self.close_children_of_dead_parent(&resident).await;
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_millis() as u64);
             let failures = Self::next_failure_count(&resident, now_ms);
             if failures > MAX_CONSECUTIVE_FAILURES {
-                // A stop that lands during the relaunch storm owns the
-                // terminal state: the give-up must not persist `Failed`
-                // over the stop's tombstone or recreate a descriptor the
-                // stop already deleted (the next boot would adopt a
-                // cleanly stopped worker as `GaveUp`).
+                // A stop during the storm owns the terminal state: the give-up must
+                // not persist `Failed` over the stop's tombstone or recreate a deleted
+                // descriptor (the next boot would adopt a stopped worker as `GaveUp`).
                 if self.is_stopping(&resident) {
                     return;
                 }
@@ -128,11 +148,9 @@ impl Supervisor {
                 let journal_path = descriptor.recovery_journal_path.clone();
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
-                // The give-up settles its own revival evidence (the storm
-                // cycle's breaker): the journal's busy records are what a
-                // later boot reads as "interrupted live work" — the
-                // verdict that gave up must outlive them, or every boot
-                // re-storms this same slot (the 12:00 → 17:07 recurrence).
+                // The give-up settles its own revival evidence: the journal's busy records
+                // are what a later boot reads as "interrupted live work" — the give-up
+                // verdict must outlive them.
                 if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
                     std::path::Path::new(&journal_path),
                     "worker_gave_up",
@@ -147,29 +165,18 @@ impl Supervisor {
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
-                // The residency change lands in the scheduled-jobs
-                // invalidation (TS `broadcastHeartbeatsChanged`: "every
-                // daemon-owned scheduled-job mutation and worker residency
-                // change"): the dead worker's durable jobs are passive from
-                // here on, so a snapshot that excluded them while the
-                // worker was live must not be served for the rest of the
-                // refresh window.
+                // The residency change lands in the scheduled-jobs invalidation (TS
+                // `broadcastHeartbeatsChanged`): the dead worker's durable jobs are passive
+                // from here on, so a snapshot from while it was live must not be served again.
                 self.broadcast_heartbeats_changed();
-                // The give-up settles the dead worker's rows exactly like
-                // a stop (every owned non-ephemeral, non-queued row
-                // passivates and keeps its model/thinking/cwd). No ledger
-                // reseed, no transcript read.
+                // The give-up settles the dead worker's rows exactly like a stop: owned
+                // non-ephemeral, non-queued rows passivate and keep their model/thinking/cwd.
                 let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
                 self.passivate_roster_worker(&resident.worker_id, ephemeral)
                     .await;
-                // The exhausted-failure state must release the session
-                // hold: a process this daemon spawned under the id that
-                // outlived the failure loop keeps the session's runtime
-                // lease and refuses every create for the file (the
-                // zombie-holder incident). The belt reaps the id's
-                // same-socket leftovers identity-gated; the last crashed
-                // child is provably gone, and a dead holder's lease
-                // self-heals on the next acquire.
+                // The exhausted-failure state must release the session hold: the belt reaps
+                // the id's same-socket leftovers identity-gated; the lease self-heals on
+                // the next acquire.
                 crate::boot_reap::reap_abandoned_workers(&self, &resident.worker_id).await;
                 self.log_line(&format!(
                     "session worker {} failed after {failures} consecutive failures",
@@ -185,10 +192,9 @@ impl Supervisor {
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             match self.relaunch_worker(&resident).await {
                 Ok(new_child) => {
-                    // No counter reset on a successful relaunch: a spawn
-                    // that dies fast must accumulate toward the give-up cap
-                    // (the reset now comes only from a stable lifetime on
-                    // the crash path).
+                    // No counter reset on a successful relaunch: a spawn that dies fast must
+                    // accumulate toward the give-up cap (the reset comes only from a stable
+                    // lifetime on the crash path).
                     self.note_daemon_event("worker_restarted", None);
                     child = Some(new_child);
                 }
@@ -229,15 +235,12 @@ impl Supervisor {
         if self.is_stopping(resident) {
             return Err(anyhow!("supervisor is shutting down"));
         }
-        // The replacement's create replay is pending: routed client
-        // commands must wait for the replayed session (the replacement-
-        // aware route gates on this until the replay answers).
+        // The replacement's create replay is pending: routed client commands must wait
+        // for the replayed session (the replacement-aware route gates on this).
         resident.note_session_replaying();
-        // The old worker is gone for good: a run with a pending abort is
-        // declared terminal HERE, before the create payload is built, so
-        // the journal record deterministically rides this replay even when
-        // the dead connection's EOF is late (a stale reader declares
-        // nothing).
+        // The old worker is gone for good: a run with a pending abort is declared
+        // terminal HERE, before the create payload is built, so the journal record
+        // rides this replay even when the dead connection's EOF is late.
         self.declare_compaction_terminal(resident, || resident.compaction.observe_worker_gone())
             .await;
         let deadline = self.connect_deadline();
@@ -257,15 +260,9 @@ impl Supervisor {
         let (payload, injected_compaction_abort) = {
             let descriptor = resident.descriptor.lock().await;
             let mut payload = create_command_payload(&descriptor.create_command);
-            // The abort supervision's pending terminal record rides the
-            // create replay: the replacement worker discloses the aborted
-            // run in the rebuilt transcript (the parity shape of its own
-            // auto-abort rows), and the record is consumed by the reply.
-            // A declaration whose durable write failed is retried here —
-            // the replay is the point the record is needed — and a
-            // still-failing write only logs: the replay proceeds without
-            // the disclosure and the record stays retryable for a later
-            // replacement.
+            // The pending terminal record rides the create replay: the replacement
+            // discloses the aborted run in the rebuilt transcript, and the record is
+            // consumed by the reply.
             let pending = {
                 let mut journal = self
                     .compaction_journal
@@ -283,11 +280,8 @@ impl Supervisor {
                 }
             };
             if let Some(record) = pending {
-                // `declaredAt` is the disclosure row's identity: the
-                // replacement stamps its persisted entry with it, so a
-                // replay of the same declaration is idempotent even when
-                // the previous replacement died between persisting the
-                // row and the create reply that consumes the record.
+                // `declaredAt` is the disclosure row's identity: the replacement stamps it
+                // into the persisted entry, so a replay of the same declaration is idempotent.
                 payload["interruptedCompaction"] = serde_json::json!({
                     "reason": record.reason,
                     "sessionFile": record.session_file,
@@ -303,16 +297,14 @@ impl Supervisor {
                 resident,
                 "create",
                 payload,
-                LONG_ROUTE_TIMEOUT_MS,
+                WORKER_REQUEST_TIMEOUT_MS,
                 RouteAdmission::SupervisorInternal,
             )
             .await
         {
             Ok(response) => response,
-            // The replay never answered: the freshly spawned worker is not
-            // supervised by the monitor path that produced it, so it must
-            // die with the relaunch attempt instead of orphaning (and
-            // holding its socket path against the next one).
+            // The replay never answered: the freshly spawned worker is not supervised by the
+            // monitor path, so it must die with the relaunch attempt instead of orphaning.
             Err(error) => {
                 let mut child = child;
                 let _ = child.kill().await;
@@ -336,9 +328,8 @@ impl Supervisor {
             return Err(anyhow!("supervisor is shutting down"));
         }
         if !response.success {
-            // Same rule as the route error above: a worker whose create
-            // replay failed must not be left running. A typed rejection
-            // relays verbatim and logs the conflict like the launch path.
+            // Same rule as the route error above: a worker whose create replay failed must
+            // not be left running; a typed rejection relays verbatim like the launch path.
             let mut child = child;
             let _ = child.kill().await;
             return Err(match response.error_info {
@@ -358,15 +349,8 @@ impl Supervisor {
                 ),
             });
         }
-        // The create replay consumed the terminal record when the
-        // disclosure it carried is durable (persisted by this replay, or
-        // already held by the rebuilt transcript): it never replays again
-        // (a later relaunch would duplicate the disclosure row). A replay
-        // whose persist failed keeps the record pending — the next
-        // replacement retries it, the same recovery the journal's
-        // retryable declarations use. A missing flag on the reply is
-        // treated as not-persisted: the record survives a worker that
-        // did not answer the question.
+        // The create replay consumed the terminal record only when the disclosure it
+        // carried is durable; a replay whose persist failed keeps the record pending.
         if let Some(root_active_session_id) = injected_compaction_abort {
             let persisted = response
                 .data
@@ -400,12 +384,9 @@ impl Supervisor {
         // The replayed create restored the session: routed client commands
         // may run against this worker again.
         resident.note_session_ready();
-        // The replacement is identity-complete and its session replay
-        // answered: record the binding now. The replacement's boot
-        // registration carries no session id (it races the create), so its
-        // record supersedes nothing - this is the record that retargets
-        // every stale client id at the replacement, delivered exactly
-        // when the replacement can actually serve them.
+        // The replacement is identity-complete and its replay answered: record the binding
+        // now — the boot registration carries no session id, so this retargets every
+        // stale client id.
         {
             let descriptor = resident.descriptor.lock().await;
             self.record_session_binding(
@@ -423,9 +404,8 @@ impl Supervisor {
         connect_deadline: tokio::time::Instant,
         spawn_record_sync: TempSync,
     ) -> Result<Child> {
-        // One env definition for spawn and for the update roster's
-        // `launch_env` row (spec §8: "env snapshot to respawn the worker
-        // identically").
+        // One env definition for spawn and for the update roster's `launch_env` row
+        // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -456,16 +436,14 @@ impl Supervisor {
             .envs(launch_env)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            // The worker's stderr lands in its per-worker log (not the
-            // supervisor's inherited stderr, which a detached supervisor
-            // never had): the launch failure errors below tail this file.
+            // The worker's stderr lands in its per-worker log (a detached supervisor has no
+            // inherited stderr): the launch failure errors below tail this file.
             .stderr(std::process::Stdio::from(stderr_log));
         if std::path::Path::new(&cwd).is_dir() {
             command.current_dir(&cwd);
         }
-        // Detached and window-hidden, the TS worker spawn
-        // (`spawnHidden(..., { detached: true })`): the worker leaves the
-        // supervisor's console group and shows no fresh console.
+        // Detached and window-hidden, the TS worker spawn (`spawnHidden`, `{ detached: true }`):
+        // the worker leaves the supervisor's console group and shows no fresh console.
         pa_core::platform::process::set_new_process_group(command.as_std_mut());
         let child = command
             .spawn()
@@ -479,10 +457,8 @@ impl Supervisor {
         }
         {
             let mut descriptor = resident.descriptor.lock().await;
-            // Capture the child's start identity alongside its pid (TS
-            // `getProcessStartId(childPid)` at spawn): the identity-aware
-            // holder checks can only recognize a recycled pid when the
-            // descriptor carries the start id the original holder had.
+            // Capture the child's start identity alongside its pid (TS `getProcessStartId`
+            // at spawn): the holder checks need it to recognize a recycled pid.
             let child_pid = child.id().unwrap_or(0);
             descriptor.pid = u64::from(child_pid);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
@@ -503,11 +479,8 @@ impl Supervisor {
             let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
         }
 
-        // Probe the worker socket until it accepts connections. A worker that
-        // never comes up inside the connect budget is killed here so a stuck
-        // child never outlives its failed launch (TS `connectWorker` throws
-        // `DaemonWorkerProbeTimeoutError` and the launch failure path stops
-        // the worker).
+        // A worker that never comes up inside the connect budget is killed here, so a
+        // stuck child never outlives its failed launch.
         if let Err(error) =
             probe_worker_socket(&resident.worker_id, &worker_socket, connect_deadline).await
         {
@@ -528,6 +501,25 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,
     ) -> Result<()> {
+        self.connect_worker_with_auth_floor(resident, connect_deadline, true)
+            .await
+    }
+
+    pub(super) async fn connect_worker_for_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        connect_deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        self.connect_worker_with_auth_floor(resident, connect_deadline, false)
+            .await
+    }
+
+    async fn connect_worker_with_auth_floor(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        connect_deadline: tokio::time::Instant,
+        auth_floor: bool,
+    ) -> Result<()> {
         let (socket_path, token) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -535,14 +527,17 @@ impl Supervisor {
                 descriptor.authentication_token.clone(),
             )
         };
-        let stream = connect_transport(&socket_path)
-            .await
-            .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
+        let stream = if auth_floor {
+            connect_transport(&socket_path).await
+        } else {
+            tokio::time::timeout_at(connect_deadline, connect_transport(&socket_path))
+                .await
+                .map_err(|_| anyhow!("Session worker timed out"))?
+        }
+        .with_context(|| format!("connect worker socket {}", socket_path.display()))?;
         let (reader, mut writer) = stream.split();
-        // Bounded at the in-flight capacity (the admission seam in
-        // `route_command` refuses or waits before enqueueing): no
-        // unbounded channel remains on the request path, and a wedged
-        // writer can park at most this many frames.
+        // Bounded at the in-flight capacity (the admission seam in `route_command` refuses
+        // or waits before enqueueing): no unbounded channel on the request path.
         let (cmd_tx, mut cmd_rx) =
             mpsc::channel::<WorkerRequest>(crate::backpressure::WORKER_INFLIGHT_CAPACITY);
         resident.pending.lock().await.clear();
@@ -551,13 +546,10 @@ impl Supervisor {
         // may retire it, and a superseded connection ending late cannot.
         let connection_epoch = resident.note_connection_live();
 
-        // Writer pump: send command frames. It holds only a weak resident
-        // reference: a strong one would keep `cmd_tx` (inside the resident)
-        // alive and park this pump forever, leaking the worker socket after
-        // the resident is dropped (the pump exits via `recv() == None` when
-        // the last sender drops).
+        // Writer pump: holds only a weak resident reference — a strong one would keep
+        // `cmd_tx` alive and park this pump forever after the resident is dropped.
         let writer_resident = Arc::downgrade(resident);
-        tokio::spawn(async move {
+        let writer_pump = tokio::spawn(async move {
             while let Some(request) = cmd_rx.recv().await {
                 let header = json!({
                     "kind": "command",
@@ -582,10 +574,9 @@ impl Supervisor {
                     );
                 }
                 if written.is_err() {
-                    // The frame never fully reached the worker (a dead or
-                    // mid-replacement socket): resolve the request with the
-                    // unambiguous not-connected failure so a
-                    // replacement-aware route may safely retry it.
+                    // The frame never fully reached the worker (a dead or mid-replacement
+                    // socket): resolve it with the not-connected failure so a route may
+                    // safely retry it.
                     if let Some(resident) = writer_resident.upgrade() {
                         fail_unsent_request(&resident, &request.request_id).await;
                     }
@@ -603,7 +594,7 @@ impl Supervisor {
             }
         });
         // Reader: route responses to pending requests, forward session events.
-        {
+        let reader_pump = {
             let reader_resident = Arc::clone(resident);
             let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
@@ -628,15 +619,9 @@ impl Supervisor {
                         .unwrap_or_default()
                         .to_string();
                     if outbound_type == "response" {
-                        // The response rides as bytes: the supervisor's
-                        // client-facing route splices the client's command
-                        // id in front of the worker's own line instead of
-                        // parsing, deep-cloning and re-serializing the
-                        // whole tree; the small scalars the route's
-                        // bookkeeping reads (success, the attach's active
-                        // session) travel in the frame's routing header.
-                        // Callers that read the response parse it back
-                        // through `WorkerReply::typed`.
+                        // The response rides as bytes: the route splices the client's command
+                        // id in front of the worker's own line; the bookkeeping scalars travel
+                        // in the frame's routing header.
                         if let Some(reply) =
                             reader_resident.pending.lock().await.remove(&request_id)
                         {
@@ -661,19 +646,9 @@ impl Supervisor {
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        // The abort supervision rides the forwarded events:
-                        // `compaction_start` arms the supervisor-visible
-                        // token, a settled `compaction_end` clears it (and
-                        // any pending terminal record — the worker landed
-                        // the outcome itself, so a replacement must never
-                        // replay it).
-                        // Only the live connection's frames may drive the
-                        // token: a superseded connection still draining
-                        // must not arm over — or settle — the replacement
-                        // connection's run. The journal lock spans the
-                        // token settle and the record clear, pairing with
-                        // `declare_compaction_terminal`'s take-then-write
-                        // under the same lock.
+                        // The abort supervision rides the forwarded events: `compaction_start`
+                        // arms the token, a settled `compaction_end` clears it; only live
+                        // frames drive it.
                         if let Some(event) = payload
                             .get("event")
                             .filter(|_| reader_resident.connection_is_current(connection_epoch))
@@ -687,13 +662,9 @@ impl Supervisor {
                                             .and_then(Value::as_str)
                                             .unwrap_or_default(),
                                     );
-                                    // A pending fallback abort rode this
-                                    // start frame onto the run it
-                                    // reveals (the fallback armed before
-                                    // the delayed frame landed): the
-                                    // carried epoch needs its own watcher,
-                                    // the fallback's old epoch never
-                                    // matches again.
+                                    // A pending fallback abort rode this start frame
+                                    // onto the run it reveals: the carried epoch needs
+                                    // its own watcher (the old epoch never matches again).
                                     if let Some(epoch) = carried_abort {
                                         let supervisor = Arc::clone(&reader_supervisor);
                                         let resident = Arc::clone(&reader_resident);
@@ -712,12 +683,9 @@ impl Supervisor {
                                             .expect("compaction journal lock");
                                         reader_resident.compaction.observe_end();
                                         active_session_id.as_deref().and_then(|active_session_id| {
-                                            // A failed clear keeps the record
-                                            // pending (write-before-forget, so
-                                            // memory and disk agree) — surfaced
-                                            // here so the settled run's stale
-                                            // record is visible, and retried by
-                                            // the next forwarded end.
+                                            // A failed clear keeps the record pending
+                                            // (write-before-forget, so memory and disk agree);
+                                            // retried by the next forwarded end.
                                             journal.clear(active_session_id).err()
                                         })
                                     };
@@ -730,13 +698,9 @@ impl Supervisor {
                                 _ => {}
                             }
                         }
-                        // The send-time delivery pass (TS handleWorkerFrame
-                        // parity): the session's attached connections get
-                        // the frame through the subscriber registry, other
-                        // connections never wake. A session event without
-                        // an active session id is dropped - TS's
-                        // `!activeSessionId` guard in the same handler, not
-                        // broadcast to every client.
+                        // The send-time delivery pass (TS `handleWorkerFrame` parity):
+                        // attached connections get the frame; an event without an active
+                        // session id is dropped, not broadcast.
                         if let Some(active_session_id) = active_session_id {
                             reader_supervisor.publish_session_event(
                                 &active_session_id,
@@ -755,44 +719,37 @@ impl Supervisor {
                             );
                         }
                     } else if outbound_type == "heartbeats_changed" {
-                        // The worker's own catalog changed: its last-good
-                        // snapshot can no longer be trusted as fresh (TS
-                        // `heartbeatSnapshotStale = true` + a queued re-read
-                        // for an in-flight pass; Rust bumps the generation,
-                        // so an in-flight read keeps an older generation
-                        // and can never publish itself as fresh over this
-                        // invalidation), and every client re-reads the
-                        // catalog (TS `broadcastHeartbeatsChanged`
-                        // re-broadcast: the TS site writes the frame to
-                        // each client in its set, so a session-scoped
-                        // catalog view refreshes on the same push).
+                        // The worker's own catalog changed: its last-good snapshot can no longer be
+                        // trusted as fresh (Rust bumps the generation, so an in-flight read can
+                        // never publish over this invalidation), and every client re-reads.
                         reader_resident
                             .heartbeat_snapshot_generation
                             .fetch_add(1, Ordering::Relaxed);
                         let _ =
                             events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     } else if outbound_type == "model_catalog_changed" {
-                        // A worker's background catalog refresh changed
-                        // the served snapshot: every client re-fetches
-                        // (the sessions' pickers fold the fresh catalog
-                        // through their stable update path — no flicker).
-                        // Rust-only extension: the no-stall picker-open
-                        // refresh returns the validated snapshot instantly
-                        // and lands the fresh catalog through this
-                        // broadcast.
+                        // A worker's background catalog refresh changed the served snapshot:
+                        // every client re-fetches (the pickers fold the fresh catalog
+                        // without flicker).
                         let _ =
                             events.send((ClientRouting::Broadcast, std::sync::Arc::new(payload)));
                     }
                 }
+                // The connection is gone: no reply can arrive on it any
+                // more (TS `notifyClosed` -> `rejectAll`); each waiting
+                // route fails with the dropped-request error. A stale
+                // reader drops nothing - the newer connection's handshake
+                // inserts only after its epoch bump.
+                {
+                    let mut pending = reader_resident.pending.lock().await;
+                    if reader_resident.connection_is_current(connection_epoch) {
+                        pending.clear();
+                    }
+                }
                 reader_resident.note_connection_lost(connection_epoch);
-                // The connection ended (EOF or frame error): a run without
-                // an abort request dies with the worker and rides the
-                // normal recovery flow; an abort-requested run is declared
-                // terminal immediately — the worker can never land its own
-                // end now, and the record must be durable before the
-                // relaunch replays the create. A stale reader (a newer
-                // connection already installed its own epoch) touches
-                // nothing.
+                // The connection ended (EOF or frame error): a run without an abort request
+                // dies with the worker; an abort-requested run is declared terminal
+                // immediately — the record must be durable before the relaunch replays.
                 if reader_resident.connection_is_current(connection_epoch) {
                     reader_supervisor
                         .declare_compaction_terminal(&reader_resident, || {
@@ -800,38 +757,34 @@ impl Supervisor {
                         })
                         .await;
                 }
-            });
-        }
-        // The handshake owns the channel privately (TS `pendingClient`):
-        // the channel is NOT installed for routing until the auth answer
-        // proves the connection — the worker answers any command other
-        // than `worker_auth` as the unauthenticated FIRST command with the
-        // authentication refusal and closes the connection, so a route
-        // that wins the enqueue race against the handshake (the
-        // registration path's roster refresh under a concurrent-launch
-        // storm) would kill the connection and strand the handshake for
-        // the whole connect budget — a fully-healthy worker failing its
-        // launch "did not come up in time". A pre-auth route finds no
-        // installed channel (`route_command` fails fast with the
-        // retryable not-connected error) and the callers that tolerate it
-        // (the roster refresh) skip; the install below is the
-        // `worker.client = client` boundary, epoch-guarded against a
-        // superseded connect installing over a live one.
+            })
+        };
+        let mut pumps = PreAuthPumps {
+            writer: writer_pump,
+            reader: reader_pump,
+            resident: Arc::clone(resident),
+            epoch: connection_epoch,
+            installed: false,
+        };
+        // The handshake owns the channel privately (TS `pendingClient`): any non-`worker_auth`
+        // route winning the enqueue race would strand the handshake for the whole connect
+        // budget. A pre-auth route finds no installed channel; the install is epoch-guarded.
         let auth_tx = cmd_tx.clone();
 
-        // Authenticate against the worker within the remaining connect
-        // budget (TS `handshakeBudgetMs`: probes, connect, and auth share one
-        // deadline).
-        // A worker whose probes ate the whole connect budget still proved
-        // it is alive (the socket answered), so the handshake always gets
-        // at least the auth floor — the floor, never the budget's crumbs,
-        // and a fully-spent budget included. The launch's failure mode
-        // stays the connect-budget error instead of a misleading route
-        // timeout on a worker that just came up.
-        let auth_budget_ms = connect_deadline
+        // Authenticate within the remaining connect budget (TS `handshakeBudgetMs`: probes,
+        // connect, and auth share one deadline). A worker whose probes ate the whole budget
+        // still proved it is alive, so the handshake always gets at least the auth floor.
+        let remaining_ms = connect_deadline
             .saturating_duration_since(tokio::time::Instant::now())
-            .as_millis()
-            .max(WORKER_AUTH_FLOOR_MS.into()) as u64;
+            .as_millis() as u64;
+        let auth_budget_ms = if auth_floor {
+            remaining_ms.max(WORKER_AUTH_FLOOR_MS)
+        } else {
+            if remaining_ms == 0 {
+                return Err(anyhow!("Session worker timed out"));
+            }
+            remaining_ms
+        };
         let response = self
             .route_command_on_typed(
                 resident,
@@ -850,25 +803,22 @@ impl Supervisor {
             )
             .await
             .map_err(|error| {
-                // The handshake route's timeout is the connect budget
-                // running out, not a session command timing out: report the
-                // launch-budget failure so a loaded-box launch failure says
-                // what actually happened (never the generic route timeout
-                // text, which pointed triage at the wrong seam).
-                if error.to_string() == "Session worker timed out" {
-                    // The worker answered nothing inside the launch budget:
-                    // its captured stderr tail rides the failure (the same
-                    // evidence the probe arm carries).
-                    crate::worker_stderr::not_ready_with_tail(
-                        anyhow!("session worker {} did not come up in time", resident.worker_id),
-                        &crate::worker_stderr::log_path(
-                            &self.options.agent_dir,
-                            &resident.worker_id,
-                        ),
-                    )
-                } else {
-                    error
-                }
+                // A handshake that never finishes is a launch failure, not a
+                // route timeout: report it with the worker's stderr tail.
+                let message = match error.to_string().as_str() {
+                    "Session worker timed out" => {
+                        format!("session worker {} did not come up in time", resident.worker_id)
+                    }
+                    WORKER_SOCKET_CLOSED => format!(
+                        "session worker {} exited before its handshake finished",
+                        resident.worker_id
+                    ),
+                    _ => return error,
+                };
+                crate::worker_stderr::not_ready_with_tail(
+                    anyhow!(message),
+                    &crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id),
+                )
             })?;
         if !response.success {
             return Err(anyhow!(
@@ -877,9 +827,7 @@ impl Supervisor {
             ));
         }
         // The handshake answered: install the channel for routing (TS
-        // `worker.client = client`, after `authenticateWorker`). A
-        // superseded connect (a replacement already owns a newer
-        // connection) never installs over it.
+        // `worker.client = client`). A superseded connect never installs over it.
         resident
             .install_command_channel(connection_epoch, cmd_tx)
             .await;
@@ -898,6 +846,7 @@ impl Supervisor {
         resident
             .peer_transport_capable
             .store(peer_transport_capable, Ordering::SeqCst);
+        pumps.installed = true;
         Ok(())
     }
 }

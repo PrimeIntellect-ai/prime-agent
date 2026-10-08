@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines:
+// style gate only. Casts: 64-bit targets; narrowing sits at bounded
+// OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -17,14 +10,10 @@
     clippy::cast_precision_loss
 )]
 
-//! End-to-end verifier for the agents-view session search: a fixture
-//! roster (saved-catalog sessions on disk) behind a real supervisor, with
-//! the headless agents-view plan typing queries and asserting the redesigned
-//! picker contract (Kevin's 2026-09-23 directive): queries match the
-//! session NAME, the durable session ID, and the CWD — never first
-//! messages, transcript text, or file paths — and hits
-//! render as one flat, relevance-ranked list. `PA_SEARCH_FRAMES_DIR`
-//! dumps every frame for before/after evidence captures.
+//! End-to-end verifier for the agents-view session search (Kevin's
+//! 2026-09-23 directive): queries match the session NAME, the durable
+//! session ID, and the CWD — never first messages, transcript text, or
+//! file paths — and hits render as one flat, relevance-ranked list.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -45,9 +34,8 @@ struct Supervisor {
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        // Stop by protocol so the supervisor shuts its workers down, then
-        // kill the child when the protocol path fails (a failing test must
-        // not leak worker processes).
+        // Stop by protocol so the supervisor shuts its workers down; kill the
+        // child when it fails (a failing test must not leak workers).
         graceful_shutdown(&self.socket);
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -167,8 +155,7 @@ fn frame_of(frames: &[String], marker: &str) -> String {
 }
 
 /// Writes every captured frame under `PA_SEARCH_FRAMES_DIR` when set: the
-/// before/after evidence capture for the search redesign (run the same
-/// driver against the base tree to diff behavior).
+/// before/after evidence capture for the search redesign.
 fn dump_frames(label: &str, frames: &[String]) {
     let Some(dir) = std::env::var("PA_SEARCH_FRAMES_DIR")
         .ok()
@@ -194,11 +181,8 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The fixture roster: a named session whose transcript ALSO mentions
-    // the query word, several sibling sessions whose transcripts mention
-    // it but whose names do not, an id-only target (name without the id
-    // fragment), and a session whose transcript text exists nowhere in its
-    // identity fields.
+    // The fixture roster: a named session whose transcript ALSO mentions the query word,
+    // siblings whose transcripts mention it but names do not, an id-only target.
     let fast_path = write_fixture(
         &session_dir,
         "fast-01",
@@ -250,11 +234,8 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // The full-roster gate: all four fixtures sit in the row
-            // model before any query filters them, so every later
-            // settle rides the render cadence alone, never the scan's
-            // data arrival (the registered render/data-arrival race
-            // closes by construction).
+            // The full-roster gate: all four fixtures sit in the row model before
+            // any query filters them, so every later settle rides the render cadence.
             AgentsStep::WaitRender {
                 needle: "4 inactive".to_string(),
                 timeout_ms: 10_000,
@@ -279,7 +260,6 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
             AgentsStep::WaitSettle { timeout_ms: 300 },
             AgentsStep::Key("escape".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
-            // Enter opens the filtered match.
             AgentsStep::Type("gateway".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
             AgentsStep::Key("enter".to_string()),
@@ -295,8 +275,8 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
     assert!(!outcome.frames.is_empty(), "frames were captured");
     dump_frames("lane", &outcome.frames);
 
-    // Name query: only the named hit renders — the sibling transcripts
-    // that mention "fast" stay hidden (the redesign's headline behavior).
+    // Name query: only the named hit renders — the sibling transcripts that mention "fast" stay
+    // hidden.
     let fast_frame = frame_of(&outcome.frames, " >  fast");
     assert!(
         fast_frame.contains("fast lane refactor"),
@@ -343,7 +323,6 @@ async fn search_matches_names_ids_and_cwd_never_transcripts() {
         "other rows hide under the id query:\n{id_frame}"
     );
 
-    // Enter opens the filtered match.
     assert_eq!(
         outcome.selection,
         Some(SessionSelection::Resume(gateway_path)),
@@ -361,9 +340,8 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // Three name-prefix hits for "run": two same-length prefixes (tie on
-    // tier quality, title breaks the tie) and one longer prefix (worse
-    // tier quality ranks it below them).
+    // Three name-prefix hits for "run": two same-length prefixes (tie on tier
+    // quality, title breaks the tie) and one longer prefix ranking below.
     write_fixture(
         &session_dir,
         "run-books-01",
@@ -404,11 +382,8 @@ async fn ranked_hits_sort_by_relevance_then_recency() {
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::Type("run".to_string()),
-            // The full-catalog count gate: the plan cannot reach Done
-            // before the scan's rows rendered under the query (a
-            // wall-clock settle only wins on an idle machine — the
-            // registered render/data-arrival race this barrier closes
-            // by construction, red-agentsview-search-ranked-hits-20260926-1).
+            // The full-catalog count gate: the plan cannot reach Done before the scan's rows
+            // rendered under the query (red-agentsview-search-ranked-hits-20260926-1).
             AgentsStep::WaitRender {
                 needle: "3 inactive".to_string(),
                 timeout_ms: 10_000,

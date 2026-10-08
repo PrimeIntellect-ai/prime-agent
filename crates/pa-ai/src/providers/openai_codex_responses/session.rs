@@ -1,6 +1,5 @@
-//! Codex WebSocket session state: connection cache, SSE-fallback pinning,
-//! debug stats, continuation bookkeeping, and idle expiry. Section of the
-//! port of `packages/ai/src/providers/openai-codex-responses.ts`.
+//! Codex WebSocket session state: connection cache, SSE-fallback pinning, debug stats, continuation
+//! bookkeeping, and idle expiry.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -40,7 +39,6 @@ pub fn session_state() -> &'static Mutex<SessionState> {
     STATE.get_or_init(|| Mutex::new(SessionState::default()))
 }
 
-/// Port of `isWebSocketSseFallbackActive`.
 pub fn is_websocket_sse_fallback_active(session_id: Option<&str>) -> bool {
     match session_id {
         Some(session_id) => session_state()
@@ -50,7 +48,6 @@ pub fn is_websocket_sse_fallback_active(session_id: Option<&str>) -> bool {
     }
 }
 
-/// Port of `recordWebSocketSseFallback`.
 pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
     let Some(session_id) = session_id else {
         return;
@@ -64,10 +61,7 @@ pub fn record_websocket_sse_fallback(session_id: Option<&str>) {
     session_stats.websocket_fallback_active = Some(active);
 }
 
-/// Port of `recordWebSocketFailure`: pins the session to SSE fallback and
-/// records the failure in the debug stats.
-/// Port of `recordWebSocketFailure`: pins the session to SSE fallback and
-/// records the failure in the debug stats.
+/// Pins the session to SSE fallback and records the failure in the debug stats.
 pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamError) {
     let Some(session_id) = session_id else {
         return;
@@ -82,13 +76,11 @@ pub fn record_websocket_failure(session_id: Option<&str>, error: &CodexStreamErr
     session_stats.websocket_fallback_active = Some(true);
 }
 
-/// Port of `getOpenAICodexWebSocketDebugStats`.
 #[must_use]
 pub fn get_debug_stats(session_id: &str) -> Option<WebSocketDebugStats> {
     session_state().lock().ok()?.stats.get(session_id).cloned()
 }
 
-/// Port of `resetOpenAICodexWebSocketDebugStats`.
 pub fn reset_debug_stats(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
@@ -102,12 +94,8 @@ pub fn reset_debug_stats(session_id: Option<&str>) {
     }
 }
 
-/// Port of `closeOpenAICodexWebSocketSessions`: close the cached connection
-/// for one session or all of them. The TS registers this as a session
-/// resource cleanup; in Rust the agent layer calls it when a session ends.
-/// Port of `closeOpenAICodexWebSocketSessions`: close the cached connection
-/// for one session or all of them. The TS registers this as a session
-/// resource cleanup; in Rust the agent layer calls it when a session ends.
+/// Close the cached connection for one session or all of them; the agent layer calls it when a
+/// session ends (the TS registers a session resource cleanup).
 pub fn close_websocket_sessions(session_id: Option<&str>) {
     let Ok(mut state) = session_state().lock() else {
         return;
@@ -129,10 +117,7 @@ pub fn close_websocket_sessions(session_id: Option<&str>) {
     }
 }
 
-/// Record debug stats for a request (mirrors the stats block in
-/// `processWebSocketStream`).
-/// Record debug stats for a request (mirrors the stats block in
-/// `processWebSocketStream`).
+/// Record debug stats for a request (mirrors the stats block in `processWebSocketStream`).
 pub fn record_request_stats(
     session_id: &str,
     reused: bool,
@@ -174,10 +159,7 @@ pub fn record_request_stats(
     }
 }
 
-/// Port of `acquireWebSocket`: reuse the session's idle connection when
-/// possible, otherwise open a fresh connection (cached per session).
-/// Port of `scheduleSessionWebSocketExpiry`: close the cached connection
-/// after the TTL if it stayed idle.
+/// Close the cached connection after the TTL if it stayed idle.
 pub fn schedule_session_websocket_expiry(session_id: &str) {
     let Ok(mut state) = session_state().lock() else {
         return;
@@ -207,10 +189,8 @@ pub fn schedule_session_websocket_expiry(session_id: &str) {
     });
 }
 
-/// Take the continuation for `connection_id`, if one is anchored to it
-/// (part of `buildCachedWebSocketRequestBody` in the TS).
-/// Take the continuation for `connection_id`, if one is anchored to it
-/// (part of `buildCachedWebSocketRequestBody` in the TS).
+/// Take the continuation for `connection_id`, if one is anchored to it (part of
+/// `buildCachedWebSocketRequestBody` in the TS).
 pub fn take_continuation_for(session_id: &str, connection_id: u64) -> Option<ContinuationState> {
     session_state()
         .lock()
@@ -243,8 +223,8 @@ mod tests {
         let session = format!("test-session-{}", std::process::id());
         reset_debug_stats(Some(&session));
         assert!(!is_websocket_sse_fallback_active(Some(&session)));
-        // Recording a fallback bump does not pin the session (only a
-        // transport failure does, matching the TS semantics).
+        // Recording a fallback bump does not pin the session (only a transport failure does,
+        // matching the TS semantics).
         record_websocket_sse_fallback(Some(&session));
         assert!(!is_websocket_sse_fallback_active(Some(&session)));
         let stats = get_debug_stats(&session).expect("stats recorded");

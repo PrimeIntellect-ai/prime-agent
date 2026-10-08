@@ -215,6 +215,34 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      # The homebrew-core submission candidate: the source tarball the
+      # formula pins (scripts/release/assemble_source.py — the git tree at
+      # the tag plus the validated catalog assets at the archive root). One
+      # cut per stable release: the job gate keeps this stable-only, and the
+      # step gate holds the matrix to a single leg so the artifact exists
+      # exactly once. The output goes to its own src-dist dir — the binary
+      # artifact's upload glob (dist/prime-agent-*) must not pick the src
+      # tarball up as a per-target artifact.
+      - name: Assemble the source tarball (homebrew-core candidate)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          python3 scripts/release/assemble_source.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/src-dist"
+          cat "target/${{ matrix.target }}/src-dist/manifest.json"
+      - name: Upload the source tarball artifacts
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-source
+          path: |
+            target/${{ matrix.target }}/src-dist/prime-agent-*
+            target/${{ matrix.target }}/src-dist/SHA256SUMS
+            target/${{ matrix.target }}/src-dist/manifest.json
+          if-no-files-found: error
       - name: Upload artifacts
         # The glob carries the decoder alongside the payload files — it is
         # a workflow artifact, never a tarball member: assemble never stages
@@ -357,7 +385,19 @@ jobs:
         shell: bash
         run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
       # Only the shipped binary links here (the build-gnu/build-darwin rule).
+      # THE STATIC VC RUNTIME (the operator's real-machine report,
+      # 2026-10-06: the dynamically linked launcher died at process start -
+      # 0xC0000135, STATUS_DLL_NOT_FOUND, exit -1073741515 - on a stock
+      # Windows box, which carries no vcruntime140.dll; the windows-2022
+      # runner image has it, so the livecheck never sees the gap): the
+      # step-scoped RUSTFLAGS below links the shipped binary against the
+      # static CRT. The pin rides THIS STEP alone and never Cargo.toml,
+      # whose dev builds stay dynamic; cargo's unit fingerprints carry
+      # RUSTFLAGS, so a cache restored from the dynamic-link era rebuilds
+      # instead of reusing a dynamically linked tree.
       - name: Build (release, locked)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
       - name: "Livecheck gate: --version prints the tag version"
         shell: bash
@@ -784,8 +824,11 @@ jobs:
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
       # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
-      # user path is curl <domain>/install.sh and everything it reads comes
-      # from the same R2-backed base — nobody fetches a GitHub URL).
+      # channel — pointers, manifests, payloads, checksums — lives on the
+      # R2-backed base alone. The sh one-liner's route carries no GitHub
+      # URL; the Windows one-liner's entry script comes from the repo's raw
+      # copy, and that fetch is the only GitHub touch on any user path —
+      # everything either installer reads is R2-backed).
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
@@ -815,7 +858,7 @@ jobs:
       #     so the channel only ever advances forward.
       #   - AUDIT SURFACE: the GitHub release below still attaches every
       #     artifact (the TS order: the R2 publish first, GitHub second).
-      - name: Publish the R2 channel (the user path never touches GitHub)
+      - name: Publish the R2 channel (the channel serves no GitHub URL)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -837,7 +880,12 @@ jobs:
           (cd release-out && sha256sum --check SHA256SUMS)
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
+          # The R2 channel serves the installers: the platform tarballs
+          # the channel manifests reference. The homebrew-core source
+          # tarball rides the GitHub release only (packagers pin it
+          # there; the R2 pointers never name it).
           for artifact in release-out/prime-agent-*.tar.gz; do
+            case "$artifact" in *-src.tar.gz) continue ;; esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
@@ -998,10 +1046,15 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/plain \
                   --cache-control no-cache
-                # The stable installers (install.sh / install.ps1) move ONLY
-                # on a stable release — a beta cut never touches the stable
-                # channel's surface (the TS version serves installs until the
-                # first Rust stable release replaces it).
+                # The beta route also uploads the stable PowerShell render
+                # (install.ps1, the Windows entry point — the installer's
+                # Windows channel fallback rides the stable channel default).
+                # install.sh stays stable-only; a beta cut never overwrites it.
+                render_installer_ps1 stable
+                aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                  --endpoint-url "$R2_ENDPOINT_URL" \
+                  --content-type text/plain \
+                  --cache-control no-cache
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
             fi

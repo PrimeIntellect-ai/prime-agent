@@ -11,8 +11,7 @@ use tokio::sync::mpsc;
 /// How the fake supervisor answers a child `kill`.
 enum FakeKill {
     Success,
-    /// The child session is gone (the route failure a supervisor
-    /// answers for a non-resident child).
+    /// The child session is gone (the route failure a supervisor answers for a non-resident child).
     UnknownSession,
     /// The kill fails for a real reason (a stuck worker).
     Failure,
@@ -301,6 +300,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             model: None,
             thinking: None,
             cell_source_code: None,
+            spawned_by_request_id: None,
         })
         .await
         .expect("spawn must succeed against the fake supervisor")
@@ -328,8 +328,6 @@ async fn roster_snapshot_does_not_wait_for_a_slow_child_worker() {
     assert_eq!(roster[0].status, "running");
 }
 
-/// A child that settles without replying delivers the no-reply terminal
-/// notice to the parent session as an injected follow-up turn.
 #[tokio::test]
 async fn a_settled_child_without_a_reply_delivers_the_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -393,6 +391,91 @@ async fn a_worker_leaving_inside_the_settle_grace_keeps_the_verdict() {
     assert!(notice["customMessage"]["content"]
         .as_str()
         .is_some_and(|content| content.contains("the child final answer")));
+}
+
+#[tokio::test]
+async fn child_updates_surface_through_the_sink() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let rows: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_rows = Arc::clone(&rows);
+    sessions.set_child_update_sink(Arc::new(move |child| {
+        sink_rows.lock().unwrap().push(child);
+    }));
+    let settled = sessions.settle_notified();
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    tokio::time::timeout(Duration::from_secs(10), settled)
+        .await
+        .expect("the child settles");
+    let result = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("the settled child deletes");
+    assert_eq!(result.outcome, Some("deleted"));
+    let rows = rows.lock().unwrap().clone();
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("running")
+                && row["sessionName"] == json!("f20-worker")
+                && row["model"] == json!("mock/mock-1")
+                && row["sessionDir"].is_string()
+        }),
+        "the admission row carries the snapshot: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("done")
+                && row["answerPreview"] == json!("the child final answer")
+        }),
+        "the settle row carries the terminal status: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| {
+            row["id"] == json!(handle.rlm_child_id)
+                && row["status"] == json!("cancelled")
+                && row["error"] == json!("Deleted by parent orchestrator")
+        }),
+        "the delete surfaces the removal row: {rows:?}"
+    );
+}
+
+/// A cancelled run's watcher settle leaves the display `running`, so a
+/// restart relists the child as `error` instead of `completed`.
+#[tokio::test]
+async fn a_cancelled_child_keeps_its_display_running_through_the_watcher_settle() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 500, FakeKill::Success, FakeChild::Healthy)
+            .await;
+    let (hook_tx, mut hook_rx) = mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = hook_tx.send(());
+    }));
+    let handle = spawn_child(&sessions).await;
+    let display_file = Path::new(&handle.session_dir).join("rlm-subagent.json");
+    std::fs::write(
+        &display_file,
+        json!({ "type": "rlm_subagent", "childId": handle.rlm_child_id,
+                "sessionDir": handle.session_dir, "status": "running" })
+        .to_string(),
+    )
+    .unwrap();
+    sessions.notify_turn_done();
+    assert!(sessions.cancel_child_run(&handle.rlm_child_id).await);
+    // One settle hook from the cancel, one from the watcher's settle tail.
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(10), hook_rx.recv())
+            .await
+            .expect("both settle hooks fire")
+            .expect("hook channel open");
+    }
+    let display = crate::rlm_ledger::read_rlm_subagent_display(Path::new(&handle.session_dir))
+        .expect("display entry stays readable");
+    assert_eq!(display.status, "running");
 }
 
 /// The `follow_up` carries exactly the TS failure row (`createRlmChildFailureMessage`).
@@ -717,11 +800,8 @@ async fn one_running_child(sessions: &SupervisorChildSessions) {
     }
 }
 
-/// `close_children` (TS `closeChildSessions` at the replacement
-/// teardown / session close): every tracked child is stopped through
-/// the supervisor - a plain stop, no delete marker, so the ledger edge
-/// and passive roster row survive - the registry empties, and no
-/// terminal notice is owed to the closing parent session.
+/// `close_children`: every tracked child is stopped through the supervisor — a plain stop, no
+/// delete marker; the registry empties, and no terminal notice is owed.
 #[tokio::test]
 async fn close_children_stops_the_child_and_clears_the_roster() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -751,20 +831,15 @@ async fn close_children_stops_the_child_and_clears_the_roster() {
         !kill.to_string().contains("rlmLedgerDelete"),
         "the replacement close is a stop, not a delete"
     );
-    // The registry the replacement session reads starts empty.
     let entries = sessions.list_subagents().await.expect("child roster");
     assert!(
         entries.is_empty(),
         "the closed child stays listed: {entries:?}"
     );
-    // No terminal notice is delivered to the closing parent session.
     let extra = tokio::time::timeout(Duration::from_millis(300), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "a closed child must not deliver a notice");
 }
 
-/// A child whose session is already gone is a completed no-op (the TS
-/// `sessions.has` early return in `closeSessionOnce`), not a close
-/// failure: the registry drops it and the close succeeds.
 #[tokio::test]
 async fn close_children_treats_an_already_gone_child_as_a_no_op() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -791,9 +866,6 @@ async fn close_children_treats_an_already_gone_child_as_a_no_op() {
     );
 }
 
-/// A real close failure propagates and keeps the child tracked, so the
-/// caller (the replacement teardown) fails exactly like TS
-/// `teardownForReplacement` rethrowing `disposeHostedSubagentRuntimes`.
 #[tokio::test]
 async fn close_children_keeps_a_failed_child_tracked() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -817,8 +889,6 @@ async fn close_children_keeps_a_failed_child_tracked() {
     assert_eq!(entries.len(), 1, "the failed child stays tracked for retry");
 }
 
-/// A child that sent an agent message back gets no terminal notice: the
-/// reply is the parent's report (TS `_parentReplyCount`).
 #[tokio::test]
 async fn a_replied_child_gets_no_terminal_notice() {
     let (follow_up_tx, mut follow_up_rx) = mpsc::unbounded_channel();
@@ -830,18 +900,14 @@ async fn a_replied_child_gets_no_terminal_notice() {
     let handle = spawn_child(&sessions).await;
     assert!(!handle.rlm_child_id.is_empty());
     sessions.mark_replied("child-live").await;
-    // The worker releases the detached prompt at its turn boundary.
     sessions.notify_turn_done();
 
     let extra = tokio::time::timeout(std::time::Duration::from_secs(2), follow_up_rx.recv()).await;
     assert!(extra.is_err(), "a replied child must not deliver a notice");
 }
 
-/// TS #2388: a target whose delete receipt already returned resolves
-/// immediately to the settled cancelled envelope - status `cancelled`,
-/// `settled: true`, the delete reason - without spending the timeout
-/// budget; unknown selectors keep erroring, and the delete selector
-/// itself keeps the TS miss.
+/// A target whose delete receipt already returned resolves immediately to the settled cancelled
+/// envelope without spending the timeout budget; unknown selectors keep erroring.
 #[tokio::test]
 async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -867,7 +933,6 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
         .await
         .expect("delete the settled child");
 
-    // By child id: the settled cancelled envelope the receipt promised.
     let results = sessions
         .collect(vec![handle.rlm_child_id.clone()], 0)
         .await
@@ -881,7 +946,6 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
         results[0].error.as_deref(),
         Some("Deleted by parent orchestrator")
     );
-    // By session name: the same cancelled envelope.
     let results = sessions
         .collect(vec!["f20-worker".to_string()], 0)
         .await
@@ -890,7 +954,6 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     assert_eq!(results[0].rlm_child_id, handle.rlm_child_id);
     assert_eq!(results[0].status, "cancelled");
     assert!(results[0].settled);
-    // An unknown selector keeps the TS miss.
     let missing = sessions
         .collect(vec!["ghost".to_string()], 0)
         .await
@@ -911,10 +974,8 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
     );
 }
 
-/// TS #2388: the inactive delete (a settled retained child) leaves the
-/// same tombstone as the live delete, so `collect` answers a
-/// just-deleted selector with the settled cancelled envelope its
-/// delete receipt promised.
+/// The inactive delete (a settled retained child) leaves the same tombstone as the live delete, so
+/// `collect` answers a just-deleted selector with the settled cancelled envelope.
 #[tokio::test]
 async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
     let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
@@ -956,10 +1017,8 @@ async fn collect_answers_the_cancelled_envelope_after_an_inactive_delete() {
     );
 }
 
-/// The unreachable-poller's POSITIVE-status guard: a child that already
-/// settled (`done` — the idle passivation's prerequisite) never re-scores
-/// as an error when its worker leaves afterward; a still-RUNNING child
-/// does (the crash class the error verdict exists for).
+/// A child that already settled never re-scores as an error when its worker leaves afterward; a
+/// still-RUNNING child does (the crash class the error verdict exists for).
 #[test]
 fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     let base = || ChildRecord {
@@ -968,6 +1027,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         active_session_id: "child-live".to_string(),
         session_id: Some("child-file".to_string()),
         session_dir: "/tmp".to_string(),
+        model: String::new(),
         label: "task".to_string(),
         started_at_ms: 0,
         settled_status: None,
@@ -980,10 +1040,12 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         error: None,
         closed_by_parent: false,
         session_file: None,
-        attributed_rows: 0,
+        attributed_rows: Some(0),
         usage_watch_live: false,
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        last_emitted_status: None,
+        rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     // A running child that goes unreachable is the error class.
     assert!(super::lifecycle::should_mark_unreachable_error(&base()));

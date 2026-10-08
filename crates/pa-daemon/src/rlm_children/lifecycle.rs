@@ -52,9 +52,8 @@ fn custom_message_text(message: &CustomMessage) -> Option<String> {
 }
 
 impl SupervisorChildSessionsInner {
-    /// Create one child session over the supervisor link (no prompt yet).
-    /// `depth` is the child's recursion depth; `session_dir` holds its
-    /// persisted session; `model` is the resolved `provider/id` selector.
+    /// Create one child session over the supervisor link (no prompt yet);
+    /// `model` is the resolved `provider/id` selector.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_child(
         &self,
@@ -68,6 +67,10 @@ impl SupervisorChildSessionsInner {
         thinking: Option<&str>,
         cwd: &str,
         session_dir: &Path,
+        // The parent's in-flight turn request the child anchors to (TS
+        // `spawnedByRequestId` rides the child's session options, never
+        // the runtime metadata).
+        spawned_by_request_id: Option<&str>,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
     ) -> Result<CreatedChild> {
@@ -89,15 +92,17 @@ impl SupervisorChildSessionsInner {
         if let Some(parent_file) = &identity.session_file {
             config["parentSessionPath"] = json!(parent_file);
         }
+        if let Some(request_id) = spawned_by_request_id {
+            config["spawnedByRequestId"] = json!(request_id);
+        }
         if let Some(script) = &identity.child_script {
             config["script"] = json!(script);
-            // The scripted engine rides the identity down the recursion
-            // (the TS child runtime inherits the parent's sessionConfig, so
-            // a harness child spawns harness grandchildren the same way).
+            // The scripted engine rides the identity down the recursion (TS
+            // inherits the parent's sessionConfig, so harness children spawn
+            // the same way).
             config["childScript"] = json!(script);
         }
-        // Runtime metadata mirrors the TS subagent runtime identity; a
-        // depth-0 resident session carries none (it is a plain root session).
+        // Runtime metadata mirrors the TS subagent runtime identity.
         let runtime_metadata = runtime_metadata.map(|mut metadata| {
             if let Some(session_id) = &identity.session_id {
                 metadata["parentSessionId"] = json!(session_id);
@@ -124,9 +129,8 @@ impl SupervisorChildSessionsInner {
             no_session: None,
             name: name.map(str::to_string),
             config: Some(config),
-            // RLM children never report telemetry (the depth-0 gate in the
-            // session engine installs nothing); the worker's own opt-out
-            // stays process-level.
+            // RLM children never report telemetry (the depth-0 gate installs
+            // nothing); the worker's own opt-out stays process-level.
             telemetry_disabled: None,
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
@@ -168,13 +172,17 @@ impl SupervisorChildSessionsInner {
                 thinking,
                 cwd,
                 session_dir,
+                /*spawned_by_request_id*/ None,
                 runtime_metadata,
                 identity,
             )
             .await?;
         // A failed prompt tears the just-created session down (TS kills the
         // created session in the create-path catch block).
-        if let Err(error) = self.prompt_child(&created.active_session_id, prompt).await {
+        if let Err(error) = self
+            .prompt_child(&created.active_session_id, prompt, None)
+            .await
+        {
             let _ = self
                 .kill_child(&created.active_session_id, ChildCloseReason::Killed)
                 .await;
@@ -183,8 +191,7 @@ impl SupervisorChildSessionsInner {
         Ok(created)
     }
 
-    /// Parse a created-session summary into its ids (TS `createRlmRootSession`
-    /// reads `activeSessionId`/`sessionId`/`sessionFile`/`sessionName`).
+    /// Parse a created-session summary into its ids.
     fn created_summary_ids(summary: &Value) -> Result<CreatedSessionIds> {
         let active_session_id = summary
             .get("activeSessionId")
@@ -209,7 +216,75 @@ impl SupervisorChildSessionsInner {
         })
     }
 
-    pub(super) async fn prompt_child(&self, active_session_id: &str, prompt: &str) -> Result<()> {
+    /// Send one child-addressed daemon command and retry it ONCE by the
+    /// child's durable selector when its routing id no longer resolves
+    /// (the passivation-aware wake, TS's tier-2 revival — shared by the
+    /// prompt and the parent-directed rename): the child's worker was
+    /// idle-evicted, or a prior wake re-keyed the supervisor roster's
+    /// child row to a fresh worker id, so the routing id the caller
+    /// holds (the record's spawn-time active id) resolves nowhere. The
+    /// retry addresses the child by its DURABLE selector (its session id
+    /// — the session-file stem the supervisor's wake resolves through
+    /// the spawn ledger, then the child id) — the daemon's wake arm
+    /// launches a fresh worker over the child's session file and the
+    /// command lands on the replay. `subject` renders the failure
+    /// contexts; the retry's context appends the wake provenance. A
+    /// non-miss failure and a child with no record keep the original
+    /// error.
+    pub(super) async fn command_with_durable_wake(
+        &self,
+        make_command: impl Fn(&str) -> DaemonCommand,
+        active_session_id: &str,
+        timeout_ms: u64,
+        subject: &str,
+    ) -> Result<()> {
+        let command = make_command(active_session_id);
+        match self.command(&command, timeout_ms).await {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                if !rendered.starts_with("Unknown active session:") {
+                    return Err(error).with_context(|| subject.to_string());
+                }
+                let durable = self.durable_child_selector_for(active_session_id).await;
+                let Some(durable) = durable else {
+                    return Err(error).with_context(|| subject.to_string());
+                };
+                let retry = make_command(&durable);
+                self.command(&retry, timeout_ms)
+                    .await
+                    .with_context(|| format!("{subject} (woken by {durable})"))?;
+                Ok(())
+            }
+        }
+    }
+
+    /// The durable selector of the child whose routing id is
+    /// `active_session_id`: the address that reaches a passivated child
+    /// through the supervisor's ledger wake.
+    async fn durable_child_selector_for(&self, active_session_id: &str) -> Option<String> {
+        let children = self.children.lock().await;
+        for record in children.iter() {
+            let record = record.lock().await;
+            if record.active_session_id == active_session_id {
+                return Some(crate::rlm_children::durable_child_selector(
+                    record.session_id.as_deref(),
+                    &record.rlm_child_id,
+                ));
+            }
+        }
+        None
+    }
+
+    /// Prompt one child over the supervisor link (TS `promptAndWait`):
+    /// `custom_message` replaces the persisted user row (TS
+    /// `customMessage`).
+    pub(super) async fn prompt_child(
+        &self,
+        active_session_id: &str,
+        prompt: &str,
+        custom_message: Option<&Value>,
+    ) -> Result<()> {
         let make_command = |selector: &str| DaemonCommand::Prompt {
             id: None,
             active_session_id: selector.to_string(),
@@ -222,7 +297,7 @@ impl SupervisorChildSessionsInner {
                 expand_prompt_templates: None,
                 source: Some(json!("rpc")),
                 agent_message_id: None,
-                custom_message: None,
+                custom_message: custom_message.cloned(),
                 queue_key: None,
                 prefix_messages: None,
                 admission_id: None,
@@ -230,49 +305,13 @@ impl SupervisorChildSessionsInner {
             },
             rest: Map::default(),
         };
-        let command = make_command(active_session_id);
-        match self.command(&command, PROMPT_TIMEOUT_MS).await {
-            Ok(_) => Ok(()),
-            // The passivation-aware wake (TS's tier-2 revival): the
-            // child's worker was idle-evicted, so its ROUTING id no
-            // longer resolves. Retry once by the child's DURABLE selector
-            // (its session id — the session-file stem the supervisor's
-            // wake resolves through the spawn ledger, then the child id)
-            // — the daemon's wake arm launches a fresh worker over the
-            // child's session file and the prompt lands on the replay.
-            Err(error) => {
-                let rendered = format!("{error:#}");
-                if !rendered.starts_with("Unknown active session:") {
-                    return Err(error)
-                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
-                }
-                let mut durable: Option<String> = None;
-                {
-                    let children = self.children.lock().await;
-                    for record in children.iter() {
-                        let record = record.lock().await;
-                        if record.active_session_id == active_session_id {
-                            durable = Some(crate::rlm_children::durable_child_selector(
-                                record.session_id.as_deref(),
-                                &record.rlm_child_id,
-                            ));
-                            break;
-                        }
-                    }
-                }
-                let Some(durable) = durable else {
-                    return Err(error)
-                        .with_context(|| format!("prompt RLM child session {active_session_id}"));
-                };
-                let retry = make_command(&durable);
-                self.command(&retry, PROMPT_TIMEOUT_MS)
-                    .await
-                    .with_context(|| {
-                        format!("prompt RLM child session {active_session_id} (woken by {durable})")
-                    })?;
-                Ok(())
-            }
-        }
+        self.command_with_durable_wake(
+            make_command,
+            active_session_id,
+            PROMPT_TIMEOUT_MS,
+            &format!("prompt RLM child session {active_session_id}"),
+        )
+        .await
     }
 
     pub(super) async fn kill_child(
@@ -354,9 +393,8 @@ impl SupervisorChildSessionsInner {
             .await;
     }
 
-    /// Refresh one record against its worker: settle a child whose worker
-    /// ran out of work and capture its answer once. An unreachable child
-    /// keeps its last known state (the supervisor may be restarting).
+    /// Refresh one record against its worker: settle a child whose worker ran out of work and
+    /// capture its answer once; an unreachable child keeps its last known state.
     pub(super) async fn refresh_record(&self, record: &Arc<Mutex<ChildRecord>>) {
         {
             let record = record.lock().await;
@@ -375,8 +413,8 @@ impl SupervisorChildSessionsInner {
         let mut record = record.lock().await;
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
-            // A settled preview is never overwritten with a later miss, but
-            // a `None` capture (the settle raced the admission-to-run
+            // A settled preview is never overwritten with a later miss; a
+            // `None` capture (the settle raced the admission-to-run
             // hand-off) recovers on a later refresh.
             if !record.answer_captured || record.answer_preview.is_none() {
                 record.answer_preview = answer;
@@ -385,31 +423,22 @@ impl SupervisorChildSessionsInner {
         }
     }
 
-    /// Watch one admitted child until its run settles, then deliver the
-    /// parent's terminal notice when the child never replied (TS
-    /// `deliverTerminalMessageToParent` on the detached run task). The
-    /// watcher owns no registry state: it stops as soon as the record is
-    /// removed (deleted children carry their own cancelled notice).
+    /// Watch one admitted child until its run settles, then deliver the parent's terminal notice
+    /// when the child never replied; the watcher stops as soon as the record is removed.
     pub(super) async fn watch_child_settle(&self, record: &Arc<Mutex<ChildRecord>>) {
         let mut unreachable_polls: u32 = 0;
         loop {
-            // The parent's session closed with this child running (a
-            // replacement teardown or a session close): the child dies with
-            // the parent (TS `closeChildSessions`) and no notice is owed to
-            // the torn-down session - the watch ends without polling the
-            // killed child.
+            // The parent closed with this child running: the child dies
+            // with it and no notice is owed — end without polling it.
             if record.lock().await.closed_by_parent {
                 return;
             }
             // Slice-top usage flush: rows of turns that completed since the
-            // last slice land here (TS flushes pending usage at each child
-            // `agent_end`; the slice cadence bounds crash loss to one
-            // slice, the TS staleness window's role).
+            // last slice land here (crash loss is bounded to one slice).
             self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
-            // One bounded idle-wait slice: a slice that times out while the
-            // child still runs re-slices; the returned slice means the child
-            // drained its queue.
+            // One bounded idle-wait slice: a timeout while the child still
+            // runs re-slices; a returned slice means the queue drained.
             self.wait_for_child(
                 &active_session_id,
                 Duration::from_millis(WATCH_WAIT_SLICE_MS),
@@ -433,13 +462,42 @@ impl SupervisorChildSessionsInner {
                 }
                 self.refresh_record(record).await;
                 // The run's final rows are attributed before the terminal
-                // notice rides the parent's follow-up route (TS: the run
-                // task's `finally` flushes pending usage at settlement).
+                // notice rides the parent's follow-up route.
                 self.emit_child_usage(record).await;
+                // TS records the return before delivering the notice: the
+                // pending edge must be on the parent's ledger before the
+                // notice's follow-up turn mints its own request.
+                self.record_child_return(record).await;
+                self.emit_child_update(record).await;
+                // Only a successful run completes the display (TS
+                // `completeRlmSubagentRuntime`); a cancelled or failed run
+                // stays `running`, which a restart relists as `error`.
+                let completed = {
+                    let record = record.lock().await;
+                    (record.settled_status == Some("done"))
+                        .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
+                };
+                if let Some((session_dir, child_id)) = completed {
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        let Some(mut display) =
+                            crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
+                        else {
+                            return Ok(());
+                        };
+                        if display.child_id != child_id || display.status != "running" {
+                            return Ok(());
+                        }
+                        display.status = "completed".to_string();
+                        crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
+                    })
+                    .await
+                    .unwrap_or_else(|error| Err(anyhow!(error)))
+                    {
+                        eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
+                    }
+                }
                 self.deliver_settle_notice(record).await;
-                // A settled child releases an owed goal continuation (TS
-                // `_maybeResumeGoalContinuationAfterRlmWork` at the child
-                // settle sites).
+                // A settled child releases an owed goal continuation.
                 self.fire_settle_hook(record).await;
                 return;
             }
@@ -479,6 +537,51 @@ impl SupervisorChildSessionsInner {
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
         }
+    }
+
+    /// Record a settled child's return in the parent's semantic-edge ledger
+    /// (TS `recordChildReturned` at the run-settle sites): the child's last
+    /// committed request, read from the child's own ledger file (the
+    /// cross-process form of TS's in-process
+    /// `child.semanticEdges.lastCommittedRequestId`). Only a `done` or
+    /// `error` settle returns — TS never records a cancelled run (its done
+    /// arm throws on `run.error` and the record gates on `status ===
+    /// "error"`). A child without a durable session id, or a parent
+    /// without a recorder, records nothing.
+    async fn record_child_return(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let recorder = self
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone();
+        let Some(recorder) = recorder else {
+            return;
+        };
+        let (child_session_id, child_dir) = {
+            let record = record.lock().await;
+            if !matches!(record.settled_status, Some("done" | "error")) {
+                return;
+            }
+            (record.session_id.clone(), record.session_dir.clone())
+        };
+        let Some(child_session_id) = child_session_id else {
+            return;
+        };
+        let ledger_path = pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+            Some(Path::new(&child_dir)),
+            None,
+        );
+        // The file read stays off the async workers (the usage walk's
+        // discipline).
+        let last_committed = tokio::task::spawn_blocking(move || {
+            ledger_path
+                .as_deref()
+                .and_then(pa_core::session_engine::semantic_edges::last_committed_request_id)
+        })
+        .await
+        .ok()
+        .flatten();
+        recorder.record_child_returned(&child_session_id, last_committed);
     }
 
     /// Deliver the no-reply terminal notice for a settled child that never
@@ -549,6 +652,11 @@ impl SupervisorChildSessionsInner {
             record.error = Some(error);
             message
         };
+        self.emit_child_update(record).await;
+        // TS records a failed child's return too (`recordChildReturned` in
+        // the thrown-run arm): a child that committed requests before
+        // failing still returns them; a zero-commit child records nothing.
+        self.record_child_return(record).await;
         self.deliver_terminal_notice(message).await;
         self.fire_settle_hook(record).await;
         true

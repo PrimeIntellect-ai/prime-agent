@@ -1,14 +1,7 @@
-//! Proxy stream function, porting `packages/agent/src/proxy.ts`.
-//!
 //! Streams through a proxy server (`POST {proxyUrl}/api/stream`) instead of
-//! calling LLM providers directly. The server strips the `partial` field from
-//! delta events to reduce bandwidth; the partial message is reconstructed
-//! client-side from the proxy events (TS `processProxyEvent`).
-//!
-//! Wire events are SSE lines starting with `data: ` (TS reference protocol).
-//! Failures - HTTP error status, transport error, abort - are encoded as a
-//! terminal `error` event carrying the partial message with `stopReason`
-//! "aborted" or "error", exactly like the TS implementation.
+//! calling LLM providers directly. The server strips the `partial` field to
+//! reduce bandwidth; the partial message is reconstructed client-side. Wire
+//! events are SSE `data: ` lines; failures are a terminal `error` event.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -26,8 +19,6 @@ use crate::types::{
     Usage,
 };
 
-/// Serializable proxy event (TS `ProxyAssistantMessageEvent`). The server
-/// strips `partial`; field names match the wire protocol.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProxyAssistantMessageEvent {
@@ -106,7 +97,6 @@ pub enum ProxyErrorReason {
     Error,
 }
 
-/// Options for [`stream_proxy`].
 pub struct ProxyStreamOptions {
     pub auth_token: String,
     pub proxy_url: String,
@@ -125,8 +115,6 @@ fn empty_usage() -> Usage {
     Usage::zero()
 }
 
-/// Port of `streamProxy`: returns a producer/consumer event stream pair.
-///
 /// The consumer side implements [`crate::stream::ModelStream`]; use it as the
 /// `streamFn` for an agent that goes through the proxy.
 #[must_use]
@@ -173,8 +161,8 @@ pub fn stream_proxy(
         )
         .await;
 
-        // TS catch block: encode the failure as a terminal error event. The
-        // catch settles partial tool calls first (TS PR #2783).
+        // Encode the failure as a terminal error event; the catch settles
+        // partial tool calls first.
         match result {
             Ok(()) => {
                 if signal.is_aborted() {
@@ -210,13 +198,11 @@ pub fn stream_proxy(
     (handle, stream)
 }
 
-/// Request body options subset (TS `buildProxyRequestOptions` over the
-/// total `PROXY_SERIALIZED_OPTIONS` map): every field of
-/// [`crate::stream::StreamRequestOptions`] is either serialized here
-/// (temperature, maxTokens, reasoning, sessionId, serviceTier) or
-/// explicitly client-local (apiKey, signal). A new stream option must be
-/// classified on both sides or the proxy transport silently drops what
-/// direct transport sends (TS #2491 — serviceTier itself was the drop).
+/// Request body options subset: every field of
+/// [`crate::stream::StreamRequestOptions`] is either serialized here or
+/// explicitly client-local. A new stream option must be classified on both
+/// sides or the proxy transport silently drops it (serviceTier itself was the
+/// drop).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyRequestOptions {
@@ -229,6 +215,8 @@ struct ProxyRequestOptions {
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<crate::types::ServiceTier>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -266,6 +254,7 @@ async fn proxy_run(
         },
         session_id: options.session_id.clone(),
         service_tier: options.service_tier,
+        headers: options.headers.clone(),
     };
     let body = serde_json::json!({
         "model": model,
@@ -345,11 +334,10 @@ async fn proxy_run(
         return Err("Request aborted by user".to_string());
     }
 
-    // Clean EOF without a terminal event: end the stream (TS `stream.end()`).
+    // Clean EOF without a terminal event.
     Ok(())
 }
 
-/// Race a future against the abort signal; `Err(())` means aborted.
 async fn run_aborting<T>(
     future: impl std::future::Future<Output = T>,
     signal: &AbortSignal,
@@ -360,11 +348,9 @@ async fn run_aborting<T>(
     }
 }
 
-/// Port of `processProxyEvent`: mutate the reconstructed partial message and
-/// return the full assistant event to push. `Err` mirrors the TS `throw`s for
-/// mismatched content types.
-// One arm per proxy event kind, mirroring the TS switch; refactoring is out
-// of scope for this zero-behavior-change sweep.
+/// Mutate the reconstructed partial message and return the full assistant
+/// event to push. `Err` mirrors the TS `throw`s for mismatched content types.
+// One arm per proxy event kind, mirroring the TS switch.
 #[allow(clippy::too_many_lines)]
 fn process_proxy_event(
     proxy_event: ProxyAssistantMessageEvent,
@@ -511,8 +497,8 @@ fn process_proxy_event(
         ProxyAssistantMessageEvent::ToolcallEnd { content_index } => {
             match partial.content.get_mut(content_index) {
                 Some(AssistantContent::ToolCall(tool_call)) => {
-                    // TS PR #2783: the throttled preview can lag the final
-                    // text; `toolcall_end` finalizes the arguments.
+                    // The throttled preview can lag the final text;
+                    // `toolcall_end` finalizes the arguments.
                     let flushed = state
                         .partial_json
                         .remove(&content_index)
@@ -551,8 +537,7 @@ fn process_proxy_event(
                 ProxyErrorReason::Aborted => StopReason::Aborted,
                 ProxyErrorReason::Error => StopReason::Error,
             };
-            // TS PR #2783: the error result settles the partial tool calls
-            // (the throttled preview can lag the accumulated text).
+            // The throttled preview can lag the accumulated text.
             settle_partial_tool_calls(state);
             state.partial.stop_reason = stop_reason;
             state.partial.error_message = error_message;
@@ -565,9 +550,9 @@ fn process_proxy_event(
     }
 }
 
-/// Port of the TS `settlePartialToolCalls`: finalize tool-call blocks whose
-/// parsed preview may lag the accumulated text under the growth throttle.
-/// Error paths call this before the error event carries the message.
+/// Finalize tool-call blocks whose parsed preview may lag the accumulated
+/// text under the growth throttle. Error paths call this before the error
+/// event carries the message.
 fn settle_partial_tool_calls(state: &mut ProxyReconstruction) {
     let keys: Vec<usize> = state.partial_json.keys().copied().collect();
     for key in keys {
@@ -583,10 +568,6 @@ fn settle_partial_tool_calls(state: &mut ProxyReconstruction) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Streaming JSON utilities (port of `packages/ai/src/utils/json-parse.ts`)
-// ---------------------------------------------------------------------------
 
 const VALID_JSON_ESCAPES: [char; 8] = ['"', '\\', '/', 'b', 'f', 'n', 'r', 't'];
 
@@ -605,8 +586,8 @@ fn escape_control_character(ch: char) -> String {
     }
 }
 
-/// Port of `repairJson`: escape raw control characters inside strings and
-/// double backslashes before invalid escape characters.
+/// Escape raw control characters inside strings and double backslashes
+/// before invalid escape characters.
 #[must_use]
 pub fn repair_json(json: &str) -> String {
     let mut repaired = String::new();
@@ -685,22 +666,16 @@ enum ContainerKind {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Expect {
-    /// A key string (object) or a value (array).
     KeyOrValue,
-    /// After a key string; expecting ':'.
     Colon,
-    /// After ':' or '[' or ','; expecting a value.
     Value,
-    /// A value is complete; expecting ',' or the closing bracket.
     AfterValue,
 }
 
 /// Completes a truncated JSON document by closing open strings and containers,
 /// filling missing values with `null` and dropping dangling separators - the
-/// same results the TS `partial-json` library produces for streaming tool-call
-/// arguments.
-// State machine over the input; refactoring is out of scope for this
-// zero-behavior-change sweep.
+/// same results the TS `partial-json` library produces.
+// State machine over the input.
 #[allow(clippy::too_many_lines)]
 fn complete_partial_json(input: &str) -> String {
     let mut stack: Vec<ContainerKind> = Vec::new();
@@ -793,7 +768,6 @@ fn complete_partial_json(input: &str) -> String {
                 if !ch.is_whitespace() && literal_start.is_some() {
                     // literal like true/false/null continues
                 }
-                // whitespace outside literals
             }
         }
     }
@@ -829,7 +803,6 @@ fn complete_partial_json(input: &str) -> String {
         }
     }
 
-    // Close remaining containers from the inside out.
     while let Some(kind) = stack.pop() {
         let expect = expects.pop().unwrap_or(Expect::AfterValue);
         match (kind, expect) {
@@ -854,8 +827,8 @@ fn complete_partial_json(input: &str) -> String {
     completed
 }
 
-/// Port of `parseStreamingJson`: parse potentially incomplete JSON, always
-/// returning a value (empty object on total failure).
+/// Parse potentially incomplete JSON, always returning a value (empty object
+/// on total failure).
 #[must_use]
 pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
     if partial_json.trim().is_empty() {
@@ -876,14 +849,11 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
 
 const EAGER_PARSE_LENGTH: usize = 8 * 1024;
 
-/// Streamed tool-call argument JSON with a best-effort parsed preview (port
-/// of the TS `StreamingJsonAccumulator`; `pa-agent` keeps its own copy of the
-/// json-parse utilities because it does not depend on `pa-ai`).
-///
-/// Re-parsing the whole buffer on every delta is quadratic in the argument
-/// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
-/// buffer grew by 1/16 since the last parse, keeping total parse work linear.
-/// Callers still parse `text` with [`parse_streaming_json`] when the call ends.
+/// Streamed tool-call argument JSON with a best-effort parsed preview
+/// (`pa-agent` keeps its own copy of the json-parse utilities because it
+/// does not depend on `pa-ai`). Re-parsing the whole buffer on every delta
+/// is quadratic, so past `EAGER_PARSE_LENGTH` the preview is refreshed only
+/// after the buffer grew by 1/16.
 struct StreamingJsonAccumulator {
     text: String,
     /// Buffer length in UTF-16 code units, the metric of the TS reference
@@ -909,8 +879,7 @@ impl StreamingJsonAccumulator {
         self.text.push_str(delta);
         self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
         let length = self.len_utf16;
-        // `length - parsed_length < parsed_length / 16` (the TS float
-        // comparison) in exact integer form.
+        // `length - parsed_length < parsed_length / 16` in exact integer form.
         if length > EAGER_PARSE_LENGTH && 16 * (length - self.parsed_length) < self.parsed_length {
             return None;
         }
@@ -947,13 +916,12 @@ mod tests {
 
     /// Serve the SSE body for the proxy's POST. `truncate` claims a larger
     /// Content-Length than the bytes actually sent, so the client's body
-    /// stream errors mid-response (the TS stub's mid-stream failure).
+    /// stream errors mid-response.
     async fn serve_proxy_sse(body: String, truncate: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            // Read the full request: headers, then Content-Length body bytes.
             let mut request = Vec::new();
             let mut chunk = [0u8; 4096];
             let headers_end = loop {
@@ -1015,14 +983,13 @@ mod tests {
             signal: AbortSignal::never(),
             on_payload: None,
             on_response: None,
+            headers: None,
         }
     }
 
-    /// Port of the TS proxy.test.ts "finalizes throttled large tool-call
-    /// arguments" test: 20 KiB arguments streamed in 16-byte deltas stay past
-    /// the eager-parse threshold, so the per-delta preview lags and only the
-    /// `toolcall_end` flush (ends cleanly) or the error settle (mid-stream
-    /// failure) carries the full parse.
+    /// 20 KiB arguments in 16-byte deltas stay past the eager-parse
+    /// threshold, so the per-delta preview lags; only the `toolcall_end`
+    /// flush (ends cleanly) or the error settle carries the full parse.
     async fn finalize_throttled_tool_call_arguments(ends_cleanly: bool) {
         let arguments = serde_json::json!({"content": "x".repeat(20 * 1024)}).to_string();
         let mut events = vec![
@@ -1098,6 +1065,7 @@ mod tests {
             cost: crate::types::UsageCost::default(),
             context_window: 128_000,
             max_tokens: 8_192,
+            max_tokens_explicit: false,
         }
     }
 
@@ -1114,7 +1082,7 @@ mod tests {
     use crate::types::ServiceTier;
 
     /// Serve one `POST /api/stream` on a local listener, capture the
-    /// request body, and answer with `sse`. Returns the proxy URL base and
+    /// request body, and answer with `sse`; returns the proxy URL base and
     /// the captured body.
     fn spawn_proxy_stub(
         sse: &'static str,
@@ -1134,8 +1102,8 @@ mod tests {
                     break;
                 }
                 request.push_str(&String::from_utf8_lossy(&buffer[..n]));
-                // The terminator may not be in this read yet (a fragmented
-                // request): only inspect the content length once it is.
+                // The terminator may not be in this read yet; only inspect
+                // the content length once it is.
                 if let Some(header_end) = request.find("\r\n\r\n") {
                     if let Some(len) = content_length(&request[..header_end]) {
                         if request.len() - header_end - 4 >= len {
@@ -1184,8 +1152,6 @@ mod tests {
 
     const DONE_SSE: &str = "data: {\"type\":\"start\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"usage\":{\"input\":1,\"output\":2,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":3,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n";
 
-    /// TS #2491: `serviceTier` serializes into the proxy request (it was
-    /// silently dropped before the option list was total).
     #[tokio::test]
     async fn serializes_service_tier_into_the_proxy_request() {
         let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
@@ -1212,8 +1178,7 @@ mod tests {
         );
     }
 
-    /// An unset tier stays off the wire (TS serializes the field only when
-    /// the option is present).
+    /// An unset tier stays off the wire.
     #[tokio::test]
     async fn without_a_tier_the_proxy_request_omits_it() {
         let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
@@ -1233,10 +1198,8 @@ mod tests {
         assert!(body["options"].get("serviceTier").is_none());
     }
 
-    /// The serialized option set is total: every option the loop carries is
-    /// classified (serialized or client-local). A fully-populated request
-    /// serializes exactly the classified keys, so adding a stream option
-    /// without classifying it shows up here (TS's compile-time
+    /// The serialized option set is total: adding a stream option without
+    /// classifying it shows up here (TS's compile-time
     /// `PROXY_SERIALIZED_OPTIONS` guard, pinned as a test).
     #[test]
     fn proxy_request_options_stay_total() {
@@ -1246,6 +1209,7 @@ mod tests {
             reasoning: ThinkingLevelWire::High,
             session_id: Some("session".to_string()),
             service_tier: Some(ServiceTier::Flex),
+            headers: Some([("X-ACP-Model-Request-ID".to_string(), "id".to_string())].into()),
         };
         let value = serde_json::to_value(&options).expect("serialize");
         let keys: std::collections::BTreeSet<String> =
@@ -1253,6 +1217,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "headers",
                 "maxTokens",
                 "reasoning",
                 "serviceTier",

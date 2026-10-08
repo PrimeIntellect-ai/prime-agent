@@ -62,9 +62,6 @@ fn image_only_user_message_shows_the_image_placeholder() {
 
 #[test]
 fn a_skill_block_user_message_decodes_to_the_card() {
-    // TS `addMessageToChat`'s user case: the persisted user message
-    // that carried a skill invocation parses into the card + the
-    // trailing argument text, never the raw block.
     let message = json!({
         "role": "user",
         "content": "<skill name=\"websearch\" location=\"/s/SKILL.md\">\nRun one query.\n</skill>\n\nfind parity tuis"
@@ -106,18 +103,6 @@ fn empty_user_message_renders_no_entry() {
     assert!(message_value_to_entries(&message).is_empty());
 }
 
-/// The live wire shape that broke the ipython card: a provider announces
-/// the tool call before the function name streams in (the openai-style
-/// toolcall-start frame carries the block unnamed), so the first
-/// `message_update` frame has an empty `name`. The card must not freeze
-/// on that frame — the named frame routes it to the ipython renderer and
-/// the collapsed line shows the code preview, not the raw arguments
-/// JSON.
-/// TS `orderMessagesForTranscript`: the wire context is summary-first
-/// for the model, but the transcript presents the summary at its
-/// chronological boundary — after the retained messages
-/// (`retainedMessageCount`), before anything appended after the
-/// compaction.
 #[test]
 fn transcript_presents_the_summary_after_the_retained_tail() {
     let messages = vec![
@@ -181,10 +166,6 @@ fn unnamed_streamed_tool_call_renders_code_once_named() {
     );
 }
 
-/// TS `message_end`'s failed-frame sweep: every still-pending card
-/// settles with the failure text as an error result, the pending set
-/// drains, and the card flags the abort so the tool's late result
-/// frames land on nothing.
 #[test]
 fn failed_frame_sweep_settles_pending_tool_cards() {
     let mut view = test_view();
@@ -204,8 +185,6 @@ fn failed_frame_sweep_settles_pending_tool_cards() {
         "Operation aborted \u{00b7} 3s",
     );
     assert!(pending.is_empty(), "the sweep drains the pending set");
-    // Every drained id records as aborted - late frames for a call
-    // that never created a card land on nothing the same way.
     assert_eq!(
         aborted,
         std::collections::HashSet::from(["call-1".to_string()]),
@@ -220,9 +199,6 @@ fn failed_frame_sweep_settles_pending_tool_cards() {
     assert!(card.ended_at.is_some(), "the settle stamps the card ended");
 }
 
-/// A reused id after a failed run re-arms as a fresh card (TS's cleared
-/// pending map forces a new component for the new invocation); the old
-/// settled card keeps its sweep-written abort result in the transcript.
 #[test]
 fn reused_id_after_abort_re_arms_as_a_fresh_card() {
     let mut view = test_view();
@@ -242,8 +218,6 @@ fn reused_id_after_abort_re_arms_as_a_fresh_card() {
         "Operation aborted \u{00b7} 3s",
     );
     let settled = cards_of(&view);
-    // The re-armed invocation's streamed frame: a fresh card, not a
-    // refresh of the settled one.
     apply_streamed_tool_card(
         &mut view,
         "call-1",
@@ -264,18 +238,12 @@ fn reused_id_after_abort_re_arms_as_a_fresh_card() {
     assert!(!cards[1].aborted, "the new card starts fresh");
     assert_eq!(cards[1].result, None, "the new card has no result");
     assert_eq!(cards[1].args.get("command"), Some(&json!("echo ready")));
-    // The execution start marks the new invocation's card; the old
-    // settled card stays untouched.
     apply_tool_execution_start(&mut view, "call-1", "bash", Value::Null);
     let cards = cards_of(&view);
     assert_eq!(cards[0], settled[0], "the settled card is untouched");
     assert!(cards[1].started, "the fresh card runs");
 }
 
-/// A second failed run settles the re-armed invocation's own card — the
-/// newest card carrying the id — so the older card keeps the first
-/// sweep's result (TS's pending map only ever holds the current
-/// component).
 #[test]
 fn sweep_settles_the_re_armed_card_not_the_settled_one() {
     let mut view = test_view();
@@ -329,9 +297,6 @@ fn sweep_settles_the_re_armed_card_not_the_settled_one() {
     );
 }
 
-/// The latest streamed frame wins on an existing card (TS builds the
-/// pending component against the latest streaming call), so a card that
-/// somehow kept an empty name picks the name up from the next frame.
 #[test]
 fn existing_card_refreshes_name_and_args_from_latest_frame() {
     let mut view = test_view();
@@ -347,9 +312,6 @@ fn existing_card_refreshes_name_and_args_from_latest_frame() {
     assert_eq!(card.args.get("code"), Some(&json!("x = 1")));
 }
 
-/// `tool_execution_start` reports the actual tool name ("ipython" on
-/// the wire today); it backfills a card still unnamed and creates the
-/// card when the message frames have not arrived yet.
 #[test]
 fn tool_execution_start_reports_the_tool_name() {
     let mut view = test_view();
@@ -429,9 +391,6 @@ fn slim_attach() -> Value {
 
 #[test]
 fn an_unmatched_replay_result_keeps_its_standalone_card() {
-    // A `toolResult` whose call never landed on a pending card
-    // keeps its orphan card exactly like the live push path - the
-    // rebuilt transcript never drops the standalone result.
     let mut rebuilt = Reconstructed::default();
     rebuilt.push_message(&json!({
         "role": "user",
@@ -461,10 +420,6 @@ fn an_unmatched_replay_result_keeps_its_standalone_card() {
 
 #[test]
 fn a_bulk_replay_never_drops_an_orphan_result() {
-    // The bulk path (slim attach, the get-messages rebuild) keeps
-    // an unmatched `toolResult` as its standalone orphan card -
-    // the rebuilt transcript matches the live and incremental
-    // paths.
     let chat = transcript_to_entries(&[
         json!({
             "role": "user",
@@ -492,10 +447,6 @@ fn a_bulk_replay_never_drops_an_orphan_result() {
 
 #[test]
 fn a_bulk_replay_settles_the_last_pending_card_for_a_reused_id() {
-    // A later invocation reusing a `tool_call_id` settles its OWN
-    // card (the live `rposition` match), never the first
-    // invocation's pending one - and the result never becomes an
-    // orphan.
     let chat = transcript_to_entries(&[
         json!({
             "role": "assistant",
@@ -540,9 +491,6 @@ fn a_bulk_replay_settles_the_last_pending_card_for_a_reused_id() {
 
 #[test]
 fn an_interleaved_replay_pairs_results_in_arrival_order() {
-    // Call, result, ANOTHER call reusing the id, result: each
-    // result settles the call it FOLLOWED (the live arrival-order
-    // pairing), never the later invocation's card.
     let chat = transcript_to_entries(&[
         json!({
             "role": "assistant",
@@ -609,9 +557,6 @@ fn an_interleaved_replay_pairs_results_in_arrival_order() {
 
 #[test]
 fn an_orphan_result_keeps_its_wire_position() {
-    // An orphan result BETWEEN two ordinary messages lands at its
-    // own wire position in the rebuilt transcript - never at the
-    // tail (condensation can never span across it).
     let chat = transcript_to_entries(&[
         json!({
             "role": "user",
@@ -642,10 +587,6 @@ fn an_orphan_result_keeps_its_wire_position() {
 
 #[test]
 fn a_leftover_settle_keeps_its_own_orphan_card() {
-    // A result arriving after its card ALREADY settled (a leftover)
-    // never crosses a later reused invocation: it keeps its own
-    // orphan card at its wire position, and the later card stays
-    // pending - exactly the live push path.
     let chat = transcript_to_entries(&[
         json!({
             "role": "assistant",
@@ -717,8 +658,6 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
             .and_then(Value::as_str),
         Some("the leftover")
     );
-    // The second invocation's card stays pending (its result arrives
-    // later or never).
     let second_call = chat.iter().rev().find_map(|entry| match entry {
         ChatEntry::Tool(card) if card.result.is_none() => Some(card.as_ref()),
         _ => None,
@@ -733,13 +672,10 @@ fn a_leftover_settle_keeps_its_own_orphan_card() {
 }
 
 /// The rebuild's loader anchor (the operator's 2026-09-28 rule: the
-/// waiting/executing timer counts since the LAST HUMAN PROMPT): the
-/// reconstruct reads the NEWEST user message's wall-clock timestamp —
-/// the numeric ms wire form, the f64 form, and the ISO-8601 string
-/// form — and skips non-user messages and unreadable times.
+/// timer counts since the LAST HUMAN PROMPT): the reconstruct reads the
+/// NEWEST user message's readable wall-clock time.
 #[test]
 fn reconstructs_the_last_user_prompt_timestamp() {
-    // The numeric ms form (the live engine's wire shape).
     let mut attach = slim_attach();
     let snapshot = attach.get_mut("snapshot").expect("snapshot");
     let messages = snapshot
@@ -751,7 +687,6 @@ fn reconstructs_the_last_user_prompt_timestamp() {
     messages[0]["timestamp"] = json!(1_700_000_000_000u64);
     let view = reconstruct(&attach_data_from_response(attach).unwrap());
     assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_000));
-    // The f64 form reads as ms too.
     let mut attach = slim_attach();
     let messages = attach
         .get_mut("snapshot")
@@ -763,8 +698,6 @@ fn reconstructs_the_last_user_prompt_timestamp() {
     messages[0]["timestamp"] = json!(1_700_000_000_050.0f64);
     let view = reconstruct(&attach_data_from_response(attach).unwrap());
     assert_eq!(view.last_user_prompt_ms, Some(1_700_000_000_050));
-    // The ISO-8601 string form parses through the same reader (older
-    // wire shapes carry the entry timestamp as a string).
     let mut attach = slim_attach();
     let messages = attach
         .get_mut("snapshot")
@@ -778,8 +711,7 @@ fn reconstructs_the_last_user_prompt_timestamp() {
     assert_eq!(view.last_user_prompt_ms, Some(1_790_596_801_000));
     // A newer user prompt with NO readable time does not strand the
     // anchor (Macroscope 2026-09-28): the scan takes the newest user
-    // message that HAS a readable time, so unreadable-tail prompts
-    // leave the older prompt anchoring the loader.
+    // message that HAS a readable time.
     let mut attach = slim_attach();
     let messages = attach
         .get_mut("snapshot")
@@ -801,8 +733,6 @@ fn reconstructs_the_last_user_prompt_timestamp() {
         Some(1_700_000_000_000),
         "the newest READABLE user time wins, not the newest user message"
     );
-    // No readable user time anywhere: the anchor stays unset and the
-    // loader keeps its re-attach instant.
     let mut attach = slim_attach();
     let messages = attach
         .get_mut("snapshot")
@@ -841,16 +771,11 @@ fn reconstructs_slim_attach() {
     );
 }
 
-/// The layout handoff's cursor-presence gate (`view::handoff`): an
-/// attach that omits the resume cursor reconstructs to collapsed default
-/// key values (an empty generation, a zero sequence), which could alias
-/// across cursor-less attaches of the same entry count — the handoff
-/// refuses to key on that shape.
+/// A cursor-less attach reconstructs to collapsed key values that could
+/// alias across attaches, so the handoff refuses to key on them.
 #[test]
 fn a_cursorless_attach_reconstructs_as_unkeyed_for_the_layout_handoff() {
     let mut attach = slim_attach();
-    // The cursor rides both the snapshot block AND the attach's top-level
-    // optional fields: a cursor-less attach omits it in BOTH places.
     let snapshot = attach
         .get_mut("snapshot")
         .expect("the slim attach carries a snapshot")
@@ -874,15 +799,8 @@ fn a_cursorless_attach_reconstructs_as_unkeyed_for_the_layout_handoff() {
     );
 }
 
-/// TS `getModelContextLabel`: the attach snapshot's state carries the
-/// tray effort suffix with the model (reasoning + level), and a model
-/// without reasoning reconstructs bare.
-/// The attach state's model block carries the provider next to the id
-/// (TS `state.model.provider`): both reconstruct, so the picker's
-/// current-model match disambiguates the same id across providers
-/// (prime-inference and openrouter both list `z-ai/glm-5.3`). The
-/// display-string form and a provider-less object keep `None` (older
-/// daemons).
+/// The model block carries the provider next to the id: the picker
+/// disambiguates the same id across providers.
 #[test]
 fn reconstructs_the_model_provider_alongside_the_id() {
     let mut attach = slim_attach();
@@ -958,10 +876,6 @@ fn reconstructs_the_queue_from_session_actions() {
     );
 }
 
-/// The typed child-status provenance rides the attach snapshot too
-/// (replay parity with the live frames): the parked notices stay
-/// folded and inspectable across a re-attach, while a notice-free
-/// projection (the TS wire shape, rider omitted) still decodes.
 #[test]
 fn reconstructs_the_child_status_provenance_from_session_actions() {
     let mut attach = slim_attach();
@@ -987,10 +901,6 @@ fn reconstructs_the_child_status_provenance_from_session_actions() {
     );
 }
 
-/// The injected-continuation provenance rides the attach snapshot too
-/// (replay parity with the live frames): a re-attach keeps the
-/// engine-minted continuations folded and inspectable read-only, while
-/// a projection without the rider (older daemons) still decodes.
 #[test]
 fn reconstructs_the_injected_provenance_from_session_actions() {
     let mut attach = slim_attach();
@@ -1015,9 +925,6 @@ fn reconstructs_the_injected_provenance_from_session_actions() {
     );
 }
 
-/// TS #2063: an attach re-sync mid-preparing keeps the picked-up
-/// prompt visible too — the snapshot's active action projects the
-/// same starting row the live frames carry.
 #[test]
 fn reconstructs_the_starting_row_from_session_actions() {
     let mut attach = slim_attach();
@@ -1042,9 +949,6 @@ fn reconstructs_the_starting_row_from_session_actions() {
 
 #[test]
 fn decodes_the_user_bash_event_triple() {
-    // The `!command` lane (TS `runUserBash`): bash_start carries the
-    // command and identity, bash_output one chunk, bash_end the
-    // settled outcome — all decoded whole-object.
     let start = event_to_update(&json!({
         "type": "bash_start",
         "command": "echo hi",
@@ -1125,10 +1029,6 @@ fn decodes_session_action_update_as_the_queue_projection() {
     );
 }
 
-/// The live queue update carries the typed child-status provenance
-/// (the Rust-native rider): the parked notices fold into the strip
-/// on the live path exactly like the attach path, and a notice-free
-/// projection decodes with empty provenance.
 #[test]
 fn decodes_the_child_status_provenance_from_the_live_queue_update() {
     let update = event_to_update(&json!({
@@ -1156,10 +1056,6 @@ fn decodes_the_child_status_provenance_from_the_live_queue_update() {
     );
 }
 
-/// The live queue update carries the injected-continuation provenance
-/// (the second Rust-native rider): the parked continuations fold into
-/// the strip on the live path exactly like the attach path, and a
-/// projection without the rider decodes with empty provenance.
 #[test]
 fn decodes_the_injected_provenance_from_the_live_queue_update() {
     let update = event_to_update(&json!({
@@ -1193,10 +1089,6 @@ fn decodes_the_injected_provenance_from_the_live_queue_update() {
     );
 }
 
-/// TS #2063 (RES-1306): a queue update that reports a preparing turn
-/// carries the picked-up prompt's label as the strip's starting row,
-/// whatever the parked lanes hold; a later phase (the turn committed)
-/// drops it.
 #[test]
 fn decodes_the_preparing_turn_label_as_the_starting_row() {
     let preparing = json!({
@@ -1245,8 +1137,6 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
             injected_prompts: crate::queued::QueueLaneIndices::default(),
         })
     );
-    // An active action that is not a turn never projects a starting
-    // row.
     let other_kind = json!({
         "type": "session_action_update",
         "actions": {
@@ -1273,9 +1163,8 @@ fn decodes_the_preparing_turn_label_as_the_starting_row() {
 }
 
 /// The rebuild side of the single-line retry UX (operator ruling
-/// 2026-09-23): the `provider_retry_outcome` row replaces the failed
-/// attempts its episode superseded — the rebuilt chat shows ONE line
-/// per episode, never the per-attempt error rows TS renders.
+/// 2026-09-23): the `provider_retry_outcome` row replaces the superseded
+/// attempts — ONE line per episode, never TS's per-attempt rows.
 #[test]
 fn retry_outcome_row_collapses_the_superseded_attempts() {
     let user = json!({"role": "user", "content": "run the deploy"});
@@ -1303,7 +1192,6 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
         recovered,
     ];
     let entries = transcript_to_entries(&messages);
-    // Exactly: the user row, the ONE outcome line, the recovered reply.
     assert_eq!(entries.len(), 3, "entries: {entries:?}");
     assert!(matches!(
         entries[1],
@@ -1311,7 +1199,6 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
             if text.contains("Recovered after 2 retries")
                 && text.contains("429 Too many concurrent requests")
     ));
-    // Zero superseded attempt rows survive.
     assert!(
         entries
             .iter()
@@ -1320,9 +1207,6 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
     );
 }
 
-/// Without an outcome row the failure is not an episode: the lone
-/// error row keeps today's rendering (retries disabled or a
-/// non-retryable kind).
 #[test]
 fn a_lone_failed_attempt_without_an_outcome_row_stays() {
     let user = json!({"role": "user", "content": "hi"});
@@ -1340,7 +1224,6 @@ fn a_lone_failed_attempt_without_an_outcome_row_stays() {
     );
 }
 
-/// Aborted attempts are never collateral of the collapse.
 #[test]
 fn aborted_attempts_never_collapse() {
     let user = json!({"role": "user", "content": "hi"});
@@ -1443,9 +1326,6 @@ fn decodes_auto_retry_events() {
     );
 }
 
-/// The python-kernel bootstrap's `starting` partials carry the loader
-/// note (the same stage text TS hands `setWorkingMessage`); streamed
-/// `ok` output and non-text payloads do not.
 #[test]
 fn loader_note_comes_from_starting_partials_only() {
     let booting = json!({
@@ -1580,7 +1460,6 @@ fn session_command_rows_decode_once() {
             text: "/goal ship it".to_string()
         }))
     );
-    // The closing frame of the pair must not duplicate the row.
     let end = json!({
         "type": "message_end",
         "message": echo["message"].clone(),
@@ -1600,9 +1479,8 @@ fn session_command_rows_decode_once() {
             },
         },
     });
-    // The outcome row decodes as a system status row, never a user
-    // block (the operator's 2026-09-25 ruling: command output is not
-    // user text).
+    // The outcome row is a status row, never a user block (the
+    // operator's 2026-09-25 ruling: command output is not user text).
     assert_eq!(
         event_to_update(&result),
         Some(TurnUpdate::CustomRow(ChatEntry::Status {
@@ -1610,7 +1488,6 @@ fn session_command_rows_decode_once() {
             kind: StatusKind::Info
         }))
     );
-    // A failed command's outcome row carries the error tone.
     let failed = json!({
         "type": "message_start",
         "message": {
@@ -1635,7 +1512,6 @@ fn session_command_rows_decode_once() {
 
 #[test]
 fn session_command_rows_respect_display_and_shape() {
-    // Non-display rows (the refine result) render nothing.
     let hidden = json!({
         "role": "custom",
         "customType": "session_slash_command_result",
@@ -1643,9 +1519,6 @@ fn session_command_rows_respect_display_and_shape() {
         "display": false,
     });
     assert!(custom_message_entries(&hidden).is_empty());
-    // A displayed outcome row renders in the status-row class with
-    // the severity's tone (the operator's 2026-09-25 ruling: command
-    // output is system output, never user text).
     let outcome = json!({
         "role": "custom",
         "customType": "session_slash_command_result",
@@ -1663,9 +1536,6 @@ fn session_command_rows_respect_display_and_shape() {
             kind: StatusKind::Info,
         }]
     );
-    // Unknown displayed custom types render the generic box (the TS
-    // live dispatch fallthrough; harness digests persist with
-    // display=false and render nothing).
     let other = json!({
         "role": "custom",
         "customType": "harness_digest",
@@ -1676,8 +1546,6 @@ fn session_command_rows_respect_display_and_shape() {
         custom_message_entries(&other).as_slice(),
         [ChatEntry::CustomPanel(_)]
     ));
-    // A command row without command details renders the malformed
-    // notice (TS `isSessionSlashCommandMessage` fallback).
     let malformed = json!({
         "role": "custom",
         "customType": "session_slash_command",
@@ -1693,10 +1561,6 @@ fn session_command_rows_respect_display_and_shape() {
     );
 }
 
-/// A transcript with tool calls replays the way the TS attach does: the
-/// assistant's tool card stays pending until the matching
-/// `role: "toolResult"` message completes it; orphan results render
-/// nothing.
 #[test]
 fn transcript_replay_completes_tool_cards() {
     let transcript = [
@@ -1737,9 +1601,6 @@ fn transcript_replay_completes_tool_cards() {
         }),
     ];
     let chat = transcript_to_entries(&transcript);
-    // user row, assistant text, tool card, final assistant text -
-    // and the orphan result keeps its standalone card (the live
-    // push path's twin; the rebuilt transcript never drops it).
     assert_eq!(chat.len(), 5, "chat: {chat:?}");
     let Some(ChatEntry::Tool(card)) = chat.get(2) else {
         panic!("tool card at index 2: {chat:?}");
@@ -1760,8 +1621,6 @@ fn transcript_replay_completes_tool_cards() {
     assert!(orphan.result.is_some(), "the orphan keeps its own card");
 }
 
-/// A pending card (result absent) replays with no result, like a turn
-/// still in flight when the session was last persisted.
 #[test]
 fn transcript_replay_keeps_pending_cards_without_results() {
     let transcript = [
@@ -1784,8 +1643,6 @@ fn transcript_replay_keeps_pending_cards_without_results() {
     assert!(card.result.is_none());
 }
 
-/// `Reconstructed::push_message` folds a late `toolResult` message onto
-/// the card an earlier chunk added (streamed snapshot reassembly).
 #[test]
 fn push_message_completes_pending_tool_card() {
     let mut reconstructed = Reconstructed::default();
@@ -1818,10 +1675,7 @@ fn push_message_completes_pending_tool_card() {
     );
 }
 
-/// A provider-failure turn replays like the TS transcript: the healthy
-/// exchange renders once, and every failed retry attempt folds into its
-/// own error row (TS `buildConversationComponents` pushes one component
-/// per assistant message, even a content-less failure).
+/// One component per assistant message, even a content-less failure.
 #[test]
 fn transcript_replay_stacks_provider_failure_rows() {
     let failed_attempt = |timestamp: u64| {
@@ -1849,7 +1703,6 @@ fn transcript_replay_stacks_provider_failure_rows() {
         failed_attempt(6),
     ];
     let chat = transcript_to_entries(&transcript);
-    // One user + reply, one user, then one entry per failed attempt.
     assert_eq!(chat.len(), 6, "chat: {chat:?}");
     let replies: Vec<&crate::chat::AssistantMessage> = chat
         .iter()
@@ -1875,8 +1728,6 @@ fn transcript_replay_stacks_provider_failure_rows() {
     }
 }
 
-/// An aborted assistant message folds into its abort row even when the
-/// message streamed no content (TS renders the abort row always).
 #[test]
 fn transcript_replay_renders_contentless_abort() {
     let transcript = [
@@ -1901,7 +1752,6 @@ fn transcript_replay_renders_contentless_abort() {
 
 #[test]
 fn decodes_compaction_events() {
-    // The start pair (TS `AgentSession.compact` event).
     assert_eq!(
         event_to_update(&json!({
             "type": "compaction_start",
@@ -1920,7 +1770,6 @@ fn decodes_compaction_events() {
             custom_instructions: None,
         })
     );
-    // Success carries the client-facing result.
     assert_eq!(
         event_to_update(&json!({
             "type": "compaction_end",
@@ -1939,7 +1788,6 @@ fn decodes_compaction_events() {
             error_severity: None,
         })
     );
-    // A skip carries the warning message; the result stays absent.
     assert_eq!(
         event_to_update(&json!({
             "type": "compaction_end",
@@ -1958,9 +1806,7 @@ fn decodes_compaction_events() {
             error_severity: Some("warning".to_string()),
         })
     );
-    // A summary delta carries its text chunk verbatim (the live
-    // streamed block's input; the settling end stays the summary's
-    // only durable source).
+    // The settling end stays the summary's only durable source.
     assert_eq!(
         event_to_update(&json!({
             "type": "compaction_summary_delta",
@@ -1970,8 +1816,6 @@ fn decodes_compaction_events() {
             delta: "The session covered the goal.".to_string(),
         })
     );
-    // A missing delta field decodes as an empty chunk, never a drop
-    // (the accumulation stays a pure append — the frame is real).
     assert_eq!(
         event_to_update(&json!({ "type": "compaction_summary_delta" })),
         Some(TurnUpdate::CompactionSummaryDelta {
@@ -1982,7 +1826,6 @@ fn decodes_compaction_events() {
 
 #[test]
 fn transcript_replay_renders_the_compaction_outcome_row() {
-    // A skipped auto-compaction warns (TS `CompactionOutcomeMessageComponent`).
     let items = message_value_to_entries(&json!({
         "role": "custom",
         "customType": "compaction_outcome",
@@ -1997,7 +1840,6 @@ fn transcript_replay_renders_the_compaction_outcome_row() {
             kind: StatusKind::Warning,
         }]
     );
-    // A failed overflow recovery errors.
     let items = message_value_to_entries(&json!({
         "role": "custom",
         "customType": "compaction_outcome",
@@ -2010,7 +1852,6 @@ fn transcript_replay_renders_the_compaction_outcome_row() {
         ChatEntry::Status { kind: StatusKind::Error, text }
             if text == "Context overflow recovery failed: boom"
     ));
-    // A cancelled compaction errors too (TS: only `skipped` warns).
     let items = message_value_to_entries(&json!({
         "role": "custom",
         "customType": "compaction_outcome",
@@ -2024,7 +1865,7 @@ fn transcript_replay_renders_the_compaction_outcome_row() {
             if text == "Compaction cancelled"
     ));
     // An envelope TS `isCompactionOutcomeMessage` rejects renders the
-    // malformed notice (invalid reason and outcome both).
+    // malformed notice.
     for details in [
         json!({ "reason": "manual", "outcome": "skipped" }),
         json!({ "reason": "threshold", "outcome": "compacted" }),
@@ -2049,8 +1890,6 @@ fn transcript_replay_renders_the_compaction_outcome_row() {
 
 #[test]
 fn transcript_replay_renders_the_compaction_summary() {
-    // The attach snapshot's `role: "compactionSummary"` message (the
-    // session store's fold) renders the summary row with its fields.
     let items = message_value_to_entries(&json!({
         "role": "compactionSummary",
         "summary": "the story so far",
@@ -2069,8 +1908,6 @@ fn transcript_replay_renders_the_compaction_summary() {
     ));
 }
 
-/// A settled content-less assistant message renders nothing (TS: the
-/// component's rows are empty and spacing stays `hidden`).
 #[test]
 fn transcript_replay_skips_contentless_settled_messages() {
     let items = message_value_to_entries(&json!({
@@ -2079,8 +1916,6 @@ fn transcript_replay_skips_contentless_settled_messages() {
         "stopReason": "stop",
     }));
     assert_eq!(items, Vec::new());
-    // A provider error beside tool calls renders no message row either:
-    // the cards carry the failure.
     let items = message_value_to_entries(&json!({
         "role": "assistant",
         "content": [
@@ -2093,8 +1928,6 @@ fn transcript_replay_skips_contentless_settled_messages() {
     assert!(matches!(&items[0], ChatEntry::Tool(card) if card.name == "bash"));
 }
 
-/// A `goal_update` event decodes to the wire goal payload (the session
-/// view owns announcement and tray rendering).
 #[test]
 fn goal_update_decodes_the_goal_payload() {
     let update = event_to_update(&json!({
@@ -2120,8 +1953,6 @@ fn goal_update_decodes_the_goal_payload() {
     assert_eq!(goal.last_reason.as_deref(), Some("Goal achieved"));
 }
 
-/// The attach snapshot's `state.goal` rehydrates with the session (TS
-/// `snapshot.ts: goal: session.goalState`); a null goal stays absent.
 #[test]
 fn attach_snapshot_carries_the_goal_state() {
     let attach = json!({
@@ -2170,9 +2001,41 @@ fn attach_snapshot_carries_the_goal_state() {
     assert_eq!(goal.objective.as_deref(), Some("keep shipping"));
 }
 
-/// The synthetic image-heavy tool-result row: a `role: "toolResult"`
-/// message with one 500KB image payload block (the `attach_image` emit's
-/// stored shape).
+/// The tray's context usage rides the attach snapshot's state: the
+/// reconstruct hands it to the rebuild that follows every attach.
+#[test]
+fn attach_snapshot_carries_the_tray_context_usage() {
+    let mut attach = slim_attach();
+    attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("state")
+        .expect("state")["contextUsage"] =
+        json!({ "tokens": 9_400, "contextWindow": 128_000, "percent": 7.34 });
+    let data = attach_data_from_response(attach).unwrap();
+    let reconstructed = reconstruct(&data);
+    let usage = reconstructed.context_usage.expect("snapshot context usage");
+    assert_eq!(usage.tokens, 9_400);
+    assert_eq!(usage.context_window, 128_000);
+
+    // Unknown tokens (a fresh compaction) clear the tray display.
+    let mut attach = slim_attach();
+    attach
+        .get_mut("snapshot")
+        .expect("snapshot")
+        .get_mut("state")
+        .expect("state")["contextUsage"] =
+        json!({ "tokens": null, "contextWindow": 128_000, "percent": null });
+    let data = attach_data_from_response(attach).unwrap();
+    assert_eq!(reconstruct(&data).context_usage, None);
+
+    // A state without the field (a model-less session) stays `None`.
+    let data = attach_data_from_response(slim_attach()).unwrap();
+    assert_eq!(reconstruct(&data).context_usage, None);
+}
+
+/// A `role: "toolResult"` message with one 500KB image payload block
+/// (the `attach_image` emit's stored shape).
 fn image_heavy_tool_result(payload: &str) -> serde_json::Value {
     json!({
         "role": "toolResult",
@@ -2210,18 +2073,15 @@ fn elided_image_tool_result(elided_bytes: u64, width: u64, height: u64) -> serde
     })
 }
 
-/// One row's joined span text.
 fn line_text(line: &crate::Line) -> String {
     line.iter().map(|span| span.content.as_str()).collect()
 }
 
 #[test]
 fn an_image_heavy_transcript_replays_and_renders_its_first_frame() {
-    // The synthetic image-heavy fixture: a transcript whose tail carries
-    // many half-megabyte image tool results. The first-frame fold and the
-    // collapsed-detail layout must complete without any payload
-    // processing, and the expanded card renders the payload's
-    // placeholder, never its bytes.
+    // A transcript whose tail carries many half-megabyte image tool
+    // results: the fold and layout must complete without payload
+    // processing.
     let payload = "A".repeat(500 * 1024);
     let mut messages = Vec::new();
     for index in 0..16 {
@@ -2235,14 +2095,11 @@ fn an_image_heavy_transcript_replays_and_renders_its_first_frame() {
     let entries = transcript_to_entries(&messages);
     assert_eq!(entries.len(), 32, "a user row and a card per turn");
 
-    // The first-frame geometry pass over the whole transcript completes.
     let mut view = test_view();
     for entry in entries {
         view.push_entry(entry);
     }
     let layout = view.layout_pass(100);
-    // The whole first frame renders (the lazy walk's full-transcript
-    // request shape), and its rows carry no payload bytes.
     let rows = view.transcript_window(&layout, 0, usize::MAX);
     assert!(rows.len() > 40, "the transcript frame renders");
     let flat: Vec<String> = rows.iter().map(line_text).collect();
@@ -2254,10 +2111,8 @@ fn an_image_heavy_transcript_replays_and_renders_its_first_frame() {
 
 #[test]
 fn elided_image_tool_results_render_their_marker_metadata() {
-    // The elision marker the daemon's attach snapshot writes for an
-    // `elide_snapshot_images` client: the fold keeps the card, and the
-    // expanded card renders the marker's dimensions — the same row the
-    // payload's own metadata produced.
+    // The elision marker the daemon writes for an `elide_snapshot_images`
+    // client: the expanded card renders the marker's dimensions.
     let entries = transcript_to_entries(&[elided_image_tool_result(500 * 1024, 64, 32)]);
     let card = entries
         .iter()
@@ -2280,13 +2135,10 @@ fn elided_image_tool_results_render_their_marker_metadata() {
             .any(|row| row.contains("\u{2570}\u{2500} [image/png \u{b7} 64\u{d7}32]")),
         "the marker's dimensions render: {flat:?}"
     );
-    // The hidden form renders the same metadata with its size.
     assert_eq!(
         card.result.as_ref().unwrap().text_output(false),
         "Loaded 1 image(s) into context: /tmp/shot.png\n[Image: [image/png]]"
     );
 }
 
-/// The thinking-channel render pins (the two provider envelopes' stored
-/// row shapes) live in their own child module with this file's harness.
 mod thinking_pins;

@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,21 +8,9 @@
     clippy::cast_precision_loss
 )]
 #![cfg(unix)]
-//! The release pipeline's channel-manifest producer, gated against the
-//! update reader it feeds.
-//!
-//! The read side (`pa_core::update::release::latest_release`, the TS
-//! `getLatestPiRelease` port) fetches `<download-base>/latest.json` (the
-//! stable channel) or `<download-base>/beta.json` (the nightly channel)
-//! and keeps an artifact row only when it satisfies the channel contract:
-//! a known platform, `file == prime-agent-<version>-<platform>.tar.gz`,
-//! and a 64-hex `sha256`. `.github/workflows/release.yml` is the producer
-//! that publishes those manifests; these tests pin that producer the way
-//! the TS repo pins its release workflow (`release-workflow.test.ts`):
-//! parse the workflow, run the promote job's real step code against a
-//! fixture tree, and prove the emitted manifest parses with the exact
-//! reader (`parse_channel_manifest`) while the archive files it names
-//! exist with the digests it claims.
+//! The release pipeline's channel-manifest producer, gated against the update reader it feeds: run
+//! the promote job's real step code against a fixture tree, and prove the emitted manifest parses
+//! with the exact reader while the named archives exist with the digests it claims.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -135,9 +121,8 @@ fn python(script: &Path, args: &[&std::ffi::OsStr]) -> std::process::Output {
         .expect("run the release script")
 }
 
-/// The platforms a fixture release carries: the four v1 installer
-/// platforms, win32-x64 (known to the reader, v2-only), and a future
-/// musl platform the reader skips.
+/// The platforms a fixture release carries: the four v1 installer platforms, win32-x64 (known to
+/// the reader, v2-only), and a future musl platform the reader skips.
 const FIXTURE_PLATFORMS: &[&str] = &[
     "darwin-arm64",
     "darwin-x64",
@@ -229,9 +214,8 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         run.contains("-beta*"),
         "the tag check does not gate the channel a prerelease publishes"
     );
-    // The promote job emits the channel manifest between the manifest
-    // merge and the release attach (the manifest must exist before attach,
-    // after the merged rows exist).
+    // The promote job emits the channel manifest between the manifest merge and the release attach
+    // (the manifest must exist before attach, after the merged rows exist).
     let promote = workflow
         .jobs
         .get("promote")
@@ -252,9 +236,8 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         emit_run.contains("RELEASE_VERSION"),
         "the emission decides the channel from the tag"
     );
-    // The attach list must carry the channel manifest with a glob that
-    // matches whichever name the tag published (exactly one of
-    // latest.json/beta.json exists per release).
+    // The attach list must carry the channel manifest with a glob that matches whichever name the
+    // tag published (exactly one of latest.json/beta.json exists per release).
     let attach_step = step(promote, "Attach to GitHub release");
     let files = attach_step
         .with
@@ -267,10 +250,9 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         files.contains("release-out/*.json"),
         "the attach list must carry the channel manifest via a json glob"
     );
-    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never
-    // take the Latest pointer; the stable channel's download base
-    // (.../releases/latest/download/) keeps serving the last stable
-    // release's latest.json (Bugbot: beta tags steal GitHub Latest).
+    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never take the Latest
+    // pointer; the stable channel's download base (.../releases/latest/download/) keeps serving the
+    // last stable release's latest.json (Bugbot: beta tags steal GitHub Latest).
     let prerelease = attach_step
         .with
         .as_ref()
@@ -315,10 +297,9 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
          needs, so the bare form skipped the refresh on every green beta \
          promote while the payload uploaded inside the same promote"
     );
-    // The refresh is the workflow's only shared mutable state, so it alone
-    // serializes (a queued refresh superseded by a newer tag is harmless:
-    // the newest beta's refresh wins; no per-tag promotion is ever
-    // canceled).
+    // The refresh is the workflow's only shared mutable state, so it alone serializes (a queued
+    // refresh superseded by a newer tag is harmless: the newest beta's refresh wins; no per-tag
+    // promotion is ever canceled).
     assert_eq!(
         refresh
             .concurrency
@@ -357,14 +338,12 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
     assert!(run.contains("--clobber"), "{run}");
     assert!(run.contains("--prerelease"), "{run}");
     assert!(run.contains("release-out/prime-agent-*.tar.gz"), "{run}");
-    // The newest-wins guard: re-runs of an older tag must never clobber a
-    // newer rolling beta.json; gh release download's destination flag is
-    // --dir (Bugbot: --output-dir was discarded and never wrote the guard
-    // file). The guard FAILS CLOSED: a release carrying an unreadable
-    // beta.json is never clobbered (Bugbot: a discarded download failure
-    // fell through to --clobber), while a release with NO beta.json asset
-    // (a partial earlier refresh) has nothing to protect - the clobber
-    // heals it.
+    // The newest-wins guard: re-runs of an older tag must never clobber a newer rolling beta.json;
+    // gh release download's destination flag is --dir (Bugbot: --output-dir was discarded and never
+    // wrote the guard file). The guard FAILS CLOSED: a release carrying an unreadable beta.json is
+    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), while a
+    // release with NO beta.json asset (a partial earlier refresh) has nothing to protect - the
+    // clobber heals it.
     assert!(run.contains("sort -V"), "{run}");
     assert!(run.contains("skipping the refresh"), "{run}");
     assert!(run.contains(r#"--dir "$guard""#), "{run}");

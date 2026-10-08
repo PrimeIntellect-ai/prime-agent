@@ -1,5 +1,4 @@
-//! The refine planner: proposal parsing, edit validation, application, and
-//! rollback. Port of the apply half of core/refinement/refinement.ts.
+//! The refine planner: proposal parsing, edit validation, application, and rollback.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +18,6 @@ pub const REFINEMENT_CONTEXT_OVERHEAD_TOKENS: u64 = 1_024;
 
 pub const TRUNCATED_JSON_ERROR: &str = "the model stopped before completing its JSON object. This usually means the output budget was exhausted; retry with a smaller request.";
 
-/// One proposed edit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefinementEdit {
@@ -43,7 +41,6 @@ pub struct RefinementEdit {
     pub reason: Option<String>,
 }
 
-/// The refiner's proposal.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RefinementProposal {
     pub summary: String,
@@ -100,8 +97,7 @@ fn parse_json_candidate(candidate: &str) -> Result<serde_json::Value, String> {
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the reply contains no JSON
-/// object, the candidate JSON is invalid, or the reply looks truncated.
+/// Human-readable error: no JSON object, an invalid candidate, or a truncated reply.
 pub fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
@@ -166,8 +162,7 @@ pub fn normalize_refinement_proposal(value: &serde_json::Value) -> RefinementPro
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the reply's JSON cannot be
-/// extracted or its top level is not an object.
+/// Error when the JSON cannot be extracted or the top level is not an object.
 pub fn parse_proposal(text: &str) -> Result<RefinementProposal, String> {
     let value = extract_json_object(text)?;
     if !value.is_object() {
@@ -293,7 +288,6 @@ fn now_iso() -> String {
     crate::session::manager::format_iso_now()
 }
 
-/// Options for applying a proposal.
 pub struct ApplyOptions {
     pub id: String,
     pub rollback_of: Option<String>,
@@ -312,9 +306,7 @@ pub struct ApplyOptions {
 ///
 /// # Panics
 ///
-/// The internal unwraps cannot fire: an edit without an action is rejected
-/// by validation first, and the empty state pre-populates every per-kind
-/// entry map.
+/// The unwraps cannot fire: validation runs first; the state pre-populates every kind map.
 pub fn apply_refinement_proposal(
     state: &mut HarnessState,
     proposal: &RefinementProposal,
@@ -582,8 +574,7 @@ fn refinement_input_token_bound(text: &str) -> u64 {
 ///
 /// # Errors
 ///
-/// Returns an error when even the trimmed prompt leaves no room for output
-/// tokens in the model's context window.
+/// Error when even the trimmed prompt leaves no room for output tokens.
 pub fn refinement_request(
     model: &pa_types::ai::Model,
     system_prompt: &str,
@@ -658,13 +649,10 @@ mod tests {
 
     #[test]
     fn json_extraction_diagnoses_truncation() {
-        // Direct object.
         let parsed = parse_proposal(r#"{"summary":"ok","edits":[]}"#).unwrap();
         assert_eq!(parsed.summary, "ok");
-        // Fenced block.
         let fenced = parse_proposal("```json\n{\"summary\":\"fenced\"}\n```").unwrap();
         assert_eq!(fenced.summary, "fenced");
-        // Brace-sliced out of prose.
         let prose = parse_proposal("Here you go:\n{\"summary\":\"sliced\"}\nAll set.").unwrap();
         assert_eq!(prose.summary, "sliced");
         // Truncated JSON reports the output-budget cause.
@@ -679,7 +667,6 @@ mod tests {
 
     #[test]
     fn validation_rules() {
-        // Unsupported action.
         let mut edit = create_memory_edit("m", "t", "c");
         edit.action = None;
         assert!(validate_edit(&edit, None).is_some());
@@ -718,7 +705,6 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(validate_edit(&skill_edit, None), None);
-        // Wrong reference type.
         skill_edit.reference = Some(
             serde_json::from_value(
                 serde_json::json!({ "type": "shell", "import": "pkg.mod", "callable": "run" }),
@@ -833,7 +819,6 @@ mod tests {
         assert_eq!(entry.content, "builds are green");
         assert_eq!(entry.version, 1);
         assert_eq!(entry.scope, Some(HarnessScope::Local));
-        // Duplicate create is rejected.
         let duplicate = apply_refinement_proposal(
             &mut state,
             &RefinementProposal {
@@ -855,7 +840,6 @@ mod tests {
             duplicate.applied_edits[0].error.as_deref(),
             Some("entry already exists")
         );
-        // Update bumps the version.
         let mut update_edit = create_memory_edit("m1", "Fact", "updated fact");
         update_edit.action = Some(RefinementAction::Update);
         apply_refinement_proposal(
@@ -875,7 +859,6 @@ mod tests {
             },
         );
         assert_eq!(state.entries[&RefinementKind::Memory]["m1"].version, 2);
-        // Rollback restores the original content and keeps history.
         let rollback = rollback_proposal(&result);
         let rolled = apply_refinement_proposal(
             &mut state,

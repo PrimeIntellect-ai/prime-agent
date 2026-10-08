@@ -1,13 +1,8 @@
-//! Chunked snapshot streaming on the client attach path.
-//!
-//! When a client advertises the `chunked_snapshot` capability, the attach
-//! response omits the transcript and the snapshot travels as
-//! `session_snapshot_begin` / `session_snapshot_chunk` /
-//! `session_snapshot_end` records. Each chunk record is a self-contained
-//! JSONL event whose `messages` array stays under a target byte budget; the
-//! client reassembles the arrays in index order. A snapshot that fails after
-//! the streamed response was produced surfaces as
-//! `session_snapshot_failed` keyed by the same snapshot id.
+//! Chunked snapshot streaming on the client attach path: with the
+//! `chunked_snapshot` capability the attach response omits the transcript,
+//! which travels as `session_snapshot_begin`/`chunk`/`end` records — each
+//! chunk's `messages` array stays under a byte budget. A failure after the
+//! streamed response surfaces as `session_snapshot_failed`.
 
 use anyhow::{anyhow, Result};
 use pa_types::daemon::SnapshotPurpose;
@@ -44,9 +39,8 @@ impl SnapshotStreamEvents {
     }
 }
 
-/// The client capability set for one attach command, normalized the way the
-/// supervisor's `normalizeCapabilities` does: unsupported entries are
-/// dropped and missing capabilities default to the standard pair.
+/// The client capability set for one attach command: unsupported entries
+/// dropped, missing capabilities defaulted to the standard pair.
 pub(crate) fn attach_client_capabilities(capabilities: Option<&[String]>) -> Vec<String> {
     let capabilities = capabilities.map_or_else(
         crate::protocol::default_client_capabilities,
@@ -60,27 +54,18 @@ pub(crate) fn wants_chunked(capabilities: &[String]) -> bool {
     capabilities.iter().any(|cap| cap == "chunked_snapshot")
 }
 
-/// True when the client asked for image payloads to leave the snapshot
-/// (the `elide_snapshot_images` capability, the image-heavy session-open
-/// fix's fast path).
+/// True when the client asked for image payloads to leave the snapshot (`elide_snapshot_images`).
 pub(crate) fn wants_image_elision(capabilities: &[String]) -> bool {
     capabilities
         .iter()
         .any(|cap| cap == "elide_snapshot_images")
 }
 
-/// The attach snapshot's image-payload elision (the image-heavy
-/// session-open fix): every `toolResult` message's image content blocks
-/// travel with their base64 payload replaced by an empty string plus the
-/// block's metadata — `elidedBytes` (the payload's character count) and,
-/// when the bounded header read parses them, `widthPx`/`heightPx`, so the
-/// client renders the same fallback metadata rows without the payload.
-/// The transcript's image rows are fallback-only metadata rows (TS
-/// `tool-execution.ts` mounts its `Image` components with
-/// `fallbackOnly`), so nothing a client renders consumes the payload; an
-/// image-heavy session's snapshot stops serializing megabytes of base64
-/// per attach. The store keeps the payload: model resend, persistence,
-/// and clients without the capability all read the untouched form.
+/// The attach snapshot's image-payload elision: a `toolResult` image block
+/// travels with its payload replaced by an empty string plus `elidedBytes` and
+/// `widthPx`/`heightPx`. The transcript's image rows are fallback-only metadata
+/// (TS mounts `Image` components with `fallbackOnly`), so an image-heavy session
+/// stops shipping megabytes of base64 per attach; the store keeps the payload.
 pub(crate) fn elide_snapshot_image_payloads(messages: &mut [Value]) {
     for message in messages.iter_mut() {
         if message.get("role").and_then(Value::as_str) != Some("toolResult") {
@@ -91,9 +76,8 @@ pub(crate) fn elide_snapshot_image_payloads(messages: &mut [Value]) {
         };
         for block in content.iter_mut() {
             let is_image = block.get("type").and_then(Value::as_str) == Some("image");
-            // The immutable reads (payload length, the bounded-prefix
-            // dimension parse) end here; the marker writes below borrow
-            // the block mutably.
+            // The immutable reads (payload length, the bounded-prefix dimension parse) end
+            // here; the marker writes below borrow the block mutably.
             let (payload_chars, dimensions) = match (
                 is_image,
                 block.get("data").and_then(Value::as_str),
@@ -133,15 +117,10 @@ fn snapshot_stream_id(
 }
 
 /// Convert a worker attach result into its streamed form plus the snapshot
-/// event records: the transcript leaves the response (`messages` arrays
-/// emptied) and the response advertises the `snapshotStream` the events
-/// carry.
-///
-/// `Err` means the worker response could not even identify a snapshot; the
-/// attach itself fails before any record is produced.
-/// [`SnapshotStreamEvents::Failed`] means the response was streamable but
-/// the transcript could not be transferred; the caller sends the streamed
-/// response followed by the failed record.
+/// event records (the transcript leaves the response). `Err` means the
+/// response could not identify a snapshot; [`SnapshotStreamEvents::Failed`]
+/// means the transcript could not be transferred — send the streamed
+/// response, then the failed record.
 pub(crate) fn stream_attach(
     mut data: Value,
     active_session_id: &str,
@@ -217,9 +196,8 @@ fn json_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Split the transcript into chunk `messages` arrays under the byte budget.
-/// A single message larger than the budget travels alone; messages are
-/// never split.
+/// Split the transcript into chunk `messages` arrays under the byte budget; a single
+/// message larger than the budget travels alone, messages are never split.
 fn chunk_messages(messages: &[Value], target_chunk_bytes: usize) -> Vec<Vec<Value>> {
     let mut chunks: Vec<Vec<Value>> = Vec::new();
     let mut current: Vec<Value> = Vec::new();
@@ -241,9 +219,7 @@ fn chunk_messages(messages: &[Value], target_chunk_bytes: usize) -> Vec<Vec<Valu
 }
 
 /// Build the begin/chunk/end records (or the failed record) for a streamed
-/// attach result. `messages` is the transcript the streamed response left
-/// out; `data` is the already-streamed response (for the end record's
-/// event cursor).
+/// attach result (the end record's event cursor comes from `data`).
 fn snapshot_event_lines(
     messages: &Value,
     stream: &SnapshotStream,
@@ -342,9 +318,8 @@ mod tests {
         json!({ "role": "user", "content": format!("message {index}"), "timestamp": index as u64 })
     }
 
-    /// A tiny PNG header payload (base64 of the signature + IHDR with the
-    /// given dimensions), built without a base64 dependency: the header
-    /// bytes are all one-byte base64 triples.
+    /// A tiny PNG header payload (base64 of the signature + IHDR with the given dimensions),
+    /// built without a base64 dependency: the header bytes are all one-byte base64 triples.
     fn tiny_png(width: u32, height: u32) -> String {
         let mut bytes = vec![0x89, b'P', b'N', b'G'];
         bytes.extend(vec![0u8; 8]);
@@ -413,8 +388,8 @@ mod tests {
 
     #[test]
     fn elision_marks_unparseable_headers_with_the_size_only() {
-        // A payload whose dimensions do not parse from the bounded prefix
-        // carries the byte count alone.
+        // A payload whose dimensions do not parse from the bounded prefix carries the byte
+        // count alone.
         let payload = "x".repeat(186_328);
         let mut messages = vec![image_tool_result(&payload)];
         elide_snapshot_image_payloads(&mut messages);
@@ -426,8 +401,8 @@ mod tests {
 
     #[test]
     fn elision_skips_empty_payloads_and_non_tool_results() {
-        // A user message carrying an image block (the pasted-image wire)
-        // stays verbatim: the elision targets tool-result payloads only.
+        // A user message carrying an image block (the pasted-image wire) stays verbatim:
+        // the elision targets tool-result payloads only.
         let pasted = json!({
             "role": "user",
             "content": [

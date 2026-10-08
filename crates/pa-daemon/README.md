@@ -4,35 +4,17 @@ Session supervision and wire serving.
 
 ## Scope
 ACP stdio transport (`acp`): the JSON-RPC serve surface for Agent
-Client Protocol clients - a thin transport over the pa-core session engine
-(initialize, session/new, session/prompt, session/close, session/cancel,
-and the outgoing session/update notification with namespaced `_meta`
-correlation), owned by this crate because wire-protocol serving is its area;
-the in-process transport hosts the automatic compaction arms at its turn
-boundaries (`acp/compaction_arms.rs`: the TS `_checkCompaction` /
-`_runPreTurnCompaction` / `_consumePendingRequestedRefine` flows — the
-overflow compact-and-retry, the model-requested arm, and the threshold
-arm, publishing the ACP `compaction_end` mapping and aborting an in-flight
-run on session/cancel+close; the daemon-attached transport runs the
-worker turn loop's arms instead), because the TS arms live in the session
-turn loop every transport shares and the in-process ACP path drives the
-pa-core engine directly. The compact-trigger auto-refine scheduling owns
-its surface here (`compact_autorefine.rs` for the daemon worker: every
-compaction arm plus the manual `compact` command arm the pa-core
-trigger, and the quiescent turn boundaries / the command path consume
-the gated review - TS `_scheduleAutoRefineAfterCompaction` plus the
-background `_maybeAutoRefine("compact")`; `acp/autorefine.rs` for ACP:
-the serialized checkpoint consumes the armed trigger after the
-requested refine.run and session close drains what no turn serviced -
-TS's serialized scheduling for the acp app mode). The direct-ACP goal
-continuation boundary owns its surface here too (`acp/goal_continuation.rs`:
-the TS session's continuation hook `_getContinuationMessages` runs inside
-the one `session/prompt` request on the in-process path — the goal arm with
-exclusive priority over the autonomous arm, the budget-limit wrap-up steer,
-the natural continuation mint per settled boundary, the terminal-error
-goal failure, the threshold-arm goal queue before its compaction (with
-the cancel rollback), and the compact-with-active-goal continue; the
-daemon-attached transport rides the worker's #244 loop instead).
+Client Protocol clients, served over a daemon session (initialize, session/new, session/prompt, session/close,
+session/cancel, and the outgoing session/update notification with
+namespaced `_meta` correlation), owned by this crate because
+wire-protocol serving is its area; the worker turn loop owns compaction
+arms, auto-refine, and goal continuation. The compact-trigger
+auto-refine scheduling owns its surface here (`compact_autorefine.rs`
+for the daemon worker: every compaction arm plus the manual `compact`
+command arm the pa-core trigger, and the quiescent turn boundaries /
+the command path consume the gated review - TS
+`_scheduleAutoRefineAfterCompaction` plus the background
+`_maybeAutoRefine("compact")`).
 Supervisor process (one worker process per active session), restart/backoff
 supervision, session registry/roster + worker self-registration (session
 identity survives supervisor restarts: workers re-register with backoff and
@@ -271,7 +253,7 @@ attached UIs daemon-wide).
 No agent behavior inside workers beyond hosting a pa-core engine; no UI.
 
 ## Public API
-Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::{run_acp_mode, AcpOptions}` (pa-cli dispatches `--mode acp` through it), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
+Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::daemon::{run_daemon_attached_acp_mode, DaemonAcpOptions}` (pa-cli dispatches `--mode acp` through it), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
 
 
 ## Depends on
