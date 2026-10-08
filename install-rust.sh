@@ -3177,7 +3177,12 @@ if uv_on_path \
     note "  retries it online:"
     note "$(cat "$prewarm_out" 2>/dev/null || true)"
   fi
-  rm -rf "$prewarm_scratch"
+  # The sweep is best-effort too (the payload is already live): a scratch
+  # a surviving pre-warm descendant holds busy warns like the superseded-
+  # layout cleanup does, never aborts the install under `set -e`.
+  if ! rm -rf "$prewarm_scratch" 2>/dev/null; then
+    note "warning: could not remove the kernel pre-warm scratch ${prewarm_scratch}; remove it by hand"
+  fi
   else
     step_fail "Preparing the Python kernel" "skipped (no scratch directory)"
     note "! The kernel pre-warm was skipped (its scratch directory could not be created);"

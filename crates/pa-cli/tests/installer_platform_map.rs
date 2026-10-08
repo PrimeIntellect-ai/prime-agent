@@ -1476,6 +1476,67 @@ fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
         flow.contains("flow-continued"),
         "the install proceeds after the skipped pre-warm: {flow}"
     );
+
+    // The sweep is best-effort too (the cursor bot's second location): a
+    // scratch the cleanup cannot remove (a surviving pre-warm descendant
+    // holds it busy on a live install) warns and the install continues -
+    // under `set -e` an unguarded `rm -rf` would abort the whole install
+    // after a SUCCESSFUL pre-warm. The stubbed `rm` fails on purpose.
+    let transcript2 = dir.path().join("transcript2");
+    let rm_stub = dir.path().join("fail-rm");
+    std::fs::create_dir_all(&rm_stub).expect("rm stub dir");
+    std::fs::write(rm_stub.join("rm"), "#!/bin/sh\nexit 1\n").expect("write the failing rm");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(rm_stub.join("rm"), std::fs::Permissions::from_mode(0o755))
+            .expect("rm stub permissions");
+    }
+    let harness2 = format!(
+        "#!/bin/sh\n\
+         set -e\n\
+         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n\
+         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n\
+         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
+         uv_on_path() {{ return 0; }}\n\
+         launcher=true\n\
+         TMPDIR={tmpdir}\n\
+         export TMPDIR\n\
+         PATH={rm_stub}:$PATH\n\
+         export PATH\n\
+         {block}\
+         printf 'flow-continued\\n' >> {transcript}\n\
+         exit 0\n",
+        transcript = transcript2.display(),
+        tmpdir = dir.path().join("tmp").display(),
+        rm_stub = rm_stub.display(),
+        block = block,
+    );
+    let harness2_path = dir.path().join("harness2.sh");
+    std::fs::write(&harness2_path, harness2).expect("write the sweep harness");
+    std::fs::create_dir_all(dir.path().join("tmp")).expect("the working TMPDIR exists");
+    let out2 = Command::new("/bin/sh")
+        .arg(&harness2_path)
+        .output()
+        .expect("run the sweep harness");
+    let flow2 = std::fs::read_to_string(&transcript2).unwrap_or_default();
+    assert!(
+        out2.status.success(),
+        "the install survives a scratch that cannot be swept: {out2:?} flow: {flow2}"
+    );
+    assert!(
+        flow2.contains("ok Kernel ready"),
+        "the pre-warm itself succeeded before the sweep: {flow2}"
+    );
+    assert!(
+        flow2.contains("warning: could not remove the kernel pre-warm scratch"),
+        "the failed sweep warns by name: {flow2}"
+    );
+    assert!(
+        flow2.contains("flow-continued"),
+        "the install proceeds after the failed sweep: {flow2}"
+    );
 }
 
 /// Drives the pre-warm block under `sh` with a three-level hanging
