@@ -201,16 +201,7 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
-    let (killed, released) = kill_process_group_or_pid_pinned(pid);
-    // A parked helper that outlives its own kill may still act on the pid:
-    // this caller cannot hold the target's handle, so the wrapper waits one
-    // more grace for the helper to die before returning. The callers that
-    // own their target use the pinned variant, whose pin holds for as long
-    // as the helper can act.
-    if let Some(released) = released {
-        let _ = released.recv_timeout(TASKKILL_GRACE);
-    }
-    killed
+    kill_process_group_or_pid_pinned(pid).0
 }
 
 /// The bootstrap arm: like [`kill_process_group_or_pid`], and on the

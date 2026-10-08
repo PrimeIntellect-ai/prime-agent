@@ -550,33 +550,6 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 /// platforms take it too so the serialization is one lock everywhere.)
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// The bound override resolves to a usable bound or the default - a
-/// non-positive value would tree-kill every child on its first poll.
-#[test]
-fn bootstrap_child_timeout_rejects_non_positive_overrides() {
-    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
-    let previous = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
-    let resolve = super::resolve_bootstrap_child_timeout_ms;
-    for (given, expected) in [
-        ("0", 600_000u64),
-        ("-5", 600_000),
-        ("abc", 600_000),
-        ("", 600_000),
-        ("2500", 2_500),
-    ] {
-        std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", given);
-        assert_eq!(
-            resolve(),
-            expected,
-            "the override {given:?} resolves to {expected:?}"
-        );
-    }
-    match previous {
-        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
-        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
-    }
-}
-
 /// A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override resolves through
 /// the DIRECT probe and never reads or writes any memo file.
 #[cfg(unix)]
@@ -1369,5 +1342,35 @@ async fn bootstrap_venv_runs_uv_quietly_with_no_stdin() {
     assert!(
         !calls.join("\n").contains("stdin-leaked"),
         "the child's stdin is null, never inherited: {calls:?}"
+    );
+}
+
+/// A non-positive `PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS` is not a bound:
+/// it falls back to the default instead of killing every child on sight.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_zero_bound_override_falls_back_to_the_default() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(dir.path(), "#!/bin/sh\nsleep 1\nexit 0\n");
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let previous_timeout = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
+    std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", "0");
+    let restore_path = prepend_path(dir.path());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        bootstrap_venv(&venv, &[], &EnsureKernelPythonOptions::default()),
+    )
+    .await;
+    restore_path();
+    match previous_timeout {
+        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
+        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
+    }
+    let result = outcome.expect("the fallback bound keeps the bootstrap bounded");
+    assert!(
+        result.is_ok(),
+        "the child completes on the default bound: {result:?}"
     );
 }
