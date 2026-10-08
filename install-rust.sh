@@ -3084,6 +3084,9 @@ if uv_on_path \
   prewarm_done="$prewarm_scratch/done"
   prewarm_pid_file="$prewarm_scratch/pid"
   prewarm_status="$prewarm_scratch/status"
+  # The runner holds nothing of the installer: a runner stranded on an
+  # unkillable launcher must not hold the console, the detail fd 3, or the
+  # captured pipe a wrapper waits on past this script's exit.
   (
     "$launcher" --prime-agent-bootstrap >"$prewarm_out" 2>&1 &
     printf '%s\n' "$!" >"$prewarm_pid_file"
@@ -3093,7 +3096,7 @@ if uv_on_path \
     wait "$!" || prewarm_status_val=$?
     printf '%s\n' "$prewarm_status_val" >"$prewarm_status"
     printf 'done\n' >"$prewarm_done"
-  ) &
+  ) </dev/null >/dev/null 2>&1 3>&- &
   prewarm_runner=$!
   prewarm_waited=0
   prewarm_timed_out=""

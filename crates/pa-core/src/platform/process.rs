@@ -192,6 +192,11 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// a bare `taskkill` name could resolve a planted CWD executable. True
 /// only when taskkill exited 0, the same proof TS's `result.status === 0`
 /// requires.
+///
+/// The wait on taskkill is bounded: on expiry the helper kills its OWN
+/// child, so a hung tree walk cannot hang the caller, and the call stays
+/// synchronous - the target's handle is still open in the caller, so a
+/// late kill can never reach a recycled pid.
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
@@ -210,8 +215,27 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     set_no_window(&mut command);
-    command.status().is_ok_and(|status| status.success())
+    let Ok(mut helper) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + TASKKILL_GRACE;
+    loop {
+        match helper.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = helper.kill();
+                let _ = helper.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return false,
+        }
+    }
 }
+
+/// The bound the Windows helper gives its own taskkill child.
+#[cfg(windows)]
+const TASKKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(not(any(unix, windows)))]
 pub fn kill_process_group_or_pid(_pid: i32) -> bool {

@@ -1546,6 +1546,81 @@ fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
     );
 }
 
+/// The runner holds nothing of the caller's captures: the TUI's /update
+/// runs this installer through `Command::output()`, which waits for pipe
+/// EOF past the shell's own exit - a runner stranded on an unkillable
+/// launcher would hold that pipe open past the watchdog. The block is
+/// extracted from the shipped script, driven under `sh` with `set -e`,
+/// the detail fd 3 open (`exec 3>&1`, the installer's own shape), and a
+/// `wait` stub that strands the runner for seconds past the bound; the
+/// captured pipe must reach EOF with the shell, not with the runner.
+#[test]
+fn install_rust_sh_prewarm_runner_releases_the_captured_pipe() {
+    let script =
+        std::fs::read_to_string(repo_root().join("install-rust.sh")).expect("read install-rust.sh");
+    let gate = script
+        .find("# THE PRE-WARM GATE")
+        .expect("the pre-warm gate exists");
+    let start = script[gate..]
+        .find("if uv_on_path")
+        .map(|at| gate + at)
+        .expect("the gate's guard if opens the block");
+    let end = script
+        .find("# --- verify: the launcher must answer --version")
+        .expect("the verify section follows the pre-warm");
+    let block = &script[start..end];
+
+    let dir = tempfile::tempdir().expect("scratch dir");
+    let transcript = dir.path().join("transcript");
+    let harness = format!(
+        "#!/bin/sh\n\
+         set -e\n\
+         exec 3>&1\n\
+         wait() {{ sleep 8; }}\n\
+         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n\
+         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n\
+         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n\
+         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
+         uv_on_path() {{ return 0; }}\n\
+         launcher=true\n\
+         prewarm_bound_s=2\n\
+         {block}\
+         printf 'flow-continued\\n' >> {transcript}\n\
+         exit 0\n",
+        transcript = transcript.display(),
+        block = block,
+    );
+    let harness_path = dir.path().join("harness.sh");
+    std::fs::write(&harness_path, harness).expect("write the harness");
+    let started = std::time::Instant::now();
+    let out = Command::new("/bin/sh")
+        .arg(&harness_path)
+        .output()
+        .expect("run the harness with captured output");
+    let elapsed = started.elapsed();
+    let flow = std::fs::read_to_string(&transcript).unwrap_or_default();
+    assert!(
+        out.status.success(),
+        "the install finishes past the watchdog: {out:?} flow: {flow}"
+    );
+    assert!(
+        flow.contains("flow-continued"),
+        "the install proceeds after expiry: {flow}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(7),
+        "the captured pipe reaches EOF with the shell, not with the stranded \
+         runner (took {elapsed:?}; the runner stub lingers 8s past it): {flow}"
+    );
+    // The detachment rides the shipped text: the runner subshell closes
+    // stdin, stdout, stderr, and fd 3 at the spawn boundary.
+    assert!(
+        block.contains(") </dev/null >/dev/null 2>&1 3>&- &"),
+        "the runner subshell detaches the caller's descriptors at spawn: {block}"
+    );
+}
+
 /// Drives the pre-warm block under `sh` with a three-level hanging
 /// fixture, bounded by a kill guard (`None` on the guard). Liveness is
 /// measured before the cleanup kill; `hermetic_path` replaces PATH for

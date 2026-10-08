@@ -180,17 +180,12 @@ async fn run_async(
                     // what was proven, and the drains are never joined -
                     // a descendant that inherited the pipes can outlive
                     // the kill.
-                    // The helper is bounded by the same grace: on Windows
-                    // it waits on taskkill.exe, and an unbounded helper
-                    // would trade the bound for a new hang; an answer that
-                    // does not arrive in time counts as not killed.
-                    let pid = child.id() as i32;
-                    let (kill_tx, kill_rx) = std::sync::mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ =
-                            kill_tx.send(crate::platform::process::kill_process_group_or_pid(pid));
-                    });
-                    let killed = kill_rx.recv_timeout(REAP_GRACE).unwrap_or(false);
+                    // The helper is synchronous and bounded in its own
+                    // right: on Windows a hung taskkill is killed by the
+                    // helper itself, so this call cannot outlive the bound
+                    // - or the child's pid.
+                    let killed =
+                        crate::platform::process::kill_process_group_or_pid(child.id() as i32);
                     let reap_deadline = std::time::Instant::now() + REAP_GRACE;
                     let mut reaped = false;
                     while std::time::Instant::now() < reap_deadline {
@@ -207,7 +202,8 @@ async fn run_async(
                     let outcome = match (killed, reaped) {
                         (true, true) => "was terminated",
                         (true, false) => "was sent a kill that did not complete",
-                        (false, _) => "could not be killed",
+                        (false, true) => "exited during the kill reap",
+                        (false, false) => "could not be killed",
                     };
                     return Err(anyhow!(
                         "{} {} did not finish within {}ms and {}",
