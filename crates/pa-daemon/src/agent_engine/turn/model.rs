@@ -342,7 +342,14 @@ impl AgentSessionEngine {
                             // resolution and its slot write is clobbered
                             // by the restore's older pair — the lock
                             // makes whichever runs last leave the newest
-                            // store standing.
+                            // store standing. The whole turn (this
+                            // closure included) runs on the blocking
+                            // pool — the worker parks the turn there
+                            // (`worker/turn.rs`) — so the synchronous
+                            // credential resolution below, OAuth refresh
+                            // and all, never touches an async executor
+                            // worker; only a concurrently reloading
+                            // session waits on this span.
                             let _reload_serialized = self
                                 .reload_lock
                                 .lock()
