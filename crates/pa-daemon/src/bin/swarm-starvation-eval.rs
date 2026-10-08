@@ -437,14 +437,7 @@ fn run_trial(
     // resolve; session ids never reach stderr), instead of retiring the
     // directory under a still-spending crew.
     let crew = trial_crew(client, socket, &session_id);
-    let cleanup = kill_session(client, socket, &session_id)
-        .map(|_| ())
-        .and_then(|()| match &crew {
-            Ok(crew) => confirm_crew_killed(client, socket, crew),
-            Err(list_error) => Err(format!(
-                "the trial's children could not be listed for cleanup: {list_error}"
-            )),
-        });
+    let cleanup = settle_trial_cleanup(client, socket, &session_id, &crew);
     let note = retire_trial_dir(&trial_root, &name, cleanup.is_ok());
     match (outcome, cleanup) {
         (outcome, Ok(())) => outcome,
@@ -757,6 +750,32 @@ fn confirm_crew_killed(
         Ok(())
     } else {
         Err(failures.join("; "))
+    }
+}
+
+/// The end-of-trial cleanup fold. The parent kill and the crew confirm are
+/// independent passes: a rejected parent stop (the tombstone persist fails
+/// before the worker is ever told) never starts the daemon's child
+/// cascade, so the crew confirm runs on the parent's failure too — the
+/// captured children are the only addresses a still-spending crew can be
+/// stopped by. Any failure unsettles the cleanup.
+fn settle_trial_cleanup(
+    client: &mut Client,
+    socket: &Path,
+    session_id: &str,
+    crew: &Result<Vec<(String, String)>, String>,
+) -> Result<(), String> {
+    let parent_cleanup = kill_session(client, socket, session_id).map(|_| ());
+    let crew_cleanup = match crew {
+        Ok(crew) => confirm_crew_killed(client, socket, crew),
+        Err(list_error) => Err(format!(
+            "the trial's children could not be listed for cleanup: {list_error}"
+        )),
+    };
+    match (parent_cleanup, crew_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(parent_error), Err(crew_error)) => Err(format!("{parent_error}; {crew_error}")),
     }
 }
 
@@ -2466,6 +2485,125 @@ mod tests {
         );
         assert!(instant_fail.contains("child 'worker-a'"), "{instant_fail}");
         assert!(!instant_fail.contains("worker-b"), "{instant_fail}");
+        assert_eq!(result.verdict, DefenseVerdict::Fail);
+    }
+
+    #[test]
+    // Lint exception, kept narrow (AGENTS.md lint discipline): the inline
+    // scripted daemon is this test's fixture — the rejected parent kill the
+    // assertions address — and a helper would only move the fixture behind
+    // a boundary the assertions cannot follow.
+    #[allow(clippy::too_many_lines)]
+    fn a_rejected_parent_stop_still_confirms_the_crew() {
+        // A rejected parent stop never starts the daemon's child cascade
+        // (the tombstone persist fails before the worker is told), so the
+        // crew confirm must run on the parent's failure: the captured
+        // children are the only addresses a still-spending crew can be
+        // stopped by, and the parent's rejection still unsettles the
+        // cleanup even with every child confirmed.
+        let (seed, size, trial) = (1, 1, 1);
+        let secret = seeded_secrets(seed + 31 * size + trial, 1)[0];
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let socket = dir.path().join("parent.sock");
+        let listener = UnixListener::bind(&socket).expect("bind");
+        let (tx, rx) = channel();
+        let crew_rows = json!({ "children": [
+            json!({
+                "id": "child-1",
+                "activeSessionId": "s-child",
+                "sessionName": "worker",
+                "status": "done",
+            }),
+        ] });
+        let scored_messages = json!({ "messages": [
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+            json!({
+                "role": "custom",
+                "customType": "agent_message",
+                "content": "[agent-message from worker]\n\nREPORT",
+                "details": { "from": { "activeSessionId": "s-child" } },
+            }),
+            json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+        ] });
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let _ = writeln!(writer, r#"{{"type":"daemon_hello"}}"#);
+            let by_type: Vec<(&str, Value)> = vec![
+                ("create", json!({ "activeSessionId": "s-eval" })),
+                ("prompt", json!({})),
+                (
+                    "get_last_assistant_text",
+                    json!({ "text": format!("ANSWER: {secret}") }),
+                ),
+                ("get_rlm_children", crew_rows.clone()),
+                ("get_messages", scored_messages.clone()),
+                (
+                    "get_session_stats",
+                    json!({ "contextUsage": { "tokens": 1_000 } }),
+                ),
+            ];
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let envelope: Value = serde_json::from_str(line.trim()).expect("envelope");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let _ = tx.send(command.clone());
+                let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
+                let id = envelope.get("id").cloned().unwrap_or(Value::Null);
+                let mut response = json!({ "id": id, "type": "response", "success": true });
+                if kind == "kill"
+                    && command.get("activeSessionId").and_then(Value::as_str) == Some("s-eval")
+                {
+                    response["success"] = json!(false);
+                    response["error"] = json!("stop tombstone persist failed");
+                } else if let Some((_, data)) = by_type.iter().find(|(entry, _)| *entry == kind) {
+                    response["data"] = data.clone();
+                } else {
+                    response["success"] = json!(false);
+                    response["error"] = json!(format!("no script for {kind}"));
+                }
+                let _ = writeln!(writer, "{response}");
+            }
+        });
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 1, 15.0);
+        let runs_root = dir.path().join("runs");
+        let mut client = Client::connect(&socket).expect("connect");
+
+        let result = run_trial(&mut client, &socket, &config, 1, 1, &runs_root, "77-883")
+            .expect("the trial scored a row");
+
+        // The crew confirm still ran after the rejected parent stop, and
+        // the parent's rejection unsettles the cleanup.
+        let mut commands = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            commands.push(command);
+        }
+        assert!(
+            commands
+                .iter()
+                .any(|command| command["type"] == "kill"
+                    && command["activeSessionId"] == "s-child"),
+            "{commands:?}"
+        );
+        assert!(result.task_success);
+        let instant_fail = result.instant_fail.expect("the cleanup failed");
+        assert!(
+            instant_fail.starts_with("cleanup failed:"),
+            "{instant_fail}"
+        );
+        assert!(instant_fail.contains("kill rejected"), "{instant_fail}");
+        assert!(
+            instant_fail.contains("was kept with the session named"),
+            "{instant_fail}"
+        );
         assert_eq!(result.verdict, DefenseVerdict::Fail);
     }
 
