@@ -228,7 +228,7 @@ fn run_rpc_mode(options: &RunOptions) -> Result<i32, String> {
 
 async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
     let config = &options.config;
-    let (parts, initial_lease) = build_headless_engine_parts_with_lease(options, "rpc").await?;
+    let (parts, initial_lease) = build_headless_engine_parts(options, "rpc").await?;
     if let Some(goal) = &config.initial_goal {
         parts
             .engine
@@ -367,7 +367,8 @@ fn run_print_mode(options: &RunOptions) -> Result<i32, String> {
 async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
     // `print` or `json`: the telemetry execution mode is the app mode (TS
     // main.ts `executionMode: appMode`).
-    let headless = build_headless_engine(options, options.app_mode.as_str()).await?;
+    let (headless, _lease) =
+        build_headless_engine_parts(options, options.app_mode.as_str()).await?;
     let engine = std::sync::Arc::new(headless.engine);
     // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
     // branch keeps its persisted goal. Depth 0 only — the print session is a root.
@@ -402,18 +403,9 @@ struct HeadlessEngine {
     provider_target: ProviderTargetSlot,
 }
 
+/// The headless engine assembly, returning the opened session's runtime
+/// lease alongside: the driving mode owns the lease for its run's lifetime.
 async fn build_headless_engine_parts(
-    options: &RunOptions,
-    execution_mode: &str,
-) -> Result<HeadlessEngine, String> {
-    let (engine, lease) = build_headless_engine_parts_with_lease(options, execution_mode).await?;
-    std::mem::forget(lease);
-    Ok(engine)
-}
-
-/// The same assembly, returning the opened session's runtime lease alongside (long-lived
-/// connections hold it on the engine handle).
-async fn build_headless_engine_parts_with_lease(
     options: &RunOptions,
     execution_mode: &str,
 ) -> Result<(HeadlessEngine, Option<pa_daemon::lease::SessionLease>), String> {
@@ -780,14 +772,6 @@ fn headless_image_model_router(
     }
 }
 
-/// The engine alone (callers that do not drive session commands).
-async fn build_headless_engine(
-    options: &RunOptions,
-    execution_mode: &str,
-) -> Result<HeadlessEngine, String> {
-    build_headless_engine_parts(options, execution_mode).await
-}
-
 /// The session header line: the session file's `type: "session"` entry in the
 /// TS wire shape and field order.
 async fn session_header_json(
@@ -961,9 +945,8 @@ fn select_headless_session(options: &RunOptions) -> Result<HeadlessSession, Stri
 }
 
 /// The in-process session manager for the selected session. The opened
-/// session's runtime lease returns alongside (a long-lived connection
-/// holds it on the engine handle; the one-shot modes forget it for the
-/// process lifetime).
+/// session's runtime lease returns alongside: the driving mode owns it for
+/// its run's lifetime.
 fn build_session_manager_with_lease(
     options: &RunOptions,
 ) -> Result<
