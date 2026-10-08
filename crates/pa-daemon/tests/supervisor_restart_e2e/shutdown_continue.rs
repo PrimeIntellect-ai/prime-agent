@@ -204,7 +204,10 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(30);
     while daemon2.child.try_wait().expect("try wait").is_none() {
-        assert!(Instant::now() < deadline, "restarted supervisor never exited");
+        assert!(
+            Instant::now() < deadline,
+            "restarted supervisor never exited"
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
 }
