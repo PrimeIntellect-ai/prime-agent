@@ -411,11 +411,20 @@ impl AgentSessionEngine {
         captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
         let (api_key, headers) = self.resolve_request_key_and_headers(primary);
+        // The capture backs the restore only when the store resolves
+        // nothing: a resolved credential REPLACES the pair — its headers
+        // land even when it carries none, so a failover onto a credential
+        // without the team header never keeps the captured
+        // `X-Prime-Team-ID` on the new key.
+        let (api_key, headers) = match api_key {
+            Some(api_key) => (Some(api_key), headers),
+            None => (captured_api_key, captured_headers),
+        };
         pa_core::session_engine::provider_adapter::ProviderTarget {
             service_tier: *self.service_tier.read().expect("service tier lock"),
-            api_key: api_key.or(captured_api_key),
+            api_key,
             model: primary.clone(),
-            headers: headers.or(captured_headers),
+            headers,
         }
     }
 }

@@ -396,3 +396,145 @@ fn restored_primary_target_serves_the_store_auth() {
         "a resolution that yields nothing falls back to the capture"
     );
 }
+
+/// A custom `prime-inference` provider: the one provider whose stored
+/// credentials can carry request headers (the team header), so the
+/// reload's header replacement is observable against a real resolution.
+fn write_prime_inference_provider(agent_dir: &std::path::Path) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        serde_json::json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9",
+                    "apiKey": "sk-config-fallback",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096,
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+/// One stored `prime-inference` API-key credential, with or without the
+/// team header `get_provider_headers` derives from `primeTeam`.
+fn write_prime_inference_credential(agent_dir: &std::path::Path, key: &str, team_id: Option<&str>) {
+    std::fs::create_dir_all(agent_dir).unwrap();
+    let mut credential = serde_json::json!({ "type": "api_key", "key": key });
+    if let Some(team_id) = team_id {
+        credential["primeTeam"] =
+            serde_json::json!({ "teamId": team_id, "name": format!("Team {team_id}") });
+    }
+    std::fs::write(
+        agent_dir.join("auth.json"),
+        serde_json::json!({ "prime-inference": credential }).to_string(),
+    )
+    .unwrap();
+}
+
+fn team_headers(team_id: &str) -> std::collections::BTreeMap<String, String> {
+    [("X-Prime-Team-ID".to_string(), team_id.to_string())]
+        .into_iter()
+        .collect()
+}
+
+fn prime_inference_backed_engine(dir: &std::path::Path) -> AgentSessionEngine {
+    AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.to_path_buf(),
+        agent_dir: dir.join("agent"),
+        provider: Some("prime-inference".to_string()),
+        model: Some("mock-1".to_string()),
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: Some(true),
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .expect("engine")
+}
+
+/// A rotated credential REPLACES the request headers: a fresh key that
+/// carries no team header must clear the previous credential's
+/// `X-Prime-Team-ID`, never serve the stale team context on the new key.
+#[test]
+fn reload_clears_headers_when_the_fresh_credential_carries_none() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_inference_provider(&agent_dir);
+    write_prime_inference_credential(&agent_dir, "team-key", Some("team-1"));
+    let engine = prime_inference_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("the custom model resolves");
+    // The session's build-time target: the team credential the engine saw.
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("team-key".to_string()),
+        model,
+        headers: Some(team_headers("team-1")),
+    });
+    // A re-login without the team replaces the stored credential.
+    write_prime_inference_credential(&agent_dir, "solo-key", None);
+    engine.reload_live_inputs();
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert_eq!(
+        target.api_key.as_deref(),
+        Some("solo-key"),
+        "the reload rebinds the request auth to the fresh stored credential"
+    );
+    assert!(
+        target.headers.is_none(),
+        "the fresh credential clears the stale team header: {:?}",
+        target.headers
+    );
+}
+
+/// A failover's primary restore serves the resolved pair, never the
+/// resolved key paired with the captured headers: a credential rotated
+/// during the failover carries its own (empty) headers, clearing the
+/// captured `X-Prime-Team-ID` the pre-failover credential pinned.
+#[test]
+fn restored_primary_target_serves_the_resolved_header_pair() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_inference_provider(&agent_dir);
+    write_prime_inference_credential(&agent_dir, "solo-key", None);
+    let engine = prime_inference_backed_engine(dir.path());
+    let primary = engine.resolve_model().expect("the primary resolves");
+    let restored = engine.restored_primary_target(
+        &primary,
+        Some("captured-key".to_string()),
+        Some(team_headers("old-team")),
+    );
+    assert_eq!(
+        restored.api_key.as_deref(),
+        Some("solo-key"),
+        "the restored primary serves the stored credential"
+    );
+    assert!(
+        restored.headers.is_none(),
+        "the resolved pair replaces the captured headers: {:?}",
+        restored.headers
+    );
+}

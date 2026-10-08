@@ -8,15 +8,16 @@ use pa_core::session_engine::provider_adapter::ProviderTarget;
 impl AgentSessionEngine {
     /// The stored request auth for the target's OWN model, applied in
     /// place: only the key and headers change, and only when the store
-    /// resolves something (nothing stored never clears what the target
-    /// already serves with).
+    /// resolves a credential (nothing stored never clears what the
+    /// target already serves with). A resolved credential REPLACES the
+    /// pair: its headers land even when it carries none, so a rotated
+    /// credential without a team header clears the previous credential's
+    /// `X-Prime-Team-ID` instead of serving it on the new key.
     fn refresh_request_auth(&self, target: &mut ProviderTarget) {
         let (api_key, headers) = self.resolve_request_key_and_headers(&target.model);
         if let Some(api_key) = api_key {
             target.api_key = Some(api_key);
-        }
-        if let Some(headers) = headers {
-            target.headers = Some(headers);
+            target.headers = headers;
         }
     }
 
@@ -76,11 +77,11 @@ impl AgentSessionEngine {
                     } else {
                         self.resolve_request_key_and_headers(&target.model)
                     };
+                    // A resolved credential replaces the pair: headers
+                    // clear when the fresh credential carries none.
                     if let Some(api_key) = api_key {
                         target.api_key = Some(api_key);
-                    }
-                    if let Some(headers) = headers {
-                        target.headers = Some(headers);
+                        target.headers = headers;
                     }
                 }
             }
