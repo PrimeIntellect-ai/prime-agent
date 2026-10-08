@@ -801,18 +801,21 @@ fn running_children(client: &mut Client, session_id: &str) -> Result<usize, Stri
 
 /// The number of distinct children the transcript can verify as having
 /// reported: one per sender id (`details.from.activeSessionId`) over the
-/// accepted agent-message rows — the same rows the snapshot counts as
-/// `arrivals`, which keep #2352's row-counting definitions untouched. The
-/// row count alone cannot tell a duplicate sender from a missing one — a
-/// child that re-sends its REPORT must not mask a silent sibling — so the
-/// partial-crew gate scores distinct children, not rows. An arrival with no
-/// sender id proves exactly one reporter (never two), so the unattributed
-/// arrivals count as one between them — and never as an extra child beyond
-/// the attributed senders: the row builder passes the sender endpoint
-/// through verbatim (`from: null` included), so that one reporter may be a
-/// child an attributed row already names. The gate fails closed on a
-/// transcript it cannot attribute rather than crediting an unverifiable
-/// crew.
+/// accepted agent-message rows that carry the protocol `REPORT` line — the
+/// same rows the snapshot counts as `arrivals`, which keep #2352's
+/// row-counting definitions untouched. A child that only acknowledges
+/// (`ready`) has not reported: the secrets ride the orchestrator's own
+/// prompt, so an ack credited as a REPORT would pass the gate while scoring
+/// a lighter workload than the crew size labels. The row count alone cannot
+/// tell a duplicate sender from a missing one — a child that re-sends its
+/// REPORT must not mask a silent sibling — so the partial-crew gate scores
+/// distinct children, not rows. An unattributed REPORT proves exactly one
+/// reporter (never two), so the unattributed reports count as one between
+/// them — and never as an extra child beyond the attributed senders: the row
+/// builder passes the sender endpoint through verbatim (`from: null`
+/// included), so that one reporter may be a child an attributed row already
+/// names. The gate fails closed on a transcript it cannot attribute rather
+/// than crediting an unverifiable crew.
 fn distinct_reporting_children(messages: &[Value]) -> usize {
     let mut senders: HashSet<&str> = HashSet::new();
     let mut unattributed = false;
@@ -820,6 +823,11 @@ fn distinct_reporting_children(messages: &[Value]) -> usize {
         if message.get("role").and_then(Value::as_str) != Some("custom")
             || message.get("customType").and_then(Value::as_str) != Some(AGENT_MESSAGE_CUSTOM_TYPE)
         {
+            continue;
+        }
+        // Only a REPORT line credits its sender: an ack is an arrival, not
+        // a report.
+        if !agent_message_body(message).contains("REPORT") {
             continue;
         }
         match message
@@ -833,6 +841,17 @@ fn distinct_reporting_children(messages: &[Value]) -> usize {
         }
     }
     senders.len().max(usize::from(unattributed))
+}
+
+/// The delivered body of an accepted agent-message row: the raw
+/// `details.message` the sender wrote, with the rendered prompt (`content`,
+/// which embeds that body) standing in for rows without details.
+fn agent_message_body(message: &Value) -> &str {
+    message
+        .pointer("/details/message")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("content").and_then(Value::as_str))
+        .unwrap_or_default()
 }
 
 /// A rate-limit model error during the trial is an instant failure.
@@ -1391,6 +1410,82 @@ mod tests {
         assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
         let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
         assert!(report.contains("1/1 trials failed"), "{report}");
+        assert!(
+            report.contains("partial crew: 1 of 2 children reported"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn an_ack_without_a_report_is_not_a_reporter() {
+        // One child of two only acknowledged (`ready`). The secrets ride
+        // the orchestrator's own prompt, so the task column still succeeds
+        // and every defense line passes — crediting the ack's sender as a
+        // reporter would pass the row while scoring a lighter workload than
+        // the crew size labels. Only the child that sent its REPORT counts.
+        let (seed, size, trial) = (1, 2, 1);
+        let secrets = seeded_secrets(seed + 31 * size + trial, 2);
+        let answer = secrets
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let daemon = fake_daemon(vec![
+            ("create", json!({ "activeSessionId": "s-eval" })),
+            ("prompt", json!({})),
+            (
+                "get_last_assistant_text",
+                json!({ "text": format!("ANSWER: {answer}") }),
+            ),
+            ("get_rlm_children", json!({ "children": [] })),
+            (
+                "get_messages",
+                json!({ "messages": [
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({ "role": "assistant", "usage": { "input": 1000, "output": 500 } }),
+                    json!({
+                        "role": "custom",
+                        "customType": "agent_message",
+                        "content": "[agent-message from child-a]\n\nready",
+                        "details": { "message": "ready", "from": { "activeSessionId": "child-a" } },
+                    }),
+                    json!({
+                        "role": "custom",
+                        "customType": "agent_message",
+                        "content": format!("[agent-message from child-b]\n\nREPORT {}", secrets[1]),
+                        "details": {
+                            "message": format!("REPORT {}", secrets[1]),
+                            "from": { "activeSessionId": "child-b" }
+                        },
+                    }),
+                    json!({ "role": "assistant", "usage": { "input": 10, "output": 5 } }),
+                ] }),
+            ),
+            (
+                "get_session_stats",
+                json!({ "contextUsage": { "tokens": 1_000 } }),
+            ),
+            ("kill", json!(null)),
+        ]);
+        let out_dir = tempfile::TempDir::new().expect("out dir");
+        let config = test_config(out_dir.path(), 2, 15.0);
+
+        run(&daemon.socket, &config).expect("the ack-crew trial is a row");
+
+        let raw = std::fs::read_to_string(out_dir.path().join("report.json")).expect("report.json");
+        let json: Value = serde_json::from_str(&raw).expect("report.json parses");
+        let rows = json["results"].as_array().expect("results array");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["task_success"], true, "{rows:?}");
+        // Both arrival rows still count (the raw #2352 counters are
+        // untouched); only the REPORTing child is a reporter.
+        assert_eq!(rows[0]["arrivals"], 2, "{rows:?}");
+        assert_eq!(
+            rows[0]["instant_fail"], "partial crew: 1 of 2 children reported",
+            "{rows:?}"
+        );
+        assert_eq!(rows[0]["verdict"], "fail", "{rows:?}");
+        let report = std::fs::read_to_string(out_dir.path().join("report.md")).expect("report.md");
         assert!(
             report.contains("partial crew: 1 of 2 children reported"),
             "{report}"
