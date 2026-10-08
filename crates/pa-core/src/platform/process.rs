@@ -201,8 +201,19 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
+    kill_process_group_or_pid_pinned(pid).0
+}
+
+/// The bootstrap arm: like [`kill_process_group_or_pid`], and on the
+/// parked-helper path it also hands back the helper's done signal. The
+/// caller's target reaper holds the target's handle until that signal
+/// dies, so a helper that survives its own kill can only ever meet its
+/// own target's reserved pid, never a recycled one.
+#[cfg(windows)]
+#[must_use]
+pub fn kill_process_group_or_pid_pinned(pid: i32) -> (bool, Option<std::sync::mpsc::Receiver<()>>) {
     if pid <= 0 {
-        return false;
+        return (false, None);
     }
     let system_root =
         std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
@@ -217,32 +228,35 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
         .stderr(std::process::Stdio::null());
     set_no_window(&mut command);
     let Ok(mut helper) = command.spawn() else {
-        return false;
+        return (false, None);
     };
     let deadline = std::time::Instant::now() + TASKKILL_GRACE;
     loop {
         match helper.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => return (status.success(), None),
             Ok(None) if std::time::Instant::now() >= deadline => {
                 // The helper gets one kill and one more grace to take it;
                 // a helper that survives both is parked on a reaper that
-                // owns its handle - this call never waits on it.
+                // owns its handle and its done signal - this call never
+                // waits on it.
                 if helper.kill().is_ok() {
                     let reap_deadline = std::time::Instant::now() + TASKKILL_GRACE;
                     while std::time::Instant::now() < reap_deadline {
                         match helper.try_wait() {
-                            Ok(Some(_)) => return false,
+                            Ok(Some(_)) => return (false, None),
                             _ => std::thread::sleep(std::time::Duration::from_millis(50)),
                         }
                     }
                 }
+                let (done, released) = std::sync::mpsc::channel::<()>();
                 std::thread::spawn(move || {
                     let _ = helper.wait();
+                    drop(done);
                 });
-                return false;
+                return (false, Some(released));
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-            Err(_) => return false,
+            Err(_) => return (false, None),
         }
     }
 }

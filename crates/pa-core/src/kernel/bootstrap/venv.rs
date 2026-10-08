@@ -184,6 +184,12 @@ async fn run_async(
                     // right: on Windows a hung taskkill is killed by the
                     // helper itself, so this call cannot outlive the bound
                     // - or the child's pid.
+                    #[cfg(windows)]
+                    let (killed, helper_released) =
+                        crate::platform::process::kill_process_group_or_pid_pinned(
+                            child.id() as i32
+                        );
+                    #[cfg(not(windows))]
                     let killed =
                         crate::platform::process::kill_process_group_or_pid(child.id() as i32);
                     let reap_deadline = std::time::Instant::now() + REAP_GRACE;
@@ -198,14 +204,20 @@ async fn run_async(
                             Err(_) => break,
                         }
                     }
-                    // On Windows the kill helper may still be parking its
-                    // own reap: the child rides a parked reaper here so
-                    // its pid stays reserved until it exits, and a late
-                    // kill can only ever meet its own target.
+                    // On Windows a helper that survived its own kill may
+                    // still act on the pid: the target's pin is held until
+                    // the HELPER dies, not just the target - the handle is
+                    // the only thing keeping the pid reserved.
                     #[cfg(windows)]
-                    std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
+                    match helper_released {
+                        Some(released) => {
+                            std::thread::spawn(move || {
+                                let _ = released.recv();
+                                drop(child);
+                            });
+                        }
+                        None => drop(child),
+                    }
                     drop(drains);
                     let outcome = match (killed, reaped) {
                         (true, true) => "was terminated",
