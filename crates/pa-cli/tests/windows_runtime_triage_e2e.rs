@@ -647,10 +647,8 @@ async fn subagent_session_stays_a_distinct_store_entry() {
     );
 }
 
-/// Scenario (3): the agent-message rows carry their glyph vocabulary, and
-/// the panes dump for the workflow artifact. The headless frames are the
-/// emission record - what the TUI writes to the terminal - so the dump is
-/// the icon check the fleet can read from the artifact.
+/// Scenario (3): preserve non-ASCII user/assistant text in headless frames.
+/// This renderer regression does not exercise console, font or ConPTY I/O.
 #[tokio::test]
 async fn agent_message_rows_dump_their_glyphs() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -660,7 +658,7 @@ async fn agent_message_rows_dump_their_glyphs() {
     let script_path = dir.path().join("glyph-script.json");
     std::fs::write(
         &script_path,
-        json!({ "responses": [ { "text": "the glyph battery reply" } ] }).to_string(),
+        json!({ "responses": [ { "text": "reply café 中文 ◆ ▸" } ] }).to_string(),
     )
     .expect("write script");
     let supervisor = spawn_supervisor(dir.path());
@@ -669,7 +667,7 @@ async fn agent_message_rows_dump_their_glyphs() {
     options.cwd = dir.path().to_path_buf();
     let plan = HeadlessPlan {
         steps: vec![
-            HeadlessStep::Submit("the glyph battery question".to_string()),
+            HeadlessStep::Submit("question café 中文 ◆ ▸".to_string()),
             HeadlessStep::WaitIdle { timeout_ms: 60_000 },
         ],
         width: 100,
@@ -679,11 +677,11 @@ async fn agent_message_rows_dump_their_glyphs() {
     dump_frames("glyph-rows", &outcome.frames);
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("the glyph battery question"),
+        rendered.contains("question café 中文 ◆ ▸"),
         "the user message row renders:\n{rendered}"
     );
     assert!(
-        rendered.contains("the glyph battery reply"),
+        rendered.contains("reply café 中文 ◆ ▸"),
         "the agent message row renders:\n{rendered}"
     );
 }

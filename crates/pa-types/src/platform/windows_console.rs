@@ -1,36 +1,14 @@
-//! The Windows console preparation (the operator's 2026-10-08 broken-icons
-//! report): the TUI emits fully-correct UTF-8 and writes it through Rust
-//! std's `Stdout` -> `WriteFile`, and a Windows console (conhost) decodes
-//! those bytes with the console's OUTPUT CODEPAGE - a legacy OEM/ANSI
-//! codepage (437/1252/...) unless someone set 65001, so every multi-byte
-//! glyph (`◆ ● ◐ ◷ ▸ ✉ ╰ ─ │ ·`) decodes as multi-character mojibake
-//! even with VT processing on. Node-based TUIs (claude/codex) look fine on
-//! the same box because libuv's tty write path converts to UTF-16 and
-//! calls `WriteConsoleW`, bypassing the codepage; Rust std has no console
-//! write path, so this process must set the codepage itself (the `chcp
-//! 65001` the interactive shells do by hand).
-//!
-//! [`init`] prepares the attached console: both codepages to UTF-8 (65001)
-//! plus `ENABLE_VIRTUAL_TERMINAL_PROCESSING` on the output handle (VT
-//! parsing, the TUI's crossterm backend and its raw `write_all` mode-sets
-//! both ride it), recording the originals for [`restore`]. The console
-//! gate keeps redirected/pipe runs (headless tests, CI, `tee`) untouched:
-//! a handle that is not a console answers the mode query with an error
-//! and `init` is a no-op. Call sites never branch on `cfg`: both fns are
-//! no-ops on non-Windows hosts.
-//!
-//! The FFI is the hand-declared wall the named-pipe transport and the
-//! process-identity module already use (pinned constants, no windows-sys
-//! dependency).
+//! Enable VT processing before the TUI's raw ANSI mode writes, restoring
+//! only the bit this module added on exit. Redirected stdout is untouched.
+//! Rust std handles Unicode console I/O (WriteConsoleW/ReadConsoleW);
+//! changing console-wide codepages is unnecessary and affects other users
+//! of the attached console. Pipes retain their ordinary byte I/O.
+//! The FFI uses pinned Win32 constants without a windows-sys dependency.
 
-/// The recorded original console state, restored by [`restore`]: the
-/// codepage flip is CONSOLE-SESSION state (it outlives the process when
-/// not restored), so the composition root's exit funnel hands it back.
+/// The original output mode, used to restore only the VT bit we added.
 #[cfg(windows)]
 #[derive(Clone, Copy)]
 struct OriginalConsole {
-    output_cp: u32,
-    input_cp: u32,
     output_mode: u32,
 }
 
@@ -52,8 +30,6 @@ mod winapi {
     /// `wincon.h` `ENABLE_VIRTUAL_TERMINAL_PROCESSING`: the console's VT
     /// parsing bit (0x4).
     const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
-    /// `winnls.h` `CP_UTF8`: the UTF-8 console codepage.
-    const CP_UTF8: u32 = 65001;
 
     type Handle = *mut c_void;
 
@@ -61,10 +37,10 @@ mod winapi {
         fn GetStdHandle(which: i32) -> Handle;
         fn GetConsoleMode(handle: Handle, mode: *mut u32) -> i32;
         fn SetConsoleMode(handle: Handle, mode: u32) -> i32;
+        #[cfg(test)]
         fn GetConsoleOutputCP() -> u32;
-        fn SetConsoleOutputCP(codepage: u32) -> i32;
+        #[cfg(test)]
         fn GetConsoleCP() -> u32;
-        fn SetConsoleCP(codepage: u32) -> i32;
     }
 
     /// The process's console output handle, null when none.
@@ -84,24 +60,14 @@ mod winapi {
         unsafe { SetConsoleMode(handle, mode) != 0 }
     }
 
+    #[cfg(test)]
     pub(crate) fn output_codepage() -> u32 {
         unsafe { GetConsoleOutputCP() }
     }
 
-    pub(crate) fn set_output_codepage(codepage: u32) -> bool {
-        unsafe { SetConsoleOutputCP(codepage) != 0 }
-    }
-
+    #[cfg(test)]
     pub(crate) fn input_codepage() -> u32 {
         unsafe { GetConsoleCP() }
-    }
-
-    pub(crate) fn set_input_codepage(codepage: u32) -> bool {
-        unsafe { SetConsoleCP(codepage) != 0 }
-    }
-
-    pub(crate) const fn cp_utf8() -> u32 {
-        CP_UTF8
     }
 
     pub(crate) const fn enable_vt() -> u32 {
@@ -109,12 +75,8 @@ mod winapi {
     }
 }
 
-/// Prepare the attached console for UTF-8 + VT output (the TUI mount and
-/// the CLI's terminal-mode output). Idempotent (the first call records
-/// the originals; later calls re-apply the same values); a no-op when
-/// stdout is not a console (pipes, redirects, headless runs) and on
-/// non-Windows hosts. The mounts call it unconditionally - [`restore`]
-/// is a safe no-op when nothing was prepared, so no verdict returns.
+/// Enable VT on attached stdout without changing console codepages.
+/// Idempotent; a no-op for redirected stdout and non-Windows hosts.
 pub fn init() {
     #[cfg(windows)]
     {
@@ -123,36 +85,20 @@ pub fn init() {
             return;
         };
         let _ = ORIGINAL.set(OriginalConsole {
-            output_cp: winapi::output_codepage(),
-            input_cp: winapi::input_codepage(),
             output_mode: original_mode,
         });
-        // Best-effort, each flip independently: a failed setter leaves
-        // the originals recorded, and the restore only hands back what
-        // differs from the recorded state.
-        let _ = winapi::set_output_codepage(winapi::cp_utf8());
-        let _ = winapi::set_input_codepage(winapi::cp_utf8());
         let _ = winapi::set_output_mode(handle, original_mode | winapi::enable_vt());
     }
 }
 
-/// Restore the recorded console state at the process exit funnel (the
-/// codepage is console-session state: the interactive shell the process
-/// hands back must not inherit 65001 if it was not the shell's own). A
-/// no-op when [`init`] never prepared a console; best-effort on every
-/// failure path.
+/// Restore only the VT bit added by [`init`], preserving other mode bits.
+/// Best-effort; a no-op when no console was prepared.
 pub fn restore() {
     #[cfg(windows)]
     {
         let Some(original) = ORIGINAL.get() else {
             return;
         };
-        if original.output_cp != winapi::cp_utf8() {
-            let _ = winapi::set_output_codepage(original.output_cp);
-        }
-        if original.input_cp != winapi::cp_utf8() {
-            let _ = winapi::set_input_codepage(original.input_cp);
-        }
         let handle = winapi::stdout_handle();
         let Some(current) = winapi::output_mode(handle) else {
             return;
@@ -180,16 +126,10 @@ mod windows_tests {
         }
     }
 
-    /// The mechanism the operator's report pins (2026-10-08): after
-    /// `init`, the attached console decodes the TUI's UTF-8 output as
-    /// UTF-8 and parses its VT sequences - the codepages read 65001 and
-    /// the output mode carries the VT bit - and `restore` hands the
-    /// console back. Runs on the windows runner (the runtime-triage
-    /// battery); the cross gate type-checks it. The console is
-    /// process-global state, so the test keeps its own originals instead
-    /// of trusting the module's.
+    /// Check VT setup/restore and that both console codepages stay intact.
+    /// CI may redirect stdout, in which case init must remain a no-op.
     #[test]
-    fn init_flips_the_console_to_utf8_and_vt_and_restore_hands_it_back() {
+    fn init_preserves_codepages_and_restores_vt() {
         let handle = winapi::stdout_handle();
         let Some(original_mode) = winapi::output_mode(handle) else {
             // A redirected (non-console) stdout: the gate keeps the
@@ -210,8 +150,8 @@ mod windows_tests {
         let _console_restore = ConsoleRestoreOnPanic;
 
         init();
-        assert_eq!(winapi::output_codepage(), winapi::cp_utf8());
-        assert_eq!(winapi::input_codepage(), winapi::cp_utf8());
+        assert_eq!(winapi::output_codepage(), original_output_cp);
+        assert_eq!(winapi::input_codepage(), original_input_cp);
         let mode = winapi::output_mode(handle).expect("the console mode");
         assert_ne!(
             mode & winapi::enable_vt(),
@@ -223,12 +163,12 @@ mod windows_tests {
         assert_eq!(
             winapi::output_codepage(),
             original_output_cp,
-            "the output codepage returns to the shell's"
+            "the output codepage stays unchanged"
         );
         assert_eq!(
             winapi::input_codepage(),
             original_input_cp,
-            "the input codepage returns to the shell's"
+            "the input codepage stays unchanged"
         );
         let back = winapi::output_mode(handle).expect("the console mode");
         assert_eq!(

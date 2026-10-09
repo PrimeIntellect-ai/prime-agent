@@ -91,12 +91,7 @@ pub(crate) fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = report_cooked_repair();
     let _ = out.flush();
-    // The console codepages hand back LAST, after the restore's own ANSI
-    // writes: this funnel is the one every ABNORMAL exit rides (the unwind
-    // guard's drop, the error paths, the process::exit sites), and a
-    // crashed TUI must not leave the shell at 65001 + VT (a no-op when
-    // nothing was prepared; the normal interactive exit uses the release
-    // tail and the CLI's own exit funnel restores instead).
+    // Restore Windows VT after the final ANSI cleanup writes.
     pa_types::platform::console_restore();
 }
 

@@ -78,8 +78,7 @@ fn run_app_surface(
     // A panic anywhere between the mount below and the deliberate teardown must still hand
     // the terminal back whole (the same unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    // The Windows console's UTF-8 codepages + VT bit arm before the first
-    // mode write (the broken-icons report's fix; a no-op elsewhere).
+    // Enable Windows VT processing before raw ANSI mode writes.
     pa_types::platform::console_init();
     // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one trigger for
     // lifting a pending Ctrl+S stop (see the flow e2e's launch route).

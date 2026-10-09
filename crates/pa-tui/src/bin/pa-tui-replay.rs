@@ -72,9 +72,7 @@ fn newest_session() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
-    // The console codepages are console-session state: every exit path
-    // of this bin (the `?` early returns included) hands them back. The
-    // restore is a no-op when nothing was prepared.
+    // Restore Windows VT on success and early error returns.
     if let Err(error) = replay() {
         pa_types::platform::console_restore();
         return Err(error);

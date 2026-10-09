@@ -11,7 +11,7 @@
 # repeat). The battery boots the freshly-built binary as a real daemon and
 # drives the three reported breakages headlessly - session reopen renders
 # the old history, a subagent's session stays a distinct store entry, and
-# the agent-message panes dump for the icon check - uploading the pane
+# non-ASCII agent-message text survives rendering - uploading the pane
 # dumps as run artifacts the fleet can download and inspect.
 name: windows-runtime-triage
 
@@ -80,11 +80,11 @@ jobs:
   # built binary booted as a real daemon, driven through the three
   # scripted TUI scenarios of crates/pa-cli/tests/windows_runtime_triage_e2e.rs
   # (the reopen battery, the subagent-distinct battery, the glyph-panes
-  # battery), with the captured panes uploaded as the icon-check artifact.
+  # battery), with captured headless panes uploaded for renderer inspection.
   # The runner is pinned to windows-2022 (never the mutable windows-latest):
   # the same reviewed-baseline rule the release build-windows job carries.
   windows-runtime-tui-battery:
-    name: windows tui battery (reopen, subagent distinct, icon panes)
+    name: windows tui battery (reopen, subagent distinct, unicode panes)
     needs: trust
     if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
     runs-on: windows-2022
@@ -92,7 +92,7 @@ jobs:
       contents: read
     timeout-minutes: 90
     env:
-      # The panes ride the run artifact: the icon check the fleet reads.
+      # Captured headless panes supplement native terminal validation.
       WINDOWS_RUNTIME_TRIAGE_DUMP_DIR: '${{ github.workspace }}\win-tui-dumps'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -111,10 +111,8 @@ jobs:
       # built binary and warms the test run's build.
       - name: Build the binary the battery boots (locked)
         run: cargo build --locked -p pa-cli --bin prime-agent
-      # The broken-icons fix's mechanism battery (cfg(windows) tests in
-      # pa_types::platform::windows_console): the codepage/VT flips and the
-      # restore, proven on the runner the product ships to.
-      - name: The Windows console battery (the broken-icons fix)
+      # Console VT setup/restore; redirected CI stdout can take the no-op branch.
+      - name: The Windows console mode regression
         shell: bash
         run: |
           set -euo pipefail
@@ -124,12 +122,11 @@ jobs:
         run: |
           set -euo pipefail
           # The panes must land in the artifact dir: a green battery with
-          # an unset dump dir would upload nothing for the icon check.
+          # an unset dump dir would upload no renderer evidence.
           test -n "${WINDOWS_RUNTIME_TRIAGE_DUMP_DIR}" \
             || { echo "::error::WINDOWS_RUNTIME_TRIAGE_DUMP_DIR is unset"; exit 1; }
           cargo test --locked -p pa-cli --test windows_runtime_triage_e2e -- --test-threads=1 --nocapture
-      # The icon check: the pane dumps download per run (red runs too) -
-      # the artifact the fleet inspects for broken-glyph regressions.
+      # Renderer evidence only: these frames do not validate console glyphs.
       - name: Upload the pane dumps
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
