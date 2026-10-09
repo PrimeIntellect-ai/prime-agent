@@ -128,8 +128,8 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
             .iter()
             .any(|a| a == DAEMON_UPDATE_RESTART_COORDINATOR_FLAG)
     {
-        handle_package_command(&args);
-        return handled();
+        let result = handle_package_command(&args);
+        return handled_with_exit(result.exit_code.unwrap_or(0));
     }
 
     let separator_index = args.iter().position(|a| a == "--");
@@ -725,10 +725,14 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     ) {
         return handled_with_exit(abort_code);
     }
-    // The installer funnel serves the bare update and the channel flags:
-    // the channel is the flag, else the saved `updateChannel` setting
-    // (`/nightly on|off`), else the installed one.
-    if !options.rollback && options.archive.is_none() {
+    // A Rust archive activated by a historical TS installer still belongs
+    // to that managed root. Keep using its atomic launcher activation so a
+    // custom root/public-bin pair is not silently replaced by ~/.local.
+    let managed_install = std::env::current_exe()
+        .ok()
+        .and_then(|exe| pa_core::update::install::install_root_of(&exe))
+        .is_some();
+    if !managed_install && !options.rollback && options.archive.is_none() {
         let update = crate::installer_update::UpdateOptions {
             check: false,
             channel: options.channel,
@@ -1020,6 +1024,17 @@ mod update_options_tests {
         assert_eq!(channel(&["--check", "--nightly", "--stable"]), None);
         assert_eq!(channel(&["--check", "--force"]), None);
         assert_eq!(channel(&["--check", "--rollback"]), None);
+    }
+
+    #[test]
+    fn invalid_restart_coordinator_preserves_the_failure_exit_code() {
+        let args = vec![
+            "update".to_string(),
+            DAEMON_UPDATE_RESTART_COORDINATOR_FLAG.to_string(),
+        ];
+        let result = handle_public_command(&args);
+        assert!(result.handled);
+        assert_eq!(result.exit_code, Some(1));
     }
 
     #[test]
