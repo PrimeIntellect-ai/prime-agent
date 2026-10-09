@@ -540,7 +540,7 @@ fn recovery_registry_releases_inactive_directory_capacity_and_preserves_other_ho
         );
     }
     recovered.insert(
-        fixture.agent_dir.clone(),
+        fixture.agent_dir,
         (
             live_cancel.clone(),
             Arc::new(std::sync::atomic::AtomicU8::new(1)),
