@@ -895,12 +895,24 @@ impl LockDir {
                     // that is no longer stale is a LIVE lease - swap it
                     // home and report contention, never remove it.
                     if claimed == incumbent && !still_stale {
-                        if let Err(error) = rename_noreplace::exchange(path, &placeholder) {
-                            if error.kind() != io::ErrorKind::NotFound {
+                        // A freshly heartbeat-refreshed LIVE lease: swap
+                        // it home and report contention. The swap's
+                        // failure is preserved-closed: the public entry
+                        // may have vanished while the displaced lease
+                        // remains at the private name - removing that
+                        // name would destroy the live lease, so on any
+                        // swap failure the displaced inode stays where
+                        // it is (an inert private dotname its holder can
+                        // still reach through the pinned fd).
+                        match rename_noreplace::exchange(path, &placeholder) {
+                            Ok(()) => {
+                                let _ = remove_candidate_dir(&placeholder);
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                                 return Err(error);
                             }
+                            Err(error) => return Err(error),
                         }
-                        let _ = remove_candidate_dir(&placeholder);
                         return Ok(StaleClaim::Successor);
                     }
                     if claimed == incumbent {

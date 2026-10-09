@@ -168,23 +168,53 @@ impl SocketLease {
                 let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
                 if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
                     if write_error && !lost {
-                        // Retry the mtime write after the grace: a
-                        // transient failure passes (the lease stays
-                        // held and Drop releases it normally); a
-                        // repeated failure (persistent EIO, a
-                        // read-only filesystem) is a compromise, never
-                        // letting the lock age silently past the stale
-                        // threshold while the supervisor keeps serving.
+                        // Retry the mtime write after the grace - under
+                        // the sidecar again: an unguarded retry could
+                        // refresh a stale judge's claimed inode
+                        // mid-verification, the exact race the heartbeat
+                        // coordination exists to prevent. The transient
+                        // failure passes (the lease stays held, Drop
+                        // releases normally); a repeated failure
+                        // (persistent EIO, a read-only filesystem) is a
+                        // compromise, never letting the lock age silently
+                        // past the stale threshold.
+                        #[cfg(target_os = "linux")]
                         drop(guarded);
                         std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
-                        if task_dir.set_modified(std::time::SystemTime::now()).is_err()
-                            || !lock_identity_matches(&task_path, &task_identity)
-                        {
-                            task_compromised.store(true, std::sync::atomic::Ordering::Release);
-                            task_tx.send_replace(true);
-                            break;
+                        #[cfg(target_os = "linux")]
+                        match pa_core::platform::try_reclaim_guard(
+                            &task_path,
+                            std::time::Duration::from_millis(100),
+                        ) {
+                            None => {
+                                // A dance or release pass is active:
+                                // defer the retry to the next tick.
+                                continue;
+                            }
+                            Some(retry_guard) => {
+                                let retry_failed =
+                                    task_dir.set_modified(std::time::SystemTime::now()).is_err()
+                                        || !lock_identity_matches(&task_path, &task_identity);
+                                drop(retry_guard);
+                                if retry_failed {
+                                    task_compromised
+                                        .store(true, std::sync::atomic::Ordering::Release);
+                                    task_tx.send_replace(true);
+                                    break;
+                                }
+                                continue;
+                            }
                         }
-                        continue;
+                        #[cfg(not(target_os = "linux"))]
+                        {
+                            if task_dir.set_modified(std::time::SystemTime::now()).is_err()
+                                || !lock_identity_matches(&task_path, &task_identity)
+                            {
+                                task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                                task_tx.send_replace(true);
+                                break;
+                            }
+                        }
                     }
                     // A stale-reclaim dance may hold this lease's
                     // directory displaced for the microseconds of its
@@ -194,6 +224,7 @@ impl SocketLease {
                     // displacement that persists past the grace (a
                     // suspended dance's token-protected placeholder, or
                     // a real takeover) is a compromise.
+                    #[cfg(target_os = "linux")]
                     drop(guarded);
                     std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
                     if !lock_identity_matches(&task_path, &task_identity) {
@@ -502,7 +533,20 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
         }
         // The exchange: the public path holds the placeholder while the
         // incumbent sits at the private name.
-        if let Ok(()) = pa_core::platform::exchange_paths(lock_path, &placeholder) {
+        if pa_core::platform::exchange_paths(lock_path, &placeholder).is_err() {
+            // The exchange failed: the public path was never displaced
+            // (an unpublished placeholder), so clean it and its live
+            // owner record. A missing public path means the lease
+            // directory vanished - the release is complete. An
+            // unsupported-rename mount means this choreography cannot
+            // run here at all - return without retrying; the artifact
+            // expires through the stale window, the documented floor.
+            let _ = std::fs::remove_file(placeholder.join("owner"));
+            let _ = std::fs::remove_dir(&placeholder);
+            drop(guarded);
+            return;
+        }
+        {
             {
                 if lock_identity_matches(&placeholder, identity) {
                     // This lease's directory, held where nothing can
@@ -514,13 +558,16 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
                     let _ = std::fs::remove_dir(lock_path);
                 } else {
                     // Not this lease's directory: a successor's live
-                    // lock. Swap it home atomically - both paths exist,
-                    // so the exchange cannot fail on occupancy - and
-                    // remove the placeholder at its private name. NEVER
-                    // delete the successor's directory.
-                    let _ = pa_core::platform::exchange_paths(lock_path, &placeholder);
-                    let _ = std::fs::remove_file(placeholder.join("owner"));
-                    let _ = std::fs::remove_dir(&placeholder);
+                    // lock. Swap it home atomically and remove the
+                    // placeholder ONLY after a verified successful swap
+                    // - a failed swap leaves the successor's directory
+                    // at the private name, and stripping the placeholder
+                    // (the same name) would delete the foreign lock.
+                    // Fail closed: preserve the displaced lease.
+                    if pa_core::platform::exchange_paths(lock_path, &placeholder).is_ok() {
+                        let _ = std::fs::remove_file(placeholder.join("owner"));
+                        let _ = std::fs::remove_dir(&placeholder);
+                    }
                 }
                 drop(guarded);
                 return;
