@@ -531,6 +531,18 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
             drop(guarded);
             return;
         }
+        // The created placeholder's identity: on an AMBIGUOUS exchange
+        // error the swap may have completed with the incumbent (or a
+        // racing successor) at the private name - the cleanup below
+        // deletes the placeholder only after proving the private name
+        // still resolves to THIS created inode, exactly like the
+        // publish-error proof in the acquisition path.
+        let placeholder_identity = std::fs::symlink_metadata(&placeholder)
+            .ok()
+            .map(|metadata| {
+                use std::os::unix::fs::MetadataExt;
+                (metadata.dev(), metadata.ino())
+            });
         // The exchange: the public path holds the placeholder while the
         // incumbent sits at the private name.
         if pa_core::platform::exchange_paths(lock_path, &placeholder).is_err() {
@@ -541,8 +553,22 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
             // unsupported-rename mount means this choreography cannot
             // run here at all - return without retrying; the artifact
             // expires through the stale window, the documented floor.
-            let _ = std::fs::remove_file(placeholder.join("owner"));
-            let _ = std::fs::remove_dir(&placeholder);
+            // The cleanup is identity-proved first: an ambiguous error
+            // may have completed the swap with the incumbent (or a
+            // racing successor) at the private name, and deleting that
+            // would destroy a live lock - fail closed on any doubt.
+            let is_created_placeholder =
+                std::fs::symlink_metadata(&placeholder)
+                    .ok()
+                    .map(|metadata| {
+                        use std::os::unix::fs::MetadataExt;
+                        (metadata.dev(), metadata.ino())
+                    })
+                    == placeholder_identity;
+            if is_created_placeholder {
+                let _ = std::fs::remove_file(placeholder.join("owner"));
+                let _ = std::fs::remove_dir(&placeholder);
+            }
             drop(guarded);
             return;
         }
