@@ -433,7 +433,7 @@ impl TreeNavigation {
     /// `fork`'s swap phase (TS `buildAndApplyReplacement`): the store, the engine's session
     /// file, and the rebuilt context move onto the prepared fork file; the teardown runs
     /// between the prepare and this swap.
-    pub(crate) async fn replace_with_fork(&self, forked: SessionFile) -> Result<(), String> {
+    pub(crate) async fn replace_with_fork(&self, mut forked: SessionFile) -> Result<(), String> {
         let branch_entries = forked.branch_file_entries();
         let new_path = forked.path.clone();
         // Prime the fork store's usage fold before it enters the core: the
@@ -443,10 +443,30 @@ impl TreeNavigation {
         let _ =
             tokio::task::spawn_blocking(move || crate::session_store::read_session_info(&primed))
                 .await;
-        let previous = {
+        let (previous, transferred) = {
             let mut core = self.core.lock().unwrap();
-            core.store.replace(forked)
+            // A navigating fork replaces its source: when the prepare could not
+            // admit a distinct installation (registry at capacity), the
+            // publication takes the predecessor's slot. No fallible work sits
+            // between the transfer and the store swap.
+            let mut transferred = None;
+            if forked.trace_upload.is_none() {
+                transferred = core
+                    .store
+                    .as_ref()
+                    .and_then(|old| old.trace_upload.as_ref())
+                    .and_then(|traces| {
+                        traces.rebind(std::path::Path::new(&core.cwd), &forked.path)
+                    });
+                forked.trace_upload.clone_from(&transferred);
+            }
+            (core.store.replace(forked), transferred)
         };
+        if let Some(traces) = &transferred {
+            // The fork was rewritten before its controller existed; the
+            // pre-written file owes a delivery only after publication.
+            traces.persisted(&new_path);
+        }
         // The old store's lease release flushes the window and info
         // sidecars (megabytes for a large session): off the core lock
         // and the runtime.
@@ -605,5 +625,133 @@ impl Worker {
                 response_failure(None, "fork", &error, None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod trace_fork_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn below_capacity_fork_keeps_its_prepared_controller() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let session_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        settings.set_agent_traces_enabled(true).unwrap();
+        let old_path = session_dir.join("old.jsonl");
+        let (_, consent) =
+            pa_core::agent_traces::ContinuousTraceUpload::load_settings(dir.path(), &agent_dir);
+        let controller = pa_core::agent_traces::ContinuousTraceUpload::install(
+            dir.path(),
+            &agent_dir,
+            Some(&old_path),
+            consent,
+        )
+        .unwrap();
+        let mut store = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
+        store.set_path(old_path.clone());
+        store.trace_upload = Some(controller.clone());
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            dir.path().to_string_lossy().into_owned(),
+        )));
+        let navigation = TreeNavigation::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            core.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // A spare registry slot admits the fork's distinct controller at prepare
+        // time; publication must keep it attached for later writes.
+        let (_, fork_consent) =
+            pa_core::agent_traces::ContinuousTraceUpload::load_settings(dir.path(), &agent_dir);
+        let prepared = pa_core::agent_traces::ContinuousTraceUpload::install(
+            dir.path(),
+            &agent_dir,
+            Some(&session_dir.join("fork.jsonl")),
+            fork_consent,
+        )
+        .unwrap();
+        let mut forked = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
+        forked.set_path(session_dir.join("fork.jsonl"));
+        forked.trace_upload = Some(prepared.clone());
+        forked.rewrite().unwrap();
+        navigation.replace_with_fork(forked).await.unwrap();
+        let live = core.lock().unwrap();
+        let published = live.store.as_ref().unwrap();
+        let hook = published
+            .trace_upload
+            .as_ref()
+            .expect("the prepared hook must survive");
+        assert!(
+            Arc::ptr_eq(hook, &prepared),
+            "publication must keep the prepared controller attached"
+        );
+        drop(live);
+        let outbox = agent_dir.join("agent-traces-outbox");
+        let markers = std::fs::read_dir(&outbox)
+            .expect("the rewritten fork file owes a delivery")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .count();
+        assert_eq!(markers, 1);
+    }
+
+    #[tokio::test]
+    async fn fork_at_capacity_publishes_with_the_predecessors_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let session_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        settings.set_agent_traces_enabled(true).unwrap();
+        let old_path = session_dir.join("old.jsonl");
+        let (_, consent) =
+            pa_core::agent_traces::ContinuousTraceUpload::load_settings(dir.path(), &agent_dir);
+        let controller = pa_core::agent_traces::ContinuousTraceUpload::install(
+            dir.path(),
+            &agent_dir,
+            Some(&old_path),
+            consent,
+        )
+        .unwrap();
+        let mut store = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
+        store.set_path(old_path.clone());
+        store.trace_upload = Some(controller.clone());
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            dir.path().to_string_lossy().into_owned(),
+        )));
+        let navigation = TreeNavigation::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            core.clone(),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        // At capacity the prepare-time admission is rejected (the registry
+        // bound is pa-core's, covered by its bounded-admission tests); the
+        // unhooked prepared fork is that rejection's daemon-side shape.
+        let mut forked = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
+        forked.set_path(session_dir.join("fork.jsonl"));
+        forked.rewrite().unwrap();
+        navigation.replace_with_fork(forked).await.unwrap();
+        let live = core.lock().unwrap();
+        let published = live.store.as_ref().unwrap();
+        assert!(
+            published.trace_upload.is_some(),
+            "a replacing fork must publish with its predecessor's slot"
+        );
+        drop(live);
+        let outbox = agent_dir.join("agent-traces-outbox");
+        let markers: Vec<_> = std::fs::read_dir(&outbox)
+            .expect("the pre-written fork file owes a delivery")
+            .map(|entry| entry.expect("outbox entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        assert_eq!(
+            markers.len(),
+            1,
+            "exactly the fork's pending marker must be recorded"
+        );
     }
 }
