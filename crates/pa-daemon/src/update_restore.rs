@@ -649,12 +649,18 @@ where
         // A partial restore remains parked on failure, but release the temporary
         // lease so the ordinary user resume action can recover the session.
         if outcome.is_err() {
-            let response = route("abort", json!({})).await?;
-            anyhow::ensure!(
-                response.success,
-                "legacy update abort after failed restore: {}",
-                response.error.unwrap_or_default()
-            );
+            // Best-effort abort: its failure must not skip the release below
+            // and leave the input pause held.
+            match route("abort", json!({})).await {
+                Ok(response) if response.success => {}
+                Ok(response) => eprintln!(
+                    "pa-daemon: legacy update abort after failed restore also failed: {}",
+                    response.error.unwrap_or_default()
+                ),
+                Err(error) => eprintln!(
+                    "pa-daemon: legacy update abort after failed restore also failed: {error:#}"
+                ),
+            }
         }
         let response = route(
             "release_session_input_pause",
@@ -1042,6 +1048,46 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             failed_calls,
+            [
+                "acquire_session_input_pause",
+                "restore_actions",
+                "abort",
+                "release_session_input_pause"
+            ]
+        );
+        assert_eq!(
+            error.to_string(),
+            "legacy update restore_actions: invalid action"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_releases_input_pause_when_abort_fails() {
+        let mut row = two_row_roster().sessions.remove(0);
+        row.should_resume = true;
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [{"id": "queued"}] });
+        let mut calls = Vec::new();
+        let error = restore_legacy_session(&row, None, "1.0.0", |command, _| {
+            calls.push(command);
+            let response = match command {
+                "restore_actions" => {
+                    crate::protocol::response_failure(None, command, "invalid action", None)
+                }
+                "abort" => crate::protocol::response_failure(None, command, "abort refused", None),
+                _ => crate::protocol::response_success(
+                    None,
+                    command,
+                    Some(json!({ "pauseId": "test-pause" })),
+                ),
+            };
+            std::future::ready(Ok(response))
+        })
+        .await
+        .unwrap_err();
+        // A failed abort must not skip the release: a leaked pause would leave
+        // the session unable to accept input.
+        assert_eq!(
+            calls,
             [
                 "acquire_session_input_pause",
                 "restore_actions",
