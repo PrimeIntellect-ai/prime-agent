@@ -21,6 +21,42 @@ where
         .and_then(|value| serde_json::from_value(value).ok())
 }
 
+/// The pa-ai view of a pa-agent session model: the forward direction of the
+/// model handoff at this boundary. Unlike the message types, the two
+/// `Model`s do not share a wire shape — the agent descriptor serializes
+/// `base_url`, never carries `input`, and the ai side requires both — so this
+/// direction cannot ride [`json_round_trip`] (the reverse direction can:
+/// the agent side defaults every missing field and ignores the rest). The
+/// descriptor is lossy by design (TS `Model<any>`): it carries no input
+/// modalities, thinking-level map, featured flag, request headers, or compat
+/// overrides, so those default; a surface that needs them must resolve the
+/// model through the catalog instead.
+#[must_use]
+pub(crate) fn agent_model_to_ai_model(model: &AgentModel) -> Model {
+    Model {
+        id: model.id.clone(),
+        name: model.name.clone(),
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        base_url: model.base_url.clone(),
+        reasoning: model.reasoning,
+        thinking_level_map: None,
+        input: Vec::new(),
+        cost: pa_types::ai::ModelCost {
+            input: model.cost.input.into(),
+            output: model.cost.output.into(),
+            cache_read: model.cost.cache_read.into(),
+            cache_write: model.cost.cache_write.into(),
+        },
+        context_window: model.context_window,
+        max_tokens: model.max_tokens,
+        max_tokens_explicit: model.max_tokens_explicit,
+        featured: None,
+        headers: None,
+        compat: None,
+    }
+}
+
 /// Thinking-level mapping across the two crates.
 #[must_use]
 pub fn map_thinking_level(level: pa_types::ai::ModelThinkingLevel) -> ThinkingLevel {
@@ -381,6 +417,50 @@ mod tests {
     //! provider with a system prompt only.
 
     use super::*;
+
+    /// The forward direction of the model handoff: every field the agent
+    /// descriptor carries survives the crossing, and the fields it cannot
+    /// carry (the TS `Model<any>` lossiness) default. The two `Model`s do
+    /// not share a wire shape, so this must never regress to
+    /// `json_round_trip` — that path produces no model at all (the agent
+    /// side serializes `base_url`, never carries `input`).
+    #[test]
+    fn agent_model_to_ai_model_maps_the_descriptor_and_defaults_the_rest() {
+        let agent_model: AgentModel = serde_json::from_value(serde_json::json!({
+            "id": "session-model", "name": "Session Model", "api": "faux",
+            "provider": "testprov", "base_url": "http://localhost:9", "reasoning": true,
+            "cost": { "input": 1.5, "output": 2.5, "cacheRead": 0.25, "cacheWrite": 0.75 },
+            "contextWindow": 128_000, "maxTokens": 4096, "maxTokensExplicit": true
+        }))
+        .unwrap();
+        let model = agent_model_to_ai_model(&agent_model);
+        assert_eq!(model.id, "session-model");
+        assert_eq!(model.name, "Session Model");
+        assert_eq!(model.api, "faux");
+        assert_eq!(model.provider, "testprov");
+        assert_eq!(model.base_url, "http://localhost:9");
+        assert!(model.reasoning);
+        assert_eq!(model.cost.input.as_f64(), 1.5);
+        assert_eq!(model.cost.output.as_f64(), 2.5);
+        assert_eq!(model.cost.cache_read.as_f64(), 0.25);
+        assert_eq!(model.cost.cache_write.as_f64(), 0.75);
+        assert_eq!(model.context_window, 128_000);
+        assert_eq!(model.max_tokens, 4096);
+        // The explicitly configured cap survives the crossing (#3362):
+        // the ai side needs the flag to keep the cap above the default
+        // output ceiling.
+        assert!(model.max_tokens_explicit);
+        // The lossy defaults: the descriptor carries none of these.
+        assert_eq!(model.input, Vec::new());
+        assert_eq!(model.thinking_level_map, None);
+        assert_eq!(model.featured, None);
+        assert_eq!(model.headers, None);
+        assert_eq!(model.compat, None);
+        // The wire-shape round trip this helper replaces never produces a
+        // model: the agent side serializes `base_url` and omits `input`,
+        // both of which the ai side requires.
+        assert!(json_round_trip::<AgentModel, Model>(&agent_model).is_none());
+    }
 
     #[tokio::test]
     async fn live_target_service_tier_reaches_provider_and_reset() {

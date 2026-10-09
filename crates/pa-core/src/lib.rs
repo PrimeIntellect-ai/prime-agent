@@ -74,6 +74,9 @@ pub mod session_engine;
 pub mod settings;
 pub mod skills;
 pub mod slash_command_args;
+// The router is consumed only by the session engine's host handler and the
+// unit batteries; per the crate facade policy its surface stays crate-private.
+pub(crate) mod system_router;
 pub mod update;
 pub mod workspace_snapshot;
 pub use kernel::ReplKernelManager;

@@ -226,6 +226,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // (`settings` moves into the loader); the `PI_REQUEST_TIMING` half stays live.
     let request_timing_settings = settings.get_request_timing();
     // Captured before `settings` moves into the resource loader: the
+    // `system_router.run` action-model resolution (the subagent default
+    // model), the daemon guardrail pin, and the shared provider-retry
+    // policy the segment's decision calls ride.
+    let router_subagent_default_model = settings.get_subagent_default_model();
+    let router_allowed_models = settings.get_allowed_models();
+    let router_retry_policy = settings.get_provider_retry_policy();
+    // Captured before `settings` moves into the resource loader: the
     // factory host bridge's preflight facts (the daemon `allowedModels`
     // pin), like the request-timing snapshot above.
     let factory_allowed_models = settings.get_allowed_models();
@@ -285,6 +292,20 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     if let Some(extra) = config.extra_host_handlers.clone() {
         handlers.merge(extra);
     }
+    // The `system_router.run` host handler the bundled system-router skill
+    // reaches through `rlm.host_request` (#2484).
+    super::system_router_host::register_system_router_handlers(
+        &mut handlers,
+        super::system_router_host::SystemRouterHostConfig {
+            agent_dir: config.agent_dir.clone(),
+            cwd: cwd.clone(),
+            session_model: model.clone(),
+            session_id: session_id.clone(),
+            subagent_default_model: router_subagent_default_model,
+            allowed_models: router_allowed_models,
+            policy: router_retry_policy,
+        },
+    );
     // Per-session counters (MCP connector use, kernel boots, skills, RLM
     // child usage, feature outcomes) ride `agent session ended`; the seams
     // below count into them instead of emitting their own events.

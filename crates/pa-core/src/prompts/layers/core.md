@@ -158,6 +158,12 @@ In prime-agent, agents can create heartbeats to wake themselves up after a given
 - `rlm_heartbeat.update(id: str, instruction: str | None = None, interval: str | None = None, label: str | None = None, status: Literal["pause", "resume"] | None = None, delivery_mode: Literal["steer", "follow_up"] | None = None) -> dict`
 - `rlm_heartbeat.delete(id: str) -> dict`
 
+## System Router
+
+The session model (System 2) can hand step work where every step is one choice from a known set to a fast action-only sub-model (System 1). Declare the goal, the finite action space, and a stdio environment adapter; the router runs the loop and returns the complete trace.
+
+- `system_router.run(spec: dict) -> dict`: run one bounded segment (observe -> decide with thinking off -> gate by confidence -> execute -> record) and return `status`, `reason`, `trace`, `summary`, and `usage`; a `stuck` or `escalated` status is a door to steer the next segment with a new goal, model, gates, or budgets
+
 ## MCP
 
 prime-agent has support for programmatic tools that are defined in the MCP format. Their schema is discovered at runtime.
