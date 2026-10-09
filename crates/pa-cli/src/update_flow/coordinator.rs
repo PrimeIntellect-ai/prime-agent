@@ -146,8 +146,16 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // predecessor fence, and can bind the socket the rollback
             // still needs. A re-acquire failure is another window's
             // socket: the rollback cannot run under it.
+            // A bounded re-close: an unbounded acquire would sit behind a
+            // concurrent shutdown's whole convergence and then spawn a
+            // daemon right after it finished - undoing the user's stop.
+            // A window still busy after a grace that dwarfs any transient
+            // contention is a real concurrent shutdown: the rollback
+            // aborts beside it instead.
             let rollback_admission =
-                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire() {
+                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_bounded(
+                    Duration::from_secs(1),
+                ) {
                     Ok(admission) => Some(admission),
                     Err(error) => {
                         let mut writer = writer.lock().await;

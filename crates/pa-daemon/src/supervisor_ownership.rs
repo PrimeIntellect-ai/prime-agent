@@ -693,9 +693,31 @@ impl ShutdownAdmission {
         Self::acquire_in(&registry_dir()?)
     }
 
+    /// A BOUNDED acquire (the rollback re-close): the unbounded acquire
+    /// waits out a concurrent stop window and the caller would then spawn
+    /// a daemon right after that shutdown finished - undoing it. The
+    /// rollback instead aborts after `max_wait`: a window still busy that
+    /// long is a real concurrent shutdown (its convergence runs to tens of
+    /// seconds), never transient contention.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry record cannot be written, the
+    /// renewal thread cannot be spawned, or `max_wait` elapses behind
+    /// another active stop window.
+    pub fn acquire_bounded(max_wait: Duration) -> Result<Self> {
+        Self::acquire_in_bounded(&registry_dir()?, max_wait)
+    }
+
     /// [`ShutdownAdmission::acquire`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
     fn acquire_in(registry_dir: &Path) -> Result<Self> {
+        Self::acquire_in_bounded(registry_dir, Duration::MAX)
+    }
+
+    /// The acquire loop with a deadline (`Duration::MAX` = the unbounded
+    /// TS acquire).
+    fn acquire_in_bounded(registry_dir: &Path, max_wait: Duration) -> Result<Self> {
         let registry_dir = registry_dir.to_path_buf();
         let state = Arc::new(AdmissionState {
             registry_dir: registry_dir.clone(),
@@ -705,6 +727,7 @@ impl ShutdownAdmission {
             stopped: AtomicBool::new(false),
             lost: AtomicBool::new(false),
         });
+        let deadline = std::time::Instant::now().checked_add(max_wait);
         loop {
             let acquired = with_registry_guard(&registry_dir, || {
                 let path = shutdown_admission_path(&registry_dir);
@@ -728,6 +751,9 @@ impl ShutdownAdmission {
             })?;
             if acquired.is_some() {
                 break;
+            }
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                anyhow::bail!("another stop window holds the socket");
             }
             std::thread::sleep(SHUTDOWN_ADMISSION_WAIT_MS);
         }
@@ -1257,6 +1283,26 @@ mod tests {
                 socket.display()
             ),
             "the refusal is the TS message"
+        );
+    }
+
+    /// A held stop window makes the bounded acquire give up after its
+    /// deadline - the rollback re-close never sits out a concurrent
+    /// shutdown and spawns behind it - while the window's holder still
+    /// owns the record.
+    #[test]
+    fn the_bounded_acquire_gives_up_behind_a_held_window() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let admission = ShutdownAdmission::acquire_in(registry.path()).expect("hold the window");
+        assert!(
+            ShutdownAdmission::acquire_in_bounded(registry.path(), Duration::from_millis(1))
+                .is_err()
+        );
+        drop(admission);
+        // The vacated window acquires boundedly again.
+        assert!(
+            ShutdownAdmission::acquire_in_bounded(registry.path(), Duration::from_secs(5)).is_ok(),
+            "the freed window acquires"
         );
     }
 
