@@ -563,15 +563,31 @@ fn regular_or_close(fd: i32) -> Option<fs::File> {
 pub fn mark_released_through(dir: &fs::File) {
     use std::os::unix::io::AsRawFd;
     let name = c"released";
+    // Hardened exactly like the sidecar open: nonblocking (a planted
+    // FIFO would hang an ordinary blocking write-open forever - this
+    // runs in Drop, on the shutdown path), no-follow (a planted symlink
+    // to another owner's file must not be created through), and the
+    // created entry is fstat-verified regular - anything else at the
+    // marker name is closed and the mark is skipped (fail closed, the
+    // stale-window floor).
     let fd = unsafe {
         libc::openat(
             dir.as_raw_fd(),
             name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOFOLLOW,
             0o600,
         )
     };
-    if fd >= 0 {
+    if fd < 0 {
+        return;
+    }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, std::ptr::addr_of_mut!(stat)) } == 0
+        && stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    {
+        unsafe { libc::close(fd) };
+    } else {
+        // A FIFO or other non-regular entry: close without writing.
         unsafe { libc::close(fd) };
     }
 }
@@ -1050,6 +1066,7 @@ impl LockDir {
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
                     let claimed = identity_at(&placeholder);
+                    let released = released_marker(&placeholder);
                     let still_stale = fs::symlink_metadata(&placeholder)
                         .ok()
                         .and_then(|metadata| metadata.modified().ok())
@@ -1059,6 +1076,31 @@ impl LockDir {
                     // after the judge's snapshot: a claimed incumbent
                     // that is no longer stale is a LIVE lease - swap it
                     // home and report contention, never remove it.
+                    // The release marker outranks the mtime: creating
+                    // `released` REFRESHES the directory mtime, so an
+                    // already-released incumbent looks heartbeat-fresh -
+                    // a released marker means CONSUME (nobody else will
+                    // clean it), never restore.
+                    if claimed == incumbent && released {
+                        // An already-released incumbent (its guard wrote
+                        // the marker through the pinned fd - the marker
+                        // write refreshed this mtime, which is why the
+                        // stale check above saw freshness): CONSUME it -
+                        // nobody else will - and clear the placeholder
+                        // so the caller's retry sees an empty path.
+                        if let Err(error) = remove_candidate_dir(&placeholder) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                let _ = remove_candidate_dir(path);
+                                return Err(error);
+                            }
+                        }
+                        if let Err(error) = remove_candidate_dir(path) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
+                        return Ok(StaleClaim::Vanished);
+                    }
                     if claimed == incumbent && !still_stale {
                         // A freshly heartbeat-refreshed LIVE lease: swap
                         // it home and report contention. The swap's
