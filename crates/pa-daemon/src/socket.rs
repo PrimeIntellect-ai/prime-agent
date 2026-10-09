@@ -874,16 +874,70 @@ async fn unlink_stale_socket_with_lease(
     match socket_identity(path) {
         None => Ok(()),
         Some(current) if current == expected => {
+            // The lease fence can sleep the displacement grace; a
+            // replacement can land at the path during that wait, and
+            // the remove must NEVER unlink it: re-verify the exact
+            // inode AFTER the fence and claim atomically before the
+            // unlink (the claim's no-replace rename both proves the
+            // path still names the probed stale inode and takes the
+            // file out of the public namespace - a replacement cannot
+            // be deleted through it).
             if let Some(lease) = lease {
                 lease.assert_path_held(path)?;
             }
-            std::fs::remove_file(path)?;
+            if socket_identity(path) != Some(expected.clone()) {
+                return Err(anyhow!(
+                    "Daemon socket changed ownership while fencing: {}",
+                    path.display()
+                ));
+            }
+            let Some(claim) = claim_socket_file_for_removal(path) else {
+                // A racing actor already claimed or removed it: there
+                // is nothing of ours left to unlink.
+                return Ok(());
+            };
+            if socket_identity(&claim) == Some(expected) {
+                std::fs::remove_file(&claim)?;
+            }
             Ok(())
         }
         Some(_) => Err(anyhow!(
             "Daemon socket changed ownership while waiting for cleanup: {}",
             path.display()
         )),
+    }
+}
+
+/// Claim the socket file at `path` under a private name with a
+/// no-replace rename: the claim proves the path still names the inode
+/// the caller probed (EEXIST/ENOENT means it does not) and takes the
+/// file out of the public namespace, so the unlink can only ever touch
+/// the claimed file - a replacement landing at the vacated path is
+/// never unlinked through it. Non-Linux unix has no no-replace rename:
+/// the callers' re-verification narrows the window, and the removal
+/// falls back to the pathname there.
+#[cfg(unix)]
+fn claim_socket_file_for_removal(path: &Path) -> Option<std::path::PathBuf> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No no-replace rename exists here: the re-verified pathname
+        // remove is the documented floor.
+        Some(path.to_path_buf())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let parent = path.parent()?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        for attempt in 0..8 {
+            let claim = parent.join(format!(".s{pid:x}{nanos:x}{attempt:x}"));
+            if pa_core::platform::move_without_replacing(path, &claim).is_ok() {
+                return Some(claim);
+            }
+        }
+        None
     }
 }
 
@@ -1074,6 +1128,50 @@ mod tests {
             "the refresh thread itself declared the compromise"
         );
         drop(lease);
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn stale_unlink_refuses_a_replacement_landing_during_the_fence() {
+        // The fenced unlink's re-verify: a file whose identity does not
+        // match the probed stale inode is NEVER removed - the remove can
+        // only ever touch the atomically claimed inode.
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, b"stale").unwrap();
+        let expected = socket_identity(&socket).unwrap();
+        // A replacement lands where the stale file sat while the fence
+        // could have slept: the re-verify must refuse the swap.
+        let replaced = dir.path().join("replaced.sock");
+        std::fs::write(&replaced, b"live-replacement").unwrap();
+        std::fs::rename(&socket, dir.path().join("probed-stale")).unwrap();
+        std::fs::rename(&replaced, &socket).unwrap();
+        let error = unlink_stale_socket_with_lease(&socket, expected, None)
+            .await
+            .is_err();
+        assert!(
+            error,
+            "the fencing re-verify refuses a replacement inode at the path"
+        );
+        assert!(
+            std::fs::read_to_string(&socket)
+                .unwrap()
+                .contains("live-replacement"),
+            "the replacement survives"
+        );
+        // The claim helper: a successful claim takes the file out of the
+        // public namespace, atomically proving the path named it.
+        std::fs::write(&socket, b"stale").unwrap();
+        let stale_identity = socket_identity(&socket).unwrap();
+        let claim = claim_socket_file_for_removal(&socket);
+        assert!(claim.is_some(), "the claim succeeds on the unowned file");
+        assert!(!socket.exists(), "the claim vacated the public path");
+        let claim = claim.unwrap();
+        assert_eq!(
+            socket_identity(&claim),
+            Some(stale_identity),
+            "the claimed file is the probed inode"
+        );
     }
 
     #[tokio::test]
