@@ -417,7 +417,12 @@ impl SessionFile {
             true
         });
         let mut cut = visited.len().saturating_sub(tail_budget);
-        while cut > 0 && visited[cut].get("role").and_then(Value::as_str) == Some("toolResult") {
+        while cut > 0
+            && matches!(
+                visited[cut].get("role").and_then(Value::as_str),
+                Some("toolResult" | "custom")
+            )
+        {
             cut -= 1;
         }
         if let Some(retained) = visited

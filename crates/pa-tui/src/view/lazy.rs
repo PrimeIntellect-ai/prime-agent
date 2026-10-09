@@ -153,10 +153,19 @@ impl AgentView {
         let Some(mut window) = self.sparse_window.take() else {
             return;
         };
-        let seam_after = self.count_entry_rows(count, self.layout_width);
+        let seam_after = if self.chat.len() > count {
+            self.count_entry_rows(count, self.layout_width)
+        } else {
+            0
+        };
         window.cursor = match window.cursor.take() {
-            Some((0, _)) => Some((count + 1, seam_after.saturating_sub(seam_before))),
-            Some((1, row)) => Some((count + 1, (row + seam_after).saturating_sub(seam_before))),
+            Some((0, row)) if self.chat.len() > count => {
+                Some((count + 1, seam_after.saturating_sub(seam_before)))
+            }
+            Some((0, row)) => Some((0, row)),
+            Some((1, row)) if self.chat.len() > count => {
+                Some((count + 1, (row + seam_after).saturating_sub(seam_before)))
+            }
             Some((section, row)) => Some((section + count, row)),
             None => None,
         };

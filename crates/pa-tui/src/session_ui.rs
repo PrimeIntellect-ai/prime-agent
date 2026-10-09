@@ -121,6 +121,16 @@ pub(crate) struct CommandCatalogUpdate {
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
+pub(crate) fn attach_capabilities() -> Vec<DaemonClientCapability> {
+    vec![
+        "attach_snapshot".to_string(),
+        "event_sequence".to_string(),
+        "slim_attach".to_string(),
+        "elide_snapshot_images".to_string(),
+        "windowed_snapshot".to_string(),
+    ]
+}
+
 pub(crate) struct TranscriptBackfillNote {
     pub epoch: u64,
     pub entries: Vec<ChatEntry>,

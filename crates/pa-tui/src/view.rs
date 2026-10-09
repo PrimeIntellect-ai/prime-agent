@@ -509,7 +509,7 @@ impl AgentView {
             return;
         }
         self.pending_handoff = None;
-        let seam_before = if self.layout_width > 0 {
+        let seam_before = if self.layout_width > 0 && !self.chat.is_empty() {
             self.count_entry_rows(0, self.layout_width)
         } else {
             0

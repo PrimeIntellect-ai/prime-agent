@@ -160,6 +160,7 @@ impl SessionUi {
                     id: None,
                     active_session_id,
                     before: Some(before as u64),
+                    capabilities: Some(crate::session_ui::attach_capabilities()),
                     rest: Map::default(),
                 })
                 .await

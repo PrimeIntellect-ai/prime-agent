@@ -92,6 +92,15 @@ fn prepended_history_keeps_a_paused_tail_window() {
         frame_text(&sparse.render_frame(37, 24)).contains("head body 0"),
         "the prepended head's first row is reachable"
     );
+
+    let mut empty = view();
+    empty.render_frame(37, 24);
+    empty.prepend_entries(vec![body("head", 0)]);
+    assert_eq!(
+        empty.chat_len(),
+        1,
+        "a prepend into an empty chat lands without a seam panic"
+    );
 }
 
 #[test]

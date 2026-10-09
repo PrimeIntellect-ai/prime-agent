@@ -2,13 +2,13 @@
 //! §10 reattach, the attach fold, and the transcript rebuild it feeds),
 //! the stats refresh, and the detach/exit request helpers.
 use super::{
-    attach_data_from_response, create_session, mpsc, reconstruct, resume_hint_from_stats,
-    ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote, Context, DaemonClient,
-    DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
-    Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
-    RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
-    ShareNote, TranscriptBackfillNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS,
-    EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
+    attach_capabilities, attach_data_from_response, create_session, mpsc, reconstruct,
+    resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote,
+    Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView, HashSet,
+    InteractiveOptions, LoaderTokenTracker, Map, MessageBlock, ModelCatalogUpdate, PromptOrder,
+    PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
+    SessionSelection, SessionUi, ShareNote, TranscriptBackfillNote, UpdateNote, Value,
+    EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -346,13 +346,7 @@ impl SessionUi {
             client_id: None,
             // `elide_snapshot_images`: the transcript arrives without the base64 image payloads, so
             // an image-heavy session's attach stops transferring megabytes.
-            capabilities: Some(vec![
-                "attach_snapshot".to_string(),
-                "event_sequence".to_string(),
-                "slim_attach".to_string(),
-                "elide_snapshot_images".to_string(),
-                "windowed_snapshot".to_string(),
-            ]),
+            capabilities: Some(attach_capabilities()),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,

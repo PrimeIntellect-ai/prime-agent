@@ -39,6 +39,20 @@ fn assistant_message(text: &str) -> Value {
     })
 }
 
+fn image_tool_result_message() -> Value {
+    json!({
+        "role": "toolResult",
+        "toolCallId": "img-call",
+        "toolName": "ipython",
+        "content": [
+            { "type": "text", "text": "Loaded 1 image(s) into context" },
+            { "type": "image", "data": "QUJDRA==", "mimeType": "image/png" }
+        ],
+        "isError": false,
+        "timestamp": 12u64,
+    })
+}
+
 fn tool_result_message() -> Value {
     json!({
         "role": "toolResult",
@@ -148,9 +162,22 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     });
     fixture.row(custom_row);
     fixture.row(custom_row);
-    for _ in 0..197 {
+    for _ in 0..194 {
         fixture.row(|prev, id| message_row(prev, id, &assistant_message("kept context")));
     }
+    fixture.row(|prev, id| message_row(prev, id, &image_tool_result_message()));
+    fixture.row(|prev, id| {
+        message_row(
+            prev,
+            id,
+            &json!({
+                "role": "assistant",
+                "content": [{ "type": "toolCall", "id": "call-1", "name": "bash", "arguments": { "command": "ls" } }],
+                "timestamp": 4u64,
+            }),
+        )
+    });
+    fixture.row(custom_row);
     for _ in 0..800 {
         fixture.row(|prev, id| message_row(prev, id, &tool_result_message()));
     }
@@ -168,11 +195,18 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     let snapshot = &data["snapshot"];
     let tail = snapshot["messages"].as_array().expect("tail messages");
     let omitted = snapshot["historyBefore"].as_u64().expect("historyBefore");
-    assert_eq!(omitted, 199, "the cut snaps back off the tool result run");
-    assert_eq!(tail.len(), 801, "the tail keeps the whole tool result run");
+    assert_eq!(
+        omitted, 198,
+        "the cut snaps back off the tool result and custom rows"
+    );
+    assert_eq!(tail.len(), 802, "the tail keeps the whole tool call run");
     assert_eq!(
         tail[0]["role"], "assistant",
-        "the first tail message is never a tool result"
+        "the first tail message is never a tool result or custom row"
+    );
+    assert_eq!(
+        tail[1]["role"], "custom",
+        "the custom row rides the tail with its tool call"
     );
     assert_eq!(
         &tail[..],
@@ -191,6 +225,28 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
         head.data.expect("head data")["messages"],
         serde_json::json!(full[..omitted as usize]),
         "the before range serves the walk's omitted prefix"
+    );
+    let elided = worker
+        .dispatch(
+            "get_messages",
+            &json!({
+                "before": omitted,
+                "capabilities": TUI_CAPABILITIES,
+            }),
+        )
+        .await;
+    assert!(elided.success, "the elided head fetch failed: {elided:?}");
+    let elided_messages = elided.data.expect("elided head data")["messages"]
+        .as_array()
+        .expect("elided messages")
+        .clone();
+    assert_eq!(
+        elided_messages[197]["content"][1]["data"], "",
+        "the image payload leaves the backfill head"
+    );
+    assert_eq!(
+        elided_messages[197]["content"][1]["elidedBytes"], 8,
+        "the elided marker rides the backfill head"
     );
 
     let plain = attach(&worker, &["attach_snapshot", "event_sequence"]).await;

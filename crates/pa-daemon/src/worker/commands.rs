@@ -462,12 +462,26 @@ impl Worker {
             .get("before")
             .and_then(Value::as_u64)
             .and_then(|before| usize::try_from(before).ok());
+        let capabilities = payload
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let core = self.core.lock().unwrap();
-        let messages: Vec<Value> = match (core.store.as_ref(), before) {
+        let mut messages: Vec<Value> = match (core.store.as_ref(), before) {
             (Some(store), Some(before)) => store.messages_before(before),
             (Some(store), None) => store.messages(),
             (None, _) => Vec::new(),
         };
+        if crate::snapshot_stream::wants_image_elision(&capabilities) {
+            crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
+        }
         response_success(None, "get_messages", Some(json!({ "messages": messages })))
     }
 
