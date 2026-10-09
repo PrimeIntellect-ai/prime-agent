@@ -1207,8 +1207,6 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
     );
 }
 
-/// The model-prompts rule-map warning: one warning status line, never
-/// turn content (pa-core drops it from the LLM view).
 #[test]
 fn model_prompt_error_row_is_a_warning_status_line() {
     let message = json!({

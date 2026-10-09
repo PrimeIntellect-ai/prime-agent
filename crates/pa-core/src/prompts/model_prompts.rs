@@ -1,9 +1,6 @@
-//! Per-model system-prompt additions: a TOML rule map from model
-//! selectors to markdown files, resolved for one session's model and
-//! appended to the static prefix after the constant layers. Shipped rules
-//! (the embedded map plus file table) run before the user's rules from
-//! `<agent_dir>/model-prompts.toml`; any problem in either layer disables
-//! the additions for the session and is reported (model use never blocks).
+//! Per-model system-prompt additions: a TOML rule map from model selectors to markdown files.
+//! Shipped rules run before the user's `<agent_dir>/model-prompts.toml` rules; any problem in
+//! either layer disables all additions for the session and is reported, never blocking.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -12,24 +9,18 @@ use std::path::{Component, Path};
 use pa_types::session::CustomMessage;
 use serde::Deserialize;
 
-/// The shipped rule map: a comment-only format reference, no rules.
 pub const MODEL_PROMPTS_TOML: &str = include_str!("layers/model_prompts.toml");
 
-/// The shipped markdown files rule `files` entries may name, as
-/// `(name, content)` pairs. Empty until real rules ship.
 const MODEL_PROMPT_FILES: &[(&str, &str)] = &[];
 
 const USER_MODEL_PROMPTS_TOML: &str = "model-prompts.toml";
 
-/// The session-status warning row's wire type: `display: true`, dropped
-/// from LLM context by `messages::convert_to_llm`.
+/// `display: true` rows of this type are dropped from LLM context by `messages::convert_to_llm`.
 pub const MODEL_PROMPT_ERROR_CUSTOM_TYPE: &str = "model_prompt_error";
 
 const SHIPPED_SOURCE: &str = "shipped model_prompts.toml";
 
-/// The resolution for one session's model: the joined additions when
-/// rules matched and both layers are problem-free, and every problem
-/// otherwise (`extras` is `None` whenever `errors` is non-empty).
+/// `extras` is `None` whenever `errors` is non-empty.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ModelPromptResolution {
     pub extras: Option<String>,
@@ -97,8 +88,8 @@ fn parse_layer(toml_text: &str, source: &str) -> (Vec<ParsedRule>, Vec<String>) 
     (rules, errors)
 }
 
-/// The selector with a trailing thinking level stripped (only when the
-/// suffix parses as one, mirroring the model parser), split on `/`.
+/// Strips a trailing `:<level>` only when it parses as a thinking level, mirroring the model
+/// parser.
 fn selector_segments(selector: &str) -> Vec<&str> {
     let selector = match selector.rsplit_once(':') {
         Some((prefix, suffix)) if crate::models::resolver::is_valid_thinking_level(suffix) => {
@@ -134,7 +125,6 @@ fn resolve_layer_files(
                 Ok(content) => {
                     contents.insert(name.clone(), content);
                 }
-                // A missing user file falls back to the shipped table.
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     if let Some((_, content)) = shipped_files
                         .iter()
@@ -176,7 +166,6 @@ fn resolve_model_prompts(
             errors.append(&mut layer_errors);
             rules
         }
-        // An absent user map is no problem: the shipped rules still apply.
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => {
             errors.push(format!("{}: {error}", user_path.display()));
@@ -226,15 +215,11 @@ fn resolve_model_prompts(
     ModelPromptResolution { extras, errors }
 }
 
-/// Resolve the additions for one session's model against the shipped map
-/// and the user's `<agent_dir>/model-prompts.toml`.
 #[must_use]
 pub fn load_model_prompts(selector: Option<&str>, agent_dir: &Path) -> ModelPromptResolution {
     resolve_model_prompts(selector, MODEL_PROMPTS_TOML, MODEL_PROMPT_FILES, agent_dir)
 }
 
-/// The one-row session warning: the problems that disabled the additions,
-/// `display: true`, never LLM context.
 #[must_use]
 pub fn model_prompt_error_message(errors: &[String]) -> CustomMessage {
     let list = errors
@@ -262,7 +247,6 @@ mod tests {
         std::fs::write(dir.join(name), content).unwrap();
     }
 
-    /// One rule map in a fresh agent dir.
     fn user_layer(toml_rules: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         write_file(dir.path(), USER_MODEL_PROMPTS_TOML, toml_rules);
@@ -272,7 +256,6 @@ mod tests {
     #[test]
     fn documented_selector_examples_match() {
         let cases = [
-            // (pattern, selector, matches)
             ("glm-5.3", "z-ai/glm-5.3", true),
             ("glm-5.3", "internal/glm-5.3-fast", false),
             ("glm-5.3*", "internal/glm-5.3-fast", true),
@@ -370,11 +353,8 @@ files = ["shared.md", "user-only.md"]
             dir.path(),
         );
         assert!(resolution.errors.is_empty());
-        // The shipped rule's shared.md position carries the user file's
-        // content; the user rule adds its own file after it.
         assert_eq!(resolution.extras.as_deref(), Some("USER\n\nUSER-ONLY"));
 
-        // Without the user's override the shipped content applies.
         let clean = tempfile::tempdir().unwrap();
         let resolution = resolve_model_prompts(
             Some("z-ai/glm-5.3"),
@@ -387,13 +367,11 @@ files = ["shared.md", "user-only.md"]
 
     #[test]
     fn layer_problems_disable_extras_and_name_the_source() {
-        // An absent user map is not an error.
         let empty = tempfile::tempdir().unwrap();
         let resolution = resolve_model_prompts(Some("z-ai/glm-5.3"), "", &[], empty.path());
         assert_eq!(resolution, ModelPromptResolution::default());
 
         let cases = [
-            // (user map text, a fragment the error must name)
             ("not a rule map [", USER_MODEL_PROMPTS_TOML),
             (
                 "[[rule]]\nmatches = [\"glm-5.3\"]\nfiles = [\"a.md\"]\n",
@@ -423,8 +401,6 @@ files = ["shared.md", "user-only.md"]
             );
         }
 
-        // Every problem in both layers is reported at once, and any one of
-        // them disables the additions.
         let dir = user_layer("[[rule]]\nmatch = [\"claude-*\"]\nfiles = [\"missing-user.md\"]\n");
         let resolution = resolve_model_prompts(
             Some("z-ai/glm-5.3"),
@@ -442,8 +418,6 @@ files = ["shared.md", "user-only.md"]
             .iter()
             .any(|error| error.contains("missing-shipped.md")));
 
-        // Without a selector no rule matches, but a broken map still
-        // reports: `prime-agent prompt` without `--model` must surface it.
         let dir = user_layer("not a rule map [");
         let resolution = resolve_model_prompts(None, "", &[], dir.path());
         assert!(resolution.extras.is_none());
@@ -469,7 +443,6 @@ files = ["shared.md", "user-only.md"]
         write_file(&agent_dir, "inside.md", "INSIDE");
 
         let outside = root.path().join("outside.md").display().to_string();
-        // (file entry, expected extras, whether an error must name it)
         let cases = [
             ("inside.md", Some("INSIDE"), false),
             ("../outside.md", None, true),

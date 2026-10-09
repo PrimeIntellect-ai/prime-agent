@@ -62,9 +62,7 @@ pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 /// operator ruling 2026-09-23: one terminal row per episode instead of TS's per-attempt error
 /// rows). Wire twin of `pa_core::session_engine::messages::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`.
 pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
-/// The per-model prompt additions' rule-map warning row (a session-build
-/// status line). Wire twin of
-/// `pa_core::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE`.
+/// Wire twin of `pa_core::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE`.
 pub const MODEL_PROMPT_ERROR_CUSTOM_TYPE: &str = "model_prompt_error";
 
 /// Which agent-message side a row renders: the received transcript rows, or the

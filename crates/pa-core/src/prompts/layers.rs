@@ -1,8 +1,5 @@
-//! Static system-prompt layers: `core.md`, `usage.md`, and
-//! `opinionated.md`, assembled into the cache-stable prefix. Layers must
-//! never contain session-specific values (the cache-safety guard test
-//! pins the boundary). The per-model additions live in
-//! [`crate::prompts::model_prompts`].
+//! Static system-prompt layers assembled into the cache-stable prefix. Layers must never
+//! contain session-specific values (the cache-safety guard test pins the boundary).
 
 pub const CORE_LAYER: &str = include_str!("layers/core.md");
 pub const USAGE_LAYER: &str = include_str!("layers/usage.md");

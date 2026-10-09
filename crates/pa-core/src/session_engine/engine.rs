@@ -450,9 +450,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 
     let prompt_model_selector = format!("{}/{}", model_info.provider, model_info.id);
     let prompt_vision_capable = Some(model_info.input.contains(&pa_types::ai::ModelInput::Image));
-    // Per-model additions resolve at build time; any rule-map problem
-    // warns the user through the boot-notice row and the session runs
-    // without additions.
     let model_prompts = crate::prompts::model_prompts::load_model_prompts(
         Some(&prompt_model_selector),
         &config.agent_dir,

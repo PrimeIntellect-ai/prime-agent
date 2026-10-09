@@ -68,8 +68,6 @@ pub struct BuildSystemPromptOptions<'a> {
     /// Replaces the layered static prefix with user text. The dynamic tail
     /// still applies.
     pub custom_prompt: Option<String>,
-    /// Per-model additions resolved by the model-prompts rule map; a
-    /// static prefix input, dropped when `custom_prompt` replaces it.
     pub model_prompt_extras: Option<&'a str>,
     /// Whether the resolved model accepts image input, when known.
     pub vision_capable: Option<bool>,

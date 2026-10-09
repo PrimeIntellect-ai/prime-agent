@@ -468,7 +468,6 @@ mod tests {
         );
     }
 
-    /// The model-prompts rule-map warning: user-visible, never context.
     #[test]
     fn model_prompt_error_row_is_never_context() {
         let message = crate::prompts::model_prompts::model_prompt_error_message(&[

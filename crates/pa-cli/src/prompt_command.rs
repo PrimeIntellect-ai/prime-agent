@@ -59,8 +59,6 @@ pub fn run_prompt_command(args: &[String]) -> i32 {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     match assemble_breakdown(&cwd, parsed.model.as_deref()) {
         Ok((breakdown, errors)) => {
-            // Rule-map problems never hide the dump: the errors go to
-            // stderr, the effective prompt still prints.
             for error in &errors {
                 eprintln!("Error: {error}");
             }
