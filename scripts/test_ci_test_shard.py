@@ -31,6 +31,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
 REPO = SCRIPTS_DIR.parent
@@ -77,7 +78,8 @@ class EnumerationTestCase(unittest.TestCase):
                            failed_tests=[]) for u in mine]
             SHARD.write_manifest(
                 directory / f"shard-manifest-{shard}.json", shard, TOTAL,
-                self.all_ids, results, scope_by_shard(shard) if scope_by_shard else crates)
+                self.all_ids, results, scope_by_shard(shard) if scope_by_shard else crates,
+                run_attempt=1)
         return selection
 
     def test_the_assignment_is_stable_under_the_selection(self):
@@ -136,13 +138,16 @@ class AuditTestCase(unittest.TestCase):
             use_crates = scope_by_shard(shard) if scope_by_shard else crates
             SHARD.write_manifest(
                 directory / f"shard-manifest-{shard}.json", shard, TOTAL,
-                self.all_ids, results, use_crates)
+                self.all_ids, results, use_crates, run_attempt=1)
 
     def test_a_full_wave_audits_green(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
-            self.green_wave(directory, None)
-            result = run_summary(directory)
+            # Legacy fixture names imply attempt 1 even when this battery runs
+            # inside a GitHub Actions rerun (GITHUB_RUN_ATTEMPT=2 or later).
+            with patch.dict(os.environ, {"GITHUB_RUN_ATTEMPT": "2"}):
+                self.green_wave(directory, None)
+                result = run_summary(directory)
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertIn("full selection", result.stdout)
 
