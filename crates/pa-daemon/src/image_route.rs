@@ -168,6 +168,16 @@ impl AgentSessionEngine {
     /// overtaken by an older clone of this route installing itself after
     /// the refresh — the clone and its install are one critical section.
     pub(crate) fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
+        // The lock spans the session-target capture AND the route install:
+        // `/reload` refreshes the armed route, releases the route lock,
+        // then rebinds the live slot — an apply in that window would
+        // capture the pre-reload session target (and a later clear would
+        // restore it over the reload's pair). Both run under the same
+        // lock: whichever runs last leaves the newest store standing.
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut slot = self
             .image_route
             .lock()
