@@ -13,6 +13,14 @@ impl SessionUi {
         let Ok(goal) = serde_json::from_value::<pa_types::goal::GoalState>(goal) else {
             return;
         };
+        self.goal_terminal = match goal.status {
+            pa_types::goal::GoalStatus::Complete => Some(crate::program_status::Status::Done),
+            pa_types::goal::GoalStatus::Error => Some(crate::program_status::Status::Error),
+            pa_types::goal::GoalStatus::Idle
+            | pa_types::goal::GoalStatus::Active
+            | pa_types::goal::GoalStatus::Paused
+            | pa_types::goal::GoalStatus::BudgetLimited => None,
+        };
         let announce = self.goal_view.apply_update(goal.clone());
         if announce {
             self.announce_goal_status(view);

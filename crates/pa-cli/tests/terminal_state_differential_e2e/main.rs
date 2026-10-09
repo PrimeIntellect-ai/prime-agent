@@ -54,6 +54,12 @@ const KITTY_QUERY: &[u8] = b"\x1b[?u";
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The alt-screen leave: every route that ends the process writes it.
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
+/// The OSC 7501 reports the chat surface writes while a turn runs and rests.
+const STATUS_WORKING: &[u8] = b"\x1b]7501;state=working:app=prime-agent\x1b\\";
+const STATUS_DONE: &[u8] = b"\x1b]7501;state=done:app=prime-agent\x1b\\";
+const STATUS_IDLE: &[u8] = b"\x1b]7501;state=idle:app=prime-agent\x1b\\";
+/// The OSC 7501 clear every exit route writes once a report was sent.
+const STATUS_CLEAR: &[u8] = b"\x1b]7501;state=clear\x1b\\";
 
 /// The child-mode env: which surface this re-executed binary runs.
 const CHILD_MODE_ENV: &str = "PA_DIFF_CHILD_MODE";
@@ -203,6 +209,132 @@ fn write_replay_fixture() -> String {
     // The child reads the file across the process boundary.
     std::mem::forget(dir);
     path.display().to_string()
+}
+
+/// OSC 7501 (program status): the chat surface reports working while a
+/// scripted turn runs, done when the turn settled on a completed goal,
+/// idle when a later ordinary turn settles (a stale done never carries),
+/// and the exit clears the terminal's record. One Esc and one Ctrl+C:
+/// each interrupt key fires once, outside the Esc repeat and the Ctrl+C
+/// pair windows, so the aborts stay deterministic.
+#[test]
+fn program_status_reports_the_turn_and_the_goal_outcome() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the turn started",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the goal's turn settled",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the next turn started",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"\x03");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the later ordinary turn settled",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status reports and clear");
+}
+
+/// OSC 7501: a completed goal's done does not survive the attach into a
+/// new session (`/new`), and the exit still clears the record.
+#[test]
+fn program_status_a_new_session_drops_the_completed_goal() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the turn started",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"\x03");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the goal's turn settled",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/new\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the new session reports idle, not the previous session's done",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status new-session route");
+}
+
+/// OSC 7501: the force-quit watchdog's restore carries the exit clear — the
+/// abrupt exit path owes the terminal the same record removal.
+#[test]
+fn program_status_clear_reaches_the_force_quit_restore() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat").stall(&["list"]));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(
+        STATUS_IDLE,
+        "the resting surface's idle report armed the exit clear",
+    );
+
+    harness.write(b"/list\r");
+    harness.drain_until_quiet(4);
+    harness.write(b"\x03");
+    harness.write(b"\x03");
+    harness.wait_from_start(STATUS_CLEAR, "the force-quit restore wrote the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the watchdog force-quit exited the process cleanly"
+    );
+
+    harness.assert_terminal_state_restored("the force-quit watchdog's exit clear");
 }
 
 /// Route: the parity exit through the `/exit` slash command.
