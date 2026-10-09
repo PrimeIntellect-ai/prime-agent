@@ -31,6 +31,7 @@ from pathlib import Path
 
 # The bundled-catalog gate (same release-scripts directory).
 from bundle_catalog import validate_bundled_catalog_dir
+from native_compat import validate_compatibility_archive
 # The release platform alias the archive name carries (TS parity; the update
 # flow's channel manifest requires alias-named archives).
 from assemble_artifacts import (
@@ -41,9 +42,8 @@ from assemble_artifacts import (
 )
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
-# Never add a root-level install.sh: it is what lets a TypeScript 0.9.8
-# updater install the archive (release.yml's promote job refuses it).
-# Continuous builds additionally stage the package.json version manifest.
+# POSIX archives preserve the native TS updater contract. Every archive
+# carries version metadata; Windows never had a native TS installation.
 # The binary entry is the target's name (`prime-agent.exe` on the MSVC
 # Windows target), resolved in `main` via `binary_name_for_target`.
 EXPECTED_TOP_LEVEL = {
@@ -52,6 +52,7 @@ EXPECTED_TOP_LEVEL = {
     "skills",
     "LICENSE",
     "README.md",
+    "package.json",
     # The bundled catalog assets (spec §3.2): the installed artifact must
     # contain both, and they must pass the same validation gates the packer
     # enforced at assembly time.
@@ -59,6 +60,7 @@ EXPECTED_TOP_LEVEL = {
     "mcp-services.bundled.json",
 }
 CONTINUOUS_EXTRA_TOP_LEVEL = {"package.json"}
+NATIVE_COMPAT_TOP_LEVEL = {"theme", "export-html", "photon_rs_bg.wasm", "PHOTON-LICENSE.md", "install.sh"}
 
 # Same shape as `continuous_version` in assemble_artifacts.py.
 CONTINUOUS_SUFFIX = "continuous"
@@ -103,6 +105,8 @@ def main() -> int:
 
     binary_name = binary_name_for_target(args.target)
     expected_top_level = (EXPECTED_TOP_LEVEL - {"prime-agent"}) | {binary_name}
+    if binary_name != "prime-agent.exe":
+        expected_top_level |= NATIVE_COMPAT_TOP_LEVEL
     expected_top_level |= (
         CONTINUOUS_EXTRA_TOP_LEVEL if (args.sha or args.expect_package_json)
         else set()
@@ -114,6 +118,8 @@ def main() -> int:
     archive = args.dist_dir / archive_name
     if not archive.is_file():
         fail(f"archive {archive} not found; run assemble_artifacts.py first")
+
+    validate_compatibility_archive(archive)
 
     # 1. Deterministic tarball shape: exact top-level payload, no link entries.
     with tarfile.open(archive) as tar:
