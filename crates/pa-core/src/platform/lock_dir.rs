@@ -394,11 +394,37 @@ fn setup_private_dir(
 /// process's live owner record. The marker write is hardened exactly
 /// like `mark_released_through` (nonblocking, no-follow, regular-only).
 #[cfg(target_os = "linux")]
-fn mark_released_at(location: &Path) {
+fn mark_released_at(location: &Path, expected: Option<(u64, u64)>) {
     use std::os::unix::io::AsRawFd;
-    let Some(dir) = std::fs::File::open(location).ok() else {
-        return;
+    // Pin the residue with a NO-FOLLOW directory open and verify its
+    // inode equals the placeholder this pass created: a parent-writer
+    // who swaps a symlink onto the location between the failed removal
+    // and this open cannot redirect the marker into a live victim (the
+    // no-follow open refuses the symlink; a substituted directory fails
+    // the identity check). A mismatch or an open failure writes NOTHING
+    // - the Failed verdict still lets the caller's gated fallback retry,
+    // and the honest worst case is the stale window.
+    use std::os::fd::FromRawFd;
+    let raw =
+        std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(location.as_os_str())).ok();
+    let Some(raw) = raw else { return };
+    let fd = unsafe {
+        libc::open(
+            raw.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
     };
+    if fd < 0 {
+        return;
+    }
+    let dir = unsafe { std::fs::File::from_raw_fd(fd) };
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = dir.metadata().ok().map(|m| (m.dev(), m.ino()));
+        if identity != expected {
+            return;
+        }
+    }
     let name = c"released";
     let fd = unsafe {
         libc::openat(
@@ -954,25 +980,24 @@ impl LockDir {
         let mut collision: Option<io::Error> = None;
         for attempt in 0..8 {
             let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
-            match fs::create_dir(&candidate) {
-                Ok(()) => {
-                    // A hostile umask (e.g. 0477) strips the owner-read
-                    // bit from the fresh directory, and the caller's
-                    // File::open of the candidate would fail before the
-                    // 0700 chmod could fix it: restore the private mode
-                    // here, at creation, before any open.
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        if let Err(error) =
-                            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
-                        {
-                            let _ = fs::remove_dir(&candidate);
-                            return Err(error);
-                        }
-                    }
-                    return Ok(candidate);
-                }
+            #[cfg(unix)]
+            let prior_umask = unsafe { libc::umask(0o077) };
+            let create = fs::create_dir(&candidate);
+            #[cfg(unix)]
+            unsafe {
+                libc::umask(prior_umask)
+            };
+            match create {
+                // The temporary umask guarantees the fresh directory's
+                // mode is exactly 0700 AT CREATION (a hostile umask like
+                // 0477 would otherwise strip the owner bits and every
+                // later read-open would fail): no pathname chmod remains,
+                // so a symlink or directory swapped onto the name before
+                // the no-follow handle setup never receives a permission
+                // change from this call. umask is per-thread on Linux;
+                // the restore makes the window thread-local and bounded
+                // to the mkdir itself.
+                Ok(()) => return Ok(candidate),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     collision = collision.or(Some(error));
                 }
@@ -1105,7 +1130,14 @@ impl LockDir {
         let pid = std::process::id();
         for attempt in 0..8 {
             let placeholder = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
-            if let Err(error) = fs::create_dir(&placeholder) {
+            #[cfg(unix)]
+            let prior_umask = unsafe { libc::umask(0o077) };
+            let create = fs::create_dir(&placeholder);
+            #[cfg(unix)]
+            unsafe {
+                libc::umask(prior_umask)
+            };
+            if let Err(error) = create {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     continue;
                 }
@@ -1126,15 +1158,29 @@ impl LockDir {
             // victim - the no-follow open fails on symlinks, and the
             // handle's inode must equal the mkdir's fresh witness.
             let fresh_witness = identity_at(&placeholder);
-            let setup = setup_private_dir(
+            match setup_private_dir(
                 &placeholder,
                 fresh_witness,
                 0o700,
                 Some(&process_owner_record()),
-            );
-            if let Err(_error) = setup {
-                let _ = remove_candidate_dir(&placeholder);
-                continue;
+            ) {
+                Ok(_dir) => {
+                    // The handle is held only for the setup; the exchange
+                    // operates on pathnames (renameat2), and an open fd on
+                    // the placeholder is safe to hold or drop here.
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        || error.kind() == io::ErrorKind::Other =>
+                {
+                    // A name collision or a swapped entry at the fresh
+                    // name (the no-follow open refuses a symlink, a
+                    // mismatched directory fails the witness): regenerate
+                    // a fresh private name.
+                    let _ = remove_candidate_dir(&placeholder);
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
             if let Err(error) = fs::write(
                 placeholder.join("claimed-at"),
@@ -1433,6 +1479,11 @@ impl LockDir {
                 Some((metadata.dev(), metadata.ino()))
             }
             Err(error) => {
+                // Close the pin BEFORE the cleanup: this is the
+                // mkdir-fallback's own domain (NFS/FUSE/CIFS), where an
+                // open fd makes remove_dir return EBUSY and would strand
+                // the fresh lock the cleanup exists to prevent.
+                drop(dir);
                 if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
                     let _ = remove_candidate_dir(path);
                 }
@@ -1840,12 +1891,25 @@ impl LockDir {
                     continue;
                 }
                 let placeholder = location.with_file_name(format!(".b{pid:x}{nanos:x}{attempt:x}"));
-                if let Err(error) = fs::create_dir(&placeholder) {
+                #[cfg(unix)]
+                let prior_umask = unsafe { libc::umask(0o077) };
+                let create = fs::create_dir(&placeholder);
+                #[cfg(unix)]
+                unsafe {
+                    libc::umask(prior_umask)
+                };
+                if let Err(error) = create {
                     if error.kind() == io::ErrorKind::AlreadyExists {
                         continue;
                     }
                     return InodeRelease::Failed;
                 }
+                // The created placeholder's identity - the witness the
+                // mkdir's umask guarantee and the no-follow setup path
+                // defend - pins the residue for a possible
+                // mark_released_at after a failed removal.
+                #[cfg(unix)]
+                let placeholder_identity = identity_at(&placeholder);
                 // The placeholder is token-protected and private-moded for
                 // the whole interval it may sit at the location.
                 #[cfg(unix)]
@@ -1890,7 +1954,7 @@ impl LockDir {
                                     return InodeRelease::Done;
                                 }
                                 Err(_) => {
-                                    mark_released_at(&location);
+                                    mark_released_at(&location, placeholder_identity);
                                     return InodeRelease::Failed;
                                 }
                             }
