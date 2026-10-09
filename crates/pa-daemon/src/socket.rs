@@ -919,9 +919,13 @@ async fn unlink_stale_socket_with_lease(
                 // is surfaced - a live endpoint must never silently
                 // vanish.
                 Some(_) => {
-                    let restored = std::fs::rename(&claim, path).is_ok()
-                        || std::fs::symlink_metadata(path)
-                            .is_ok_and(|metadata| metadata.file_type().is_file());
+                    // RESTORE with a NO-REPLACE move: a plain rename
+                    // would unlink a newer holder that bound the vacated
+                    // path - the exact violation this fence exists to
+                    // prevent. A failed restoration (the path is
+                    // occupied, or the move errored) fails closed: the
+                    // claimed file stays put and the error surfaces.
+                    let restored = pa_core::platform::move_without_replacing(&claim, path).is_ok();
                     if !restored {
                         return Err(anyhow!(
                             "Displaced socket could not be restored after a racing claim: {}",
@@ -1232,6 +1236,46 @@ mod tests {
             socket_identity(&claim),
             Some(stale_identity),
             "the claimed file is the probed inode"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn displaced_claim_restoration_never_clobbers_an_occupied_path() {
+        // A racing replacement displaced by the claim is restored with
+        // a NO-REPLACE move: a newer holder that bound the vacated
+        // public path survives the restoration, and the fencing error
+        // surfaces (the claim's own file stays preserved on the
+        // private name, never deleted through the occupied path).
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, b"racing-replacement").unwrap();
+        let replacement_identity = socket_identity(&socket).unwrap();
+        // The claim takes the racing replacement out of the public
+        // namespace (this is the post-recheck/pre-claim race landing).
+        let claim = claim_socket_file_for_removal(&socket)
+            .unwrap()
+            .expect("the claim succeeds");
+        assert_eq!(
+            socket_identity(&claim),
+            Some(replacement_identity),
+            "the claim holds the racing replacement's inode"
+        );
+        // A newer holder binds the vacated public path before the
+        // restoration: the restore must NEVER unlink it.
+        std::fs::write(&socket, b"newer-holder").unwrap();
+        // The restore semantics: attempt a no-replace restore onto the
+        // occupied public path - it must refuse.
+        let restored = pa_core::platform::move_without_replacing(&claim, &socket).is_ok();
+        assert!(
+            !restored,
+            "the no-replace restore refuses the occupied public path"
+        );
+        assert!(
+            std::fs::read_to_string(&socket)
+                .unwrap()
+                .contains("newer-holder"),
+            "the newer holder's socket survives the restoration"
         );
     }
 
