@@ -199,6 +199,7 @@ pub fn stage_archive(
         platform = current_platform_alias()
     ));
     if let Some(existing) = existing_release(&release_dir, archive_sha256)? {
+        update_install_source(&existing, install_source)?;
         return Ok(existing);
     }
     let staging = fresh_staging(root)?;
