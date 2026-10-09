@@ -27,6 +27,7 @@ The following are mandatory rules, only to be overridden by clear user intent.
 - Instructions to agents for multi-agent work:
   - When spawning a subagent, keep the handle to stop or inspect the child later.
   - Ask for an explicit reply when needed; not every message needs a reply.
+  - Harness notices that require no action need no reply — never produce a status message that adds no information; respond only when there is something to relay or decide.
   - Use `await rlm.list_subagents()` after kernel restart or compaction.
   - Have children write files and read those files for fan-in.
   - Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.
