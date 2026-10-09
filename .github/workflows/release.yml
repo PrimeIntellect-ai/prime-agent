@@ -139,6 +139,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Trust the mounted checkout for release packaging
+        # checkout scopes its safe.directory setting to a temporary HOME.
+        # Later container steps need the same exact path in their own config.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       # The pinned SHA is the toolchain pin: this action version has no
       # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
       # compiler by changing the SHA; a `toolchain:` input is ignored.
@@ -693,7 +697,13 @@ jobs:
       - name: Verify historical native updater compatibility
         run: |
           set -euo pipefail
-          python3 verification-source/scripts/release/native_compat.py incoming/*/prime-agent-*.tar.gz
+          archives=()
+          for archive in incoming/*/prime-agent-*.tar.gz; do
+            # Source distributions are build inputs, not runnable payloads.
+            case "$archive" in *-src.tar.gz) continue ;; esac
+            archives+=("$archive")
+          done
+          python3 verification-source/scripts/release/native_compat.py "${archives[@]}"
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
           set -euo pipefail
