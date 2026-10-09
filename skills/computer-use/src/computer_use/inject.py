@@ -107,14 +107,14 @@ def _drag(pid: int, start: tuple[float, float], end: tuple[float, float]) -> Non
 def _scroll(pid: int, direction: str, pages: int = 1, point: tuple[float, float] | None = None) -> None:
     """Post a scroll event to the app process with the given pid.
 
-    direction is up, down, left, or right: up/down map to a negative/positive
-    vertical delta and left/right to a negative/positive horizontal delta; one
-    page is 800 pixels. point, when given, is a CG screen-space (x, y) tuple of
-    numbers (int or float) carried as the event location (the App passes the
-    target element's center); None leaves the location unset. Raises
-    ComputerUseError INVALID_ARGUMENT for a bad direction, page count, or
-    point, and INJECTION_FAILED with the underlying CG error text when a CG
-    call fails.
+    direction is up, down, left, or right, following the Quartz wheel
+    convention - a positive vertical value scrolls up, a positive horizontal
+    value scrolls left - and one page is 800 pixels. point, when given, is a
+    CG screen-space (x, y) tuple of numbers (int or float) carried as the
+    event location (the App passes the target element's center); None leaves
+    the location unset. Raises ComputerUseError INVALID_ARGUMENT for a bad
+    direction, page count, or point, and INJECTION_FAILED with the underlying
+    CG error text when a CG call fails.
     """
     if direction not in _SCROLL_DIRECTIONS:
         raise ComputerUseError(
@@ -125,10 +125,10 @@ def _scroll(pid: int, direction: str, pages: int = 1, point: tuple[float, float]
     location = None if point is None else _point(point, "point")
     magnitude = _PIXELS_PER_PAGE * pages
     dy, dx = {
-        "up": (-magnitude, 0),
-        "down": (magnitude, 0),
-        "left": (0, -magnitude),
-        "right": (0, magnitude),
+        "up": (magnitude, 0),
+        "down": (-magnitude, 0),
+        "left": (0, magnitude),
+        "right": (0, -magnitude),
     }[direction]
     try:
         quartz = _require_mac().quartz

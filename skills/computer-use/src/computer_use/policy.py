@@ -16,7 +16,11 @@ from typing import TypedDict
 
 SETTINGS_PATH = Path.home() / ".prime" / "agent" / "settings" / "computer-use.toml"
 
-SYSTEM_DENY: tuple[str, ...] = ("com.apple.loginwindow", "com.apple.ScreenSaver")
+SYSTEM_DENY: tuple[str, ...] = (
+    "com.apple.loginwindow",
+    "com.apple.ScreenSaver",
+    "com.apple.SecurityAgent",  # OS-auth dialogs: password and authorization prompts
+)
 RISK_LABELS: tuple[str, ...] = ("low", "medium", "high")
 DEFAULT_RISK = "medium"
 

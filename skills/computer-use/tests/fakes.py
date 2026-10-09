@@ -374,11 +374,9 @@ class RecordingBackend:
         if self.attach_error is not None:
             raise self.attach_error
 
-    _attach = _attach_image_if_available
-
 
 INJECT_SEAMS = ("_click", "_drag", "_scroll", "_press_key", "_type_text")
-CAPTURE_SEAMS = ("_screenshot_window", "_attach_image_if_available", "_attach")
+CAPTURE_SEAMS = ("_screenshot_window", "_attach_image_if_available")
 
 
 @contextlib.contextmanager

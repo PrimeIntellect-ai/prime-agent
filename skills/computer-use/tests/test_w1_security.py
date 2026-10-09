@@ -1374,6 +1374,14 @@ class RestoreVerificationTests(unittest.TestCase):
             restored = computer_use._restore_clipboard({"string": b"old", "metadata": b""})
         self.assertTrue(restored, "a zero-length type that round-trips is part of a full restore")
 
+    def test_the_os_auth_dialog_host_is_always_refused(self) -> None:
+        from computer_use import policy
+
+        settings = policy.Settings(allowed=("com.apple.SecurityAgent",))
+        result = policy._gate("com.apple.SecurityAgent", settings)
+        self.assertFalse(result.allowed)
+        self.assertIn("built-in system deny-list", result.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

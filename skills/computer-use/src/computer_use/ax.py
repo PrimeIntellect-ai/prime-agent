@@ -107,17 +107,14 @@ def _load_instructions(bundle_id: str) -> str | None:
 def _observe(pid: int) -> Observation:
     """Snapshot the focused window of one app process.
 
-    The walk is bounded by _MAX_OBSERVE_SECONDS; the per-read messaging
-    timeout never exceeds the remaining observation time, so an
-    unresponsive app cannot run past the deadline with one slow attribute.
-    """
-    """Snapshot the focused window of one app process.
-
     Walks the focused window's children depth-first, capped at _MAX_DEPTH
     levels below the window and _MAX_ELEMENTS elements, collecting each
     element's role, subrole, title, value, description, placeholder, actions,
-    position, and size. Raises ComputerUseError TRANSPORT_ERROR off darwin or
-    when the frameworks are missing.
+    position, and size. The walk is bounded by _MAX_OBSERVE_SECONDS; the
+    per-read messaging timeout never exceeds the remaining observation time,
+    so an unresponsive app cannot run past the deadline with one slow
+    attribute. Raises ComputerUseError TRANSPORT_ERROR off darwin or when the
+    frameworks are missing.
     """
     app_services = _require_mac().app_services
     app_element = app_services.AXUIElementCreateApplication(pid)

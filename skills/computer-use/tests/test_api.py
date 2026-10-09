@@ -346,6 +346,39 @@ class InjectionFailureTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, "INJECTION_FAILED")
 
 
+class ScrollDirectionTests(unittest.TestCase):
+    def test_the_scroll_deltas_follow_the_quartz_wheel_convention(self) -> None:
+        from computer_use import inject
+
+        events: list[tuple[int, int]] = []
+
+        class Quartz:
+            kCGScrollEventUnitPixel = "pixel"
+
+            def CGEventCreateScrollWheelEvent(self, source, unit, count, dy, dx):
+                events.append((dy, dx))
+                return "event"
+
+            def CGEventSetLocation(self, event, point):
+                pass
+
+            def CGEventPostToPid(self, pid, event):
+                pass
+
+        fake_mac = types.SimpleNamespace(quartz=Quartz())
+        with mock.patch.object(inject, "_require_mac", lambda: fake_mac):
+            inject._scroll(123, "up", 1)
+            inject._scroll(123, "down", 1)
+            inject._scroll(123, "left", 1)
+            inject._scroll(123, "right", 1)
+        magnitude = inject._PIXELS_PER_PAGE
+        # Quartz: a positive wheel value scrolls up or left
+        self.assertEqual(events[0], (magnitude, 0), "up is a positive vertical wheel")
+        self.assertEqual(events[1], (-magnitude, 0), "down is a negative vertical wheel")
+        self.assertEqual(events[2], (0, magnitude), "left is a positive horizontal wheel")
+        self.assertEqual(events[3], (0, -magnitude), "right is a negative horizontal wheel")
+
+
 if __name__ == "__main__":
     unittest.main()
 

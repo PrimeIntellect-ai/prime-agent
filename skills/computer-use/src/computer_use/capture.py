@@ -343,6 +343,3 @@ async def _attach_image_if_available(path: str) -> None:
         await run(path)
     except Exception:
         return
-
-
-_attach = _attach_image_if_available
