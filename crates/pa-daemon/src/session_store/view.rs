@@ -409,7 +409,21 @@ impl SessionFile {
         let mut last_user_prompt_ms = None;
         self.walk_message_values(|_, message| {
             if message.get("role").and_then(Value::as_str) == Some("user") {
-                if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
+                // The prompt scalar mirrors the TUI's numeric/ISO timestamp
+                // contract without changing the roster's activity-time fold.
+                let prompt_timestamp_ms = match message.get("timestamp") {
+                    Some(Value::Number(number)) => number.as_u64().or_else(|| {
+                        number
+                            .as_f64()
+                            .filter(|value| value.is_finite())
+                            .map(|value| value.max(0.0) as u64)
+                    }),
+                    Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+                        .filter(|ms| *ms > 0)
+                        .map(|ms| ms as u64),
+                    _ => None,
+                };
+                if let Some(timestamp) = prompt_timestamp_ms {
                     last_user_prompt_ms = Some(timestamp);
                 }
             }

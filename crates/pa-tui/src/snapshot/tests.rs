@@ -2287,13 +2287,30 @@ fn backfill_preserves_errors_before_an_unrelated_status() {
 
 #[test]
 fn windowed_prompt_time_prefers_the_readable_tail_over_an_older_scalar() {
-    for timestamp in [json!(2000.75), json!("1970-01-01T00:00:02.000Z")] {
+    for timestamp in [
+        json!(2000.75),
+        json!("1970-01-01T00:00:02.000Z"),
+        json!("1970-01-01T01:00:02.000+01:00"),
+    ] {
         let mut data = slim_attach();
         data["snapshot"]["historyBefore"] = json!(1);
         data["snapshot"]["lastUserPromptMs"] = json!(1000);
         data["snapshot"]["messages"] = json!([
             { "role": "user", "content": "latest", "timestamp": timestamp }
         ]);
+        let mut full = data.clone();
+        full["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("historyBefore");
+        full["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lastUserPromptMs");
+        assert_eq!(
+            reconstruct(&attach_data_from_response(full).unwrap()).last_user_prompt_ms,
+            Some(2000)
+        );
         assert_eq!(
             reconstruct(&attach_data_from_response(data).unwrap()).last_user_prompt_ms,
             Some(2000)

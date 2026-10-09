@@ -419,23 +419,21 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .get("historyBefore")
         .and_then(Value::as_u64)
         .map_or(0, |history| history as usize);
-    let last_user_prompt_ms = if history_before > 0 {
-        snapshot.get("lastUserPromptMs").and_then(Value::as_u64)
-    } else {
-        snapshot
-            .get("messages")
-            .and_then(Value::as_array)
-            .and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| {
-                        message.get("role").and_then(Value::as_str) == Some("user")
-                            && message_timestamp_ms(message).is_some()
-                    })
-                    .and_then(message_timestamp_ms)
+    let last_user_prompt_ms = snapshot
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| {
+            messages.iter().rev().find_map(|message| {
+                (message.get("role").and_then(Value::as_str) == Some("user"))
+                    .then(|| message_timestamp_ms(message))
+                    .flatten()
             })
-    };
+        })
+        .or_else(|| {
+            (history_before > 0)
+                .then(|| snapshot.get("lastUserPromptMs").and_then(Value::as_u64))
+                .flatten()
+        });
     Reconstructed {
         chat: messages,
         model_id,
@@ -467,10 +465,9 @@ fn message_timestamp_ms(message: &Value) -> Option<u64> {
                 .filter(|value| value.is_finite())
                 .map(|value| value.max(0.0) as u64)
         }),
-        Some(Value::String(iso)) => {
-            let ms = crate::agents_view_state::timestamp_ms(Some(iso));
-            (ms > 0).then_some(ms as u64)
-        }
+        Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+            .filter(|ms| *ms > 0)
+            .map(|ms| ms as u64),
         _ => None,
     }
 }

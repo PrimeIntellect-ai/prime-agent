@@ -314,7 +314,11 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
 
 #[tokio::test]
 async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
-    for timestamp in [json!(2000.75), json!("1970-01-01T00:00:02.000Z")] {
+    for timestamp in [
+        json!(2000.75),
+        json!("1970-01-01T00:00:02.000Z"),
+        json!("1970-01-01T01:00:02.000+01:00"),
+    ] {
         for user_index in [1usize, 599] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("timestamp-tail.jsonl");
