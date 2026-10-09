@@ -484,23 +484,30 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
                 continue;
             }
             if let Some(file) = regular_or_close(ro) {
-                // Legacy authentication, strict: the protocol's own
-                // sidecars are O_EXCL creations with exactly two
-                // umask-bitten modes (0200 from umask 0477, 0400 from
-                // 0277) and are never hardlinked. A foreign file planted
-                // at the sidecar path with a restrictive mode does NOT
-                // get repaired: nlink > 1 (the hardlink case) or any
-                // other mode fails closed - `None`, contention, the
-                // documented floor for a hostile sidecar - instead of
-                // chmod'ing another owner's inode.
+                // A HEURISTIC, not authentication: these attributes
+                // (single link, and exactly one of the protocol's two
+                // umask-bitten creation modes - 0200 from umask 0477,
+                // 0400 from 0277) exclude every foreign entry the
+                // protocol can distinguish, but a single-link
+                // restrictive-mode regular file planted directly at the
+                // sidecar path is INDISTINGUISHABLE from a genuine
+                // legacy sidecar, and repairing it (fchmod 0600) is an
+                // ACCEPTED, DOCUMENTED RISK: an actor with write access
+                // to the lock's own parent directory (the only way to
+                // plant such a file) can already replace the lock
+                // directory itself, so the mode repair on their inode
+                // adds no new capability. Everything the heuristic CAN
+                // exclude it does: hardlinks (nlink > 1) and every other
+                // mode fail closed - `None`, contention, the documented
+                // floor for a hostile sidecar.
                 use std::os::fd::AsRawFd;
                 let mut stat: libc::stat = unsafe { std::mem::zeroed() };
                 let statted =
                     unsafe { libc::fstat(file.as_raw_fd(), std::ptr::addr_of_mut!(stat)) } == 0;
                 let mode = stat.st_mode & 0o777;
-                let authenticated =
+                let plausibly_legacy =
                     statted && stat.st_nlink == 1 && (mode == 0o200 || mode == 0o400);
-                if !authenticated {
+                if !plausibly_legacy {
                     return None;
                 }
                 unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
