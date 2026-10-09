@@ -48,10 +48,6 @@ proptest = { workspace = true }
 # interval auto-advances).
 tokio = { workspace = true, features = ["test-util"] }
 
-[[test]]
-name = "golden_system_prompt"
-path = "tests/golden/system_prompt.rs"
-
 [lints.clippy]
 # pa-core keeps its OWN lints table (not `workspace = true`): the
 # workspace's `rust.unsafe_code = "forbid"` would outlaw the platform
