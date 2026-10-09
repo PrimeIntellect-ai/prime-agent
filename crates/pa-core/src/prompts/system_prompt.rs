@@ -307,7 +307,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
     )];
     if options.daemonless {
         lines.push(
-            "Subagents are unavailable in this session (no daemon): rlm.spawn will error. Plan to do all work yourself."
+            "Subagents and completion notifications are unavailable in this session (no daemon): rlm.spawn will error, and nothing wakes you after your turn ends, so await background commands before ending it. Plan to do all work yourself."
                 .to_string(),
         );
     }
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn daemonless_disclosure_follows_the_depth_line() {
-        let disclosure = "Subagents are unavailable in this session (no daemon): rlm.spawn will error. Plan to do all work yourself.";
+        let disclosure = "Subagents and completion notifications are unavailable in this session (no daemon): rlm.spawn will error, and nothing wakes you after your turn ends, so await background commands before ending it. Plan to do all work yourself.";
         let mut options = base_options();
         options.daemonless = true;
         let prompt = build_system_prompt(&options);
