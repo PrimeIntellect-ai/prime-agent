@@ -791,11 +791,12 @@ class App:
 
         posted = False
         consumed = False
+        restored = False
 
         def dispatch() -> None:
             from . import inject
 
-            nonlocal posted, consumed
+            nonlocal posted, consumed, restored
             with _PASTE_LOCK:
                 self._refuse_secure_focus()
                 saved = _save_clipboard()
@@ -871,6 +872,7 @@ class App:
                         pass
                     else:
                         _restore_clipboard(saved)
+                        restored = True
 
         await self._action("paste", dispatch, settle=False)
         if posted and not consumed:
@@ -878,6 +880,11 @@ class App:
                 "pasted, but the app's consumption could not be verified; the "
                 "payload remains on the clipboard (the user's prior clipboard "
                 "content was not restored)"
+            )
+        if not restored:
+            return (
+                "pasted; a concurrent copy was preserved (the user's prior "
+                "clipboard content was not restored)"
             )
         return "pasted; the user's clipboard was restored"
 
