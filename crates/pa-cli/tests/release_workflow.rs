@@ -827,10 +827,10 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     );
 }
 
-/// The publish's beta route serves install.ps1 (the stable render — the
-/// Windows entry point) and never overwrites install.sh (stable-only).
+/// Production installer updates require a stable release on both platforms;
+/// beta releases publish only the explicitly selected beta installer pair.
 #[test]
-fn the_beta_route_publishes_the_windows_entry_point() {
+fn production_installers_are_published_only_by_stable_releases() {
     let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
@@ -861,27 +861,22 @@ fn the_beta_route_publishes_the_windows_entry_point() {
     let beta_block = &publish[beta_start..stable_start];
     let stable_block = &publish[stable_start..];
     assert!(
-        beta_block.contains("render_installer_ps1 stable"),
-        "the beta route must render the stable-channel Windows installer"
-    );
-    assert!(
-        beta_block.contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
-        "the beta route must upload install.ps1 to the bucket root"
-    );
-    assert!(
         beta_block.contains("render_installer beta")
             && beta_block.contains("aws s3 cp /tmp/install-beta.ps1")
             && beta_block.contains("aws s3 cp /tmp/install-beta.sh"),
         "the beta route keeps its own installer pair"
     );
     assert!(
-        !beta_block.contains("aws s3 cp /tmp/install-stable.sh"),
-        "a beta cut must never overwrite install.sh - the TS 0.9.8 funnel bootstraps through it"
+        !beta_block.contains("aws s3 cp /tmp/install-stable.sh")
+            && !beta_block.contains("aws s3 cp /tmp/install-stable.ps1"),
+        "beta releases must preserve both production installers"
     );
     assert!(
         stable_block
-            .contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
-        "the stable route keeps its install.ps1 upload"
+            .contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#)
+            && stable_block
+                .contains(r#"aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh""#),
+        "stable releases publish both production installers"
     );
 }
 
