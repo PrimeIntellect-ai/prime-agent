@@ -180,8 +180,8 @@ impl SocketLease {
                 };
                 #[cfg(not(target_os = "linux"))]
                 let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
-                if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
-                    handle_refresh_failure(
+                if (lost || write_error || !lock_identity_matches(&task_path, &task_identity))
+                    && handle_refresh_failure(
                         lost,
                         write_error,
                         &task_dir,
@@ -189,7 +189,14 @@ impl SocketLease {
                         &task_identity,
                         &task_compromised,
                         &task_tx,
-                    );
+                    )
+                {
+                    // A definitive compromise: the refresh thread STOPS -
+                    // no further tick may refresh an abandoned inode (a
+                    // declared-dead lease writing mtime through its
+                    // pinned fd would keep the lock fresh past every
+                    // stale threshold).
+                    break;
                 }
             }
         });
@@ -446,7 +453,7 @@ fn handle_refresh_failure(
     task_identity: &SocketIdentity,
     task_compromised: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     task_tx: &tokio::sync::watch::Sender<bool>,
-) {
+) -> bool {
     if write_error && !lost {
         // Retry the mtime write after the grace - under the sidecar
         // again: an unguarded retry could refresh a stale judge's
@@ -461,7 +468,7 @@ fn handle_refresh_failure(
             ) {
                 // A dance or release pass is active: defer the retry to
                 // the next tick.
-                None => return,
+                None => return false,
                 Some(retry_guard) => {
                     let retry_failed = task_dir.set_modified(std::time::SystemTime::now()).is_err()
                         || !lock_identity_matches(task_path, task_identity);
@@ -469,8 +476,9 @@ fn handle_refresh_failure(
                     if retry_failed {
                         task_compromised.store(true, std::sync::atomic::Ordering::Release);
                         task_tx.send_replace(true);
+                        return true;
                     }
-                    return;
+                    return false;
                 }
             }
         }
@@ -481,8 +489,9 @@ fn handle_refresh_failure(
             {
                 task_compromised.store(true, std::sync::atomic::Ordering::Release);
                 task_tx.send_replace(true);
+                return true;
             }
-            return;
+            return false;
         }
     }
     // A stale-reclaim dance may hold this lease's directory displaced for
@@ -494,7 +503,9 @@ fn handle_refresh_failure(
     if !lock_identity_matches(task_path, task_identity) {
         task_compromised.store(true, std::sync::atomic::Ordering::Release);
         task_tx.send_replace(true);
+        return true;
     }
+    false
 }
 
 /// The lease release: Linux runs the airtight claim-verify-release
@@ -912,6 +923,32 @@ mod tests {
     /// nobody listening - exactly a crashed worker's residue.
     async fn bind_stale_socket(path: &Path) {
         drop(bind_transport(path).await.expect("bind stale socket"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refresh_ticks_cease_after_compromise() {
+        // A displaced lease declares compromise; the refresh thread
+        // must STOP (drop the lease and join it) - a later tick writing
+        // mtime through the pinned fd would keep an abandoned lock
+        // fresh past every stale threshold.
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&file).await.unwrap();
+        // Displace the lease's directory: the next tick observes the
+        // loss, walks the grace, and declares compromise.
+        std::fs::rename(&lease.lock_path, dir.path().join(".displaced")).unwrap();
+        // Wait past one tick + the grace budget.
+        std::thread::sleep(Duration::from_secs(2) + LEASE_DISPLACEMENT_GRACE * 2);
+        assert!(
+            lease.compromised(),
+            "the displacement past the grace is a compromise"
+        );
+        // The compromised Drop marks the lease released through the
+        // pinned fd and the refresh thread joins cleanly - the thread
+        // exited at the compromise, so no further tick can refresh the
+        // abandoned inode.
+        drop(lease);
     }
 
     #[tokio::test]
