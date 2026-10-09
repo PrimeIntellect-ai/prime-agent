@@ -706,16 +706,17 @@ fn release_lock_dir_identity(
                 let removed = std::fs::remove_file(placeholder.join("owner"))
                     .and_then(|()| std::fs::remove_dir(&placeholder));
                 if removed.is_err() {
-                    // The residue carries this process's live owner
-                    // record and sits at the PUBLIC path - a silent
-                    // failure would wedge every acquisition behind the
-                    // stale window while this process lives. Mark it
-                    // released through the pinned fd (the dance then
-                    // consumes it) and surface the error.
+                    // The residue is the lease's own directory at the
+                    // PRIVATE name (the exchange never ran on this
+                    // mount) - an inert dotname no judge reads, so no
+                    // public wedge exists. The marker through the
+                    // pinned fd is belt-and-braces (the same inode the
+                    // cleanup failed to remove), and the error surfaces
+                    // honestly.
                     pa_core::platform::mark_released_through(lock_dir);
-                    let error = removed
-                        .err()
-                        .unwrap_or_else(|| std::io::Error::other("placeholder cleanup failed"));
+                    let error = removed.err().unwrap_or_else(|| {
+                        std::io::Error::other("private lease residue cleanup failed")
+                    });
                     drop(guarded);
                     return Err(error);
                 }
@@ -728,16 +729,21 @@ fn release_lock_dir_identity(
                 if lock_identity_matches(&placeholder, identity) {
                     // This lease's directory, held where nothing can
                     // replace it: remove it completely, then clear the
-                    // placeholder from the public path. A failed removal
-                    // of the public residue (the owner file, then the
-                    // directory) must not wedge: mark it released
-                    // through the pinned fd and surface the error -
-                    // judge_and_reclaim will not reclaim a stale
-                    // directory with a live owner and no marker.
+                    // placeholder artifact from the public path. The
+                    // artifact at lock_path is THIS PASS'S OWN
+                    // placeholder (the exchange seated it there), so a
+                    // failed removal must mark THAT inode released - the
+                    // pinned lease handle names the original inode now
+                    // at the private name, a different directory. Mark
+                    // through a no-follow, identity-verified handle on
+                    // the public artifact (pa-core's mark_released_at
+                    // with the placeholder identity captured at
+                    // creation) so the residue never wedges behind a
+                    // live owner record.
                     let removed = std::fs::remove_file(lock_path.join("owner"))
                         .and_then(|()| std::fs::remove_dir(lock_path));
                     if removed.is_err() {
-                        pa_core::platform::mark_released_through(lock_dir);
+                        pa_core::platform::mark_released_at(lock_path, placeholder_identity);
                         let error = removed.err().unwrap_or_else(|| {
                             std::io::Error::other("lock directory cleanup failed")
                         });

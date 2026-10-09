@@ -9,6 +9,8 @@ pub mod perms;
 pub mod process;
 pub mod shell;
 
+#[cfg(unix)]
+pub use lock_dir::mark_released_at;
 #[cfg(target_os = "linux")]
 pub use lock_dir::{
     exchange_paths, mark_released_through, move_without_replacing, try_reclaim_guard,

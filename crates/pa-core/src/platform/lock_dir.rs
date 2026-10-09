@@ -542,8 +542,8 @@ fn write_claimed_at_through(dir: &fs::File, note: &[u8]) -> io::Result<()> {
 /// and every judge then consume it instead of refusing it behind this
 /// process's live owner record. The marker write is hardened exactly
 /// like `mark_released_through` (nonblocking, no-follow, regular-only).
-#[cfg(target_os = "linux")]
-fn mark_released_at(location: &Path, expected: Option<(u64, u64)>) {
+#[cfg(unix)]
+pub fn mark_released_at(location: &Path, expected: Option<(u64, u64)>) {
     use std::os::unix::io::AsRawFd;
     // Pin the residue with a NO-FOLLOW directory open and verify its
     // inode equals the placeholder this pass created: a parent-writer
