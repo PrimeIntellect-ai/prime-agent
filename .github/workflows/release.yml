@@ -98,7 +98,9 @@ jobs:
       # release baseline under promote). Pin the multi-arch index so both
       # matrix arches resolve from one reviewed image; update the digest
       # only through reviewed changes.
-      image: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+      # Google's Docker Hub mirror avoids anonymous Docker Hub pull limits;
+      # the identical index digest preserves both reviewed architecture images.
+      image: mirror.gcr.io/library/ubuntu@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
     # Container jobs run `run:` steps with the image's /bin/sh (dash on
     # ubuntu:22.04), which rejects `set -o pipefail`; pin the steps to bash.
     defaults:
