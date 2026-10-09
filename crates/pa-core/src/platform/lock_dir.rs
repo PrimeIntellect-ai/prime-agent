@@ -49,8 +49,18 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
 /// Remove an unpublished lock candidate completely: the auxiliary
 /// files first (a directory containing them cannot be removed), then the
 /// directory. A missing candidate is a non-error (a racing reclaimer).
+/// A SWAPPED SYMLINK is refused untouched: lstat (never follow) must
+/// name a directory - every child unlink and the final remove would
+/// otherwise traverse the link and delete a victim's notes, so the
+/// swapped entry is left for the racing actor to own.
 #[cfg(unix)]
 fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
+    if !fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        // A missing candidate is the racing-reclaimer non-error; a
+        // symlink or file at the name is a swap that must NOT be
+        // followed or removed.
+        return Ok(());
+    }
     for note in ["owner", "claimed-at", "released"] {
         match fs::remove_file(candidate.join(note)) {
             Ok(()) => {}

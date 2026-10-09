@@ -560,6 +560,36 @@ fn restrictive_umask_owned_lock_child() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn remove_candidate_dir_never_follows_a_swapped_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    // A victim directory with live notes, and a symlink pointing at it
+    // where a private candidate would sit: the helper must touch
+    // NOTHING through the link.
+    let victim = dir.path().join("victim");
+    fs::create_dir(&victim).unwrap();
+    fs::write(victim.join("owner"), b"1 live\n").unwrap();
+    fs::write(victim.join("claimed-at"), b"note").unwrap();
+    fs::write(victim.join("released"), b"").unwrap();
+    let link = dir.path().join(".c-symlink-probe");
+    std::os::unix::fs::symlink(&victim, &link).unwrap();
+    remove_candidate_dir(&link).unwrap();
+    assert_eq!(
+        fs::read_to_string(victim.join("owner")).unwrap(),
+        "1 live\n",
+        "the victim's owner record survived the swapped symlink"
+    );
+    assert!(
+        victim.join("claimed-at").exists() && victim.join("released").exists(),
+        "no victim note was unlinked through the symlink"
+    );
+    assert!(link.exists(), "the symlink itself is left for its author");
+    // A MISSING candidate stays the racing-reclaimer non-error.
+    let missing = dir.path().join(".c-missing-probe");
+    assert!(remove_candidate_dir(&missing).is_ok());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn guard_sidecar_is_spelling_independent() {
