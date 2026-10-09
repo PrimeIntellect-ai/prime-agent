@@ -1,6 +1,6 @@
 //! Enable VT processing before the TUI's raw ANSI mode writes, restoring
 //! only the bit this module added on exit. Redirected stdout is untouched.
-//! Rust std handles Unicode console I/O (WriteConsoleW/ReadConsoleW);
+//! Rust std provides console-aware Unicode I/O;
 //! changing console-wide codepages is unnecessary and affects other users
 //! of the attached console. Pipes retain their ordinary byte I/O.
 //! The FFI uses pinned Win32 constants without a windows-sys dependency.

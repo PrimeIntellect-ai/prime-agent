@@ -26,12 +26,9 @@
 //!       entries are distinct files with distinct header ids, the child's
 //!       header names the parent, and the agents view nests the child
 //!       under the parent as its own row.
-//!   (3) `agent_message_rows_dump_their_glyphs` - lots of broken icons:
-//!       the battery captures the headless pane text of the
-//!       agent-message rows, asserts the rows and the agents view's
-//!       glyph-bearing summary rows render into the frames, and writes
-//!       the dumps to `WINDOWS_RUNTIME_TRIAGE_DUMP_DIR` when set (the
-//!       workflow artifact the fleet downloads and inspects).
+//!   (3) `agent_message_rows_dump_their_glyphs` checks non-ASCII text in
+//!       user and assistant headless frames, dumping them when configured.
+//!       It does not validate console glyphs, fonts or ConPTY input/output.
 //!
 //! The harness is PORTABLE by design: the same battery runs in the linux
 //! CI shards (so every lane gates it) and on the windows-2022 runner (the
