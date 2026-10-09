@@ -122,7 +122,13 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) window: Option<SessionWindow>,
+    pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
+    /// Rows the full reader skipped as unparsable (the TS loader's
+    /// lenient skip): zero on a healthy file. A reopen that found damage
+    /// logs this count (silent skips are how a torn session degraded
+    /// unnoticed — the operator's 2026-10-08 report).
+    pub(crate) skipped_lines: usize,
     /// Whether this session has already drawn the Anthropic subscription
     /// ban-risk warning (the once-per-session-lifecycle gate, operator
     /// directive 2026-09-29): hydrated from the persisted
