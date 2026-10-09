@@ -465,7 +465,32 @@ async fn run_loop(
 
         // The gate passed; an abort during the in-flight decision must not be
         // reported as successful work (e.g. finish after a shutdown signal).
+        // The decision is finished work whose tokens are already in the usage
+        // aggregate: it lands in the trace held back and undispatched, the
+        // same ledger the pre-execute timeout keeps - and never counted as
+        // executed, since no dispatch ran.
         if signal.is_some_and(AbortSignal::is_aborted) {
+            state.trace.push(RouterStepTrace {
+                step,
+                timestamp_ms: decision_started_ms,
+                latency_ms,
+                action: Some(action.name.clone()),
+                params: decision.params.clone(),
+                confidence: Some(confidence),
+                gate: RouterGateTrace {
+                    threshold,
+                    verdict: RouterGateVerdict::Pass,
+                },
+                observation_digest: digest,
+                observation_chars: observation_chars(&observation),
+                result: format!(
+                    "held back {}; not dispatched (router aborted before execution)",
+                    action.name
+                ),
+                terminal: false,
+                thinking_level: options.model.thinking_level.clone(),
+                usage: decision.usage,
+            });
             return Ok(state.finish(
                 RouterRunStatus::Failed,
                 "aborted",

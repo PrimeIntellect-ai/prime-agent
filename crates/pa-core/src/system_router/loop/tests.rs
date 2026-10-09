@@ -583,6 +583,58 @@ async fn an_abort_mid_execute_records_the_dispatched_action() {
     );
 }
 
+/// A decision that finishes in the same poll an abort fires wins the biased
+/// race, pays its tokens, and clears its gate - the abort then wins before
+/// the dispatch. The held-back choice is not reported as successful work, but
+/// the segment keeps the ledger the pre-execute timeout keeps: the decision
+/// lands in the trace undispatched with its usage, System 2 sees the step it
+/// paid for, and the environment stays untouched.
+#[tokio::test]
+async fn an_abort_before_dispatch_records_the_held_back_decision() {
+    let env = support::ScriptedEnvironment::with_observation(support::observation("boss room"));
+    let controller = AbortController::new();
+    let aborting = controller.clone();
+    let decide: RouterDecisionFn = Arc::new(move |_request| {
+        let aborting = aborting.clone();
+        Box::pin(async move {
+            // Fire the abort inside the decision future and still finish it:
+            // the biased race prefers the completed decision, so the abort
+            // lands in the pre-dispatch window this test pins.
+            aborting.abort();
+            Ok(support::valid_decision("press", &[("button", "a")], 0.9))
+        })
+    });
+    let mut options = options(Arc::clone(&env), decide);
+    options.signal = Some(controller.signal());
+    let result = run_system_router_loop(options).await.unwrap();
+    assert_eq!(result.status, RouterRunStatus::Failed);
+    assert_eq!(result.reason, "aborted");
+    assert_eq!(result.summary, "Router aborted during the current step.");
+    assert_eq!(result.steps, 1);
+    // Held back, never dispatched: nothing executed.
+    assert_eq!(result.executed, 0);
+    assert_eq!(result.trace[0].action.as_deref(), Some("press"));
+    assert_eq!(result.trace[0].gate.verdict, RouterGateVerdict::Pass);
+    assert!(result.trace[0]
+        .result
+        .contains("not dispatched (router aborted before execution)"));
+    // The decision's usage is matched by its trace row, not left unattributed.
+    assert_eq!(
+        result.trace[0].usage,
+        Some(RouterUsage {
+            input_tokens: 7,
+            output_tokens: 3
+        })
+    );
+    assert_eq!(result.usage.input_tokens, 7);
+    assert_eq!(result.usage.output_tokens, 3);
+    // The held-back decision never reached the environment.
+    assert_eq!(
+        *env.calls.lock().unwrap(),
+        vec!["reset".to_string(), "observe".to_string()]
+    );
+}
+
 #[tokio::test]
 async fn an_abort_mid_decision_fails_the_segment() {
     let env = support::ScriptedEnvironment::with_observation(support::observation("x"));
