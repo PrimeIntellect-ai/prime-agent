@@ -595,8 +595,10 @@ async fn run_controller(
         };
         let generation = ConsentGeneration::read(&controller.cwd, &controller.agent_dir);
         if controller.consent.lock().unwrap().1 != generation || !initialized {
-            let settings =
-                crate::settings::SettingsManager::create(&controller.cwd, &controller.agent_dir);
+            let settings = crate::settings::SettingsManager::create(
+                &controller.cwd,
+                controller.agent_dir.as_ref(),
+            );
             let unchanged =
                 generation == ConsentGeneration::read(&controller.cwd, &controller.agent_dir);
             *controller.consent.lock().unwrap() = (
