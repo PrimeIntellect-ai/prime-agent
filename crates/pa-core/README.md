@@ -93,8 +93,9 @@ Retired descriptors free capacity only after background recovery acknowledges th
 Session replacement transfers its existing slot and cancels the predecessor; forks
 require a distinct slot. Replacement retains a bounded retirement flag until the
 background recovery snapshot acknowledges its exact controller identity. The synchronous
-persist seam performs two settings-generation metadata checks and an exists/create
-pending-marker write; it does not fsync the marker (matching TS v0.9.8 process-crash
+persist seam checks the cached consent snapshot and performs an exists/create
+pending-marker write; consent metadata reads and reloads stay in the worker after
+the host captures its initial settings generation; it does not fsync the marker (matching TS v0.9.8 process-crash
 recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention
 records one stable fallback marker per session, which is retained conservatively
 until a future sender has delivered it. Its cost must be measured

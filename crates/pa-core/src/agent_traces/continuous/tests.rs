@@ -204,7 +204,7 @@ fn measure_synchronous_pending_marker_cost() {
     warm.sort_unstable();
     let report = format!(
         "{}\n",
-        json!({"samples":1000,"cold_marker_ns":{"p50":cold[500],"p95":cold[950],"p99":cold[990]},"warm_marker_ns":{"p50":warm[500],"p95":warm[950],"p99":warm[990]},"fsync":false,"consent_metadata_checks_included":true})
+        json!({"samples":1000,"cold_marker_ns":{"p50":cold[500],"p95":cold[950],"p99":cold[990]},"warm_marker_ns":{"p50":warm[500],"p95":warm[950],"p99":warm[990]},"fsync":false,"consent_metadata_checks_included":false,"cached_consent_check_included":true})
     );
     // Explicit stdout retains this informational measurement in hosted CI logs
     // even when the test harness captures println output for passing tests.
