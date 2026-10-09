@@ -792,6 +792,8 @@ impl Renderer {
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
+                // Enable Windows VT processing before raw ANSI mode writes.
+                pa_types::platform::console_init();
                 // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one
                 // trigger for lifting a pending Ctrl+S stop (see the flow e2e's launch route).
                 crossterm::terminal::enable_raw_mode()?;

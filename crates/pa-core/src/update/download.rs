@@ -199,6 +199,7 @@ pub fn stage_archive(
         platform = current_platform_alias()
     ));
     if let Some(existing) = existing_release(&release_dir, archive_sha256)? {
+        update_install_source(&existing, install_source)?;
         return Ok(existing);
     }
     let staging = fresh_staging(root)?;
@@ -299,13 +300,16 @@ pub async fn stage_local_payload(
 /// The recorded install origin of a reused release follows the operator's
 /// current `--source` (future channel updates resolve from it).
 fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()> {
+    if !super::install::install_source_is_valid(install_source) {
+        anyhow::bail!("the install source {install_source:?} is not an http(s) URL");
+    }
     let path = release_dir.join(".install-source");
     let current = std::fs::read_to_string(&path).unwrap_or_default();
     if current.trim() == install_source.trim() {
         return Ok(());
     }
     std::fs::write(&path, install_source).with_context(|| format!("write {}", path.display()))?;
-    std::fs::File::open(&path)?.sync_all()?;
+    crate::platform::fs::sync_file(&path)?;
     Ok(super::install::sync_directory(release_dir)?)
 }
 
@@ -385,7 +389,7 @@ fn sync_release_tree(root: &Path) -> Result<()> {
                 directories.push(path.clone());
                 walk(&path, directories)?;
             } else if file_type.is_file() {
-                std::fs::File::open(&path)?.sync_all()?;
+                crate::platform::fs::sync_file(&path)?;
             }
         }
         Ok(())
@@ -601,6 +605,16 @@ mod tests {
         );
         let again = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").unwrap();
         assert_eq!(again, release_dir);
+        let mirrored =
+            stage_archive(&archive, &sha, &root, "0.2.0", "https://mirror.example.com").unwrap();
+        assert_eq!(mirrored, release_dir);
+        for invalid_source in ["", "file:///invalid"] {
+            assert!(stage_archive(&archive, &sha, &root, "0.2.0", invalid_source).is_err());
+        }
+        assert_eq!(
+            std::fs::read_to_string(release_dir.join(".install-source")).unwrap(),
+            "https://mirror.example.com"
+        );
         let releases = root.join("releases");
         for entry in std::fs::read_dir(&releases).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
