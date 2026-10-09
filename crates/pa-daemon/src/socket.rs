@@ -152,6 +152,18 @@ impl SocketLease {
         let (refresh_stop, stop_rx) = std::sync::mpsc::channel();
         let refresh = std::thread::spawn(move || {
             while stop_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+                // The heartbeat coordinates with any stale-reclaim dance
+                // through the sidecar: a dance in progress (or a lease
+                // release pass) skips this tick's refresh - the next
+                // tick retries - so a dance can never hold the lock
+                // while a heartbeat refreshes it mid-verification.
+                #[cfg(target_os = "linux")]
+                let Some(guarded) = pa_core::platform::try_reclaim_guard(
+                    &task_path,
+                    std::time::Duration::from_millis(100),
+                ) else {
+                    continue;
+                };
                 let lost = !lock_identity_matches(&task_path, &task_identity);
                 let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
                 if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
@@ -163,6 +175,7 @@ impl SocketLease {
                         // read-only filesystem) is a compromise, never
                         // letting the lock age silently past the stale
                         // threshold while the supervisor keeps serving.
+                        drop(guarded);
                         std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
                         if task_dir.set_modified(std::time::SystemTime::now()).is_err()
                             || !lock_identity_matches(&task_path, &task_identity)
@@ -181,6 +194,7 @@ impl SocketLease {
                     // displacement that persists past the grace (a
                     // suspended dance's token-protected placeholder, or
                     // a real takeover) is a compromise.
+                    drop(guarded);
                     std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
                     if !lock_identity_matches(&task_path, &task_identity) {
                         task_compromised.store(true, std::sync::atomic::Ordering::Release);
@@ -436,101 +450,84 @@ impl SocketLease {
 }
 
 /// The claim-verify-release choreography for a held lock directory
-/// (Linux only, like the socket cleanup it mirrors): claim the directory
-/// under a private name with one no-replace rename, remove it only when
-/// the claimed inode still matches the acquisition's identity, and
-/// restore a displaced successor without ever clobbering a newer
-/// claimant of the vacated path. A takeover landing between the
-/// identity check and the removal cannot have its own lock unlinked.
+/// (Linux only, like the socket cleanup it mirrors), under the
+/// mandatory reclaim guard: the lock directory is EXCHANGED with a
+/// blocking placeholder (a `renameat2` swap - the public path is never
+/// vacated, so a concurrent startup can never acquire the gap), removed
+/// only when the exchanged inode still matches the acquisition's
+/// identity, and a displaced successor is swapped back home atomically
+/// (occupancy cannot fail, so the delete-a-foreign-directory arm is
+/// unrepresentable). A takeover landing between the identity check and
+/// the removal can never have its own lock unlinked, and the public
+/// path is continuously held by either the lease or the placeholder.
 #[cfg(target_os = "linux")]
 fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
     // Serialize with any concurrent stale-reclaim dance (the sidecar's
     // flock): the lease's release choreography and the dance's
     // exchanges must never interleave on the same lock directory. The
     // guard is MANDATORY: without it (a suspended dance holds the
-    // sidecar past the budget) the choreography would race the dance's
-    // exchanges - vacating the public path mid-dance, stranding a live
-    // successor - so the release is skipped entirely and the lease
-    // artifact expires through the stale window instead, the documented
-    // floor.
+    // sidecar past the budget) the choreography is skipped entirely and
+    // the lease artifact expires through the stale window instead, the
+    // documented floor.
     let Some(guarded) =
         pa_core::platform::try_reclaim_guard(lock_path, std::time::Duration::from_millis(100))
     else {
         return;
     };
-    let claim = match claim_lock_dir_under_private_name(lock_path) {
-        Ok(claim) => claim,
-        Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
-            // The filesystem has no no-replace rename (NFS, FUSE and
-            // similar - the same mounts where the acquisition fell back
-            // to the mkdir protocol): no successor-safe removal exists
-            // here, so the lock directory is left to expire through the
-            // stale window instead of risking a check-then-act remove
-            // (see the impl doc above).
-            let _ = (lock_path, identity);
-            return;
-        }
-        Err(_) => return,
+    let Some(parent) = lock_path.parent() else {
+        drop(guarded);
+        return;
     };
-    if lock_identity_matches(&claim, identity) {
-        // The private name cannot be anyone else's lock: unlinking it
-        // cannot touch a successor's directory.
-        let _ = std::fs::remove_dir(&claim);
-    } else if !restore_claim(&claim, lock_path) {
-        // A newer claimant owns the path, so the claimed successor
-        // cannot go back; its holder fences on the displaced inode.
-        // Remove the orphan instead of leaking it.
-        let _ = std::fs::remove_dir(&claim);
-    }
-    drop(guarded);
-}
-
-/// Claim the lock directory under a private name in its own directory:
-/// the short, basename-independent name keeps the claim valid for lock
-/// paths whose component is near the filesystem's limit (the
-/// basename-derived sibling form could exceed it), and the no-replace
-/// rename never overwrites a preserved claim. A taken name regenerates
-/// the suffix instead.
-#[cfg(target_os = "linux")]
-fn claim_lock_dir_under_private_name(lock_path: &Path) -> std::io::Result<std::path::PathBuf> {
-    let parent = lock_path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "lock path has no parent")
-    })?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |age| age.as_nanos());
     let pid = std::process::id();
-    let mut collision: Option<std::io::Error> = None;
     for attempt in 0..8 {
-        let claim = parent.join(format!(".r{pid:x}{nanos:x}{attempt:x}"));
-        match pa_core::platform::move_without_replacing(lock_path, &claim) {
-            Ok(()) => return Ok(claim),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                collision = collision.or(Some(error));
+        let placeholder = parent.join(format!(".l{pid:x}{nanos:x}{attempt:x}"));
+        if let Err(_error) = std::fs::create_dir(&placeholder) {
+            continue;
+        }
+        // The placeholder carries this process's live owner record for
+        // the whole exchange interval: a suspended release leaves a
+        // live-owned artifact at the public path, never a vacancy.
+        let owner_record = format!(
+            "{} {:#x}\n",
+            std::process::id(),
+            uuid::Uuid::new_v4().as_u128()
+        );
+        if std::fs::write(placeholder.join("owner"), owner_record).is_err() {
+            let _ = std::fs::remove_dir(&placeholder);
+            drop(guarded);
+            return;
+        }
+        // The exchange: the public path holds the placeholder while the
+        // incumbent sits at the private name.
+        if let Ok(()) = pa_core::platform::exchange_paths(lock_path, &placeholder) {
+            {
+                if lock_identity_matches(&placeholder, identity) {
+                    // This lease's directory, held where nothing can
+                    // replace it: remove it completely, then clear the
+                    // placeholder from the public path.
+                    let _ = std::fs::remove_file(placeholder.join("owner"));
+                    let _ = std::fs::remove_dir(&placeholder);
+                    let _ = std::fs::remove_file(lock_path.join("owner"));
+                    let _ = std::fs::remove_dir(lock_path);
+                } else {
+                    // Not this lease's directory: a successor's live
+                    // lock. Swap it home atomically - both paths exist,
+                    // so the exchange cannot fail on occupancy - and
+                    // remove the placeholder at its private name. NEVER
+                    // delete the successor's directory.
+                    let _ = pa_core::platform::exchange_paths(lock_path, &placeholder);
+                    let _ = std::fs::remove_file(placeholder.join("owner"));
+                    let _ = std::fs::remove_dir(&placeholder);
+                }
+                drop(guarded);
+                return;
             }
-            Err(error) => return Err(error),
         }
     }
-    Err(collision.unwrap_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "all lock claim names are taken",
-        )
-    }))
-}
-
-/// Put a claimed successor's lock back without ever clobbering a newer
-/// claimant: the move is a no-replace rename, so an occupied path fails
-/// instead of being replaced and the claimed directory stays aside for
-/// the caller to drop. `false` means the caller must drop the claim as
-/// an orphan - either a newer claimant owns the path, or this platform
-/// has no no-replace rename at all, in which case the claimed successor
-/// is never restored (its holder fences on the displaced inode; a
-/// restore attempt here could only be a replacing rename, which is
-/// exactly the clobber this release exists to prevent).
-#[cfg(target_os = "linux")]
-fn restore_claim(claim: &Path, path: &Path) -> bool {
-    pa_core::platform::move_without_replacing(claim, path).is_ok()
+    drop(guarded);
 }
 
 #[cfg(unix)]
@@ -878,41 +875,6 @@ mod tests {
         std::fs::remove_dir(&lock_path).unwrap();
         std::fs::rename(&aside, &lock_path).unwrap();
         assert_path_pins(&lock_path, &pinned).unwrap();
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn restore_claim_returns_the_successor_when_the_path_is_vacant() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("daemon.sock.lock");
-        let claim = dir.path().join("daemon.sock.lock.claimed");
-        std::fs::create_dir(&claim).unwrap();
-        assert!(restore_claim(&claim, &path));
-        assert!(path.is_dir(), "the claimed directory is back at the path");
-        assert!(!claim.exists());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn restore_claim_never_clobbers_a_newer_claimant() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("daemon.sock.lock");
-        let claim = dir.path().join("daemon.sock.lock.claimed");
-        std::fs::create_dir(&claim).unwrap();
-        // A third claimant acquired the vacated path before the restore.
-        std::fs::create_dir(&path).unwrap();
-        let claimant = std::fs::symlink_metadata(&path).unwrap();
-        assert!(!restore_claim(&claim, &path));
-        // The newer claimant's lock survives untouched at the path.
-        let survivor = std::fs::symlink_metadata(&path).unwrap();
-        assert_eq!(
-            (survivor.dev(), survivor.ino()),
-            (claimant.dev(), claimant.ino()),
-            "the newer claimant's lock must not be clobbered"
-        );
-        // The claim stays aside for the caller to drop.
-        assert!(claim.is_dir());
     }
 
     #[cfg(target_os = "linux")]

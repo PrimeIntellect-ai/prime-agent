@@ -147,6 +147,21 @@ pub fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
     rename_noreplace::rename(from, to)
 }
 
+/// Atomically swap the entries at two existing paths
+/// (`renameat2(RENAME_EXCHANGE)`): neither path is ever vacated, so
+/// blocking-placeholder protocols (the stale-reclaim dance, the lease
+/// release) can hold a public lock path continuously. Both paths must
+/// exist; the swap is a single kernel operation.
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] when either path does not exist,
+/// the unsupported-rename errno class on filesystems without
+/// `renameat2`, and any underlying I/O error as-is.
+#[cfg(target_os = "linux")]
+pub fn exchange_paths(a: &Path, b: &Path) -> io::Result<()> {
+    rename_noreplace::exchange(a, b)
+}
+
 // The `libc::timespec` field names are the syscall's own vocabulary;
 // the struct-literal shorthand below is the point.
 #[allow(clippy::similar_names)]
@@ -778,7 +793,11 @@ impl LockDir {
     /// unrepresentable: no path is ever vacated and no live holder's
     /// directory is ever removed by another process.
     #[cfg(target_os = "linux")]
-    fn claim_stale_incumbent(path: &Path, incumbent: Option<(u64, u64)>) -> io::Result<StaleClaim> {
+    fn claim_stale_incumbent(
+        path: &Path,
+        incumbent: Option<(u64, u64)>,
+        stale_after: Duration,
+    ) -> io::Result<StaleClaim> {
         // The cheap pre-check: a successor that already replaced the
         // incumbent is detected without moving anything, and a path that
         // vanished since the judge's snapshot is retry material, never
@@ -865,7 +884,26 @@ impl LockDir {
             }
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
-                    if identity_at(&placeholder) == incumbent {
+                    let claimed = identity_at(&placeholder);
+                    let still_stale = fs::symlink_metadata(&placeholder)
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|mtime| mtime.elapsed().ok())
+                        .is_some_and(|age| age > stale_after);
+                    // The heartbeat may have refreshed this very inode
+                    // after the judge's snapshot: a claimed incumbent
+                    // that is no longer stale is a LIVE lease - swap it
+                    // home and report contention, never remove it.
+                    if claimed == incumbent && !still_stale {
+                        if let Err(error) = rename_noreplace::exchange(path, &placeholder) {
+                            if error.kind() != io::ErrorKind::NotFound {
+                                return Err(error);
+                            }
+                        }
+                        let _ = remove_candidate_dir(&placeholder);
+                        return Ok(StaleClaim::Successor);
+                    }
+                    if claimed == incumbent {
                         // The judged stale incumbent, held at the private
                         // name: remove it there (owner file first). The
                         // placeholder itself still blocks the public
@@ -1216,7 +1254,7 @@ impl LockDir {
                             format!("Lock file is already being held: {}", path.display()),
                         ));
                     }
-                    match Self::claim_stale_incumbent(path, incumbent)? {
+                    match Self::claim_stale_incumbent(path, incumbent, stale_after)? {
                         StaleClaim::Removed | StaleClaim::Vanished => return Ok(()),
                         StaleClaim::Successor => {
                             return Err(io::Error::new(
