@@ -269,3 +269,73 @@ async fn fresh_create_ignores_a_legacy_crash_orphan() {
     let killed = worker.dispatch("kill", &json!({})).await;
     assert!(killed.success, "{killed:?}");
 }
+
+#[tokio::test]
+async fn a_resume_is_append_only_and_never_deletes_rows() {
+    // The reopen contract (the operator's 2026-10-08 report: reopening an
+    // old session showed none of the old messages): a resumed session is
+    // APPEND-ONLY. The TS-style loader skips a malformed row in memory,
+    // but the file keeps it — a reopen that rewrites the file (the
+    // pre-windowing behavior the full-reader arm still carried) deletes
+    // the row permanently, and a gap early in the parent chain takes the
+    // whole transcript with it: the branch walk stops at the gap.
+    let dir = tempfile::tempdir().unwrap();
+    let session_dir = dir.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+    let mut store = SessionFile::create("/tmp", None, 0);
+    let path = session_dir.join(session_file_name(store.session_id()));
+    store.set_path(path.clone());
+    store.rewrite().unwrap();
+    let mut last_id = String::new();
+    for text in ["the first turn", "the second turn"] {
+        last_id = store.append_entry(
+            "message",
+            json!({ "message": { "role": "user", "content": text } }),
+        );
+    }
+    store.rewrite().unwrap();
+    // A mid-file unparsable row between two valid rows: the tail stays
+    // healthy, so the torn-tail repair leaves the file alone; only the
+    // loader's row-skip sees it.
+    let mut original = std::fs::read_to_string(&path).unwrap();
+    // The torn row is newline-terminated: a MID-file unparsable row the
+    // loader skips (the tail stays healthy, so the torn-tail repair leaves
+    // the file alone — that repair owns only the trailing row).
+    let torn = "{\"type\":\"message\",\"id\":\"torn-row\",\"parentId\":nu\n";
+    let after_torn = format!(
+        "{{\"type\":\"message\",\"id\":\"after-the-gap\",\"parentId\":\"{last_id}\",\"timestamp\":\"2026-10-08T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"the row after the gap\"}}}}\n"
+    );
+    original.push_str(torn);
+    original.push_str(&after_torn);
+    std::fs::write(&path, &original).unwrap();
+    let bytes_before = std::fs::read(&path).unwrap();
+
+    let worker = worker_in(dir.path(), "resume-append-only");
+    let response = worker
+        .dispatch(
+            "create",
+            &json!({"cwd": "/tmp", "sessionPath": path.display().to_string()}),
+        )
+        .await;
+    assert!(response.success, "{response:?}");
+    let bytes_after = std::fs::read(&path).unwrap();
+    assert!(
+        bytes_after.starts_with(&bytes_before),
+        "the reopen appends without touching a single original byte\nbefore:\n{bytes_before:?}\nafter:\n{bytes_after:?}"
+    );
+    let text_after = String::from_utf8_lossy(&bytes_after);
+    assert!(
+        text_after.contains(torn),
+        "the unparsable row stays on disk for the repair to see"
+    );
+    assert!(
+        text_after.contains("the row after the gap"),
+        "the row after the gap stays byte-for-byte"
+    );
+    assert!(
+        text_after.contains("the first turn"),
+        "the pre-gap rows stay byte-for-byte"
+    );
+    let killed = worker.dispatch("kill", &json!({})).await;
+    assert!(killed.success, "{killed:?}");
+}

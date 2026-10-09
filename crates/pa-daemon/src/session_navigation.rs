@@ -17,6 +17,8 @@ use crate::worker::{SessionCore, Worker};
 pub(crate) struct PreparedReplacement {
     pub(crate) file: SessionFile,
     pub(crate) cwd: Option<String>,
+    // A successful fresh write owes scheduling only after publication.
+    trace_persisted: bool,
 }
 
 /// The navigation surface: the prepare and swap phases of the replacement
@@ -47,7 +49,12 @@ impl SessionNavigation {
     /// Swap the live session onto `file` (store, engine session file, rebuilt
     /// context). The caller retires the previous runtime and rebinds the cwd
     /// first, so the context park lands on the fresh session.
-    async fn replace_session(&self, file: SessionFile) -> Result<(), String> {
+    async fn replace_session(&self, target: PreparedReplacement) -> Result<(), String> {
+        let PreparedReplacement {
+            mut file,
+            trace_persisted,
+            ..
+        } = target;
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
         // Prime the new store's usage fold before it enters the core: the
@@ -74,11 +81,30 @@ impl SessionNavigation {
         // the retired pass's notices cannot land in the replacement's
         // inbox or steering queue.
         let mut previous: Option<SessionFile> = None;
+        let mut traces: Option<Arc<pa_core::agent_traces::ContinuousTraceUpload>> = None;
         self.engine.clear_agent_watches(Box::new(|| {
-            previous = self
-                .agent_digest
-                .reset_for_replacement(|core| core.store.replace(file));
+            let (old, upload) = self.agent_digest.reset_for_replacement(|core| {
+                if file.trace_upload.is_none() {
+                    file.trace_upload = core
+                        .store
+                        .as_ref()
+                        .and_then(|old| old.trace_upload.as_ref())
+                        .and_then(|traces| {
+                            traces.rebind(std::path::Path::new(&core.cwd), &file.path)
+                        });
+                }
+                let upload = file.trace_upload.clone();
+                // No await or fallible preparation between slot transfer and publication.
+                (core.store.replace(file), upload)
+            });
+            previous = old;
+            traces = upload;
         }));
+        if let Some(traces) = traces.filter(|_| trace_persisted) {
+            // The successful prepare wrote this file before its controller existed.
+            // Record bounded intent outside the core lock, after publication.
+            traces.persisted(&new_path);
+        }
         // The old store's lease release flushes the window and info
         // sidecars (megabytes for a large session): off the core lock
         // and the runtime.
@@ -162,9 +188,11 @@ impl SessionNavigation {
             }
         }
         // TS `newSession` keeps the runtime's cwd: the fresh session runs where the live one did.
+        let trace_persisted = !fresh.path.as_os_str().is_empty();
         Ok(PreparedReplacement {
             file: fresh,
             cwd: None,
+            trace_persisted,
         })
     }
 
@@ -305,7 +333,11 @@ impl SessionNavigation {
                 ));
             }
         }
-        Ok(PreparedReplacement { file, cwd })
+        Ok(PreparedReplacement {
+            file,
+            cwd,
+            trace_persisted: false,
+        })
     }
 }
 
@@ -347,7 +379,7 @@ impl Worker {
         if let Some(cwd) = target.cwd.as_deref() {
             self.rebind_worker_cwd(cwd);
         }
-        match self.navigation.replace_session(target.file).await {
+        match self.navigation.replace_session(target).await {
             Ok(()) => {
                 self.refresh_replaced_session_state().await;
                 self.reseed_service_tier_for_replacement();
@@ -955,7 +987,14 @@ mod tests {
         let mut fresh = SessionFile::create("/tmp", None, 0);
         fresh.set_path(dir.join(session_file_name(fresh.session_id())));
         fresh.rewrite().unwrap();
-        navigation.replace_session(fresh).await.unwrap();
+        navigation
+            .replace_session(PreparedReplacement {
+                file: fresh,
+                cwd: None,
+                trace_persisted: false,
+            })
+            .await
+            .unwrap();
         // The replacement session starts on the default push lane with
         // fresh counters: neither the retired session's pin nor its mode
         // survived the swap.
@@ -1044,7 +1083,14 @@ mod tests {
             let mut fresh = SessionFile::create("/tmp", None, 0);
             fresh.set_path(fresh_path.clone());
             fresh.rewrite().unwrap();
-            navigation.replace_session(fresh).await.unwrap();
+            navigation
+                .replace_session(PreparedReplacement {
+                    file: fresh,
+                    cwd: None,
+                    trace_persisted: false,
+                })
+                .await
+                .unwrap();
             // The replaced-in store: after the swap every route pushes (the
             // pin reset rode the swap's hold), so a digested row in THIS file
             // means a delivery read the swapped store with the retired pin.
@@ -1069,5 +1115,133 @@ mod tests {
             json!(false),
             "the final replacement left the lane push-pinned"
         );
+    }
+}
+
+#[cfg(test)]
+mod trace_replacement_tests {
+    use super::*;
+
+    #[test]
+    fn failed_new_session_prepare_preserves_the_live_trace_registration() {
+        let _env = crate::trace_test_env::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, "synthetic blocker").unwrap();
+        let old_path = blocked.join("old.jsonl");
+        let agent_dir = dir.path().join("agent");
+        let (_, consent) =
+            pa_core::agent_traces::ContinuousTraceUpload::load_settings(dir.path(), &agent_dir);
+        let controller = pa_core::agent_traces::ContinuousTraceUpload::install(
+            dir.path(),
+            &agent_dir,
+            Some(&old_path),
+            consent,
+        )
+        .unwrap();
+        let mut store = SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+        store.set_path(old_path.clone());
+        store.trace_upload = Some(controller.clone());
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            dir.path().to_string_lossy().into_owned(),
+        )));
+        let navigation = SessionNavigation::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            core.clone(),
+            Arc::new(crate::worker::AgentMessageDigest::new(
+                Arc::clone(&core),
+                Arc::new(Mutex::new(None)),
+                Arc::new(tokio::sync::Notify::new()),
+            )),
+        );
+        assert!(navigation.prepare_new_session(&json!({})).is_err());
+        let live = core.lock().unwrap();
+        assert_eq!(live.store.as_ref().unwrap().path, old_path);
+        assert!(Arc::ptr_eq(
+            live.store.as_ref().unwrap().trace_upload.as_ref().unwrap(),
+            &controller
+        ));
+        drop(live);
+        // A cancelled predecessor cannot transfer its registry slot again.
+        assert!(controller
+            .rebind(dir.path(), &dir.path().join("probe.jsonl"))
+            .is_some());
+        assert!(!agent_dir.join("agent-traces-outbox").exists());
+    }
+
+    /// The composed replacement seam (#3415's carryover inside the digest
+    /// lane's reset hold): a successful switch carries the live session's
+    /// trace registration onto the replacement as a REBOUND controller for
+    /// the new path, the retired session's digest pin does not survive the
+    /// swap, and the prepared switch records no durable upload intent.
+    #[tokio::test]
+    async fn a_prepared_switch_carries_the_trace_registration_and_resets_the_lane() {
+        let _env = crate::trace_test_env::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let old_path = dir.path().join("live.jsonl");
+        let (_, consent) =
+            pa_core::agent_traces::ContinuousTraceUpload::load_settings(dir.path(), &agent_dir);
+        let controller = pa_core::agent_traces::ContinuousTraceUpload::install(
+            dir.path(),
+            &agent_dir,
+            Some(&old_path),
+            consent,
+        )
+        .unwrap();
+        let mut live = SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+        live.set_path(old_path.clone());
+        live.rewrite().unwrap();
+        live.trace_upload = Some(controller.clone());
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(live),
+            dir.path().to_string_lossy().into_owned(),
+        )));
+        let digest = Arc::new(crate::worker::AgentMessageDigest::new(
+            Arc::clone(&core),
+            Arc::new(Mutex::new(None)),
+            Arc::new(tokio::sync::Notify::new()),
+        ));
+        // The retired session ran a live digest lane.
+        digest.configure_pin("digest").unwrap();
+        let navigation = SessionNavigation::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            Arc::clone(&core),
+            Arc::clone(&digest),
+        );
+        let fresh_path = dir.path().join("fresh.jsonl");
+        let mut fresh = SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+        fresh.set_path(fresh_path.clone());
+        fresh.rewrite().unwrap();
+        navigation
+            .replace_session(PreparedReplacement {
+                file: fresh,
+                cwd: None,
+                trace_persisted: false,
+            })
+            .await
+            .unwrap();
+        let locked = core.lock().unwrap();
+        let replaced = locked.store.as_ref().expect("the swapped-in store");
+        assert_eq!(replaced.path, fresh_path);
+        // The replacement's store carries a REBOUND controller for the new
+        // path — a new registration, never the retired session's pointer.
+        let carried = replaced
+            .trace_upload
+            .as_ref()
+            .expect("the carried trace registration");
+        assert!(
+            !Arc::ptr_eq(carried, &controller),
+            "the replacement carried the retired pointer instead of rebinding"
+        );
+        // The retired session's digest pin did not survive the swap.
+        assert!(
+            !locked.agent_message_digest_mode,
+            "the replacement reset the lane mode"
+        );
+        drop(locked);
+        // A prepared switch owes no durable upload intent.
+        assert!(!agent_dir.join("agent-traces-outbox").exists());
     }
 }
