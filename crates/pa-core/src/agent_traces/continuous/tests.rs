@@ -10,7 +10,7 @@ async fn recover(
     base_url: Option<String>,
     cancel: TraceUploadCancel,
 ) -> bool {
-    recover_with_backoff(cwd, agent_dir, permits, http, base_url, cancel)
+    recover_with_backoff(cwd, agent_dir, permits, http, base_url, cancel, None)
         .await
         .0
 }
@@ -18,7 +18,7 @@ async fn recover(
 fn controller(fixture: &Fixture, path: &Path, enabled: bool) -> Arc<ContinuousTraceUpload> {
     Arc::new(ContinuousTraceUpload {
         cwd: fixture.cwd.clone(),
-        agent_dir: fixture.agent_dir.clone(),
+        agent_dir: Arc::new(fixture.agent_dir.clone()),
         consent: Mutex::new((
             enabled,
             ConsentGeneration::read(&fixture.cwd, &fixture.agent_dir),
@@ -556,27 +556,30 @@ fn recovery_registry_releases_inactive_directory_capacity_and_preserves_other_ho
     for n in 0..MAX_CONTROLLERS - 1 {
         recovered.insert(
             PathBuf::from(format!("synthetic-inactive-{n}")),
-            (
-                dead_cancel.clone(),
-                Arc::new(std::sync::atomic::AtomicU8::new(2)),
-            ),
+            RecoveryRun {
+                cancel: dead_cancel.clone(),
+                ..RecoveryRun::new(vec![])
+            },
         );
     }
     recovered.insert(
         fixture.agent_dir,
-        (
-            live_cancel.clone(),
-            Arc::new(std::sync::atomic::AtomicU8::new(1)),
-        ),
+        RecoveryRun {
+            cancel: live_cancel.clone(),
+            ..RecoveryRun::new(vec![Arc::downgrade(&c), Arc::downgrade(&another_host)])
+        },
     );
-    let weak = Arc::downgrade(&c);
+    let registration = Registration::of(&c);
     drop(c);
-    retain_live_recoveries(&mut recovered, &[weak, Arc::downgrade(&another_host)]);
+    let _ = retain_live_recoveries(
+        &mut recovered,
+        &[registration, Registration::of(&another_host)],
+    );
     assert!(dead_cancel.is_cancelled());
     assert!(!live_cancel.is_cancelled());
     assert_eq!(recovered.len(), 1);
     drop(another_host);
-    retain_live_recoveries(&mut recovered, &[]);
+    let _ = retain_live_recoveries(&mut recovered, &[]);
     assert!(live_cancel.is_cancelled());
     assert!(recovered.is_empty());
 }
@@ -656,7 +659,7 @@ async fn incomplete_recovery_cooldown_is_bounded_and_shutdown_cancellable() {
         settle_recovery_run(&task_state, false, None, &task_cancel).await;
     });
     tokio::task::yield_now().await;
-    tokio::time::advance(MIN_INTERVAL - DEBOUNCE).await;
+    tokio::time::advance(MIN_INTERVAL.checked_sub(DEBOUNCE).unwrap()).await;
     assert_eq!(state.load(Ordering::Acquire), 1);
     tokio::time::advance(DEBOUNCE).await;
     task.await.unwrap();
@@ -768,6 +771,7 @@ async fn mixed_consent_rescan_preserves_exhausted_rate_limit_deadline() {
         sink,
         Some("http://synthetic.invalid".into()),
         TraceUploadCancel::new(),
+        None,
     ));
     for _ in 0..3 {
         let (_body, reply) = observed.recv().await.unwrap();
@@ -815,4 +819,175 @@ fn oversized_cursor_records_fail_closed_with_bounded_reads() {
         read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
         None
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn pending_live_owner_keeps_recovery_incomplete_until_retirement() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("live-retirement.jsonl", "live-retirement");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let c = controller(&fixture, &path, true);
+    let weak = Arc::downgrade(&c);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![]));
+    let (complete, _) = recover_with_backoff(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+        Some(vec![weak]),
+    )
+    .await;
+    assert!(!complete);
+    drop(c);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_retirement_rearms_an_already_complete_group_for_later_markers() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("late-marker.jsonl", "late-marker");
+    let c = controller(&fixture, &path, true);
+    let another = controller(&fixture, &fixture.session_dir.join("survivor.jsonl"), true);
+    let weak = Arc::downgrade(&c);
+    let another_weak = Arc::downgrade(&another);
+    let mut runs = RecoveryRuns::new();
+    let run = RecoveryRun::new(vec![weak.clone(), another_weak.clone()]);
+    run.state.store(2, Ordering::Release);
+    runs.insert(fixture.agent_dir.clone(), run);
+    let registration = Registration::of(&c);
+    let another_registration = Registration::of(&another);
+    c.persisted(&path);
+    drop(c);
+    let _ = retain_live_recoveries(&mut runs, &[registration, another_registration]);
+    let run = runs.get(&fixture.agent_dir).unwrap();
+    assert!(run.replay_needed.load(Ordering::Acquire));
+    assert!(!run.cancel.is_cancelled());
+    rearm_retired_recovery(run);
+    assert_eq!(run.state.load(Ordering::Acquire), 1);
+    tokio::task::yield_now().await;
+    tokio::time::advance(MIN_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert_eq!(run.state.load(Ordering::Acquire), 0);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn retirement_racing_completion_survives_and_preserves_the_retry_deadline() {
+    let run = RecoveryRun::new(vec![]);
+    run.state.store(1, Ordering::Release);
+    let complete = !run.replay_needed.load(Ordering::Acquire);
+    run.replay_needed.store(true, Ordering::Release);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    *run.not_before.lock().unwrap() = Some(deadline);
+    settle_recovery_run(&run.state, complete, Some(deadline), &run.cancel).await;
+    assert_eq!(run.state.load(Ordering::Acquire), 2);
+    rearm_retired_recovery(&run);
+    rearm_retired_recovery(&run);
+    assert_eq!(run.state.load(Ordering::Acquire), 1);
+    tokio::task::yield_now().await;
+    tokio::time::advance(MIN_INTERVAL).await;
+    assert_eq!(run.state.load(Ordering::Acquire), 1);
+    tokio::time::advance(MIN_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert_eq!(run.state.load(Ordering::Acquire), 0);
+    assert!(
+        run.replay_needed.load(Ordering::Acquire),
+        "only a new sweep may clear retirement intent"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn between_tick_retirement_and_late_acknowledgement_preserve_pending_markers() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let survivor = controller(&fixture, &fixture.session_dir.join("survivor.jsonl"), true);
+    let run = RecoveryRun::new(vec![Arc::downgrade(&survivor)]);
+    run.state.store(2, Ordering::Release);
+    let mut runs = RecoveryRuns::new();
+    runs.insert(fixture.agent_dir.clone(), run);
+    let mut registrations = vec![Registration::of(&survivor)];
+    let first_path = fixture.write_session("between-ticks.jsonl", "between-ticks");
+    let first = controller(&fixture, &first_path, true);
+    registrations.push(Registration::of(&first));
+    first.persisted(&first_path);
+    drop(first);
+    let retired = retain_live_recoveries(&mut runs, &registrations);
+    assert_eq!(retired.len(), 1);
+    let second_path = fixture.write_session("after-snapshot.jsonl", "after-snapshot");
+    let second = controller(&fixture, &second_path, true);
+    registrations.push(Registration::of(&second));
+    second.persisted(&second_path);
+    drop(second);
+    acknowledge_retired_registrations(&mut registrations, &retired);
+    assert_eq!(
+        registrations.len(),
+        2,
+        "a retirement after the snapshot must remain until the next tick"
+    );
+    let retired = retain_live_recoveries(&mut runs, &registrations);
+    assert_eq!(retired.len(), 1);
+    acknowledge_retired_registrations(&mut registrations, &retired);
+    assert_eq!(registrations.len(), 1);
+    let run = runs.get(&fixture.agent_dir).unwrap();
+    assert!(run.replay_needed.load(Ordering::Acquire));
+    rearm_retired_recovery(run);
+    tokio::task::yield_now().await;
+    tokio::time::advance(MIN_INTERVAL).await;
+    tokio::task::yield_now().await;
+    assert_eq!(run.state.load(Ordering::Acquire), 0);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![
+        Ok(response(200, "{}")),
+        Ok(response(200, "{}")),
+    ]));
+    assert!(
+        recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    for path in [&first_path, &second_path] {
+        assert_eq!(
+            read_agent_trace_outbox_entry(&fixture.agent_dir, path),
+            TraceUploadSignature::of(path)
+        );
+    }
 }

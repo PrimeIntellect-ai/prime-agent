@@ -97,7 +97,7 @@ pub struct TraceConsentSnapshot {
 /// no host shutdown awaits this worker or its retry timers.
 pub struct ContinuousTraceUpload {
     cwd: PathBuf,
-    agent_dir: PathBuf,
+    agent_dir: Arc<PathBuf>,
     consent: Mutex<(bool, ConsentGeneration)>,
     // The path is passed by the writer: forks/rebindings cannot upload a stale path.
     pending: Mutex<Option<(PathBuf, Schedule)>>,
@@ -181,7 +181,7 @@ impl ContinuousTraceUpload {
     ) -> Arc<Self> {
         let controller = Arc::new(Self {
             cwd: cwd.to_path_buf(),
-            agent_dir: agent_dir.to_path_buf(),
+            agent_dir: Arc::new(agent_dir.to_path_buf()),
             consent: Mutex::new((consent.enabled, consent.generation)),
             pending: Mutex::new(session_file.map(|p| (p.to_path_buf(), Schedule::default()))),
             wake: Arc::new(tokio::sync::Notify::new()),
@@ -193,9 +193,10 @@ impl ContinuousTraceUpload {
             tracing::warn!("trace registration failed; durable intent retained for recovery");
             return controller;
         };
-        registrations.retain(|item| item.strong_count() > 0);
+        // Dead registrations are acknowledged only by the background service,
+        // so even a host that retires between service ticks retains its directory.
         if registrations.len() < MAX_CONTROLLERS {
-            registrations.push(Arc::downgrade(&controller));
+            registrations.push(Registration::of(&controller));
             service.wake.notify_one();
         } else {
             tracing::warn!(
@@ -338,8 +339,23 @@ fn delivery_lease(agent_dir: &Path, path: &Path) -> Option<std::fs::File> {
     Some(file)
 }
 
+#[derive(Clone)]
+struct Registration {
+    controller: Weak<ContinuousTraceUpload>,
+    agent_dir: Arc<PathBuf>,
+}
+
+impl Registration {
+    fn of(controller: &Arc<ContinuousTraceUpload>) -> Self {
+        Self {
+            controller: Arc::downgrade(controller),
+            agent_dir: controller.agent_dir.clone(),
+        }
+    }
+}
+
 struct Service {
-    controllers: Mutex<Vec<Weak<ContinuousTraceUpload>>>,
+    controllers: Mutex<Vec<Registration>>,
     wake: tokio::sync::Notify,
 }
 
@@ -374,27 +390,93 @@ fn service() -> &'static Service {
     })
 }
 
-// Recovery phases: 0 pending, 1 running, 2 completed for the current live hosts.
-type RecoveryRuns =
-    std::collections::HashMap<PathBuf, (TraceUploadCancel, Arc<std::sync::atomic::AtomicU8>)>;
+// Recovery phases: 0 pending, 1 running/cooling down, 2 completed.
+struct RecoveryRun {
+    cancel: TraceUploadCancel,
+    state: Arc<std::sync::atomic::AtomicU8>,
+    replay_needed: Arc<AtomicBool>,
+    not_before: Arc<Mutex<Option<Instant>>>,
+    // Weak identities pin allocations, so retirement detection cannot reuse addresses.
+    hosts: Vec<Weak<ContinuousTraceUpload>>,
+}
+
+impl RecoveryRun {
+    fn new(hosts: Vec<Weak<ContinuousTraceUpload>>) -> Self {
+        Self {
+            cancel: TraceUploadCancel::new(),
+            state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            replay_needed: Arc::new(AtomicBool::new(false)),
+            not_before: Arc::new(Mutex::new(None)),
+            hosts,
+        }
+    }
+}
+
+type RecoveryRuns = std::collections::HashMap<PathBuf, RecoveryRun>;
 
 fn retain_live_recoveries(
     recovered: &mut RecoveryRuns,
-    controllers: &[Weak<ContinuousTraceUpload>],
-) {
-    let live: std::collections::HashSet<_> = controllers
-        .iter()
-        .filter_map(Weak::upgrade)
-        .map(|c| c.agent_dir.clone())
-        .collect();
-    recovered.retain(|directory, (cancel, _)| {
-        if live.contains(directory) {
-            true
+    registrations: &[Registration],
+) -> Vec<Weak<ContinuousTraceUpload>> {
+    let mut live: std::collections::HashMap<PathBuf, Vec<Weak<ContinuousTraceUpload>>> =
+        std::collections::HashMap::new();
+    let mut retired_directories = std::collections::HashSet::new();
+    let mut retired = Vec::new();
+    for registration in registrations {
+        if let Some(controller) = registration.controller.upgrade() {
+            live.entry(controller.agent_dir.as_ref().clone())
+                .or_default()
+                .push(registration.controller.clone());
         } else {
-            cancel.cancel();
-            false
+            retired_directories.insert(registration.agent_dir.as_ref().clone());
+            retired.push(registration.controller.clone());
         }
+    }
+    recovered.retain(|directory, run| {
+        let Some(hosts) = live.get(directory) else {
+            run.cancel.cancel();
+            return false;
+        };
+        if retired_directories.contains(directory)
+            || run
+                .hosts
+                .iter()
+                .any(|old| !hosts.iter().any(|new| old.ptr_eq(new)))
+        {
+            run.replay_needed.store(true, Ordering::Release);
+        }
+        run.hosts.clone_from(hosts);
+        true
     });
+    retired
+}
+
+fn acknowledge_retired_registrations(
+    registrations: &mut Vec<Registration>,
+    retired: &[Weak<ContinuousTraceUpload>],
+) {
+    // The retained Weak handles pin allocations until acknowledgement finishes.
+    // Hosts retiring after the snapshot remain registered for the next tick.
+    let identities: std::collections::HashSet<_> =
+        retired.iter().map(|weak| weak.as_ptr() as usize).collect();
+    registrations
+        .retain(|registration| !identities.contains(&(registration.controller.as_ptr() as usize)));
+}
+
+fn rearm_retired_recovery(run: &RecoveryRun) {
+    if run.replay_needed.load(Ordering::Acquire)
+        && run
+            .state
+            .compare_exchange(2, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        let state = run.state.clone();
+        let cancel = run.cancel.clone();
+        let not_before = *run.not_before.lock().unwrap();
+        tokio::spawn(async move {
+            settle_recovery_run(&state, false, not_before, &cancel).await;
+        });
+    }
 }
 
 async fn run_service() {
@@ -403,34 +485,33 @@ async fn run_service() {
     // Recovery belongs to all live hosts sharing this directory, not its first host.
     let mut recovered = RecoveryRuns::new();
     loop {
-        let controllers = service.controllers.lock().unwrap().clone();
-        retain_live_recoveries(&mut recovered, &controllers);
-        for weak in controllers {
+        let registrations = service.controllers.lock().unwrap().clone();
+        let retired = retain_live_recoveries(&mut recovered, &registrations);
+        acknowledge_retired_registrations(&mut service.controllers.lock().unwrap(), &retired);
+        for registration in registrations {
+            let weak = registration.controller;
             if let Some(controller) = weak.upgrade() {
                 if controller.consent.lock().unwrap().0
-                    && (recovered.contains_key(&controller.agent_dir)
+                    && (recovered.contains_key(controller.agent_dir.as_ref())
                         || recovered.len() < MAX_CONTROLLERS)
                 {
-                    let (cancel, state) = recovered
-                        .entry(controller.agent_dir.clone())
-                        .or_insert_with(|| {
-                            (
-                                TraceUploadCancel::new(),
-                                Arc::new(std::sync::atomic::AtomicU8::new(0)),
-                            )
-                        });
-                    if cancel.is_cancelled() {
-                        *cancel = TraceUploadCancel::new();
-                        *state = Arc::new(std::sync::atomic::AtomicU8::new(0));
-                    }
-                    if state
+                    let run = recovered
+                        .entry(controller.agent_dir.as_ref().clone())
+                        .or_insert_with(|| RecoveryRun::new(vec![weak.clone()]));
+                    rearm_retired_recovery(run);
+                    if run
+                        .state
                         .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                     {
                         let cwd = controller.cwd.clone();
-                        let agent_dir = controller.agent_dir.clone();
-                        let cancel = cancel.clone();
-                        let state = state.clone();
+                        let agent_dir = controller.agent_dir.as_ref().clone();
+                        // Clear only on admission: retirement during completion must survive.
+                        run.replay_needed.store(false, Ordering::Release);
+                        let cancel = run.cancel.clone();
+                        let state = run.state.clone();
+                        let replay_needed = run.replay_needed.clone();
+                        let saved_deadline = run.not_before.clone();
                         let permits = permits.clone();
                         tokio::spawn(async move {
                             let (complete, not_before) = recover_with_backoff(
@@ -440,8 +521,11 @@ async fn run_service() {
                                 Arc::new(ReqwestTraceHttp),
                                 None,
                                 cancel.clone(),
+                                None,
                             )
                             .await;
+                            *saved_deadline.lock().unwrap() = not_before;
+                            let complete = complete && !replay_needed.load(Ordering::Acquire);
                             settle_recovery_run(&state, complete, not_before, &cancel).await;
                         });
                     }
@@ -650,6 +734,7 @@ async fn recover_with_backoff(
     http: Arc<dyn TraceHttp>,
     base_url: Option<String>,
     cancel: TraceUploadCancel,
+    live_controllers: Option<Vec<Weak<ContinuousTraceUpload>>>,
 ) -> (bool, Option<Instant>) {
     let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
     if !settings.errors().is_empty() || !settings.get_agent_traces_enabled() {
@@ -705,20 +790,30 @@ async fn recover_with_backoff(
             prune_entry(&entry.path(), &raw, None);
             continue;
         };
-        let live = service()
-            .controllers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(Weak::upgrade)
-            .any(|c| {
-                c.pending
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|(p, _)| p == &path)
-            });
+        // Fulfilled cursor entries owe no bytes even when their owner opted out.
+        if TraceUploadSignature::of(&path).is_some_and(|signature| {
+            read_agent_trace_outbox_entry(&agent_dir, &path) == Some(signature)
+        }) {
+            continue;
+        }
+        let registered = live_controllers.clone().unwrap_or_else(|| {
+            service()
+                .controllers
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|registration| registration.controller.clone())
+                .collect()
+        });
+        let live = registered.iter().filter_map(Weak::upgrade).any(|c| {
+            c.pending
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(p, _)| p == &path)
+        });
         if live {
+            complete = false;
             continue;
         }
         match tokio::fs::metadata(&path).await {
@@ -732,12 +827,6 @@ async fn recover_with_backoff(
                 continue;
             }
             Err(_) => continue,
-        }
-        // Successful cursor entries owe no bytes, even if their project opted out.
-        if TraceUploadSignature::of(&path).is_some_and(|signature| {
-            read_agent_trace_outbox_entry(&agent_dir, &path) == Some(signature)
-        }) {
-            continue;
         }
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
             continue;
