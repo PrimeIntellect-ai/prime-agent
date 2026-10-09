@@ -356,8 +356,23 @@ fn process_owner_record() -> String {
 /// module - an interleaved save/restore pair would leave the daemon's
 /// umask permanently changed. The mutex makes the toggle atomic across
 /// this module's users; unrelated code never toggles the umask.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 static PRIVATE_UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Create a directory with mode 0700 AT CREATION, serialized under
+/// the module umask lock. Serving the public-path mkdir protocol too:
+/// the fresh lock directory is exactly 0700 with NO pathname chmod
+/// following the mkdir, so a symlink swapped onto the path between
+/// the two calls can never have its TARGET permission-mutated by
+/// this protocol.
+#[cfg(unix)]
+fn mkdir_mode_0700(path: &Path) -> io::Result<()> {
+    let _guard = PRIVATE_UMASK_LOCK.lock();
+    let prior_umask = unsafe { libc::umask(0o077) };
+    let create = fs::create_dir(path);
+    unsafe { libc::umask(prior_umask) };
+    create
+}
 
 /// Create a fresh private directory with mode 0700 AT CREATION,
 /// serialized under the module umask lock: the temporary umask 0077
@@ -1502,10 +1517,14 @@ impl LockDir {
     /// above, which has no window.
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
-        fs::create_dir(path)?;
+        // The mode is fixed AT CREATION (mkdir under the module's
+        // umask toggle): no pathname chmod follows the mkdir, so a
+        // symlink swapped onto the path after the creation can never
+        // have its TARGET permission-mutated by this protocol.
+        mkdir_mode_0700(path)?;
         // The created-directory witness is captured IMMEDIATELY after the
-        // mkdir, before any further I/O on the path: the later chmod and
-        // owner writes give a stale takeover (a suspension past the
+        // mkdir, before any further I/O on the path: the later owner
+        // writes give a stale takeover (a suspension past the
         // staleness threshold) time to reclaim this directory and publish
         // a successor, and a capture taken after that I/O would record
         // the SUCCESSOR's identity as "created" - the adoption this
@@ -1531,27 +1550,6 @@ impl LockDir {
                     path.display()
                 ),
             ));
-        }
-        // A hostile umask would strip the owner-read bit from the fresh
-        // directory and the pin below would fail before any chmod could
-        // fix it: restore the private mode at creation.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-                // The removal is gated on the creation witness: a
-                // stale takeover in the mkdir-to-chmod window (the
-                // suspension race this function guards everywhere
-                // else) may have already reclaimed this directory and
-                // published a successor at the path - removing THAT
-                // would delete a live foreign lock. Without a
-                // positive witness match, the artifact expires
-                // through the stale window instead.
-                if identity_at(path) == created {
-                    let _ = fs::remove_dir(path);
-                }
-                return Err(error);
-            }
         }
         // PIN FIRST, VERIFY, THEN WRITE: the pin precedes every owner
         // write, and the writes go through the PINNED directory handle
@@ -1924,11 +1922,17 @@ impl LockDir {
                             // The pass exhausted without proving removal of
                             // the pinned inode: the lock stays on disk
                             // looking live. Fall back to the gated
-                            // pathname release (the owner record is the
-                            // proof this guard's lock is at the path) so
-                            // the artifact does not outlive its holder -
-                            // the same floor the unsupported mount takes.
-                            if let Some(owner) = &self.owner {
+                            // pathname release - the DIRECT gate first
+                            // (the path still names the pinned inode:
+                            // the residue is provably this guard's
+                            // own), then the owner record (the proof
+                            // for a path the dance's identity checks
+                            // could not pin) - so the artifact does not
+                            // outlive its holder, and an unowned lock
+                            // is covered too.
+                            if identity_at(&self.path) == Some(pinned) {
+                                let _ = remove_candidate_dir(&self.path);
+                            } else if let Some(owner) = &self.owner {
                                 if Self::owner_matches(&self.path, owner) {
                                     let _ = remove_candidate_dir(&self.path);
                                 }
