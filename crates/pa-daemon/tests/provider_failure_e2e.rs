@@ -246,10 +246,14 @@ fn connect_when_ready(
         }
         match std::os::unix::net::UnixStream::connect(socket) {
             Ok(stream) => return Ok(stream),
+            // On macOS/BSD, connect to a bound-but-not-yet-listening unix socket
+            // fails with EINVAL; treat it as pending, like NotFound/ConnectionRefused.
             Err(error)
                 if matches!(
                     error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::InvalidInput
                 ) =>
             {
                 if Instant::now() >= deadline {
@@ -1206,11 +1210,15 @@ fn socket_presence_is_not_readiness_until_listen_succeeds() {
         .bind(&socket2::SockAddr::unix(&path).expect("address"))
         .expect("bind without listen");
     assert!(path.exists());
-    assert_eq!(
-        std::os::unix::net::UnixStream::connect(&path)
-            .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::ConnectionRefused
+    let refusal = std::os::unix::net::UnixStream::connect(&path)
+        .unwrap_err()
+        .kind();
+    assert!(
+        matches!(
+            refusal,
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::InvalidInput
+        ),
+        "bound-before-listen must refuse the connection (Linux: ECONNREFUSED, macOS: EINVAL)"
     );
     let mut pending = 0;
     let stream = connect_when_ready(
