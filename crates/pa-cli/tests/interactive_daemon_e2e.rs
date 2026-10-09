@@ -5653,9 +5653,7 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
     let checkpoint = outcome
         .frames
         .iter()
-        .find(|frame| {
-            frame.contains("turn failed: prompt cancelled") && frame.contains(&error_row)
-        })
+        .find(|frame| frame.contains("turn failed: prompt cancelled") && frame.contains(&error_row))
         .unwrap_or_else(|| {
             panic!("the close error and cancellation must share a frame:\n{rendered}")
         });
