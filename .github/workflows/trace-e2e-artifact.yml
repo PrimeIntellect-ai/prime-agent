@@ -19,10 +19,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 6d04c0989632b379480b3daf9ea48d348c23a8da
+          ref: 4c9b5c552ec20cae64ffca7fac06d534b7981868
           persist-credentials: false
       - name: Assert exact source
-        run: test "$(git rev-parse HEAD)" = 6d04c0989632b379480b3daf9ea48d348c23a8da
+        run: test "$(git rev-parse HEAD)" = 4c9b5c552ec20cae64ffca7fac06d534b7981868
       - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
           targets: aarch64-apple-darwin
@@ -42,13 +42,13 @@ jobs:
           test -n "$version"
           python3 scripts/release/assemble_artifacts.py \
             --repo-root . --version "$version" --target aarch64-apple-darwin \
-            --sha 6d04c0989632b379480b3daf9ea48d348c23a8da \
+            --sha 4c9b5c552ec20cae64ffca7fac06d534b7981868 \
             --binary target/aarch64-apple-darwin/debug/prime-agent \
             --catalog-assets target/aarch64-apple-darwin/catalog-assets \
             --out-dir target/aarch64-apple-darwin/dist
           python3 scripts/release/verify_release.py \
             --dist-dir target/aarch64-apple-darwin/dist --version "$version" \
-            --target aarch64-apple-darwin --sha 6d04c0989632b379480b3daf9ea48d348c23a8da
+            --target aarch64-apple-darwin --sha 4c9b5c552ec20cae64ffca7fac06d534b7981868
           cp target/aarch64-apple-darwin/debug/pa-daemon target/aarch64-apple-darwin/dist/pa-daemon
           shasum -a 256 target/aarch64-apple-darwin/dist/pa-daemon > target/aarch64-apple-darwin/dist/PA_DAEMON_SHA256
           python3 - <<'PY'
@@ -65,7 +65,7 @@ jobs:
           PY
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: trace-e2e-aarch64-apple-darwin-6d04c098
+          name: trace-e2e-aarch64-apple-darwin-4c9b5c55
           path: target/aarch64-apple-darwin/dist/
           retention-days: 1
           if-no-files-found: error
