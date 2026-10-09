@@ -5,6 +5,9 @@
 
 pub mod coordinator;
 pub mod intent;
+mod legacy_admission;
+mod legacy_restart;
+mod legacy_roster;
 pub mod phases;
 pub mod plan;
 pub mod report;
