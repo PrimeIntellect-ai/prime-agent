@@ -259,6 +259,22 @@ async fn drive(
                 if let Some(parent) = backup.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
+                // The copy carries what the roster carries - queued prompts
+                // and worker authentication tokens - so it is created with
+                // the roster's own 0600 (never the process umask's wider
+                // default); the atomic rename below preserves the mode.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut partial_file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&partial)?;
+                    std::io::Write::write_all(&mut partial_file, &bytes)?;
+                }
+                #[cfg(not(unix))]
                 std::fs::write(&partial, &bytes)?;
                 pa_telemetry::rename_onto(&partial, &backup)?;
                 Ok(())
@@ -508,39 +524,6 @@ async fn finish_failure(
             return Ok(());
         }
     };
-    // The successor this coordinator spawned - rejected or adopted - still
-    // running from the failed spawn and is stopped HERE, FIRST in the
-    // rollback (before any later abort return can leave it running beside a
-    // restored launcher): an identity-verified DIRECT SIGKILL of the pid
-    // this coordinator spawned - never an RPC to the socket, and never a
-    // SIGTERM: both the graceful Shutdown and the TERM signal drain
-    // persist worker stop tombstones (a durable stop that kills the
-    // sessions), while the direct kill is the crash path the protocol
-    // already trusts - the adopted workers die with the supervisor, their
-    // recovery journals persist, and the roster'd rollback boot below
-    // re-adopts them while the socket frees for the rollback. The
-    // start-id check means a reused pid is never signaled, and a
-    // competing daemon that answered the socket is never touched - a live
-    // competitor keeps the rollback's honest Failed.
-    if let Some(rejected) = &failure.rejected {
-        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
-            u32::try_from(rejected.pid).unwrap_or(0),
-            rejected.process_start_id.as_deref(),
-        );
-        if !confirmed_dead {
-            // An UNCONFIRMED death never proceeds - not to the launcher
-            // restore, not to the spawn: the refused daemon could still
-            // own the socket, and a Failed rollback beside a serving new
-            // binary is the honest terminal state (the crash kill itself
-            // reports the conservative outcome - a liveness probe error
-            // counts as alive).
-            fail_hard(format!(
-                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-            ))
-            .await;
-            return Ok(());
-        }
-    }
     let root = match super::activation_root() {
         Ok(root) => root,
         Err(error) => {
@@ -580,6 +563,42 @@ async fn finish_failure(
         ))
         .await;
         return Ok(());
+    }
+    // The successor this coordinator spawned - rejected or adopted - is
+    // stopped HERE, the moment the previous launcher is restored and
+    // before the fence wait and the spawn: an identity-verified DIRECT
+    // SIGKILL of the pid this coordinator spawned - never an RPC to the
+    // socket, and never a SIGTERM: both the graceful Shutdown and the
+    // TERM signal drain persist worker stop tombstones (a durable stop
+    // that kills the sessions), while the direct kill is the crash path
+    // the protocol already trusts - the adopted workers die with the
+    // supervisor, their recovery journals persist, and the roster'd
+    // rollback boot below re-adopts them while the socket frees for the
+    // rollback. The start-id check means a reused pid is never signaled,
+    // and a competing daemon that answered the socket is never touched -
+    // a live competitor keeps the rollback's honest Failed.
+    //
+    // The placement is deliberate: ABOVE this point, every abort
+    // (`activation_root`, the previous-install lookup, the launcher
+    // restore itself) leaves the launcher UNRESTORED - the child and the
+    // new binary are still the consistent pair, and an adopted successor
+    // keeps serving instead of the machine losing its daemon. Below it,
+    // the launcher already points at the previous binary, so the child
+    // must be dead before anything can proceed - and an UNCONFIRMED death
+    // aborts right here, never spawning the rollback against a
+    // possibly-live owner.
+    if let Some(rejected) = &failure.rejected {
+        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
+            u32::try_from(rejected.pid).unwrap_or(0),
+            rejected.process_start_id.as_deref(),
+        );
+        if !confirmed_dead {
+            fail_hard(format!(
+                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            ))
+            .await;
+            return Ok(());
+        }
     }
     writer.lock().await.set_state(UpdateState::Booting)?;
     // The rollback boot must not race the dying predecessor either: wait
