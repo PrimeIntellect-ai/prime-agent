@@ -1414,6 +1414,29 @@ mod tests {
             "the freed window acquires at once"
         );
     }
+    /// The admission handle reports the generation OBSERVED at its
+    /// acquire (under the guard, before its own bump): a caller comparing
+    /// a later acquire against this baseline detects exactly the foreign
+    /// stops that opened in between - never one that completed before.
+    #[test]
+    fn the_admission_reports_its_observed_generation() {
+        let registry = tempfile::tempdir().expect("registry root");
+        // An earlier holder bumps the counter (its acquire observes the
+        // pre-bump value 0).
+        let earlier = ShutdownAdmission::acquire_in(registry.path()).expect("first window");
+        assert_eq!(earlier.observed_generation(), 0);
+        drop(earlier);
+        // The next acquire observes the earlier holder's bump.
+        let later = ShutdownAdmission::acquire_in(registry.path()).expect("second window");
+        assert_eq!(
+            later.observed_generation(),
+            1,
+            "the observation is the pre-bump counter value"
+        );
+        // The raced-shutdown arithmetic: observed(later) > observed(earlier
+        // baseline) means a foreign stop opened in between.
+    }
+
     #[test]
     fn the_fence_identity_gate_requires_a_fixed_hello_for_this_socket() {
         let registry = tempfile::tempdir().expect("registry root");

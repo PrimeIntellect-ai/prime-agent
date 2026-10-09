@@ -130,15 +130,15 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         &socket_lossy,
     )?));
     let heartbeat = StatusHeartbeat::start(Arc::clone(&writer));
-    // The stop-window generation BEFORE drive's own acquire: a failure-arm
-    // re-check reads exactly one more bump (drive's own); anything higher
-    // means a concurrent stop opened in the update's release-to-spawn
-    // window, and the rollback refuses to roll back behind the user's
-    // completed shutdown.
-    let generation_before = pa_daemon::supervisor_ownership::shutdown_admission_generation(
-        &pa_daemon::supervisor_ownership::default_registry_dir().unwrap_or_default(),
-    );
-    match drive(&writer, options, &update_id, &socket_dir).await {
+    // The stop-window generation DRIVE's own admission observed at its
+    // acquire (drive fills this at its first statement): the failure-arm
+    // raced-shutdown check compares the ROLLBACK acquire's observation
+    // against THIS baseline, so a shutdown that completed before drive's
+    // window (bumping the counter in drive's unbounded acquire wait) is
+    // the baseline itself, never mistaken for one that raced the update's
+    // release-to-spawn window.
+    let drive_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    match drive(&writer, options, &update_id, &socket_dir, &drive_generation).await {
         Ok(()) => {}
         Err(failure) if !failure.after_stop => {
             // `Aborted -> [*]: daemon never stopped; user retried later`.
@@ -197,11 +197,14 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             };
             // A concurrent stop raced the update's release-to-spawn
             // window: the generation THIS acquisition observed under the
-            // guard (before its own bump) advanced past drive's own single
-            // acquire - a foreign stop opened in between, completed, and
-            // released. The user's shutdown has reported success by now -
-            // the rollback refuses to spawn a daemon behind it.
-            if rollback_admission.observed_generation() > generation_before + 1 {
+            // guard advanced past the generation DRIVE's own admission
+            // observed at its acquire - a foreign stop opened in between
+            // (while drive held, the only possible window is after its
+            // release), completed, and released. The user's shutdown has
+            // reported success by now - the rollback refuses to spawn a
+            // daemon behind it.
+            let drive_generation = drive_generation.load(std::sync::atomic::Ordering::SeqCst);
+            if rollback_admission.observed_generation() > drive_generation {
                 // The rejected successor this update spawned is retired the
                 // same way finish_failure retires it (best-effort
                 // identity-pinned crash kill): left alive beside the
@@ -283,6 +286,7 @@ async fn drive(
     options: &CoordinatorOptions,
     update_id: &UpdateId,
     socket_dir: &Path,
+    drive_generation: &Arc<std::sync::atomic::AtomicU64>,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
     // The stop window opens here (TS package-manager-cli.ts
@@ -293,6 +297,10 @@ async fn drive(
     // stops renewing, so the window self-heals inside the lease.
     let mut admission = pa_daemon::supervisor_ownership::ShutdownAdmission::acquire()
         .map_err(PhaseFailure::before_stop)?;
+    drive_generation.store(
+        admission.observed_generation(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
     // `Preparing`: connect the old supervisor. An unreachable daemon is a
     // daemon-less update: an empty prepare is trivially durable and the
     // successor boots without a roster (the workers are already gone).
