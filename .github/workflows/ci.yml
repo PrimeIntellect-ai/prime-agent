@@ -371,19 +371,19 @@ jobs:
         if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: lifecycle-parity-receipts
+          name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
         run: |
-          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: shard-manifest-${{ matrix.shard }}
-          path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}.json
+          name: shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json
 
   # The aggregate: audits the partition (same enumeration everywhere,
   # disjoint shards, every assigned unit executed — coverage can never
@@ -405,7 +405,11 @@ jobs:
           merge-multiple: true
           path: manifests
       - name: Audit the shards and merge their failure reports
-        run: python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
+        run: |
+          python3 scripts/test_ci_test_shard.py
+          python3 scripts/test_ci_pr_crates.py
+          python3 scripts/test_ci_test_shard_summary.py
+          python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
   # The Windows job set + the supply-chain deny gate:
   #
