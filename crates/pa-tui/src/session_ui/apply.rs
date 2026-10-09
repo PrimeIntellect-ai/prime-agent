@@ -269,6 +269,7 @@ impl SessionUi {
                     self.turn_active = false;
                     self.run_open = false;
                     view.working = None;
+                    view.retry = None;
                     match reason.as_str() {
                         "shutdown" => self.error_row(
                             "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",

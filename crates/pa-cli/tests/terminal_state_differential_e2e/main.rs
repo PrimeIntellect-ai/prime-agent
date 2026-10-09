@@ -342,6 +342,36 @@ fn program_status_stays_working_during_provider_retry() {
     harness.assert_terminal_state_restored("the retry status route");
 }
 
+/// A closed session cannot keep a provider countdown working.
+#[test]
+fn program_status_session_close_drops_pending_retry() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(
+        mark,
+        b"status-retry-sentinel",
+        "the retry countdown rendered",
+    );
+    harness.wait_from(mark, STATUS_WORKING, "the pending retry reports working");
+    let mark = harness.mark();
+    harness.write(b"/copy\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the closed session drops its pending retry",
+    );
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+    harness.assert_terminal_state_restored("the closed-session retry status route");
+}
+
 /// OSC 7501: a completed goal's done does not survive the attach into a
 /// new session (`/new`), and the exit still clears the record.
 #[test]

@@ -422,6 +422,27 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
+                "get_last_assistant_text" if retry_pending => {
+                    // The test's read-only /copy request triggers an external
+                    // session close while the countdown is still pending.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "session_closed", "activeSessionId": "s1",
+                            "reason": "killed",
+                        }),
+                    );
+                    retry_pending = false;
+                    run_open = false;
+                }
                 // The scripted run: a prompt opens a multi-step run (a
                 // step's turn_end/turn_start pair mid-run; a `finish`
                 // message also completes the thread goal on the way), a
