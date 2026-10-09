@@ -231,6 +231,19 @@ impl Worker {
                     Ok(mut opened) => {
                         opened.trace_upload = traces(&opened.path);
                         opened_existing_session = true;
+                        if opened.skipped_lines > 0 {
+                            // The rows stay on disk (the append-only
+                            // reopen): the skip count is the damage
+                            // report the torn-tail repair can act on — a
+                            // silent skip is how a torn session degraded
+                            // unnoticed (the operator's 2026-10-08
+                            // report).
+                            eprintln!(
+                                "pa-daemon: session {} skipped {} unparsable row(s) on open; they stay on disk",
+                                path.display(),
+                                opened.skipped_lines
+                            );
+                        }
                         // The session-model restore records its decision only for a path
                         // this worker opened — a failed open never leaks the binding into a
                         // later create.
@@ -266,17 +279,23 @@ impl Worker {
                             false,
                         );
                         let _ = opened.append_session_state("active");
-                        let persisted = if opened.window.is_some() {
-                            opened.persist_appended(append_start)
-                        } else {
-                            opened.rewrite()
-                        };
+                        // A reopen is APPEND-ONLY (the operator's 2026-10-08
+                        // report: a reopened session showed none of the old
+                        // messages): the full reader skips malformed rows in
+                        // memory, and the legacy full-file rewrite this
+                        // arm carried DELETED them from disk — a gap early
+                        // in the parent chain took the whole transcript
+                        // with it. Only the rows this open appended
+                        // persist; the file keeps every original byte for
+                        // the torn-tail repair to see.
+                        let persisted = opened.persist_appended(append_start);
                         if let Err(error) = persisted {
                             return response_failure(None, "create", &error.to_string(), None);
                         }
-                        // Prime the usage fold on the file's final identity (the full-reader
-                        // fallback's rewrite replaces the inode), off the runtime and before
-                        // the core lock: summaries under the lock fold only the appended tail.
+                        // Prime the usage fold on the file's final identity,
+                        // off the runtime and before the core lock:
+                        // summaries under the lock fold only the appended
+                        // tail.
                         let primed = path.clone();
                         let _ = tokio::task::spawn_blocking(move || {
                             crate::session_store::read_session_info(&primed)
