@@ -28,8 +28,7 @@ pub(crate) struct FinalizedToolCallOutcome {
     pub(crate) is_error: bool,
 }
 
-/// Tool lookup by name; the pre-rename `python`/`ipython` names route to
-/// the registered `python_repl`, matching the read paths.
+/// Tool lookup by name; exact matches win over alias-based dispatch.
 pub(crate) fn find_tool<'a>(
     tools: &'a [Arc<dyn AgentTool>],
     name: &str,
@@ -37,12 +36,7 @@ pub(crate) fn find_tool<'a>(
     if let Some(tool) = tools.iter().find(|t| t.name() == name) {
         return Some(tool);
     }
-    if pa_types::ai::is_python_tool_name(name) {
-        return tools
-            .iter()
-            .find(|t| t.name() == pa_types::ai::PYTHON_TOOL_NAME);
-    }
-    None
+    tools.iter().find(|t| t.accepts_alias(name))
 }
 
 pub(crate) async fn execute_tool_calls(

@@ -396,34 +396,6 @@ async fn unknown_tool_name_yields_error_tool_result() {
     assert_eq!(single_text(&result.content), "Tool nonexistent not found");
 }
 
-/// Pre-rename sessions replay `ipython`/`python` tool calls; read paths
-/// accept them, so dispatch must route them to the registered `python_repl`.
-#[tokio::test]
-async fn legacy_python_tool_names_dispatch_to_python_repl() {
-    let echo = EchoTool::new("python_repl");
-    let (agent, provider, _events) = scripted_agent(vec![echo.clone()]).await;
-    provider.push_tool_call_turn(
-        None,
-        vec![
-            ("call-1", "ipython", serde_json::json!({ "text": "a" })),
-            ("call-2", "python", serde_json::json!({ "text": "b" })),
-        ],
-    );
-    provider.push_text_turn("done");
-
-    agent.prompt("go").await.unwrap();
-    agent.wait_for_idle().await;
-
-    assert_eq!(echo.calls.load(Ordering::SeqCst), 2);
-    let state = agent.state().await;
-    let first = tool_result(&state.messages[2]);
-    let second = tool_result(&state.messages[3]);
-    assert!(!first.is_error);
-    assert!(!second.is_error);
-    assert_eq!(single_text(&first.content), "echo:a");
-    assert_eq!(single_text(&second.content), "echo:b");
-}
-
 #[tokio::test]
 async fn provider_stream_failure_mid_turn_ends_run_and_retry_continues() {
     let (agent, provider, _events) = scripted_agent(vec![]).await;
