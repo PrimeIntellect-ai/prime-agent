@@ -222,7 +222,10 @@ impl SocketLease {
             return false;
         }
         std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
-        self.path_lost()
+        // The cached flag set by the refresh thread during the grace is
+        // definitive even if the path reappeared: compromise stays
+        // compromise, never downgraded by a restoration.
+        self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost()
     }
 
     /// Resolve when this lease loses its lock directory. A single
@@ -232,12 +235,16 @@ impl SocketLease {
     pub async fn wait_compromised(&self) {
         let mut changes = self.compromise_tx.subscribe();
         loop {
-            if self.compromised() {
+            // The cached flag is definitive on its own; a path mismatch
+            // alone gets the grace (the check order matters: compromised()
+            // includes the transient path loss and must not gate the
+            // grace branch).
+            if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
                 break;
             }
             if self.path_lost() {
                 tokio::time::sleep(LEASE_DISPLACEMENT_GRACE).await;
-                if self.path_lost() || self.compromised() {
+                if self.compromised() {
                     break;
                 }
                 continue;
