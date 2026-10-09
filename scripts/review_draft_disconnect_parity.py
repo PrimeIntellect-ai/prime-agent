@@ -256,7 +256,9 @@ class Supervisor:
             self.threads.append(thread); thread.start()
 
     def serve(self, sock):
-        hello = dict(self.hello, serverCapabilities=[], clientId="draft-fixture")
+        # The pinned protocol requires this for prompt dispatch. Advertise only
+        # the admission path implemented here; leave direct-peer routing disabled.
+        hello = dict(self.hello, serverCapabilities=["session_input_admission"], clientId="draft-fixture")
         buffer = b""
         try:
             self.send(sock, hello)
@@ -301,6 +303,8 @@ class Supervisor:
                             self.attaches += 1
                             if self.closed: self.post_close_attached = True
                     elif name == "prompt":
+                        # daemon-mode's accepted prompt success has no data payload.
+                        response.pop("data", None)
                         if not client_id or not request_id:
                             raise RuntimeError("prompt envelope lacks clientId/id for recovery identity")
                         with self.lock:
