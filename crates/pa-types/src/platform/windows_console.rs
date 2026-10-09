@@ -170,6 +170,16 @@ pub fn restore() {
 mod windows_tests {
     use super::*;
 
+    /// The restore rides a drop guard: a failed assert below must still
+    /// hand the console's session state back (the review rule for tests
+    /// that touch shared state).
+    struct ConsoleRestoreOnPanic;
+    impl Drop for ConsoleRestoreOnPanic {
+        fn drop(&mut self) {
+            restore();
+        }
+    }
+
     /// The mechanism the operator's report pins (2026-10-08): after
     /// `init`, the attached console decodes the TUI's UTF-8 output as
     /// UTF-8 and parses its VT sequences - the codepages read 65001 and
@@ -196,6 +206,8 @@ mod windows_tests {
         };
         let original_output_cp = winapi::output_codepage();
         let original_input_cp = winapi::input_codepage();
+
+        let _console_restore = ConsoleRestoreOnPanic;
 
         init();
         assert_eq!(winapi::output_codepage(), winapi::cp_utf8());
