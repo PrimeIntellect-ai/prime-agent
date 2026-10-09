@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
-use nix::pty::{openpty, Winsize};
-use serde_json::{json, Value};
+use nix::fcntl::{FcntlArg::F_SETFL, OFlag, fcntl};
+use nix::pty::{Winsize, openpty};
+use serde_json::{Value, json};
 
 use pa_tui::agents_view::AgentsViewOptions;
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
@@ -455,6 +455,28 @@ impl MockSupervisor {
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
                         run_open = false;
+                    } else if command.get("message").and_then(Value::as_str) == Some("retry") {
+                        // A failed attempt settles before its retry countdown starts.
+                        // Keep the next attempt pending until the test aborts it.
+                        for event in [
+                            json!({ "type": "turn_start" }),
+                            json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "error" },
+                            }),
+                            json!({ "type": "agent_end" }),
+                            json!({
+                                "type": "auto_retry_start",
+                                "attempt": 1,
+                                "maxAttempts": 2,
+                                "delayMs": 60_000,
+                                "errorMessage": "status-retry-sentinel",
+                            }),
+                        ] {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = true;
                     } else if command.get("message").and_then(Value::as_str) == Some("step") {
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));

@@ -29,21 +29,21 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::{
-    child_options, find_subsequence, harness_lock, quiet_child_epilogue, spawn_child, view_options,
-    ChildSpec, DifferentialHarness, PtyReader, Termios,
+    ChildSpec, DifferentialHarness, PtyReader, Termios, child_options, find_subsequence,
+    harness_lock, quiet_child_epilogue, spawn_child, view_options,
 };
 use ledger::ModeLedger;
 
-use nix::pty::{openpty, Winsize};
-use nix::sys::signal::{kill, Signal};
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::pty::{Winsize, openpty};
+use nix::sys::signal::{Signal, kill};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 
 use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::config_selector::{
-    run_config_selector, ConfigSelector, ConfigSelectorOptions, SelectorRow,
+    ConfigSelector, ConfigSelectorOptions, SelectorRow, run_config_selector,
 };
-use pa_tui::interactive::{run_interactive, UiMode};
+use pa_tui::interactive::{UiMode, run_interactive};
 
 /// The kitty flags push (`1|2|4`, the TS `ProcessTerminal` set): the arm
 /// proof every mounted surface must show.
@@ -287,6 +287,45 @@ fn program_status_reports_the_run_and_its_settles() {
     assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
 
     harness.assert_terminal_state_restored("the program-status reports and clear");
+}
+
+/// A provider retry remains working even after the failed attempt's
+/// turn_end and agent_end. Observe the rendered countdown before checking
+/// the last report, so an earlier transient working report cannot pass.
+#[test]
+fn program_status_stays_working_during_provider_retry() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(
+        mark,
+        b"status-retry-sentinel",
+        "the retry countdown rendered",
+    );
+    let stream = harness.output();
+    let last_working = stream
+        .windows(STATUS_WORKING.len())
+        .rposition(|w| w == STATUS_WORKING);
+    let last_idle = stream
+        .windows(STATUS_IDLE.len())
+        .rposition(|w| w == STATUS_IDLE);
+    assert!(
+        last_working > last_idle,
+        "the pending retry must report working after its failed attempt settled"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(mark, STATUS_IDLE, "the cancelled retry reports idle");
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+    harness.assert_terminal_state_restored("the retry status route");
 }
 
 /// OSC 7501: a completed goal's done does not survive the attach into a
