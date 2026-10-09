@@ -245,6 +245,10 @@ impl SessionFile {
         // Same directory as the source session, like TS `createUniqueSessionFileTarget`.
         let file = session_dir.join(session_file_name(forked.session_id()));
         forked.set_path(file);
+        forked.trace_upload = self
+            .trace_upload
+            .as_ref()
+            .and_then(|traces| traces.forked(&forked.path));
         if let Some(lease) = &self.lease {
             forked.lease = Some(lease.acquire_target(&forked.path)?);
         }
