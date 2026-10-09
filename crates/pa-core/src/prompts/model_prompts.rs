@@ -78,7 +78,14 @@ fn parse_layer(toml_text: &str, source: &str) -> (Vec<ParsedRule>, Vec<String>) 
                     Component::ParentDir | Component::RootDir | Component::Prefix(_)
                 )
             }) {
-                files.push(name);
+                // Normalize equivalent spellings before resolution and deduplication.
+                let normalized = Path::new(&name)
+                    .components()
+                    .filter(|component| !matches!(component, Component::CurDir))
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                files.push(normalized);
             } else {
                 errors.push(format!(
                     "{source}: file {name:?} must be a relative path inside the agent directory"
@@ -109,6 +116,17 @@ fn rule_applies(rule: &ParsedRule, segments: &[&str]) -> bool {
     })
 }
 
+// Check the file type before opening: opening a FIFO can wait forever for a writer.
+fn read_regular_file(path: &Path) -> io::Result<String> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "expected a regular file",
+        ));
+    }
+    std::fs::read_to_string(path)
+}
+
 fn resolve_layer_files(
     rules: &[ParsedRule],
     source: &str,
@@ -123,7 +141,17 @@ fn resolve_layer_files(
                 continue;
             }
             let user_file = agent_dir.join(name);
-            match std::fs::read_to_string(&user_file) {
+            let content = user_file.canonicalize().and_then(|resolved| {
+                let root = agent_dir.canonicalize()?;
+                if !resolved.starts_with(root) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "file resolves outside the agent directory",
+                    ));
+                }
+                read_regular_file(&resolved)
+            });
+            match content {
                 Ok(content) => {
                     contents.insert(name.clone(), content);
                 }
@@ -162,7 +190,7 @@ fn resolve_model_prompts(
     errors.append(&mut layer_errors);
     let user_path = agent_dir.join(USER_MODEL_PROMPTS_TOML);
     let user_layer = user_path.display().to_string();
-    let user_rules = match std::fs::read_to_string(&user_path) {
+    let user_rules = match read_regular_file(&user_path) {
         Ok(text) => {
             let (rules, mut layer_errors) = parse_layer(&text, &user_layer);
             errors.append(&mut layer_errors);
@@ -323,7 +351,7 @@ files = ["a.md", "b.md"]
 
 [[rule]]
 match = ["glm-5.3*"]
-files = ["b.md", "c.md"]
+files = ["./b.md", "c.md", "././a.md"]
 
 [[rule]]
 match = ["claude-*"]
@@ -468,11 +496,111 @@ files = ["shared.md", "user-only.md"]
                     "file {name:?}: extras {leaked:?}, expected {extras:?}"
                 ));
             }
-            let named = resolution.errors.iter().any(|error| error.contains(name));
+            let named = resolution
+                .errors
+                .iter()
+                .any(|error| error.contains(&format!("{name:?}")));
             if named != rejected {
                 failures.push(format!("file {name:?}: errors {:#?}", resolution.errors));
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn normalized_names_resolve_shipped_files() {
+        let dir = user_layer("[[rule]]\nmatch = [\"*\"]\nfiles = [\"./a.md\", \"a.md\"]\n");
+        let resolution = resolve_model_prompts(Some("model"), "", &[("a.md", "A")], dir.path());
+        assert_eq!(
+            resolution,
+            ModelPromptResolution {
+                extras: Some("A".to_string()),
+                errors: Vec::new(),
+            }
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_targets_must_stay_inside_agent_directory() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let agent_dir = root.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        write_file(root.path(), "outside.md", "OUTSIDE");
+        write_file(&agent_dir, "inside.md", "INSIDE");
+        symlink(root.path().join("outside.md"), agent_dir.join("escape.md")).unwrap();
+        symlink(root.path(), agent_dir.join("escape-dir")).unwrap();
+        symlink(agent_dir.join("inside.md"), agent_dir.join("safe.md")).unwrap();
+        for name in ["escape.md", "escape-dir/outside.md", "safe.md"] {
+            write_file(
+                &agent_dir,
+                USER_MODEL_PROMPTS_TOML,
+                &format!("[[rule]]\nmatch = [\"*\"]\nfiles = [{name:?}]\n"),
+            );
+            let resolution = resolve_model_prompts(Some("model"), "", &[], &agent_dir);
+            if name == "safe.md" {
+                assert_eq!(
+                    resolution,
+                    ModelPromptResolution {
+                        extras: Some("INSIDE".to_string()),
+                        errors: Vec::new(),
+                    }
+                );
+            } else {
+                assert!(resolution.extras.is_none());
+                assert!(resolution
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("outside the agent directory")));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifos_are_rejected_without_opening_them() {
+        // Keep a writer available so a regression fails assertions instead of hanging the suite.
+        for name in [USER_MODEL_PROMPTS_TOML, "fifo.md"] {
+            let dir =
+                user_layer("[[rule]]\nmatch = [\"different-model\"]\nfiles = [\"fifo.md\"]\n");
+            let path = dir.path().join(name);
+            if name == USER_MODEL_PROMPTS_TOML {
+                std::fs::remove_file(&path).unwrap();
+            }
+            nix::unistd::mkfifo(
+                &path,
+                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+            )
+            .unwrap();
+            let writer_path = path.clone();
+            let writer = std::thread::spawn(move || {
+                // Nonblocking open succeeds only if the loader incorrectly opened the FIFO.
+                use std::os::unix::fs::OpenOptionsExt;
+                loop {
+                    if let Ok(file) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&writer_path)
+                    {
+                        drop(file);
+                        break;
+                    }
+                    if !writer_path.exists() {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            let resolution = resolve_model_prompts(Some("model"), "", &[], dir.path());
+            std::fs::remove_file(&path).unwrap();
+            writer.join().unwrap();
+            assert!(resolution.extras.is_none());
+            assert!(resolution
+                .errors
+                .iter()
+                .any(|error| error.contains("expected a regular file")));
+        }
     }
 }
