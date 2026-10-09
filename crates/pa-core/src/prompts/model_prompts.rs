@@ -72,10 +72,12 @@ fn parse_layer(toml_text: &str, source: &str) -> (Vec<ParsedRule>, Vec<String>) 
         }
         let mut files = Vec::new();
         for name in rule.files {
-            if Path::new(&name)
-                .components()
-                .all(|c| matches!(c, Component::Normal(_)))
-            {
+            if Path::new(&name).components().all(|c| {
+                !matches!(
+                    c,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            }) {
                 files.push(name);
             } else {
                 errors.push(format!(
@@ -455,6 +457,7 @@ files = ["shared.md", "user-only.md"]
         let outside = root.path().join("outside.md").display().to_string();
         let cases = [
             ("inside.md", Some("INSIDE"), false),
+            ("./inside.md", Some("INSIDE"), false),
             ("../outside.md", None, true),
             (outside.as_str(), None, true),
         ];
