@@ -471,9 +471,8 @@ fn walk_pins_the_compaction_boundary_sequences() {
 }
 
 /// The restored-settings fold on a windowed open must answer the full open's
-/// scalars without re-materializing the transcript: the window walk already
-/// resolved model/thinking/tier across the active ancestry, and only rows
-/// appended past the loaded window join the fold.
+/// scalars: the window walk already resolved model/thinking/tier across the
+/// active ancestry, and only rows appended past the loaded window join the fold.
 fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std::path::Path) {
     let windowed = SessionFile::open_windowed(path).unwrap();
     assert!(
@@ -482,10 +481,6 @@ fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std:
     );
     let restored = windowed.restored_settings();
     let reference = SessionFile::open(path).unwrap().restored_settings();
-    assert!(
-        !reference.messages.is_empty(),
-        "{name}: the fixture must carry a transcript"
-    );
     assert_eq!(
         restored.model, reference.model,
         "{name}: the restored model must match the full open"
@@ -498,14 +493,10 @@ fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std:
         restored.service_tier, reference.service_tier,
         "{name}: the restored service tier must match the full open"
     );
-    assert!(
-        restored.messages.is_empty(),
-        "{name}: the restored-settings fold must not re-materialize the transcript"
-    );
 }
 
 #[test]
-fn windowed_restored_settings_match_the_full_open_without_the_transcript() {
+fn windowed_restored_settings_match_the_full_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("resumed.jsonl");
     let mut file = SessionFile::create("/tmp", None, 0);

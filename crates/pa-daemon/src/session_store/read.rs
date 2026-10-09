@@ -228,7 +228,7 @@ impl SessionFile {
         // retained rows, so the fold runs once every row is in.
         fold_child_usage_attributions(&mut file.entries);
         file.leaf_id = Some(window.leaf_id().to_owned());
-        let context = window.context();
+        let settings = window.settings();
         file.window = Some(SessionWindow {
             message_count: window.message_count(),
             first_message: window
@@ -239,10 +239,10 @@ impl SessionFile {
             compaction_count: window.compaction_count(),
             has_thinking_level: window.has_thinking_level(),
             has_service_tier: window.has_service_tier(),
-            model: context.model,
+            model: settings.model.clone(),
             boundary_model: window.boundary_model().cloned(),
-            thinking_level: context.thinking_level,
-            service_tier: context.service_tier,
+            thinking_level: settings.thinking_level.clone(),
+            service_tier: settings.service_tier,
             // The retained rows joined the store verbatim above, so their ids are
             // exactly the trailing `raw_count` store ids — no third parse pass.
             retained_ids: file.entries[file.entries.len() - raw_count..]
