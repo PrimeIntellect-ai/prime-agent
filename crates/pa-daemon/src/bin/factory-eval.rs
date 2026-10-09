@@ -285,10 +285,14 @@ fn spawn_supervisor(
     Ok(Supervisor { child })
 }
 
-/// Wait for the spawned supervisor to bind its socket. On expiry the child
-/// is killed and reaped before one clean error surfaces: a `panic!` here
-/// would leak the process (a `std::process::Child`'s drop never kills), so
-/// the driver's exit must not leave a live supervisor — or any workers it
+/// Wait for the spawned supervisor to bind its socket. A supervisor that
+/// exits before binding fails fast with its exit status — a startup crash
+/// is already the failure, and polling the rest of the deadline would
+/// surface it as a misleading socket error (the crash's stderr sits in
+/// the supervisor log beside the socket). On expiry the child is killed
+/// and reaped before one clean error surfaces: a `panic!` here would leak
+/// the process (a `std::process::Child`'s drop never kills), so the
+/// driver's exit must not leave a live supervisor — or any workers it
 /// already launched — behind. `run()` propagates the error to `main`'s
 /// clean exit path.
 #[cfg(unix)]
@@ -300,6 +304,18 @@ fn wait_for_supervisor_socket(
     while Instant::now() < deadline {
         if socket.exists() {
             return Ok(());
+        }
+        // An exited child is the failure itself: return its status now
+        // (`try_wait` reaps it — no zombie stays) instead of polling the
+        // deadline away on a dead supervisor.
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("poll the eval supervisor exit: {error}"))?
+        {
+            return Err(format!(
+                "eval supervisor exited before binding {}: {status}",
+                socket.display()
+            ));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -871,6 +887,56 @@ mod tests {
         assert!(
             gone.success(),
             "the child was killed and reaped (pid {pid} still lives)"
+        );
+    }
+
+    /// A supervisor that exits before binding fails fast with its exit
+    /// status instead of polling to the deadline: a startup crash is
+    /// already the failure, and the pre-fix wait burned the whole 10s
+    /// budget and then reported a misleading socket error that hid the
+    /// status (the crash's stderr sits in the supervisor log beside
+    /// the socket). The deadline below is generous on purpose: without
+    /// the child-exit check this test times out at it.
+    #[test]
+    fn a_supervisor_that_exits_before_binding_fails_fast_with_its_status() {
+        let socket = std::env::temp_dir().join("factory-eval-early-exit.sock");
+        let mut child = Command::new("bash")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the exiting child");
+        let started = Instant::now();
+        let error =
+            wait_for_supervisor_socket(&socket, &mut child, started + Duration::from_secs(10))
+                .expect_err("the child exits before binding");
+        assert!(
+            error.contains(socket.to_string_lossy().as_ref()),
+            "the error names the socket: {error}"
+        );
+        assert!(
+            error.contains("exit status: 7"),
+            "the error carries the child's exit status: {error}"
+        );
+        // The wait failed fast, long before the deadline the pre-fix loop
+        // would have polled to.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the wait failed fast, waited {:?}",
+            started.elapsed()
+        );
+        // The exit probe reaped the child: no zombie stays behind.
+        let pid = child.id();
+        let gone = Command::new("bash")
+            .arg("-c")
+            .arg(format!("! kill -0 {pid}"))
+            .status()
+            .expect("probe the child pid");
+        assert!(
+            gone.success(),
+            "the exited child was reaped (pid {pid} still lives)"
         );
     }
 
