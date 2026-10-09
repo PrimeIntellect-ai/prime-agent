@@ -1190,6 +1190,31 @@ class RestoreAfterSettleTests(AppTestCase):
         self.assertIn(caught.exception.code, ("ACTION_UNSUPPORTED", "TRANSPORT_ERROR"))
         self.assertNotIn(("press_key", {"pid": env.pid, "key": "cmd+v"}), env.recorder.calls)
 
+    async def test_a_payload_longer_than_the_head_cap_never_verifies(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        status = await app.paste("x" * 250)
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_a_value_that_already_carried_the_payload_proves_nothing(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        env.preexisting_value_head = "old payload"
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_a_control_that_moved_after_the_snapshot_is_not_clicked(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()
+        env.live_geometry_moved = True  # the control moved after the observation
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.click(0)
+        self.assertEqual(caught.exception.code, "ELEMENT_STALE")
+        self.assertEqual(env.recorder.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

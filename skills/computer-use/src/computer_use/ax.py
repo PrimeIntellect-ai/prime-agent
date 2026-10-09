@@ -271,6 +271,21 @@ def _budget_spent(deadline: float) -> bool:
     return time.monotonic() >= deadline
 
 
+def _live_geometry(ref: Any) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Read one element's live position and size, or None when unreadable.
+
+    Mouse-targeted actions compute their point from these bounds: the
+    snapshot's geometry is only a cache, and a control that moved or
+    resized since the observation must be caught before any injection.
+    """
+    app_services = _require_mac().app_services
+    position = _point(app_services, _copy_value(app_services, ref, "AXPosition"))
+    size = _point(app_services, _copy_value(app_services, ref, "AXSize"))
+    if position is None or size is None:
+        return None
+    return (position, size)
+
+
 def _paste_baseline(pid: int) -> tuple[Any, str] | None:
     """The focused element ref and its own value head, grounding a paste verdict.
 

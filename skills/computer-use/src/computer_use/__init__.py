@@ -956,11 +956,12 @@ class App:
         """Report whether an attributable transition shows the paste landed.
 
         The one signal macOS exposes: the SAME focused element's value
-        CHANGES to carry the payload. The pre-press baseline pins the
-        focused ref and its value head; a value that already carried the
-        payload proves nothing, an unreadable baseline or value proves
-        nothing, a focus move proves nothing, and an empty payload can
-        never show in a value: unverifiable means the clipboard must be
+        CHANGES to carry the COMPLETE payload. The pre-press baseline pins
+        the focused ref and its value head; a value that already carried the
+        payload proves nothing, a payload longer than the value-head cap can
+        never be verified by a prefix, an unreadable baseline or value
+        proves nothing, a focus move proves nothing, and an empty payload
+        can never show in a value: unverifiable means the clipboard must be
         preserved rather than restored.
         """
         if not text or baseline is None:
@@ -975,11 +976,15 @@ class App:
         # lands the verdict on a different element whose preexisting value
         # proves nothing about this paste
         same_element = focused_after is focused_before or focused_after == focused_before
+        if len(text) > ax._FINGERPRINT_VALUE_CHARS:
+            # a payload longer than the value-head cap can never be verified:
+            # a prefix match proves nothing
+            return False
         return (
             same_element
             and bool(after_head)
-            and after_head != before_head
-            and text[: ax._FINGERPRINT_VALUE_CHARS] in after_head
+            and text in after_head
+            and text not in before_head
         )
 
     def _settle(self) -> None:
@@ -1074,8 +1079,13 @@ class App:
         return element, refs[element_index]
 
     def _element_center(self, element_index: int) -> tuple[float, float]:
-        """Compute one element's center in screen space from its AX bounds."""
-        element, _ref = self._element(element_index)
+        """Compute one element's center in screen space from its live AX bounds.
+
+        The snapshot's geometry is only a cache: the live bounds are read
+        before injecting, and a control that moved or resized since the
+        observation is rejected - stale coordinates click the wrong content.
+        """
+        element, ref = self._element(element_index)
         position = element.get("position")
         size = element.get("size")
         if not position or not size:
@@ -1084,9 +1094,16 @@ class App:
                 f"element {element_index} has no on-screen position to click",
                 {"element_index": element_index},
             )
+        live = ax._live_geometry(ref)
+        if live is None or live != (tuple(position), tuple(size)):
+            raise ComputerUseError(
+                "ELEMENT_STALE",
+                f"element {element_index} moved or resized since the last observation; call get_ax_state() and use fresh indices",
+                {"element_index": element_index},
+            )
         return (
-            float(position[0]) + float(size[0]) / 2,
-            float(position[1]) + float(size[1]) / 2,
+            float(live[0][0]) + float(live[1][0]) / 2,
+            float(live[0][1]) + float(live[1][1]) / 2,
         )
 
     def _window_point(self, point: tuple[float, float]) -> tuple[float, float]:

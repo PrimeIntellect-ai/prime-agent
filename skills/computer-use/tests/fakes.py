@@ -484,6 +484,8 @@ class AppEnvironment:
         self.paste_baselines: list[Any] | None = None  # queued paste-baseline reads, cycling
         self.baseline_reads = 0
         self.paste_baseline_side_effect: Any = None  # runs mid-paste during the baseline read
+        self.live_geometry_moved = False  # a control's live bounds moved off the snapshot
+        self.live_geometry: Any = None  # an explicit live-geometry override
         self.paste_focus_before: Any = object()  # the focused element before the paste
         self.paste_focus_after: Any = object()  # the focused element after a focus move
         self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
@@ -541,6 +543,17 @@ class AppEnvironment:
 
     def _cmd_v_presses(self) -> int:
         return sum(1 for name, args in self.recorder.calls if name == "press_key" and args.get("key") == "cmd+v")
+
+    def _live_geometry(self, ref: Any) -> Any:
+        """Serve one element's live bounds: the snapshot's geometry, or the moved oracle."""
+        if self.live_geometry is not None:
+            return self.live_geometry
+        if not isinstance(ref, dict) or not ref.get("position") or not ref.get("size"):
+            return None
+        position, size = ref["position"], ref["size"]
+        if self.live_geometry_moved:
+            return (position[0] + 50.0, position[1] + 50.0), tuple(size)
+        return (tuple(position), tuple(size))
 
     def _paste_baseline(self, pid: int) -> Any:
         """Serve the paste-baseline reads: (focused ref, value head) or None.
@@ -613,6 +626,7 @@ class AppEnvironment:
         patch(ax, "_live_is_secure", lambda ref: self.live_secure_ref)
         patch(ax, "_window_fingerprint", self._window_fingerprint)
         patch(ax, "_paste_baseline", self._paste_baseline)
+        patch(ax, "_live_geometry", self._live_geometry)
         patch(ax, "_perform_action", lambda ref, action: self.ax_calls.append(("perform_action", ref, action)))
         patch(ax, "_is_settable", lambda ref, attribute: self.settable)
         patch(ax, "_current_value", lambda ref: (ref.get("value") if isinstance(ref, dict) else None))
