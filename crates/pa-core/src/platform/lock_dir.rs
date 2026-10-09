@@ -340,6 +340,84 @@ fn process_owner_record() -> String {
     format!("{} {token}\n", std::process::id())
 }
 
+/// Set up a freshly created private directory through a
+/// no-follow, identity-verified handle: `fchmod` the directory to the
+/// given mode and write the owner record fd-relative (`write_owner_through`).
+/// A symlink swapped onto the pathname before this runs cannot redirect
+/// either operation - the handle pins the inode this call created (the
+/// caller's identity witness), and a no-follow open of a symlink fails
+/// outright.
+#[cfg(target_os = "linux")]
+fn setup_private_dir(
+    path: &Path,
+    witness: Option<(u64, u64)>,
+    mode: u32,
+    owner: Option<&str>,
+) -> io::Result<fs::File> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::io::AsRawFd;
+    let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+        .map_err(|_| io::Error::other("non-null-free private path"))?;
+    let fd = unsafe {
+        libc::open(
+            raw_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = unsafe { fs::File::from_raw_fd(fd) };
+    let metadata = dir.metadata()?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        let identity = (metadata.dev(), metadata.ino());
+        if witness != Some(identity) {
+            return Err(io::Error::other(format!(
+                "Private directory {} no longer names the created inode",
+                path.display()
+            )));
+        }
+    }
+    if unsafe { libc::fchmod(dir.as_raw_fd(), mode) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if let Some(owner) = owner {
+        write_owner_through(&dir, format!("{owner}\n").as_bytes())?;
+    }
+    Ok(dir)
+}
+
+/// Mark the residue at `location` (this process's own leftover
+/// placeholder from a failed release removal) as released: the dance
+/// and every judge then consume it instead of refusing it behind this
+/// process's live owner record. The marker write is hardened exactly
+/// like `mark_released_through` (nonblocking, no-follow, regular-only).
+#[cfg(target_os = "linux")]
+fn mark_released_at(location: &Path) {
+    use std::os::unix::io::AsRawFd;
+    let Some(dir) = std::fs::File::open(location).ok() else {
+        return;
+    };
+    let name = c"released";
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // The marker write is the O_CREAT creation itself; the fstat only
+    // rejects a planted non-regular entry, and either way the fd closes.
+    let _ = unsafe { libc::fstat(fd, std::ptr::addr_of_mut!(stat)) };
+    unsafe { libc::close(fd) };
+}
+
 /// Write the owner record into the directory the pinned handle names:
 /// `openat` on the directory's own descriptor, so a public-path swap
 /// between the pin and the write cannot redirect the record into a
@@ -912,12 +990,18 @@ impl LockDir {
     #[cfg(target_os = "linux")]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         let candidate = Self::claim_candidate_name(path)?;
-        let dir = match fs::File::open(&candidate) {
+        // The candidate's setup runs through the no-follow,
+        // identity-verified handle (0700, owner written fd-relative):
+        // a symlink swapped onto the fresh private name cannot redirect
+        // the chmod or the owner write into a victim, and the no-follow
+        // open fails on symlinks outright. The returned handle IS the
+        // created inode (witness-verified inside).
+        let dir = match setup_private_dir(&candidate, identity_at(&candidate), 0o700, owner) {
             Ok(dir) => dir,
             Err(error) => {
-                // Never leave the private candidate behind a failed pin -
-                // nothing else ever removes that private name.
-                let _ = fs::remove_dir(&candidate);
+                // Never leave the private candidate behind a failed
+                // setup - nothing else ever removes that private name.
+                let _ = remove_candidate_dir(&candidate);
                 return Err(error);
             }
         };
@@ -929,41 +1013,8 @@ impl LockDir {
             // remove return EBUSY, and this is an abandoned candidate -
             // the fd has no further use.
             drop(dir);
-            let _ = fs::remove_dir(&candidate);
+            let _ = remove_candidate_dir(&candidate);
             return Err(error);
-        }
-        if let Some(owner) = owner {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) =
-                    fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
-                {
-                    // The owner record rides the publish: any failure
-                    // below abandons the candidate (handle closed, owner
-                    // file removed, directory removed), never a leaked
-                    // half-published lock.
-                    drop(dir);
-                    let _ = remove_candidate_dir(&candidate);
-                    return Err(error);
-                }
-            }
-            if let Err(error) = fs::write(candidate.join("owner"), format!("{owner}\n")) {
-                drop(dir);
-                let _ = remove_candidate_dir(&candidate);
-                return Err(error);
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) =
-                    fs::set_permissions(candidate.join("owner"), fs::Permissions::from_mode(0o600))
-                {
-                    drop(dir);
-                    let _ = remove_candidate_dir(&candidate);
-                    return Err(error);
-                }
-            }
         }
         match rename_noreplace::rename(&candidate, path) {
             Ok(()) => Ok(dir),
@@ -1068,35 +1119,22 @@ impl LockDir {
             // scenario the owner record exists for. The `claimed-at`
             // note lets a displaced holder's release find and complete
             // itself at the private location.
-            // The placeholder's records are private: the directory is
-            // restricted to 0700 and the owner/claim notes to 0600
-            // before the exchange seats them at the public lock path,
-            // where a traversable parent would otherwise expose the
-            // owner record to other users.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) =
-                    fs::set_permissions(&placeholder, fs::Permissions::from_mode(0o700))
-                {
-                    let _ = remove_candidate_dir(&placeholder);
-                    return Err(error);
-                }
-            }
-            if let Err(error) = fs::write(placeholder.join("owner"), process_owner_record()) {
+            // The placeholder's records are private, set through a
+            // no-follow identity-verified handle (the setup_private_dir
+            // helper): an actor who swaps a symlink onto the fresh name
+            // cannot redirect the chmod or the owner write into a
+            // victim - the no-follow open fails on symlinks, and the
+            // handle's inode must equal the mkdir's fresh witness.
+            let fresh_witness = identity_at(&placeholder);
+            let setup = setup_private_dir(
+                &placeholder,
+                fresh_witness,
+                0o700,
+                Some(&process_owner_record()),
+            );
+            if let Err(_error) = setup {
                 let _ = remove_candidate_dir(&placeholder);
-                return Err(error);
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) = fs::set_permissions(
-                    placeholder.join("owner"),
-                    fs::Permissions::from_mode(0o600),
-                ) {
-                    let _ = remove_candidate_dir(&placeholder);
-                    return Err(error);
-                }
+                continue;
             }
             if let Err(error) = fs::write(
                 placeholder.join("claimed-at"),
@@ -1384,10 +1422,23 @@ impl LockDir {
         // does not match it means the path changed hands, so the
         // acquisition FAILS (contending honestly) and removes NOTHING -
         // the current content is the successor's, never ours to unlink.
-        let pinned_identity = dir.metadata().ok().map(|metadata| {
-            use std::os::unix::fs::MetadataExt;
-            (metadata.dev(), metadata.ino())
-        });
+        // An fstat failure on a valid pinned fd is NOT a takeover - it
+        // is an I/O error (the NFS/FUSE fallback's own domain): report
+        // it as the error it is, cleaning the fresh artifact this call
+        // created when the path still matches the witness, never as a
+        // live collision that strands the lock.
+        let pinned_identity = match dir.metadata() {
+            Ok(metadata) => {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            }
+            Err(error) => {
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = remove_candidate_dir(path);
+                }
+                return Err(error);
+            }
+        };
         if pinned_identity != created {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -1824,10 +1875,25 @@ impl LockDir {
                             // This guard's directory, held at the private
                             // name where nothing can replace it: remove it
                             // completely, then clear the placeholder from
-                            // the location so the lock path is empty.
+                            // the location so the lock path is empty. A
+                            // FAILED placeholder removal must not report
+                            // Done: the residue carries this process's
+                            // live owner record, which every judge
+                            // refuses while this process lives - so mark
+                            // it released first (the dance consumes it)
+                            // and report Failed, letting the caller's
+                            // gated fallback retry.
                             let _ = remove_candidate_dir(&placeholder);
-                            let _ = remove_candidate_dir(&location);
-                            return InodeRelease::Done;
+                            match remove_candidate_dir(&location) {
+                                Ok(()) => return InodeRelease::Done,
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                    return InodeRelease::Done;
+                                }
+                                Err(_) => {
+                                    mark_released_at(&location);
+                                    return InodeRelease::Failed;
+                                }
+                            }
                         }
                         // Not this guard's content: swap it home atomically
                         // (both paths exist) and clear the placeholder
