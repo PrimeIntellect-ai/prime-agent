@@ -212,15 +212,17 @@ def _png_dimensions(dir_fd: int, name: str) -> tuple[int, int]:
             "TRANSPORT_ERROR", f"screencapture did not write a readable PNG: {str(error)[:_ERROR_LIMIT]}"
         ) from error
     try:
-        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
-            os.close(file_fd)
-            raise ComputerUseError(
-                "TRANSPORT_ERROR", f"screencapture did not write a regular PNG: {name}"
-            )
+        mode = os.fstat(file_fd).st_mode
     except OSError as error:
+        os.close(file_fd)
         raise ComputerUseError(
             "TRANSPORT_ERROR", f"screencapture did not write a readable PNG: {str(error)[:_ERROR_LIMIT]}"
         ) from error
+    if not stat.S_ISREG(mode):
+        os.close(file_fd)
+        raise ComputerUseError(
+            "TRANSPORT_ERROR", f"screencapture did not write a regular PNG: {name}"
+        )
     try:
         with os.fdopen(file_fd, "rb") as handle:
             header = handle.read(24)

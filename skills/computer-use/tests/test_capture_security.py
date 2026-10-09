@@ -407,5 +407,47 @@ class PngDimensionTests(_CaptureTestCase):
         self.assertEqual((result["width"], result["height"]), (4000, 3000))
 
 
+class PngFdLeakTests(unittest.TestCase):
+    def test_an_fstat_failure_still_closes_the_opened_fd(self) -> None:
+        import tempfile
+        from computer_use import capture, errors
+
+        with tempfile.TemporaryDirectory() as tmp:
+            png = os.path.join(tmp, "shot.png")
+            with open(png, "wb") as handle:
+                handle.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            dir_fd = os.open(tmp, os.O_RDONLY)
+            opened: list[int] = []
+            closed: list[int] = []
+            real_open = os.open
+            real_close = os.close
+
+            def recording_open(path, flags, dir_fd=None):
+                fd = real_open(path, flags, dir_fd=dir_fd)
+                opened.append(fd)
+                return fd
+
+            def recording_close(fd):
+                closed.append(fd)
+                real_close(fd)
+
+            try:
+                with mock.patch.object(capture.os, "open", recording_open), mock.patch.object(
+                    capture.os, "fstat", side_effect=OSError("stat failed")
+                ), mock.patch.object(capture.os, "close", recording_close):
+                    with self.assertRaises(errors.ComputerUseError) as caught:
+                        capture._png_dimensions(dir_fd, "shot.png")
+                self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+                self.assertTrue(opened, 'the function opened a file')
+                self.assertIn(opened[0], closed, 'the fstat-failure path must close the fd')
+            finally:
+                os.close(dir_fd)
+                for fd in opened:
+                    try:
+                        real_close(fd)
+                    except OSError:
+                        pass
+
+
 if __name__ == "__main__":
     unittest.main()
