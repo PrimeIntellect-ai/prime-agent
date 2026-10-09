@@ -1,10 +1,8 @@
 # install.ps1 — the Windows-native installer for Prime Agent (Rust build).
 #
-# THE ONE-LINER (the repo copy's defaults are the channel's own bucket-root
-# base + the stable channel, so the raw form works out of the box — the
-# README's Windows command):
+# THE ONE-LINER (the production endpoint serves the stable installer):
 #
-#   irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+#   irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 #
 # The release pipeline's publish step renders this file to <base>/install.ps1
 # (the stable channel) and <base>/install-beta.ps1 (the beta channel), the
@@ -20,16 +18,13 @@
 # or <base>/beta) gives the version, the channel manifest (<base>/latest.json
 # or <base>/beta.json) gives this platform's artifact row, and the versioned
 # release prefix serves the tarball plus its SHA256SUMS; the checksum is
-# verified before anything is published. The channel carries no GitHub
-# surface: every file this installer READS comes from the base — the one
-# GitHub fetch on the Windows route is this script itself (the README's raw
-# copy), and the sh route has none.
+# verified before anything is published. Every file this installer reads
+# comes from the download base. CI may fetch this script from a GitHub ref
+# to verify changes before they reach the production installer endpoint.
 #
-# THE WINDOWS CHANNEL FALLBACK: the stable releases predate Windows
-# support, so the stable manifest carries no win32-x64 row until the first
-# stable release ships one; a default-channel Windows install falls back
-# to the beta channel with a printed notice, and a channel asked for by
-# name refuses instead (the beta route spelled out).
+# CHANNEL SELECTION: the production installer uses stable. A missing
+# platform artifact is a release error, not permission to switch channels.
+# Beta remains available through an explicit channel selection.
 #
 # NO TYPESCRIPT TAKEOVER STEPS: the TypeScript product never shipped a
 # Windows build, so there is no TS daemon, native install, or npm package
@@ -264,9 +259,8 @@ function ExpectedFileName($version, $platform) {
 # PAIR, retrying once on a version mismatch (the publish writes the
 # manifest first and the pointer second: a read between the two writes sees
 # the old pointer with the new manifest — a transient window, not a broken
-# channel — install-rust.sh's consistency retry). The pair reader is a
-# function so the Windows channel fallback below re-resolves the beta
-# channel through the same retry discipline.
+# channel — install-rust.sh's consistency retry). Both explicitly selected
+# channels use the same pair reader and retry discipline.
 function Read-ChannelPair($channelName) {
     $pairPointer = $channelName
     $pairManifestName = if ($channelName -eq 'beta') { 'beta.json' } else { 'latest.json' }
@@ -333,27 +327,8 @@ if ($versionPin) {
     $version = $pair.Version
     $manifest = $pair.Manifest
     $row = Find-PlatformRow $manifest $version
-    # THE WINDOWS CHANNEL FALLBACK (the operator's real-machine report,
-    # 2026-10-02): the plain one-liner threw "no artifact row for platform
-    # win32-x64 in the stable manifest" - the stable releases predate
-    # Windows support, and the win32-x64 build ships on the beta channel
-    # only. A channel the user asked for BY NAME gets the honest refusal
-    # (the beta route spelled out); the DEFAULT channel falls back to beta
-    # with a printed notice, so the plain one-liner just works.
     if (-not $row) {
-        if ($channelRequested -and $channelRequested -ne 'beta') {
-            Fail ('the explicitly requested ' + $channelRequested + ' channel ships no ' + $platform + ' build yet; Windows builds ride the beta channel - re-run with the beta channel: ' + '$env:PRIME_AGENT_RELEASE_CHANNEL = ''beta''; irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex')
-        } elseif ($channel -ne 'beta') {
-            Write-Host "$channel does not ship Windows builds yet; installing from the beta channel"
-            $channel = 'beta'
-            $pair = Read-ChannelPair $channel
-            $version = $pair.Version
-            $manifest = $pair.Manifest
-            $row = Find-PlatformRow $manifest $version
-            if (-not $row) { Fail "no artifact row for platform $platform in the $channel manifest either (the Windows fallback found no beta build)" }
-        } else {
-            Fail "no artifact row for platform $platform in the $channel manifest"
-        }
+        Fail "no artifact row for platform $platform in the $channel manifest; the installer will not switch release channels automatically"
     }
     if ($row.sha256 -notmatch '^[0-9a-f]{64}$') { Fail "the channel manifest's sha256 for $(ExpectedFileName $version $platform) is malformed" }
     Write-Host "installing prime-agent $version from the $channel channel ($platform)"
