@@ -139,6 +139,29 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             writer.set_message(Some(failure.message))?;
         }
         Err(failure) => {
+            // The stop window closes again AT the failure boundary - the
+            // first statement after drive's handle drops, before any
+            // Rollback write or path work: in that gap a third-party
+            // supervisor sees no active admission, clears the dead
+            // predecessor fence, and can bind the socket the rollback
+            // still needs. A re-acquire failure is another window's
+            // socket: the rollback cannot run under it.
+            let rollback_admission =
+                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire() {
+                    Ok(admission) => Some(admission),
+                    Err(error) => {
+                        let mut writer = writer.lock().await;
+                        writer.set_state(UpdateState::Failed)?;
+                        writer.set_message(Some(format!(
+                            "The rollback could not hold the stop window ({error}); the update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
+                            failure.message.trim_end_matches('.')
+                        )))?;
+                        None
+                    }
+                };
+            let Some(mut rollback_admission) = rollback_admission else {
+                return finish_run(&writer, options, &socket_lossy, heartbeat).await;
+            };
             // The rollback child gets the update's roster artifact (the
             // same one the failed spawn booted with): the rejected
             // successor's crash-oracle kill leaves its adopted workers'
@@ -156,7 +179,14 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             } else {
                 (roster_path.is_file()).then_some(roster_path)
             };
-            finish_failure(&writer, options, failure, roster.as_deref()).await?;
+            finish_failure(
+                &writer,
+                options,
+                failure,
+                roster.as_deref(),
+                &mut rollback_admission,
+            )
+            .await?;
         }
     }
     heartbeat.stop();
@@ -165,6 +195,22 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     let _ = super::intent::release(&options.agent_dir, &socket_lossy);
     // The prepare-time rollback-roster copy served its purpose (or was
     // never needed); the original artifact is the successor's own.
+    let _ = std::fs::remove_file(rollback_roster_path(&options.status_path));
+    let final_status = writer.lock().await.current().clone();
+    Ok(final_status)
+}
+
+/// The shared tail of `run` (the terminal-status read after the heartbeat
+/// and lock cleanup): an early terminal exit from the failure arm lands on
+/// the same path as the natural end.
+async fn finish_run(
+    writer: &Arc<Mutex<StatusWriter>>,
+    options: &CoordinatorOptions,
+    socket_lossy: &str,
+    heartbeat: StatusHeartbeat,
+) -> Result<UpdateStatus> {
+    heartbeat.stop();
+    let _ = super::intent::release(&options.agent_dir, socket_lossy);
     let _ = std::fs::remove_file(rollback_roster_path(&options.status_path));
     let final_status = writer.lock().await.current().clone();
     Ok(final_status)
@@ -500,6 +546,7 @@ async fn finish_failure(
     options: &CoordinatorOptions,
     failure: PhaseFailure,
     roster_path: Option<&Path>,
+    rollback_admission: &mut pa_daemon::supervisor_ownership::ShutdownAdmission,
 ) -> Result<()> {
     let reason = failure.message.trim_end_matches('.');
     writer.lock().await.set_state(UpdateState::Rollback)?;
@@ -511,24 +558,12 @@ async fn finish_failure(
         let _ = writer.set_state(UpdateState::Failed);
         let _ = writer.set_message(Some(message));
     };
-    // The rollback runs INSIDE the stop window (TS keeps its
-    // `shutdownAdmission` held through every failure unwind, releasing it
-    // only in the `finally`): drive's handle dropped at its return, so the
-    // window is re-opened here - without it the fence wait and the
-    // launcher restore run open, and a third-party daemon can bind the
-    // socket out from under the rollback child. A re-acquire failure is
-    // another window's socket: the rollback cannot run under it.
-    let mut rollback_admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire()
-    {
-        Ok(admission) => admission,
-        Err(error) => {
-            fail_hard(format!(
-                "The rollback could not hold the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-            ))
-            .await;
-            return Ok(());
-        }
-    };
+    // The stop window is held by the caller from the failure boundary -
+    // `run` re-acquired it the moment drive's handle dropped, so every
+    // step below (the Rollback write, the restore, the fence wait, the
+    // spawn) runs inside it; TS keeps its `shutdownAdmission` held
+    // through every failure unwind the same way, releasing only in the
+    // `finally`.
     let root = match super::activation_root() {
         Ok(root) => root,
         Err(error) => {
