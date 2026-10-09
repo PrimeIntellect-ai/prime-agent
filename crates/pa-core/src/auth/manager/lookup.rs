@@ -449,12 +449,11 @@ impl AuthStorage {
                 let content = serde_json::to_string_pretty(&data.0)?;
                 Ok(((), Some(content)))
             });
-            // The guard arms settle the outcome without writing: a
-            // changed credential stands, a removal reports the logout.
-            // Only a real write error is worth another attempt.
-            let write_failed =
-                result.is_err() && matches!(outcome, Err(ForcedRefreshFailure::NotExchanged(_)));
-            if !write_failed {
+            // The guard arms settle without writing (with_lock
+            // succeeds); a real write error — including one after the
+            // callback already staged the grant — is worth another
+            // attempt.
+            if result.is_ok() {
                 break;
             }
         }

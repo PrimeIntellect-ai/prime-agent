@@ -123,10 +123,10 @@ impl FileAuthStorageBackend {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     return Err("another process is still refreshing the credential".to_string())
                 }
-                // Lock-infrastructure failures degrade as before: the
-                // peer checks and the write guard still bound the
-                // damage.
-                Err(_) => return Ok(None),
+                // Lock-infrastructure failures fail closed: an
+                // exchange without the cross-process exclusion can
+                // double-spend the single-use refresh token.
+                Err(error) => return Err(format!("failed to acquire refresh lock: {error}")),
             }
         }
         // Repeated stolen guards (a reclaim-race loop): fail closed

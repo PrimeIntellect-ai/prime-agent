@@ -981,13 +981,22 @@ fn a_transient_write_failure_retries_the_locked_write() {
             &self,
             update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
         ) -> anyhow::Result<()> {
+            // The failure lands AFTER the callback staged the grant: the
+            // atomic write itself is what flakes.
+            let ((), next) = update(self.inner.read()?)?;
             let left = self.failures_left.load(std::sync::atomic::Ordering::SeqCst);
             if left > 0 {
                 self.failures_left
                     .store(left - 1, std::sync::atomic::Ordering::SeqCst);
                 anyhow::bail!("transient write failure");
             }
-            self.inner.with_lock(update)
+            let Some(next) = next else {
+                return Ok(());
+            };
+            self.inner.with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(next.clone())))
+            })
         }
     }
     let oauth = Arc::new(CountingOAuth {
