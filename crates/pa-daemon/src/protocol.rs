@@ -18,11 +18,32 @@ use serde_json::Value;
 
 /// Minimum protocol version accepted in command envelopes (TS parity).
 pub const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION: u64 = DAEMON_PROTOCOL_VERSION;
-/// The product version the daemon reports in every `daemon_hello`
-/// (`appVersion`): the CLI's `doctor`/`status` "current" classification
-/// compares against the same value, so this must stay the bare product
-/// version (the build identity marker lives in `runtime.buildId`).
+/// Compiled product-version fallback for library embedders. Packaged CLI
+/// processes initialize the reported version through [`configure_app_version`].
 pub const DAEMON_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static PRODUCT_VERSION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Set the packaged product version once in the composition root, before
+/// serving supervisor or worker connections. Repeating the same value is safe.
+///
+/// # Errors
+/// Returns an error if a process attempts to serve two product versions.
+pub fn configure_app_version(version: &'static str) -> anyhow::Result<()> {
+    let configured = PRODUCT_VERSION.get_or_init(|| version);
+    anyhow::ensure!(
+        *configured == version,
+        "daemon product version was already configured differently"
+    );
+    Ok(())
+}
+
+/// Product version shared by daemon handshakes and update checkpoints. Library
+/// embedders without package metadata retain the compiled version fallback.
+#[must_use]
+pub(crate) fn app_version() -> &'static str {
+    PRODUCT_VERSION.get().copied().unwrap_or(DAEMON_APP_VERSION)
+}
 
 /// Command types the daemon recognizes (TS `DAEMON_COMMAND_TYPES` in TS
 /// declared order, followed by the Rust-native supervisor/worker frames).

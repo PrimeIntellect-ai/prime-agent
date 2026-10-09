@@ -1,12 +1,12 @@
 //! The update/restart flow: prepare/commit/abort transactions, the prepared
 //! dir + watchdog, exit-for-update, and the attach-stream salvage helpers.
 use super::{
-    anyhow, build_update_roster, join_all, json, marker_expires_at_iso, paths, response_failure,
-    response_line, response_success, stop_workers_gracefully, stream_attach, supervisor_identity,
-    util, write_prepared_artifacts, AbortOutcome, Arc, BeginOutcome, ClientRouting, DaemonCommand,
-    DaemonErrorInfo, DaemonResponse, Duration, Map, Ordering, Path, PathBuf, PrepareOp, Result,
-    RouteAdmission, SnapshotPurpose, Supervisor, UpdateId, UpdatePreparedMarker,
-    UpdateRosterInputs, Value, WorkerSnapshot, WorkerStopVerdict, DAEMON_APP_VERSION,
+    anyhow, app_version, build_update_roster, join_all, json, marker_expires_at_iso, paths,
+    response_failure, response_line, response_success, stop_workers_gracefully, stream_attach,
+    supervisor_identity, util, write_prepared_artifacts, AbortOutcome, Arc, BeginOutcome,
+    ClientRouting, DaemonCommand, DaemonErrorInfo, DaemonResponse, Duration, Map, Ordering, Path,
+    PathBuf, PrepareOp, Result, RouteAdmission, SnapshotPurpose, Supervisor, UpdateId,
+    UpdatePreparedMarker, UpdateRosterInputs, Value, WorkerSnapshot, WorkerStopVerdict,
     WORKER_REQUEST_TIMEOUT_MS,
 };
 
@@ -242,8 +242,8 @@ impl Supervisor {
             DaemonCommand::PrepareUpdateRestart { rest, .. } => rest
                 .get("toVersion")
                 .and_then(Value::as_str)
-                .unwrap_or(DAEMON_APP_VERSION),
-            _ => DAEMON_APP_VERSION,
+                .unwrap_or(app_version()),
+            _ => app_version(),
         };
         let ledger = self.rlm_spawn_ledger_for(None).await?;
         let now = util::now_ms();
@@ -254,7 +254,7 @@ impl Supervisor {
                 socket_path: self.options.socket_path.to_str().unwrap_or_default(),
                 agent_dir: &self.options.agent_dir,
                 supervisor: identity.clone(),
-                from_version: DAEMON_APP_VERSION,
+                from_version: app_version(),
                 to_version,
                 created_at_ms: now,
                 ledger: &ledger,

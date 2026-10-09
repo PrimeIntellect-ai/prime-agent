@@ -4,14 +4,14 @@ use anyhow::anyhow;
 use std::time::Duration;
 
 use super::{
-    broadcast, command_type_name, current_protocol_info, daemon_closing_shutdown_event,
-    input_admission_id, json, parse_supervisor_command_line, response_failure, response_line,
-    response_success, salvage_command_type, salvage_id, subscribers, update_gate_refuses, util,
-    Arc, AsyncBufReadExt, AsyncWriteExt, BufReader, ClientRouting, ClientTrust, DaemonCommand,
-    DaemonOutbound, DaemonRuntimeIdentity, EnvelopeParseError, Map, Ordering, Outbound,
-    ResidentWorker, Result, RouteAdmission, Supervisor, TransportStream, TypedCreateRejection,
-    Value, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS,
-    UPDATE_PREPARING_MESSAGE,
+    app_version, broadcast, command_type_name, current_protocol_info,
+    daemon_closing_shutdown_event, input_admission_id, json, parse_supervisor_command_line,
+    response_failure, response_line, response_success, salvage_command_type, salvage_id,
+    subscribers, update_gate_refuses, util, Arc, AsyncBufReadExt, AsyncWriteExt, BufReader,
+    ClientRouting, ClientTrust, DaemonCommand, DaemonOutbound, DaemonRuntimeIdentity,
+    EnvelopeParseError, Map, Ordering, Outbound, ResidentWorker, Result, RouteAdmission,
+    Supervisor, TransportStream, TypedCreateRejection, Value, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, ROUTE_TIMEOUT_MS, UPDATE_PREPARING_MESSAGE,
 };
 
 /// The outcome of one connection-line read. `Overflow` is the untrusted
@@ -333,7 +333,7 @@ impl Supervisor {
             protocol: current_protocol_info(),
             schema_id: Some(DAEMON_SCHEMA_ID.to_string()),
             schema_revision: Some(DAEMON_SCHEMA_REVISION),
-            app_version: Some(DAEMON_APP_VERSION.to_string()),
+            app_version: Some(app_version().to_string()),
             runtime: match &trust {
                 ClientTrust::Local => Some(DaemonRuntimeIdentity {
                     build_id: concat!("pa-daemon-rs-", env!("CARGO_PKG_VERSION")).to_string(),
