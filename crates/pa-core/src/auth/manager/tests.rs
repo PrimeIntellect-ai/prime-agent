@@ -1192,12 +1192,17 @@ fn an_expiry_refresh_never_overwrites_a_landing_login() {
             .send(())
             .expect("the writer reports its write");
     });
-    let _ = auth.get_api_key("x-expiry-login");
+    let api_key = auth.get_api_key("x-expiry-login");
     writer.join().expect("the writer settles");
     let stored = auth.get_all().credential("x-expiry-login");
     assert!(
         matches!(&stored, Some(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"),
         "the landing login stands over the expiry fetch's write: {stored:?}"
+    );
+    assert_eq!(
+        api_key.as_deref(),
+        Some("sk-fresh"),
+        "the landing login serves through the normal credential path"
     );
 }
 

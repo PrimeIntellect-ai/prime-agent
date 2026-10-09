@@ -94,11 +94,28 @@ impl AuthStorage {
                             if now_ms >= *expires {
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
                                     let candidate = self.stored_candidate(provider_id);
-                                    return AuthApiKeyResult {
-                                        api_key: self.oauth.api_key_for(provider_id, &refreshed),
-                                        source_token: candidate
-                                            .and_then(|c| Self::token_for(provider_id, &c)),
-                                        credential_type: Some("oauth"),
+                                    return match &refreshed {
+                                        AuthCredential::ApiKey { key, .. } => {
+                                            // A concurrent login replaced the
+                                            // expired grant with an API key:
+                                            // resolve it through the normal
+                                            // credential path, never the
+                                            // OAuth-only key extraction.
+                                            AuthApiKeyResult {
+                                                api_key: resolve_config_value(key),
+                                                source_token: candidate
+                                                    .and_then(|c| Self::token_for(provider_id, &c)),
+                                                credential_type: Some("api_key"),
+                                            }
+                                        }
+                                        _ => AuthApiKeyResult {
+                                            api_key: self
+                                                .oauth
+                                                .api_key_for(provider_id, &refreshed),
+                                            source_token: candidate
+                                                .and_then(|c| Self::token_for(provider_id, &c)),
+                                            credential_type: Some("oauth"),
+                                        },
                                     };
                                 }
                                 // Refresh failed: keep credentials for a
