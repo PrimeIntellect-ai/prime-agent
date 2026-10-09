@@ -529,7 +529,6 @@ fn restrictive_umask_owned_lock_child() {
     let mask_bits: libc::mode_t = u32::from_str_radix(&mask, 8).unwrap();
     let original = unsafe { libc::umask(mask_bits) };
     let guard = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE);
-    unsafe { libc::umask(original) };
     let guard = guard.expect("owned acquisition works under a restrictive umask");
     guard.ensure_owned().expect("the owner record landed");
     drop(guard);
@@ -537,10 +536,12 @@ fn restrictive_umask_owned_lock_child() {
     // mounts take): its owner record is written through the pinned
     // handle with the fchmod repair, so the record must be readable
     // at mode 0600 even under 0477 (owner-read stripped from fresh
-    // files).
+    // files). The mask stays APPLIED through the direct create and
+    // its assertions - the restoration happens only after.
     let lock = LockDir::path_for(&file);
     let created = LockDir::create_by_mkdir(&lock, Some("1 owner-token"));
     let created = created.expect("the owned fallback create works under the umask");
+    unsafe { libc::umask(original) };
     let owner_path = lock.join("owner");
     let mode = std::fs::metadata(&owner_path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the owner record is readable at 0600");
