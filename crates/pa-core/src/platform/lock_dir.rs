@@ -431,6 +431,11 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
     };
     if fd >= 0 {
         if let Some(file) = regular_or_close(fd) {
+            // A hostile umask (0477) can tighten the freshly created
+            // sidecar's mode below the read-write the next acquisition
+            // needs: repair through this descriptor before returning.
+            use std::os::fd::AsRawFd;
+            unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
             return Some(file);
         }
     } else {
@@ -449,7 +454,30 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
                 if let Some(file) = regular_or_close(ro) {
                     // Best-effort repair through the descriptor: the next
                     // writer's read-write open works normally.
-                    unsafe { libc::fchmod(ro, 0o600) };
+                    use std::os::fd::AsRawFd;
+                    unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
+                    // NFS requires a WRITABLE descriptor for an
+                    // exclusive flock, and fchmod does not change this
+                    // descriptor's access mode: reopen read-write and
+                    // hand the flock the writable descriptor instead.
+                    let rw = unsafe {
+                        libc::open(
+                            raw_path.as_ptr(),
+                            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+                        )
+                    };
+                    if rw >= 0 {
+                        // The repaired mode admits a read-write reopen
+                        // (regular_or_close closes the descriptor itself
+                        // when the reopen did not land on a regular
+                        // file).
+                        if let Some(rw_file) = regular_or_close(rw) {
+                            drop(file);
+                            return Some(rw_file);
+                        }
+                    }
+                    // Local filesystems flock on a read-only descriptor
+                    // fine; the repair keeps future writers working.
                     return Some(file);
                 }
             }
