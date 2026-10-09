@@ -369,6 +369,7 @@ impl MockSupervisor {
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
         let mut events_seen = 0;
+        let mut run_open = false;
         write_json(
             &mut writer,
             &json!({
@@ -420,9 +421,16 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
-                // The scripted turn: a prompt starts one, an abort ends it,
-                // and a `finish` message completes the thread goal on the
-                // way (the OSC 7501 routes).
+                // The scripted run: a prompt opens a multi-step run (a
+                // step's turn_end/turn_start pair mid-run; a `finish`
+                // message also completes the thread goal on the way), a
+                // prompt while the run is open settles it normally, and
+                // an abort settles it aborted (the OSC 7501 routes). A
+                // `step` message opens a run resting between its steps
+                // (the settle landed, the next turn has not started) —
+                // the differential flicker check's shape. One state
+                // change per interaction keeps every report a
+                // deterministic needle.
                 "prompt" => {
                     write_json(
                         &mut writer,
@@ -434,15 +442,58 @@ impl MockSupervisor {
                             "data": {},
                         }),
                     );
-                    events_seen += 1;
-                    push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
-                    if command.get("message").and_then(Value::as_str) == Some("finish") {
+                    if run_open {
                         events_seen += 1;
                         push_event(
                             &mut writer,
                             events_seen,
-                            &json!({ "type": "goal_update", "goal": { "status": "complete" } }),
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "stop" },
+                            }),
                         );
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        run_open = false;
+                    } else if command.get("message").and_then(Value::as_str) == Some("step") {
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        run_open = true;
+                    } else {
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        run_open = true;
+                        if command.get("message").and_then(Value::as_str) == Some("finish") {
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "goal_update",
+                                    "goal": { "status": "complete" },
+                                }),
+                            );
+                        }
                     }
                 }
                 "abort" => {
@@ -456,8 +507,20 @@ impl MockSupervisor {
                             "data": {},
                         }),
                     );
-                    events_seen += 1;
-                    push_event(&mut writer, events_seen, &json!({ "type": "turn_end" }));
+                    if run_open {
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "aborted" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        run_open = false;
+                    }
                 }
                 _ => {
                     write_json(

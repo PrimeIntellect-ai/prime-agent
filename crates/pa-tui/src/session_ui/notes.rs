@@ -13,14 +13,18 @@ impl SessionUi {
         let Ok(goal) = serde_json::from_value::<pa_types::goal::GoalState>(goal) else {
             return;
         };
-        self.goal_terminal = match goal.status {
-            pa_types::goal::GoalStatus::Complete => Some(crate::program_status::Status::Done),
-            pa_types::goal::GoalStatus::Error => Some(crate::program_status::Status::Error),
-            pa_types::goal::GoalStatus::Idle
-            | pa_types::goal::GoalStatus::Active
-            | pa_types::goal::GoalStatus::Paused
-            | pa_types::goal::GoalStatus::BudgetLimited => None,
-        };
+        // A terminal outcome is the run's remembered result; a
+        // non-terminal update says nothing about it (a goal_update(Active)
+        // landing after the run's end must not erase its done).
+        match goal.status {
+            pa_types::goal::GoalStatus::Complete => {
+                self.settled = Some(crate::program_status::Status::Done);
+            }
+            pa_types::goal::GoalStatus::Error => {
+                self.settled = Some(crate::program_status::Status::Error);
+            }
+            _ => {}
+        }
         let announce = self.goal_view.apply_update(goal.clone());
         if announce {
             self.announce_goal_status(view);

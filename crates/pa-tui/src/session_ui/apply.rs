@@ -267,6 +267,7 @@ impl SessionUi {
             } => {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
+                    self.run_open = false;
                     view.working = None;
                     match reason.as_str() {
                         "shutdown" => self.error_row(
@@ -372,7 +373,8 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
-                self.goal_terminal = None;
+                self.run_open = true;
+                self.settled = None;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();
@@ -460,12 +462,17 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error } => {
+            TurnUpdate::TurnEnded { error, run_failed } => {
                 // Only the engine's own turn_end clears the busy state: trailing frames
                 // from the previous turn must not cancel a turn admitted in between.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
                 self.turn_active = false;
+                // A step's settle leaves the run open; an aborted or
+                // failed one ends the run without a done report.
+                if run_failed {
+                    self.run_open = false;
+                }
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
@@ -598,6 +605,14 @@ impl SessionUi {
             TurnUpdate::Idle => {
                 if !self.turn_active {
                     view.working = None;
+                }
+                // The run's normal end settles the report's done: an
+                // aborted run already closed itself at its failed
+                // settle, and a goal's terminal outcome is kept.
+                if self.run_open {
+                    self.run_open = false;
+                    self.settled
+                        .get_or_insert(crate::program_status::Status::Done);
                 }
             }
             TurnUpdate::GoalUpdate(goal) => {

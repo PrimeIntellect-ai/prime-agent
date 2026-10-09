@@ -1912,13 +1912,7 @@ async fn run_interactive_surface(
 
         // OSC 7501 program status.
         if renderer.is_terminal() {
-            crate::program_status::report(if session.turn_active {
-                crate::program_status::Status::Working
-            } else {
-                session
-                    .goal_terminal
-                    .unwrap_or(crate::program_status::Status::Idle)
-            });
+            crate::program_status::report(session.program_status());
         }
 
         // Spinner animation: the wall clock drives the phase, not the render rate — the frame gate

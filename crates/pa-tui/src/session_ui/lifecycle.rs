@@ -109,7 +109,8 @@ impl SessionUi {
             context: None,
             list_rows: Vec::new(),
             turn_active: false,
-            goal_terminal: None,
+            run_open: false,
+            settled: None,
             turn_ends_seen: 0,
             last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
@@ -500,7 +501,7 @@ impl SessionUi {
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
-        self.goal_terminal = None;
+        self.settled = None;
         // The resynced state owns the loader: a turn still live behind the
         // re-attach keeps the spinner, one that died with the old link does not.
         let streaming = attach.snapshot.get("state").is_some_and(|state| {
@@ -509,6 +510,7 @@ impl SessionUi {
                 .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
         });
         self.turn_active = streaming;
+        self.run_open = streaming;
         self.streaming_index = None;
         // The turn-end watermark restarts only when the mounted session CHANGES: an end owed by the
         // detached session's stream must not pin the watermark (without the reset a later prompt's
