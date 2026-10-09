@@ -566,14 +566,32 @@ def main():
     for name in ("queued_close", "refusal", "rebind_close"):
         sides = [receipt["results"].get(kind, {}).get("scenarios", {}).get(name, {}) for kind in ("ts", "rust")]
         executed = all(x.get("executed") for x in sides)
-        comparisons[name] = {"both_executed": executed,
+        comparisons[name] = {"comparable": name != "rebind_close",
+                             "both_executed": executed,
                              "same_logical_prompt_observations": bool(executed and sides[0].get("prompts") == sides[1].get("prompts")),
                              "same_accepted_logical_observations": bool(executed and sides[0].get("accepted_logical_messages") == sides[1].get("accepted_logical_messages")),
                              "same_wire_prompt_observations": bool(executed and sides[0].get("wire_prompt_messages") == sides[1].get("wire_prompt_messages")),
                              "both_invariants_passed": all(x.get("invariant_passed") for x in sides)}
+    for name, comparison in comparisons.items():
+        if not comparison["comparable"]:
+            comparison["status"] = "not_comparable"
+            comparison["reason"] = (
+                "Pinned TS source " + TS_SOURCE_COMMIT + " has no session_binding or "
+                "previousActiveSessionId protocol; session_replaced retains the active ID. "
+                "The Rust-only rebind fixture cannot establish a TS behavioral difference."
+            )
+        elif not comparison["both_executed"]:
+            comparison["status"] = "incomplete"
+        else:
+            comparison["status"] = "matched" if all(comparison[key] for key in (
+                "same_logical_prompt_observations", "same_accepted_logical_observations",
+                "both_invariants_passed")) else "different"
     receipt["comparisons"] = comparisons
+    receipt["shared_contract_parity"] = bool("preflight_error" not in receipt and all(
+        comparisons[name]["status"] == "matched" for name in ("queued_close", "refusal")))
+    # Full parity remains unproven when a requested scenario is not comparable.
     receipt["parity"] = bool("preflight_error" not in receipt and all(
-        all(item[key] for key in ("both_executed", "same_logical_prompt_observations",
+        item["comparable"] and all(item[key] for key in ("both_executed", "same_logical_prompt_observations",
                                  "same_accepted_logical_observations", "both_invariants_passed"))
         for item in comparisons.values()))
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
