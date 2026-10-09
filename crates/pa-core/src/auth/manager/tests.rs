@@ -968,6 +968,69 @@ fn an_unreadable_peer_recheck_never_spends_the_refresh_token() {
 /// A transient write failure retries the locked write: the rotated
 /// grant still lands in the store.
 #[test]
+fn a_malformed_peer_recheck_keeps_the_ordinary_ladder() {
+    struct MalformedPeerBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl AuthStorageBackend for MalformedPeerBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= 2 {
+                return Ok(Some("{ not json".to_string()));
+            }
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(MalformedPeerBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-malformed",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-malformed");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "the credential store could not be parsed"
+        ),
+        "the malformed recheck keeps the ordinary ladder"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs against an unverifiable store"
+    );
+}
+
+#[test]
 fn a_transient_write_failure_retries_the_locked_write() {
     struct FlakyWriteBackend {
         inner: crate::auth::InMemoryAuthStorageBackend,
