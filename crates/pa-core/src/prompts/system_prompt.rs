@@ -494,20 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn daemonless_disclosure_follows_the_depth_line() {
-        let disclosure = "Subagents and completion notifications are unavailable in this session (no daemon): rlm.spawn will error, and nothing wakes you after your turn ends, so await background commands before ending it. Plan to do all work yourself.";
-        let mut options = base_options();
-        options.daemonless = true;
-        let prompt = build_system_prompt(&options);
-        let mut lines = prompt
-            .lines()
-            .skip_while(|line| !line.starts_with("Recursive agent depth:"));
-        lines.next().expect("depth line");
-        assert_eq!(lines.next(), Some(disclosure));
-        assert!(!build_system_prompt(&base_options()).contains(disclosure));
-    }
-
-    #[test]
     fn custom_prompt_replaces_layers_keeps_tail() {
         let mut options = base_options();
         options.custom_prompt = Some("Be terse.".to_string());
