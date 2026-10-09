@@ -42,7 +42,7 @@ struct ModelPromptsDoc {
 }
 
 struct ParsedRule {
-    patterns: Vec<(String, globset::GlobMatcher)>,
+    patterns: Vec<globset::GlobMatcher>,
     files: Vec<String>,
 }
 
@@ -66,7 +66,7 @@ fn parse_layer(toml_text: &str, source: &str) -> (Vec<ParsedRule>, Vec<String>) 
         let mut patterns = Vec::new();
         for pattern in rule.r#match {
             match compile_pattern(&pattern) {
-                Ok(matcher) => patterns.push((pattern, matcher)),
+                Ok(matcher) => patterns.push(matcher),
                 Err(error) => errors.push(format!("{source}: {error}")),
             }
         }
@@ -103,9 +103,9 @@ fn selector_segments(selector: &str) -> Vec<&str> {
 }
 
 fn rule_applies(rule: &ParsedRule, segments: &[&str]) -> bool {
-    rule.patterns.iter().any(|(pattern, matcher)| {
-        let count = pattern.split('/').count();
-        segments.len() >= count && matcher.is_match(segments[segments.len() - count..].join("/"))
+    rule.patterns.iter().any(|matcher| {
+        (1..=segments.len())
+            .any(|count| matcher.is_match(segments[segments.len() - count..].join("/")))
     })
 }
 
@@ -298,6 +298,9 @@ mod tests {
             // `?` matches exactly one character
             ("claude-sonnet-?", "anthropic/claude-sonnet-4", true),
             ("claude-sonnet-?", "anthropic/claude-sonnet-4.5", false),
+            // a brace pattern applies when any alternative fits the final
+            // segments, even though the pattern string spans more slashes
+            ("{anthropic/claude-*,z-ai/glm-*}", "z-ai/glm-5.3", true),
         ];
         for (pattern, selector, expected) in cases {
             let (rules, _) =
