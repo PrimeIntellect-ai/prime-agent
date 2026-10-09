@@ -41,6 +41,7 @@ pa-ai = { path = "crates/pa-ai" }
 pa-agent = { path = "crates/pa-agent" }
 thiserror = "2"
 futures = "0.3"
+toml = "0.9"
 # Dev-only; the default fork/timeout features are unused.
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 
