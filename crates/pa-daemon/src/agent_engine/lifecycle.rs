@@ -838,6 +838,15 @@ impl AgentSessionEngine {
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
+            // The build's resolve-and-install serializes with `/reload`'s
+            // live-input refresh (the other slot writers' fence): a reload
+            // landing between this resolution and the slot write must not
+            // be clobbered by the build's older pair. The guard never
+            // rides an await — the block is synchronous and scoped.
+            let _reload_serialized = self
+                .reload_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {

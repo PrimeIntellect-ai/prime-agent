@@ -110,6 +110,15 @@ impl AgentSessionEngine {
         };
         let armed = match route {
             Some(resolved) => {
+                // The arm's auth resolve-and-install serializes with
+                // `/reload`'s live-input refresh (the route target is one
+                // of the reload's refreshes): a reload landing between
+                // this resolution and the route install must not be
+                // clobbered by the arm's older pair.
+                let _reload_serialized = self
+                    .reload_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let agent_model = json_round_trip(&resolved.model)
                     .ok_or_else(|| "model conversion failed".to_string())?;
                 Some(ImageRoute {

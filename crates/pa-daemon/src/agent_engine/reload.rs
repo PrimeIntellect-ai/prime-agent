@@ -7,15 +7,18 @@ use pa_core::session_engine::provider_adapter::ProviderTarget;
 
 impl AgentSessionEngine {
     /// The stored request auth for the target's OWN model, applied in
-    /// place: only the key and headers change, and only when the store
-    /// serves a live credential for the model's provider. The configured
-    /// `models.json` fallback key — what the resolution serves when the
-    /// store is unreadable OR holds no credential — is not a stored
-    /// credential and never replaces what the target already serves
-    /// with. A resolved credential REPLACES the pair: its headers land
-    /// even when it carries none, so a rotated credential without a team
-    /// header clears the previous credential's `X-Prime-Team-ID` instead
-    /// of serving it on the new key.
+    /// place: only the key and headers change, and only when the
+    /// resolution serves a live credential for the model's provider —
+    /// stored, or the ambient environment/runtime override (a logout
+    /// that empties the store leaves the session on the env key, like a
+    /// fresh resolution). The configured `models.json` fallback key —
+    /// what the resolution serves when the store is unreadable OR
+    /// resolves no credential from any live source — is not a credential
+    /// and never replaces what the target already serves with. A
+    /// resolved credential REPLACES the pair: its headers land even when
+    /// it carries none, so a rotated credential without a team header
+    /// clears the previous credential's `X-Prime-Team-ID` instead of
+    /// serving it on the new key.
     fn refresh_request_auth(&self, target: &mut ProviderTarget) {
         let (api_key, headers, store_auth) =
             self.resolve_request_key_and_headers_and_store_health(&target.model);

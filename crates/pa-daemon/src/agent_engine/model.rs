@@ -379,14 +379,16 @@ impl AgentSessionEngine {
         (api_key, headers)
     }
 
-    /// [`Self::resolve_request_key_and_headers`] plus whether the store
-    /// holds a live credential for the model's provider on a healthy
-    /// read. `false` means the resolved key is the configured
-    /// `models.json` fallback — served when the store is unreadable OR
-    /// holds no credential for the provider — which is not a stored
-    /// credential and must never replace a serving pair (the
-    /// create-config override is store-independent; callers apply it
-    /// themselves).
+    /// [`Self::resolve_request_key_and_headers`] plus whether the
+    /// resolution serves a live credential for the model's provider on a
+    /// healthy read — stored, or the ambient environment/runtime override
+    /// (a logout that empties the store leaves the session on the env
+    /// key, exactly like a fresh resolution). `false` means the resolved
+    /// key is the configured `models.json` fallback — served when the
+    /// store is unreadable OR resolves no credential from any live
+    /// source — which is not a credential and must never replace a
+    /// serving pair (the create-config override is source-independent;
+    /// callers apply it themselves).
     pub(crate) fn resolve_request_key_and_headers_and_store_health(
         &self,
         model: &Model,

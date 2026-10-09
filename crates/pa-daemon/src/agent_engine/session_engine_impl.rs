@@ -391,6 +391,14 @@ impl SessionEngine for AgentSessionEngine {
             return false;
         };
         {
+            // The switch's resolve-and-install serializes with `/reload`'s
+            // live-input refresh (the failover callbacks' fence): a reload
+            // landing between this resolution and the slot write must not
+            // be clobbered by the switch's older pair.
+            let _reload_serialized = self
+                .reload_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (api_key, headers) = self.resolve_request_key_and_headers(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
