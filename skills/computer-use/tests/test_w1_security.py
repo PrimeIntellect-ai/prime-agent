@@ -1314,6 +1314,66 @@ class RestoreVerificationTests(unittest.TestCase):
             restored = computer_use._restore_clipboard({})
         self.assertTrue(restored, "clearing an empty clipboard back to empty is a successful restore")
 
+    def test_a_refused_zero_length_type_is_not_a_restore(self) -> None:
+        import computer_use
+
+        class Pasteboard:
+            def __init__(self) -> None:
+                self.data: dict[str, Any] = {}
+
+            def clearContents(self) -> None:
+                self.data = {}
+
+            def setData_forType_(self, payload: Any, type_name: str) -> bool:
+                if type_name == "metadata":
+                    return False  # the pasteboard refuses the zero-length type
+                self.data[type_name] = payload
+                return True
+
+            def dataForType_(self, type_name: str) -> Any:
+                return self.data.get(type_name)
+
+        pasteboard = Pasteboard()
+        fake_mac = types.SimpleNamespace(
+            cocoa=types.SimpleNamespace(
+                NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: pasteboard),
+                NSPasteboardTypeString="string",
+                NSData=types.SimpleNamespace(dataWithBytes_length_=lambda data, length: data),
+            )
+        )
+        with mock.patch.object(computer_use, "_require_mac", lambda: fake_mac):
+            restored = computer_use._restore_clipboard({"string": b"old", "metadata": b""})
+        self.assertFalse(restored, "a refused zero-length type means the restore lost data")
+
+    def test_a_restored_zero_length_type_reports_success(self) -> None:
+        import computer_use
+
+        class Pasteboard:
+            def __init__(self) -> None:
+                self.data: dict[str, Any] = {}
+
+            def clearContents(self) -> None:
+                self.data = {}
+
+            def setData_forType_(self, payload: Any, type_name: str) -> bool:
+                self.data[type_name] = payload
+                return True
+
+            def dataForType_(self, type_name: str) -> Any:
+                return self.data.get(type_name)
+
+        pasteboard = Pasteboard()
+        fake_mac = types.SimpleNamespace(
+            cocoa=types.SimpleNamespace(
+                NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: pasteboard),
+                NSPasteboardTypeString="string",
+                NSData=types.SimpleNamespace(dataWithBytes_length_=lambda data, length: data),
+            )
+        )
+        with mock.patch.object(computer_use, "_require_mac", lambda: fake_mac):
+            restored = computer_use._restore_clipboard({"string": b"old", "metadata": b""})
+        self.assertTrue(restored, "a zero-length type that round-trips is part of a full restore")
+
 
 if __name__ == "__main__":
     unittest.main()

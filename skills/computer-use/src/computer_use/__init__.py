@@ -331,8 +331,7 @@ def _restore_clipboard(saved: dict[str, Any] | None) -> bool:
                 continue
         for type_name, data in saved.items():
             restored = pasteboard.dataForType_(type_name)
-            restored_bytes = bytes(restored) if restored is not None else None
-            if restored_bytes != (data if data else None):
+            if restored is None or bytes(restored) != data:
                 return False
         return True
     except Exception:
