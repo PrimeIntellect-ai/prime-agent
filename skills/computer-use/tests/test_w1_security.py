@@ -1078,5 +1078,32 @@ class FirstDiffGuideTests(AppTestCase):
         self.assertNotIn("Compose without sending", second)
 
 
+class RestoreAfterSettleTests(AppTestCase):
+    async def test_the_restore_waits_for_the_paste_to_settle(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        order: list[str] = []
+        real_settle = app._settle
+        real_restore = computer_use._restore_clipboard
+
+        def settle_recording() -> None:
+            order.append("settle")
+            real_settle()
+
+        def restore_recording(saved: Any) -> None:
+            order.append("restore")
+            real_restore(saved)
+
+        with mock.patch.object(app, "_settle", settle_recording), mock.patch.object(
+            computer_use, "_restore_clipboard", restore_recording
+        ):
+            await app.paste("payload")
+        self.assertEqual(order, ["settle", "restore"], "the clipboard is restored only after the app consumed the paste")
+        self.assertEqual(
+            env.clipboard_calls,
+            [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

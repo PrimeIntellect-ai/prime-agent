@@ -834,6 +834,11 @@ class App:
                             )
                         inject._press_key(self._pid, "cmd+v")
                         time.sleep(_PASTE_SETTLE_SECONDS)
+                        # cmd+v rides the app's event queue: wait for the UI
+                        # to consume the paste before the restore, so a busy
+                        # app never reads the user's prior clipboard instead
+                        # of the payload
+                        self._settle()
                     except ComputerUseError:
                         raise
                     except Exception as error:
@@ -852,7 +857,7 @@ class App:
                     else:
                         _restore_clipboard(saved)
 
-        await self._action("paste", dispatch, settle=True)
+        await self._action("paste", dispatch, settle=False)
 
     async def _refresh(self, diff_on: bool = True) -> str:
         """Observe the app and store the new snapshot, returning its text."""
