@@ -2038,6 +2038,30 @@ mod tests {
         let _ = remove_candidate_dir(&path);
     }
 
+    /// Whether file permission denials actually reproduce in this
+    /// environment: a root or `CAP_DAC_OVERRIDE` process bypasses them,
+    /// so every restrictive-mode scenario (EACCES paths) would silently
+    /// test the wrong branch. Those tests skip when this reads false.
+    #[cfg(target_os = "linux")]
+    fn permission_denial_reproducible() -> bool {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("probe");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o400)
+            .open(&probe)
+            .unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&probe)
+            .is_err()
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn planted_fifo_at_the_sidecar_fails_closed_without_blocking() {
@@ -2083,6 +2107,12 @@ mod tests {
             .open(&sidecar)
             .unwrap();
         std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o400)).unwrap();
+        if !permission_denial_reproducible() {
+            // Root/CAP_DAC_OVERRIDE bypasses the denial these tests
+            // exist to reproduce: skip instead of testing the wrong
+            // branch.
+            return;
+        }
         // The first acquisition opens through the read-only fallback,
         // takes the flock, and repairs the mode through its descriptor.
         let held = try_reclaim_guard(&file, Duration::from_millis(200));
@@ -2125,6 +2155,9 @@ mod tests {
             .mode(0o200)
             .open(&sidecar)
             .unwrap();
+        if !permission_denial_reproducible() {
+            return;
+        }
         let guard = try_reclaim_guard(&file, Duration::from_millis(200));
         assert!(
             guard.is_some(),
@@ -2201,6 +2234,9 @@ mod tests {
         std::fs::write(&config, b"{}").unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o400)).unwrap();
         std::fs::hard_link(&config, &sidecar).unwrap();
+        if !permission_denial_reproducible() {
+            return;
+        }
         let guard = try_reclaim_guard(&file, Duration::from_millis(200));
         assert!(guard.is_none(), "a restrictive-mode hardlink fails closed");
         assert_eq!(
