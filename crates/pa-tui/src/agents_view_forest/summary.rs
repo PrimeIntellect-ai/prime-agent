@@ -103,7 +103,10 @@ pub fn summary_identity(summary: &Value) -> String {
     }
     let scope = identity_scope(summary);
     if let Some(file) = get("sessionFile") {
-        return format!("file:{file}");
+        // The identity converges the two Windows string forms of one
+        // session file (the same normalizer every join key rides - the
+        // reply flow's row lookup must land on Windows too).
+        return crate::agents_view_state::file_identity(file);
     }
     if let Some(active) = get("activeSessionId") {
         return format!("{scope}active:{active}");
