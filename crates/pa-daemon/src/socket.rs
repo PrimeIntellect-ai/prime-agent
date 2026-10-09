@@ -1048,15 +1048,16 @@ fn claim_socket_file_for_removal(path: &Path) -> std::io::Result<Option<std::pat
                 // The claim NAME is taken: regenerate the suffix.
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 // A filesystem without RENAME_NOREPLACE (EOPNOTSUPP on
-                // NFS/FUSE, EINVAL/ENOSYS without renameat2) is a REAL
-                // claim failure - a truthful unsupported-mount outcome:
-                // the stale socket stays at the public path and the
-                // caller must not report success.
+                // NFS/FUSE, EINVAL/ENOSYS without renameat2): no atomic
+                // claim exists here, so take the same floor the
+                // non-Linux platforms use - the caller's re-verified,
+                // inode-checked pathname remove. Erroring instead would
+                // wedge every later prepare behind this residue (the
+                // exit-cleanup path's None already documents the next
+                // prepare as self-healing; lock acquisition falls back
+                // on these mounts too, so startup must not pin here).
                 Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
-                    return Err(std::io::Error::other(format!(
-                        "Stale socket cleanup needs a no-replace rename this filesystem does not provide: {}",
-                        path.display()
-                    )));
+                    return Ok(Some(path.to_path_buf()));
                 }
                 Err(error) => {
                     claim_error = claim_error.or(Some(error));

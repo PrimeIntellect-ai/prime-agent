@@ -1309,27 +1309,6 @@ impl LockDir {
                 }
                 Err(error) => return Err(error),
             }
-            if let Err(error) = fs::write(
-                placeholder.join("claimed-at"),
-                placeholder
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-            ) {
-                let _ = remove_candidate_dir(&placeholder);
-                return Err(error);
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) = fs::set_permissions(
-                    placeholder.join("claimed-at"),
-                    fs::Permissions::from_mode(0o600),
-                ) {
-                    let _ = remove_candidate_dir(&placeholder);
-                    return Err(error);
-                }
-            }
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
                     let claimed = identity_at(&placeholder);
@@ -1560,7 +1539,17 @@ impl LockDir {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-                let _ = fs::remove_dir(path);
+                // The removal is gated on the creation witness: a
+                // stale takeover in the mkdir-to-chmod window (the
+                // suspension race this function guards everywhere
+                // else) may have already reclaimed this directory and
+                // published a successor at the path - removing THAT
+                // would delete a live foreign lock. Without a
+                // positive witness match, the artifact expires
+                // through the stale window instead.
+                if identity_at(path) == created {
+                    let _ = fs::remove_dir(path);
+                }
                 return Err(error);
             }
         }
