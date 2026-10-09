@@ -311,3 +311,37 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
     assert_eq!(tail.len(), 601 - omitted as usize);
     assert_eq!(&tail[..], &full[(omitted as usize)..]);
 }
+
+#[tokio::test]
+async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
+    for timestamp in [json!(2000.75), json!("1970-01-01T00:00:02.000Z")] {
+        for user_index in [1usize, 599] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("timestamp-tail.jsonl");
+            let mut fixture = Fixture {
+                content: header_line("timestamp-tail"),
+                prev: None,
+                id: 0,
+            };
+            for index in 0..600 {
+                let message = if index == user_index {
+                    json!({ "role": "user", "content": "latest", "timestamp": timestamp })
+                } else if index == 0 {
+                    json!({ "role": "user", "content": "older", "timestamp": 1000 })
+                } else {
+                    assistant_message("continuation")
+                };
+                fixture.row(|prev, id| message_row(prev, id, &message));
+            }
+            std::fs::write(&path, fixture.content).unwrap();
+            let worker = worker_over(dir.path(), &path).await;
+            let data = attach(&worker, TUI_CAPABILITIES).await;
+            let snapshot = &data["snapshot"];
+            assert_eq!(snapshot["historyBefore"], 88);
+            assert_eq!(
+                snapshot["lastUserPromptMs"], 2000,
+                "latest timestamp {timestamp} at index {user_index}"
+            );
+        }
+    }
+}

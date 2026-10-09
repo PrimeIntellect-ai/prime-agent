@@ -2284,3 +2284,19 @@ fn backfill_preserves_errors_before_an_unrelated_status() {
     let empty = json!({ "role": "assistant", "content": [], "stopReason": "stop" });
     joined_matches_full(&[attempt(1), empty, outcome], 1);
 }
+
+#[test]
+fn windowed_prompt_time_prefers_the_readable_tail_over_an_older_scalar() {
+    for timestamp in [json!(2000.75), json!("1970-01-01T00:00:02.000Z")] {
+        let mut data = slim_attach();
+        data["snapshot"]["historyBefore"] = json!(1);
+        data["snapshot"]["lastUserPromptMs"] = json!(1000);
+        data["snapshot"]["messages"] = json!([
+            { "role": "user", "content": "latest", "timestamp": timestamp }
+        ]);
+        assert_eq!(
+            reconstruct(&attach_data_from_response(data).unwrap()).last_user_prompt_ms,
+            Some(2000)
+        );
+    }
+}
