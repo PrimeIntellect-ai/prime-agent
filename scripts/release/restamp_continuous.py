@@ -59,7 +59,8 @@ from assemble_artifacts import (
     sha256_file,
 )
 from bundle_catalog import validate_bundled_catalog_dir
-from verify_release import CONTINUOUS_EXTRA_TOP_LEVEL, CONTINUOUS_SUFFIX, EXPECTED_TOP_LEVEL
+from native_compat import validate_compatibility_archive
+from verify_release import CONTINUOUS_EXTRA_TOP_LEVEL, CONTINUOUS_SUFFIX, EXPECTED_TOP_LEVEL, NATIVE_COMPAT_TOP_LEVEL
 
 # The runner-host target triple -> the binary this process can execute
 # (installer.rs `target_for` parity: the same four continuous targets).
@@ -187,11 +188,13 @@ def restamp_target(incoming: Path, out_dir: Path, version: str,
     elif decoders or decoder_files:
         fail(f"{incoming.name}: unexpected decoder artifacts on {target}")
 
+    validate_compatibility_archive(archive)
+
     # 3. Unpack; assert the continuous payload shape.
     staging = Path(tempfile.mkdtemp(prefix="prime-agent-restamp-"))
     try:
         entries = unpack_archive(archive, staging)
-        expected = sorted(EXPECTED_TOP_LEVEL | CONTINUOUS_EXTRA_TOP_LEVEL)
+        expected = sorted(EXPECTED_TOP_LEVEL | CONTINUOUS_EXTRA_TOP_LEVEL | NATIVE_COMPAT_TOP_LEVEL)
         if entries != expected:
             fail(f"{incoming.name}: payload {entries} != the continuous "
                  f"payload {expected}; refusing to restamp a foreign archive")

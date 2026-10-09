@@ -86,10 +86,10 @@ use crate::framing::{write_frame, PrivateFrameReader, DEFAULT_PRIVATE_FRAME_LIMI
 use crate::paths;
 use crate::prompt_admission::input_admission_id;
 use crate::protocol::{
-    command_active_session_id, command_type_name, current_protocol_info,
+    app_version, command_active_session_id, command_type_name, current_protocol_info,
     parse_supervisor_command_line, response_failure, response_line, response_success,
     DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError, TypedCreateRejection,
-    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{
     ResidentWorker, SessionRegistry, WorkerRegistration, WorkerReply, WorkerRequest,

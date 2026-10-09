@@ -78,3 +78,8 @@ No provider HTTP (pa-ai), no loop policy (pa-agent), no daemon supervision (pa-d
 
 ## Depends on
 pa-types, pa-ai, pa-agent (one-way).
+
+The Unix platform process API exposes `current_user_id()` for the daemon
+endpoint namespace to match the TypeScript `process.getuid()` contract on
+macOS as well as Linux. This reads the OS identity without filesystem or
+subprocess work.
