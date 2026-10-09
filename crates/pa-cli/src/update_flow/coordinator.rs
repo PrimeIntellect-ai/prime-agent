@@ -130,6 +130,14 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         &socket_lossy,
     )?));
     let heartbeat = StatusHeartbeat::start(Arc::clone(&writer));
+    // The stop-window generation BEFORE drive's own acquire: a failure-arm
+    // re-check reads exactly one more bump (drive's own); anything higher
+    // means a concurrent stop opened in the update's release-to-spawn
+    // window, and the rollback refuses to roll back behind the user's
+    // completed shutdown.
+    let generation_before = pa_daemon::supervisor_ownership::shutdown_admission_generation(
+        &pa_daemon::supervisor_ownership::default_registry_dir().unwrap_or_default(),
+    );
     match drive(&writer, options, &update_id, &socket_dir).await {
         Ok(()) => {}
         Err(failure) if !failure.after_stop => {
@@ -175,6 +183,25 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             let Some(mut rollback_admission) = rollback_admission else {
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
+            // A concurrent stop raced the update's release-to-spawn window:
+            // the generation advanced past drive's own single acquire. The
+            // user's shutdown has reported success by now - the rollback
+            // refuses to spawn a daemon behind it.
+            let generation_now = pa_daemon::supervisor_ownership::shutdown_admission_generation(
+                &pa_daemon::supervisor_ownership::default_registry_dir().unwrap_or_default(),
+            );
+            if generation_now > generation_before + 1 {
+                {
+                    let mut status = writer.lock().await;
+                    let _ = status.set_state(UpdateState::Rollback);
+                    status.set_state(UpdateState::Failed)?;
+                    status.set_message(Some(format!(
+                        "A concurrent shutdown raced this update; the rollback refused to restart the daemon. The update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
+                        failure.message.trim_end_matches('.')
+                    )))?;
+                }
+                return finish_run(&writer, options, &socket_lossy, heartbeat).await;
+            }
             // The rollback child gets the update's roster artifact (the
             // same one the failed spawn booted with): the rejected
             // successor's crash-oracle kill leaves its adopted workers'

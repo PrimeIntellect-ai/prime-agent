@@ -109,6 +109,13 @@ const STARTUP_FENCES_DIR_NAME: &str = "startup-fences";
 /// Returns an error when the override path is not valid Unicode and the
 /// fallback needs the home directory but [`crate::paths::home_dir`]
 /// cannot resolve it.
+/// The registry directory for the CLI's generation reads (the coordinator's
+/// concurrent-stop detection).
+#[must_use]
+pub fn default_registry_dir() -> Option<PathBuf> {
+    registry_dir().ok()
+}
+
 fn registry_dir() -> Result<PathBuf> {
     match std::env::var_os(REGISTRY_DIR_ENV) {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
@@ -454,8 +461,47 @@ fn read_active_shutdown_admission(registry_dir: &Path) -> Result<Option<Shutdown
     if shutdown_admission_is_active(&admission) {
         return Ok(Some(admission));
     }
-    let _ = std::fs::remove_file(&path);
+    // An expired record the reader cannot REMOVE is never reported absent:
+    // the stale token would stay on disk for its holder to RE-ARM
+    // (renew_once re-arms an expired-but-ours record), and the holder
+    // would continue shutdown actions against a boot this read just
+    // admitted. The removal error propagates - the boot is refused unless
+    // reclamation succeeds.
+    if let Err(error) = std::fs::remove_file(&path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).with_context(|| format!("remove {}", path.display()));
+        }
+    }
     Ok(None)
+}
+
+/// The stop-window generation file: a monotonic counter bumped under the
+/// registry guard on EVERY admission acquire. A coordinator that held the
+/// window and released it for its spawn can detect a concurrent stop that
+/// opened in between (the counter advanced past its own acquire) and
+/// refuse to roll back behind the user's completed shutdown.
+fn shutdown_admission_generation_path(registry_dir: &Path) -> PathBuf {
+    registry_dir.join("shutdown-admission-generation")
+}
+
+/// Read the current generation (0 when no acquire ever happened; a
+/// read error is 0 - the conservative "no concurrent window" answer, the
+/// same answer an absent file gives).
+#[must_use]
+pub fn shutdown_admission_generation(registry_dir: &Path) -> u64 {
+    std::fs::read_to_string(shutdown_admission_generation_path(registry_dir))
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Bump the generation under the caller's registry guard (acquire only).
+fn bump_shutdown_admission_generation(registry_dir: &Path) {
+    let next = shutdown_admission_generation(registry_dir) + 1;
+    let path = shutdown_admission_generation_path(registry_dir);
+    // The bump is best-effort: a write failure degrades the concurrent-stop
+    // DETECTION (reads see 0), never the admission protocol itself.
+    let _ = std::fs::write(&path, next.to_string());
 }
 
 /// Read a startup-fence record; `Ok(None)` when absent (TS
@@ -753,6 +799,7 @@ impl ShutdownAdmission {
                     ),
                 };
                 write_record(&path, &record)?;
+                bump_shutdown_admission_generation(&registry_dir);
                 Ok(Some(()))
             })?;
             if acquired.is_some() {
@@ -840,9 +887,16 @@ impl ShutdownAdmission {
     /// rewrite before the removal, but never after it - the release's
     /// removal is the final word (TS: "a stopped record must never be
     /// rewritten to disk" checked inside the guard).
-    pub fn release(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// A failed removal (or guard) error surfaces: the admission may
+    /// still sit on disk, and the caller must not proceed as if the
+    /// window were closed - a successor spawned behind the stale record
+    /// refuses its own boot ("Daemon shutdown is in progress").
+    pub fn try_release(&mut self) -> Result<()> {
         if self.state.stopped.swap(true, Ordering::SeqCst) {
-            return;
+            return Ok(());
         }
         // The renewal thread sees `stopped` at its next tick; a joined
         // detach would race the tick, and the guard-internal stopped check
@@ -852,14 +906,21 @@ impl ShutdownAdmission {
         drop(self.renewal.take());
         let registry_dir = &self.state.registry_dir;
         let token = &self.state.token;
-        let _ = with_registry_guard(registry_dir, || {
+        with_registry_guard(registry_dir, || {
             let path = shutdown_admission_path(registry_dir);
             if read_shutdown_admission(&path)?.is_some_and(|current| &current.token == token) {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("remove {}", path.display()))?;
             }
             Ok(())
-        });
+        })
+    }
+
+    /// The best-effort release for the drop path (`try_release`'s errors
+    /// cannot propagate out of a drop): a failed cleanup leaves the record
+    /// to its own lease expiry (5 s) and the crash-oracle.
+    pub fn release(&mut self) {
+        let _ = self.try_release();
     }
 }
 
