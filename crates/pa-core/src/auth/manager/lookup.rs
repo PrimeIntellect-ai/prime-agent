@@ -343,18 +343,35 @@ impl AuthStorage {
             .storage
             .refresh_exclusion()
             .map_err(ForcedRefreshFailure::NotExchanged)?;
-        let peer = self
-            .storage
-            .read()
+        // An unreadable store cannot verify the peer state: the exchange
+        // would spend a token this attempt may not own.
+        let Ok(content) = self.storage.read() else {
+            self.reload();
+            return Err(ForcedRefreshFailure::NotExchanged(
+                "the credential store could not be re-read".to_string(),
+            ));
+        };
+        let peer = parse_storage_data(content.as_deref())
             .ok()
-            .and_then(|content| parse_storage_data(content.as_deref()).ok())
             .and_then(|data| data.credential(provider_id));
         // Any changed credential stands — a fresher OAuth grant from the
         // expiry-gated path, an API-key replacement, a re-login to a
         // different grant: none spends this attempt's refresh token.
-        if let Some(peer) = peer.filter(|peer| Some(peer) != loaded.as_ref()) {
-            self.reload();
-            return Ok(peer);
+        // A removed grant is a concurrent logout: the exchange would
+        // spend a token the store no longer wants — the re-login
+        // guidance is the fix, not a refresh.
+        match peer {
+            Some(peer) if Some(&peer) != loaded.as_ref() => {
+                self.reload();
+                return Ok(peer);
+            }
+            Some(_) => {}
+            None => {
+                self.reload();
+                return Err(ForcedRefreshFailure::Rejected(format!(
+                    "the stored credential for {provider_id} was removed"
+                )));
+            }
         }
         let fetched = self.oauth.refresh_forced(provider_id, &data);
         let new_credential = match fetched {
@@ -398,47 +415,67 @@ impl AuthStorage {
         // the credential this attempt loaded; any change that landed under
         // the fetch — a peer's fresher grant, an API-key replacement, a
         // logout — stands untouched.
+        // The exchange rotated the single-use refresh token: the locked write
+        // must take the new grant or the store keeps a dead one. A
+        // transient write failure gets a bounded retry; a persistent
+        // failure still serves the rotated grant to this caller — the
+        // store's dead token rejects on the next turn and its recovery
+        // surfaces the re-login guidance.
+        let mut result: anyhow::Result<()> = Err(anyhow::anyhow!("unwritten"));
         let mut outcome = Err(ForcedRefreshFailure::NotExchanged(
             "the refreshed credential could not be stored".to_string(),
         ));
-        let result = self.storage.with_lock(&mut |current| {
-            let mut data = parse_storage_data(current.as_deref())?;
-            match data.credential(provider_id) {
-                Some(changed) if Some(&changed) != loaded.as_ref() => {
-                    outcome = Ok(changed);
-                    return Ok(((), None));
+        for _ in 0..3 {
+            outcome = Err(ForcedRefreshFailure::NotExchanged(
+                "the refreshed credential could not be stored".to_string(),
+            ));
+            result = self.storage.with_lock(&mut |current| {
+                let mut data = parse_storage_data(current.as_deref())?;
+                match data.credential(provider_id) {
+                    Some(changed) if Some(&changed) != loaded.as_ref() => {
+                        outcome = Ok(changed);
+                        return Ok(((), None));
+                    }
+                    None => {
+                        outcome = Err(ForcedRefreshFailure::Rejected(format!(
+                            "the stored credential for {provider_id} was removed while refreshing"
+                        )));
+                        return Ok(((), None));
+                    }
+                    Some(_) => {}
                 }
-                None => {
-                    outcome = Err(ForcedRefreshFailure::Rejected(format!(
-                        "the stored credential for {provider_id} was removed while refreshing"
-                    )));
-                    return Ok(((), None));
-                }
-                Some(_) => {}
+                data.insert(provider_id, &new_credential);
+                outcome = Ok(new_credential.clone());
+                let content = serde_json::to_string_pretty(&data.0)?;
+                Ok(((), Some(content)))
+            });
+            // The guard arms settle the outcome without writing: a
+            // changed credential stands, a removal reports the logout.
+            // Only a real write error is worth another attempt.
+            let write_failed =
+                result.is_err() && matches!(outcome, Err(ForcedRefreshFailure::NotExchanged(_)));
+            if !write_failed {
+                break;
             }
-            data.insert(provider_id, &new_credential);
-            outcome = Ok(new_credential.clone());
-            let content = serde_json::to_string_pretty(&data.0)?;
-            Ok(((), Some(content)))
-        });
-        if result.is_err() {
-            // Our write failed: serve whatever the store holds — a peer's
-            // fresh credential if one landed, else the write failure.
-            self.reload();
-            return match self
-                .data
-                .credential(provider_id)
-                .filter(|credential| Some(credential) != loaded.as_ref())
-            {
-                Some(credential) => Ok(credential),
-                None => Err(ForcedRefreshFailure::NotExchanged(
-                    "the refreshed credential could not be stored".to_string(),
-                )),
-            };
         }
-        // Reload from what we wrote: the in-memory snapshot must not serve the
-        // pre-refresh credential (a rotated refresh token is single-use).
+        if result.is_ok() {
+            // Reload from what we wrote: the in-memory snapshot must not
+            // serve the pre-refresh credential (a rotated refresh token
+            // is single-use).
+            self.reload();
+            return outcome;
+        }
+        // Every write attempt failed: serve whatever the store holds — a
+        // peer's fresh credential if one landed — else the rotated grant
+        // itself (the next turn's recovery handles the dead store token).
         self.reload();
-        outcome
+        match self
+            .data
+            .credential(provider_id)
+            .filter(|credential| Some(credential) != loaded.as_ref())
+        {
+            Some(credential) => Ok(credential),
+            None => Ok(new_credential),
+        }
     }
 }

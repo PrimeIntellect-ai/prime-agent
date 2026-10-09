@@ -441,6 +441,17 @@ impl LockDir {
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
+                // The observation narrows to the rename: re-read the
+                // owner immediately before renaming — a successor another
+                // waiter installed meanwhile shows a different owner file
+                // and is reported as contention without ever moving off
+                // the canonical path.
+                if fs::read_to_string(&owner_path).ok().as_deref() != recorded.as_deref() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("Lock file is already being held: {}", path.display()),
+                    ));
+                }
                 // Stale by observation: reclaim by renaming the directory
                 // aside — the rename is the atomic decision. A successor
                 // lock another waiter installed between the observation

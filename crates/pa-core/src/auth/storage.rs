@@ -104,29 +104,34 @@ impl FileAuthStorageBackend {
         // provably dead owner's is), and the incumbent's own drop never
         // deletes a successor's directory — the reclaim is safe even if
         // the refreshing process dies mid-exchange.
-        match crate::platform::lock_dir::LockDir::acquire_owned_retrying(
-            &self.refresh_lock_file(),
-            Duration::from_secs(120),
-            attempts,
-            interval,
-        ) {
-            // A guard whose owner file a racing judge already reclaimed
-            // is no exclusion at all: fail closed rather than exchange.
-            Ok(guard) if guard.ensure_owned().is_ok() => {
-                Ok(Some(RefreshExclusion { _guard: guard }))
+        for _ in 0..3 {
+            match crate::platform::lock_dir::LockDir::acquire_owned_retrying(
+                &self.refresh_lock_file(),
+                Duration::from_secs(120),
+                attempts,
+                interval,
+            ) {
+                // A guard whose owner file a racing judge already
+                // reclaimed is no exclusion: reacquire rather than
+                // spend the attempt's token unguarded.
+                Ok(guard) if guard.ensure_owned().is_err() => {}
+                Ok(guard) => return Ok(Some(RefreshExclusion { _guard: guard })),
+                // The bound exhausted with a live incumbent: the
+                // exchange never runs without the exclusion — the
+                // ordinary ladder stands, and the incumbent's eventual
+                // write serves the next attempt.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Err("another process is still refreshing the credential".to_string())
+                }
+                // Lock-infrastructure failures degrade as before: the
+                // peer checks and the write guard still bound the
+                // damage.
+                Err(_) => return Ok(None),
             }
-            Ok(_) => Err("the refresh lock was reclaimed before this attempt held it".to_string()),
-            // The bound exhausted with a live incumbent: the exchange
-            // never runs without the exclusion — the ordinary ladder
-            // stands, and the incumbent's eventual write serves the
-            // next attempt.
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                Err("another process is still refreshing the credential".to_string())
-            }
-            // Lock-infrastructure failures degrade as before: the peer
-            // checks and the write guard still bound the damage.
-            Err(_) => Ok(None),
         }
+        // Repeated stolen guards (a reclaim-race loop): fail closed
+        // rather than exchange.
+        Err("the refresh lock was reclaimed before this attempt held it".to_string())
     }
 
     fn acquire_refresh_exclusion(&self) -> Result<Option<RefreshExclusion>, String> {
