@@ -353,20 +353,16 @@ static PRIVATE_UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// serialized under the module umask lock: the temporary umask 0077
 /// cannot interleave with another private creation's save/restore.
 #[cfg(target_os = "linux")]
-fn create_private_dir_guarded(path: &Path) -> io::Result<std::time::SystemTime> {
+fn create_private_dir_guarded(path: &Path) -> io::Result<()> {
     let _guard = PRIVATE_UMASK_LOCK.lock();
-    // The pre-create clock sample: the setup's creation-time discipline
-    // refuses any pinned inode whose ctime PREDATES this sample (a
-    // pre-existing victim directory). The mutex bounds the sample's
-    // meaning to this module's serialized creations; an external umask
-    // setter or an unrelated creation's mode shift within the
-    // microsecond window is the documented side effect of the only
-    // primitive that guarantees 0700 at creation.
-    let pre_create = std::time::SystemTime::now();
+    // The mutex bounds the toggle to this module's serialized
+    // creations; an external umask setter or an unrelated creation's
+    // mode shift within the microsecond window is the documented side
+    // effect of the only primitive that guarantees 0700 at creation.
     let prior_umask = unsafe { libc::umask(0o077) };
     let create = fs::create_dir(path);
     unsafe { libc::umask(prior_umask) };
-    create.map(|()| pre_create)
+    create
 }
 
 /// Set up a freshly created private directory through a no-follow
@@ -382,7 +378,6 @@ fn setup_private_dir(
     mode: u32,
     owner: Option<&str>,
     claimed_at: Option<&str>,
-    pre_create: std::time::SystemTime,
 ) -> io::Result<(fs::File, (u64, u64))> {
     use std::os::fd::FromRawFd;
     use std::os::unix::fs::MetadataExt;
@@ -401,34 +396,18 @@ fn setup_private_dir(
         )
     };
     if fd < 0 {
-        return Err(swap_refusal(path));
+        // The raw open's errno is PRESERVED: an EIO/EACCES/EMFILE from
+        // the pin is a real error, never a phantom swap - the
+        // replacement-vs-propagation split the callers rely on.
+        return Err(io::Error::last_os_error());
     }
     let pin = unsafe { fs::File::from_raw_fd(fd) };
     let metadata = pin.metadata()?;
     if !metadata.is_dir() {
-        // A swapped symlink or file: the entry at the fresh name is
-        // not the directory this call created - regenerate, never
-        // touch.
-        return Err(swap_refusal(path));
-    }
-    // The creation-time discipline: a PRE-EXISTING victim directory
-    // (the concrete class the swap finding describes) carries a ctime
-    // from BEFORE this call's mkdir began; the pinned inode's ctime
-    // must post-date the caller's pre-create clock sample. The
-    // active racer (swap inside the mkdir->open window) is the
-    // DOCUMENTED RESIDUAL: no user-space check can prove which inode
-    // a name-creation made when an actor may replace the name between
-    // the mkdir and any later open - the fresh-name entropy and the
-    // microsecond window narrow it, and the accepted floor is stated
-    // here explicitly.
-    let ctime = std::time::SystemTime::UNIX_EPOCH
-        + std::time::Duration::new(metadata.ctime() as u64, metadata.ctime_nsec() as u32);
-    // The refusal threshold tolerates the filesystem's ctime granularity
-    // (tmpfs and friends tick ctime coarser than the nanosecond clock):
-    // a PRE-EXISTING victim is seconds-to-minutes older than the
-    // pre-create sample, so one second of tolerance never admits one
-    // while never rejecting this call's own fresh creation.
-    if ctime + std::time::Duration::from_secs(1) < pre_create {
+        // A swapped symlink or file (O_PATH|O_NOFOLLOW opens a symlink
+        // itself on Linux; the type check is the refusal): the entry
+        // at the fresh name is not the directory this call created -
+        // regenerate, never touch.
         return Err(swap_refusal(path));
     }
     let empty = std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
@@ -449,7 +428,14 @@ fn setup_private_dir(
         )
     };
     if wfd < 0 {
-        return Err(swap_refusal(path));
+        // ELOOP here IS a swapped symlink (the no-follow refusal on a
+        // non-O_PATH open); every other errno from the second open is
+        // a real error and propagates untouched.
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return Err(swap_refusal(path));
+        }
+        return Err(error);
     }
     let dir = unsafe { fs::File::from_raw_fd(wfd) };
     {
@@ -1108,7 +1094,7 @@ impl LockDir {
     /// run. The mkdir is already no-replace (EEXIST is a plain
     /// collision), so a taken name regenerates the suffix instead.
     #[cfg(target_os = "linux")]
-    fn claim_candidate_name(path: &Path) -> io::Result<(PathBuf, std::time::SystemTime)> {
+    fn claim_candidate_name(path: &Path) -> io::Result<PathBuf> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1119,16 +1105,12 @@ impl LockDir {
         // error is the real acquisition failure and propagates as-is -
         // a missing parent or a permissions denial must not masquerade
         // as contention (the old sibling form's ENAMETOOLONG bug this
-        // helper fixes was exactly such a masquerade). The guarded
-        // create returns the PRE-CREATE clock sample the setup's
-        // creation-time discipline compares the pinned inode's ctime
-        // against: a pre-existing victim directory (ctime older than
-        // the sample) is refused at setup.
+        // helper fixes was exactly such a masquerade).
         let mut collision: Option<io::Error> = None;
         for attempt in 0..8 {
             let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
             match create_private_dir_guarded(&candidate) {
-                Ok(pre_create) => return Ok((candidate, pre_create)),
+                Ok(()) => return Ok(candidate),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     collision = collision.or(Some(error));
                 }
@@ -1145,7 +1127,7 @@ impl LockDir {
 
     #[cfg(target_os = "linux")]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
-        let (candidate, pre_create) = Self::claim_candidate_name(path)?;
+        let candidate = Self::claim_candidate_name(path)?;
         // The candidate's setup runs through the no-follow pinned handle
         // with the creation-time discipline: a pre-existing victim
         // directory fails the ctime check, a swapped symlink or file
@@ -1153,7 +1135,7 @@ impl LockDir {
         // emptiness check. Fail closed on every refusal - no blind
         // remove (a leaked inert dotname beats unlinking through a
         // possible symlink into a victim's notes).
-        let dir = match setup_private_dir(&candidate, 0o700, owner, None, pre_create) {
+        let dir = match setup_private_dir(&candidate, 0o700, owner, None) {
             Ok((dir, _identity)) => dir,
             Err(error) => return Err(error),
         };
@@ -1257,13 +1239,12 @@ impl LockDir {
         let pid = std::process::id();
         for attempt in 0..8 {
             let placeholder = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
-            let pre_create = match create_private_dir_guarded(&placeholder) {
-                Ok(pre_create) => pre_create,
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if let Err(error) = create_private_dir_guarded(&placeholder) {
+                if error.kind() == io::ErrorKind::AlreadyExists {
                     continue;
                 }
-                Err(error) => return Err(error),
-            };
+                return Err(error);
+            }
             // The placeholder carries a live owner record for the whole
             // exchange/restore interval (a suspended dance leaves a
             // stale-dated but LIVE-OWNED lock at the public path - the
@@ -1281,7 +1262,6 @@ impl LockDir {
                 0o700,
                 Some(&process_owner_record()),
                 Some(&note),
-                pre_create,
             ) {
                 Ok(_handle) => {
                     // Setup complete: the notes live inside the pinned
@@ -2007,13 +1987,12 @@ impl LockDir {
                     continue;
                 }
                 let placeholder = location.with_file_name(format!(".b{pid:x}{nanos:x}{attempt:x}"));
-                let pre_create = match create_private_dir_guarded(&placeholder) {
-                    Ok(pre_create) => pre_create,
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if let Err(error) = create_private_dir_guarded(&placeholder) {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
                         continue;
                     }
-                    Err(_) => return InodeRelease::Failed,
-                };
+                    return InodeRelease::Failed;
+                }
                 // // The placeholder's owner record is written through the pinned
                 // no-follow, emptiness-disciplined handle (fd-relative) -
                 // no pathname chmod or write remains; the helper's
@@ -2024,7 +2003,6 @@ impl LockDir {
                     0o700,
                     Some(&process_owner_record()),
                     None,
-                    pre_create,
                 ) {
                     Ok((_handle, identity)) => Some(identity),
                     Err(_) => return InodeRelease::Failed,
