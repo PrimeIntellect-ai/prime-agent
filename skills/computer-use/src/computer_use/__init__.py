@@ -308,12 +308,14 @@ def _write_clipboard(text: str, format: str) -> None:
 
 
 def _restore_clipboard(saved: dict[str, Any] | None) -> bool:
-    """Restore every saved pasteboard type, returning whether it landed.
+    """Restore every saved pasteboard type, returning whether all landed.
 
     None never touches the pasteboard: it is a failed snapshot, and clearing
-    on it would erase the user's clipboard. Each type is restored on its own
-    so one unreadable format never blocks the rest; the restore reports
-    success only when the saved text reads back.
+    on it would erase the user's clipboard. Each type is written on its own
+    so one refused format never blocks the rest; the restore reports success
+    only when EVERY saved type reads back byte-for-byte - a partial restore
+    (an image the pasteboard refused, a format that did not round-trip) is
+    not a restore.
     """
     if saved is None:
         return False
@@ -327,8 +329,12 @@ def _restore_clipboard(saved: dict[str, Any] | None) -> bool:
                 pasteboard.setData_forType_(payload, type_name)
             except Exception:
                 continue
-        restored_text = pasteboard.dataForType_(cocoa.NSPasteboardTypeString)
-        return bytes(restored_text) == saved.get(cocoa.NSPasteboardTypeString, b"")
+        for type_name, data in saved.items():
+            restored = pasteboard.dataForType_(type_name)
+            restored_bytes = bytes(restored) if restored is not None else None
+            if restored_bytes != (data if data else None):
+                return False
+        return True
     except Exception:
         return False
 

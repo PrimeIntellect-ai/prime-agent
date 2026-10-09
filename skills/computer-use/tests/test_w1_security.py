@@ -1253,5 +1253,67 @@ class RestoreAfterSettleTests(AppTestCase):
         self.assertNotIn("payload remains", status)
 
 
+class RestoreVerificationTests(unittest.TestCase):
+    def test_a_partial_restore_is_not_a_restore(self) -> None:
+        import computer_use
+
+        class Pasteboard:
+            def __init__(self) -> None:
+                self.data: dict[str, Any] = {}
+
+            def clearContents(self) -> None:
+                self.data = {}
+
+            def setData_forType_(self, payload: Any, type_name: str) -> bool:
+                if type_name == "image":
+                    return False  # the pasteboard refuses the image
+                self.data[type_name] = payload
+                return True
+
+            def dataForType_(self, type_name: str) -> Any:
+                return self.data.get(type_name)
+
+        pasteboard = Pasteboard()
+        fake_mac = types.SimpleNamespace(
+            cocoa=types.SimpleNamespace(
+                NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: pasteboard),
+                NSPasteboardTypeString="string",
+                NSData=types.SimpleNamespace(dataWithBytes_length_=lambda data, length: data),
+            )
+        )
+        with mock.patch.object(computer_use, "_require_mac", lambda: fake_mac):
+            restored = computer_use._restore_clipboard({"string": b"old", "image": b"png"})
+        self.assertFalse(restored, "a lost image means the user's clipboard was NOT restored")
+
+    def test_an_empty_clipboard_restore_reports_success(self) -> None:
+        import computer_use
+
+        class Pasteboard:
+            def __init__(self) -> None:
+                self.data: dict[str, Any] = {}
+
+            def clearContents(self) -> None:
+                self.data = {}
+
+            def setData_forType_(self, payload: Any, type_name: str) -> bool:
+                self.data[type_name] = payload
+                return True
+
+            def dataForType_(self, type_name: str) -> Any:
+                return self.data.get(type_name)
+
+        pasteboard = Pasteboard()
+        fake_mac = types.SimpleNamespace(
+            cocoa=types.SimpleNamespace(
+                NSPasteboard=types.SimpleNamespace(generalPasteboard=lambda: pasteboard),
+                NSPasteboardTypeString="string",
+                NSData=types.SimpleNamespace(dataWithBytes_length_=lambda data, length: data),
+            )
+        )
+        with mock.patch.object(computer_use, "_require_mac", lambda: fake_mac):
+            restored = computer_use._restore_clipboard({})
+        self.assertTrue(restored, "clearing an empty clipboard back to empty is a successful restore")
+
+
 if __name__ == "__main__":
     unittest.main()
