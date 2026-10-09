@@ -752,12 +752,13 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
         keep_interrupted_work: bool,
     ) {
-        let (pid, start_id, journal_path) = {
+        let (pid, start_id, journal_path, no_session) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 descriptor.pid as u32,
                 descriptor.process_start_id.clone(),
                 descriptor.recovery_journal_path.clone(),
+                descriptor.create_command.no_session == Some(true),
             )
         };
         // An unobservable identity never receives the escalation's signals; a live process
@@ -781,13 +782,14 @@ impl Supervisor {
             }
             _ => {
                 if keep_interrupted_work
+                    && !no_session
                     && crate::journal::WorkerRecoveryJournal::read_interrupted(Path::new(
                         &journal_path,
                     ))
                 {
                     // A shutdown-continued worker keeps descriptor and journal so
-                    // the next boot can adopt the interrupted work; only the stop
-                    // tombstone is cleared.
+                    // the next boot can adopt the interrupted work. An in-memory
+                    // noSession worker has no saved conversation to adopt.
                     let mut descriptor = resident.descriptor.lock().await;
                     descriptor.stop_requested_at = None;
                     descriptor.archive_on_stop = None;

@@ -162,6 +162,51 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
     assert_eq!(queue["data"]["followUp"], json!(["remain parked"]));
     let paused_bytes = std::fs::read(&paused_session_file).expect("paused transcript");
 
+    // A noSession worker may be busy, but its conversation exists only in
+    // memory. Retaining its interrupted journal would relaunch an empty
+    // session with a generic continuation in place of the original history.
+    let script_memory = dir.path().join("shutdown-memory.json");
+    std::fs::write(
+        &script_memory,
+        json!({ "responses": [ { "text": "memory-turn", "delayMs": 30_000 } ] }).to_string(),
+    )
+    .expect("write in-memory script");
+    client.send_command(
+        "c4",
+        &json!({
+            "type": "create",
+            "noSession": true,
+            "config": { "cwd": dir.path().to_string_lossy(), "script": script_memory.to_string_lossy() },
+        }),
+    );
+    let created = client.read_response("c4");
+    assert_eq!(created["success"], true, "create in-memory failed: {created}");
+    assert!(created["data"]["sessionFile"].is_null());
+    let memory_session = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("in-memory session id")
+        .to_string();
+    client.send_command(
+        "p4",
+        &json!({ "type": "prompt", "activeSessionId": memory_session, "message": "go" }),
+    );
+    assert_eq!(client.read_response("p4")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        client.send_command(
+            "w4",
+            &json!({ "type": "get_state", "activeSessionId": memory_session }),
+        );
+        let state = client.read_response("w4");
+        assert_eq!(state["success"], true);
+        if state["data"]["isStreaming"] == true {
+            break;
+        }
+        assert!(Instant::now() < deadline, "in-memory turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     client.send_command(
         "p1",
         &json!({
@@ -190,6 +235,16 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         std::thread::sleep(Duration::from_millis(50));
     }
 
+    // The durable turn's stream was observed above; check the in-memory
+    // worker again immediately before the stop so a slow runner cannot turn
+    // this into an idle noSession case.
+    client.send_command(
+        "w4-final",
+        &json!({ "type": "get_state", "activeSessionId": memory_session }),
+    );
+    let memory_state = client.read_response("w4-final");
+    assert_eq!(memory_state["success"], true);
+    assert_eq!(memory_state["data"]["isStreaming"], true);
     client.send_command("sd", &json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
