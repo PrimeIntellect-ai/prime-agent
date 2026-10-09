@@ -156,7 +156,9 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
+            skipped_lines: 0,
         };
         for line in lines {
             let line = line.with_context(read_context)?;
@@ -164,9 +166,13 @@ impl SessionFile {
             if trimmed.is_empty() {
                 continue;
             }
-            // Malformed lines are skipped, matching the TS loader.
-            if let Ok(entry) = serde_json::from_str::<SessionEntry>(trimmed) {
-                file.push_index(entry);
+            // Malformed lines are skipped, matching the TS loader. The
+            // count rides the store so the reopen that found damage can
+            // log it (the rows now STAY on disk: an append-only reopen
+            // never deletes what it skipped).
+            match serde_json::from_str::<SessionEntry>(trimmed) {
+                Ok(entry) => file.push_index(entry),
+                Err(_) => file.skipped_lines += 1,
             }
         }
         fold_child_usage_attributions(&mut file.entries);
@@ -209,7 +215,9 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown,
+            skipped_lines: 0,
         };
         // The raw rows are consumed in place: each line String drops as soon as its
         // parsed entry joins the store.
@@ -275,6 +283,7 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        full.trace_upload.clone_from(&self.trace_upload);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -303,7 +312,9 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
+            skipped_lines: 0,
         }
     }
 }

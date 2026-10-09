@@ -52,9 +52,10 @@ impl WorkerConfig {
         let agent_dir = paths::agent_dir()?;
         let recovery_journal_path = std::env::var_os(WORKER_RECOVERY_JOURNAL_ENV).map_or_else(
             || {
-                agent_dir
-                    .join("daemon-workers")
-                    .join(format!("{active_session_id}.recovery.jsonl"))
+                agent_dir.join("daemon-workers").join(format!(
+                    "{active_session_id}{}",
+                    crate::journal::RECOVERY_JOURNAL_SUFFIX
+                ))
             },
             PathBuf::from,
         );
