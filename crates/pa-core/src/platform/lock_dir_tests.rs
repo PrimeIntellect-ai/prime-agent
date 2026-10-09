@@ -512,6 +512,7 @@ fn restrictive_umask_never_blocks_owned_lock_lifecycles() {
 #[cfg(target_os = "linux")]
 #[test]
 fn restrictive_umask_owned_lock_child() {
+    use std::os::unix::fs::PermissionsExt;
     let Ok(mask) = std::env::var("PA_UMASK_PROBE") else {
         // The direct entry (no env): this body only runs under the
         // parent's restricted child invocation.
@@ -532,6 +533,23 @@ fn restrictive_umask_owned_lock_child() {
     let guard = guard.expect("owned acquisition works under a restrictive umask");
     guard.ensure_owned().expect("the owner record landed");
     drop(guard);
+    // The DIRECT owned fallback (the mkdir protocol the no-replace
+    // mounts take): its owner record is written through the pinned
+    // handle with the fchmod repair, so the record must be readable
+    // at mode 0600 even under 0477 (owner-read stripped from fresh
+    // files).
+    let lock = LockDir::path_for(&file);
+    let created = LockDir::create_by_mkdir(&lock, Some("1 owner-token"));
+    let created = created.expect("the owned fallback create works under the umask");
+    let owner_path = lock.join("owner");
+    let mode = std::fs::metadata(&owner_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the owner record is readable at 0600");
+    assert!(
+        std::fs::read_to_string(&owner_path).is_ok(),
+        "the owner record is readable through the umask"
+    );
+    drop(created);
+    let _ = remove_candidate_dir(&lock);
     // The release removed the lock: a fresh acquisition succeeds
     // immediately, never waiting out the stale window.
     let next = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE);
