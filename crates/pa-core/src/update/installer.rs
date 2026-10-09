@@ -103,6 +103,9 @@ pub fn install_prefix() -> PathBuf {
             return PathBuf::from(prefix);
         }
     }
+    if let Some(prefix) = running_installer_prefix() {
+        return prefix;
+    }
     pa_types::platform::home_dir()
         .unwrap_or_default()
         .join(".local")

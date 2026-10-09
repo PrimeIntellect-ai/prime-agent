@@ -211,11 +211,9 @@ jobs:
         run: |
           pwsh -NoProfile -File scripts/release/test_windows_install.ps1 2>&1 | Tee-Object -FilePath win-install-e2e.log
           exit $LASTEXITCODE
-      # The Windows channel-fallback regression (the local-channel unit test
-      # for the stable->beta fallback the plain one-liner rides): a stable
-      # channel without a win32-x64 row falls back to beta with the notice,
-      # and an explicitly requested channel refuses with the beta route.
-      - name: windows channel-fallback unit (install.ps1 stable->beta)
+      # Production defaults stay on stable, including when its artifact is
+      # missing. Explicit beta installs remain supported independently.
+      - name: windows installer channel selection (stable default, explicit beta)
         id: channel_fallback
         continue-on-error: true
         shell: pwsh
@@ -223,11 +221,11 @@ jobs:
           pwsh -NoProfile -File scripts/release/test_windows_channel_fallback.ps1 2>&1 | Tee-Object -FilePath win-channel-fallback.log
           exit $LASTEXITCODE
       # THE RAW ONE-LINER on the real channel, end to end: install.ps1
-      # itself from raw.githubusercontent (the ref under test - on main it
-      # is the README's shipped command), then the pointer, the manifest,
+      # itself from raw.githubusercontent (the ref under test, before its
+      # publication to the README's production endpoint), then the manifest,
       # the win32-x64 tarball, and its sums from the real bucket, the real
-      # default prefix ($HOME\.local), the real stable->beta Windows
-      # fallback, and the launcher answering --version. The transcript
+      # default prefix ($HOME\.local), the stable channel, and the launcher
+      # answering --version. The transcript
       # (win-raw-one-liner.log) is the evidence: the install transcript,
       # the --version output, and the exit codes.
       - name: the raw one-liner on the real channel (irm | iex)
