@@ -195,12 +195,13 @@ async fn restart(
             }),
         )?;
         let response = client
-            .request_with_timeout(
+            .request_supervisor_with_id(
                 DaemonCommand::PrepareUpdateRestart {
                     id: None,
                     update_id: None,
                     rest: serde_json::Map::new(),
                 },
+                &format!("daemon_{}-prepare", id.0),
                 // The shipped TS coordinator allows 120s; its own preparation
                 // deadline is 100s, followed by worker commit and shutdown.
                 budget.prepare_ms.max(120_000),
@@ -258,12 +259,19 @@ async fn restart(
         identity_from_hello(client.hello()) == predecessor,
         "predecessor changed before shutdown"
     );
+    // TS deduplicates by client ID and envelope ID across connections.
+    // A reconnected client's default counter restarts at daemon_1, which
+    // would replay the prepare result instead of executing shutdown.
     let shutdown = client
-        .request_ok(DaemonCommand::Shutdown {
-            id: None,
-            force: None,
-            rest: serde_json::Map::new(),
-        })
+        .request_supervisor_with_id(
+            DaemonCommand::Shutdown {
+                id: None,
+                force: None,
+                rest: serde_json::Map::new(),
+            },
+            &format!("daemon_{}-shutdown", id.0),
+            30_000,
+        )
         .await;
     // TS shutdown waits for client sockets to close before exiting.
     // Drop the writer here; `close()` alone leaves its channel alive.
@@ -490,6 +498,7 @@ mod tests {
             "appVersion":"0.6.0", "protocol":{"name":"prime-agent.daemon","version":7}});
         let owner = hello.clone();
         let server = tokio::spawn(async move {
+            let mut prepare_key = None;
             for phase in ["prepare_update_restart", "shutdown"] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let (read, mut write) = stream.into_split();
@@ -501,11 +510,18 @@ mod tests {
                 let command: Value =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
                 assert_eq!(command["command"]["type"], phase);
+                let key = (command["clientId"].clone(), command["id"].clone());
                 if phase == "prepare_update_restart" {
+                    prepare_key = Some(key);
                     persist(&source_copy, &manifest).unwrap();
                     // The durable commit succeeds but its response disappears.
                     drop(write);
                 } else {
+                    assert_ne!(
+                        Some(key),
+                        prepare_key,
+                        "TS would replay prepare instead of executing shutdown"
+                    );
                     sent.send(()).unwrap();
                     std::future::pending::<()>().await;
                     return;
