@@ -121,7 +121,7 @@ pub(crate) struct CommandCatalogUpdate {
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
-pub(crate) fn attach_capabilities() -> Vec<DaemonClientCapability> {
+pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapability> {
     vec![
         "attach_snapshot".to_string(),
         "event_sequence".to_string(),

@@ -159,7 +159,7 @@ impl AgentView {
             0
         };
         window.cursor = match window.cursor.take() {
-            Some((0, row)) if self.chat.len() > count => {
+            Some((0, _)) if self.chat.len() > count => {
                 Some((count + 1, seam_after.saturating_sub(seam_before)))
             }
             Some((0, row)) => Some((0, row)),

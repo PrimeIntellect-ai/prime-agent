@@ -123,6 +123,7 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     before: None,
+                    capabilities: None,
                     rest: Map::default(),
                 },
             )
