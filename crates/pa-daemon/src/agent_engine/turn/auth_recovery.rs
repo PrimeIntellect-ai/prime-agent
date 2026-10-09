@@ -48,6 +48,7 @@ impl AgentSessionEngine {
     pub(in crate::agent_engine) async fn recover_provider_auth(
         &self,
         failed_provider: Provider,
+        failed_model: String,
     ) -> AuthRecoveryOutcome {
         // A create-config key override owns the request's credential: a
         // rejection under it is a bad override, not a dead OAuth session
@@ -69,7 +70,7 @@ impl AgentSessionEngine {
         // re-issues against the newer target with its own credential, and
         // the failure never consumes the episode's one auth budget — a
         // genuine rejection there still gets its own recovery round.
-        if provider != failed_provider {
+        if provider != failed_provider || target.model.id != failed_model {
             return AuthRecoveryOutcome::Superseded;
         }
         let agent_dir = self.config.agent_dir.clone();
@@ -403,7 +404,9 @@ mod tests {
         *engine.provider_target.write().unwrap() =
             Some(target("faux", "faux-1", Some("stale-access")));
         assert_eq!(
-            engine.recover_provider_auth("faux".to_string()).await,
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
             AuthRecoveryOutcome::NewCredential,
             "the refreshless fresher grant rebinds without an exchange"
         );
@@ -417,6 +420,43 @@ mod tests {
             slot.api_key.as_deref(),
             Some("fresh-access"),
             "the retry re-issues against the stored re-login"
+        );
+    }
+
+    /// A delayed rejection from a same-provider model switch never
+    /// touches the newer selection: the failed request's model guards
+    /// the seam, not the provider alone.
+    #[tokio::test]
+    async fn a_same_provider_model_switch_never_recovers_the_newer_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_oauth(&dir.path().join("agent"), "faux", "fresh-access");
+        let engine = engine_over(dir.path());
+        // The switch resolved a newer model on the same provider while
+        // the old request was in flight.
+        *engine.provider_target.write().unwrap() =
+            Some(target("faux", "faux-2", Some("stale-access")));
+        assert_eq!(
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
+            AuthRecoveryOutcome::Superseded,
+            "a same-provider superseded selection never refreshes the newer target"
+        );
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the target stays");
+        assert_eq!(
+            (slot.model.provider.as_str(), slot.model.id.as_str()),
+            ("faux", "faux-2"),
+            "the newer selection stands untouched"
+        );
+        assert_eq!(
+            slot.api_key.as_deref(),
+            Some("stale-access"),
+            "no exchange, no rebind ever ran"
         );
     }
 
@@ -442,7 +482,9 @@ mod tests {
         let engine = engine_over(dir.path());
         *engine.provider_target.write().unwrap() = Some(target("faux", "faux-1", Some("sk-same")));
         assert_eq!(
-            engine.recover_provider_auth("faux".to_string()).await,
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
             AuthRecoveryOutcome::Continue,
             "the unchanged rejected key never earns the fresh-credential grant"
         );
@@ -471,7 +513,9 @@ mod tests {
         *engine.provider_target.write().unwrap() =
             Some(target("faux", "faux-1", Some("stale-access")));
         assert_eq!(
-            engine.recover_provider_auth("faux".to_string()).await,
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
             AuthRecoveryOutcome::NewCredential,
             "the landed API-key re-login serves without an exchange"
         );
@@ -499,7 +543,9 @@ mod tests {
         *engine.provider_target.write().unwrap() =
             Some(target("faux", "faux-1", Some("stale-access")));
         assert_eq!(
-            engine.recover_provider_auth("faux".to_string()).await,
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
             AuthRecoveryOutcome::NewCredential
         );
         let slot = engine
@@ -531,7 +577,9 @@ mod tests {
         *engine.provider_target.write().unwrap() =
             Some(target("drift", "drift-1", Some("stale-drift")));
         assert_eq!(
-            engine.recover_provider_auth("faux".to_string()).await,
+            engine
+                .recover_provider_auth("faux".to_string(), "faux-1".to_string())
+                .await,
             AuthRecoveryOutcome::Superseded,
             "a superseded provider's rejection never refreshes the newer grant"
         );

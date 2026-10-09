@@ -182,12 +182,15 @@ impl AgentSessionEngine {
             Some(&mut move |message: &pa_agent::types::AssistantMessage| {
                 let engine_weak = auth_recovery_engine.clone();
                 let failed_provider = message.provider.clone();
+                let failed_model = message.model.clone();
                 Box::pin(async move {
                     let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
                     else {
                         return pa_core::session_engine::provider_auth::AuthRecoveryOutcome::Continue;
                     };
-                    engine.recover_provider_auth(failed_provider).await
+                    engine
+                        .recover_provider_auth(failed_provider, failed_model)
+                        .await
                 })
             });
         let result = self.runtime.block_on(
