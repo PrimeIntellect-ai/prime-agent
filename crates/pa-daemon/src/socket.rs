@@ -706,13 +706,15 @@ fn release_lock_dir_identity(
                 let removed = std::fs::remove_file(placeholder.join("owner"))
                     .and_then(|()| std::fs::remove_dir(&placeholder));
                 if removed.is_err() {
-                    // The residue is the lease's own directory at the
-                    // PRIVATE name (the exchange never ran on this
-                    // mount) - an inert dotname no judge reads, so no
-                    // public wedge exists. The marker through the
-                    // pinned fd is belt-and-braces (the same inode the
-                    // cleanup failed to remove), and the error surfaces
-                    // honestly.
+                    // The failed removal targeted the PRIVATE placeholder
+                    // P (an inert dotname no judge reads - no public
+                    // wedge). The marker through the pinned fd targets a
+                    // DIFFERENT inode: the ORIGINAL lease directory L,
+                    // which still sits at the PUBLIC lock_path on this
+                    // unsupported-exchange arm. Marking L released is
+                    // the correct disposition for it (the dance will
+                    // consume it), and the error surfaces the private
+                    // P residue honestly.
                     pa_core::platform::mark_released_through(lock_dir);
                     let error = removed.err().unwrap_or_else(|| {
                         std::io::Error::other("private lease residue cleanup failed")
