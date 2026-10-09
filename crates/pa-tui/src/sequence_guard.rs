@@ -518,12 +518,29 @@ fn parse_kind(kind: u8) -> KeyEventKind {
     }
 }
 
-/// The tilde forms: navigation and function keys; every other number (paste
-/// markers included) is consumed.
+/// The tilde forms: navigation, function keys, and modifyOtherKeys reports.
+/// Other forms, including paste markers, are consumed.
 fn tilde_key(body: &[u8]) -> Option<Event> {
     let text = std::str::from_utf8(body).ok()?;
     let mut fields = text.split(';');
     let first: u8 = fields.next()?.parse().ok()?;
+    // Ghostty uses modifyOtherKeys for Shift+Enter when Kitty is inactive.
+    if first == 27 {
+        let modifiers = parse_modifiers(fields.next()?.parse().ok()?);
+        let codepoint = fields.next()?.parse().ok()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        let code = match char::from_u32(codepoint)? {
+            '\r' => KeyCode::Enter,
+            '\x1b' => KeyCode::Esc,
+            '\t' if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+            '\t' => KeyCode::Tab,
+            '\x7f' => KeyCode::Backspace,
+            c => KeyCode::Char(c),
+        };
+        return Some(Event::Key(KeyEvent::new(code, modifiers)));
+    }
     let (modifiers, kind) = match fields.next() {
         Some(mods_field) => {
             let mut parts = mods_field.split(':');

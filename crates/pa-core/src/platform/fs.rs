@@ -4,6 +4,15 @@ use std::fs::File;
 use std::io;
 use std::path::Path;
 
+/// Sync an existing regular file; Windows requires a writable flush handle.
+pub(crate) fn sync_file(path: &Path) -> io::Result<()> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(windows)]
+    options.write(true);
+    options.open(path)?.sync_all()
+}
+
 /// fsync a directory so a completed rename survives a crash on POSIX.
 ///
 /// # Errors
