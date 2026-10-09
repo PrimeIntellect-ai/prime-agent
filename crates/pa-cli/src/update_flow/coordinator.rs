@@ -151,6 +151,12 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                     Ok(admission) => Some(admission),
                     Err(error) => {
                         let mut writer = writer.lock().await;
+                        // The rollback attempt is what failed: transition
+                        // through Rollback (the state the failure arm would
+                        // have written) - a direct Failed write from e.g.
+                        // Booting violates the status machine's
+                        // transition rules.
+                        let _ = writer.set_state(UpdateState::Rollback);
                         writer.set_state(UpdateState::Failed)?;
                         writer.set_message(Some(format!(
                             "The rollback could not hold the stop window ({error}); the update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
@@ -477,33 +483,28 @@ async fn drive(
         &spawned,
     )
     .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
-    // From here on the spawned child is live AND adopted: any later
-    // after-stop failure carries its identity, so the rollback stops the
-    // daemon this coordinator spawned - an adopted successor holds the
-    // socket exactly like a rejected one.
-    writer
-        .lock()
-        .await
-        .set_successor(successor)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    // From here on the successor is ADOPTED: the update has succeeded at
+    // the protocol level, the adopted child owns the socket and serves the
+    // restored sessions, and a trailing status write or marker cleanup
+    // must never undo it - a failure of these tail writes maps to the
+    // kill-and-rollback path and would destroy a fully restored update
+    // (TS `statusWriter.update` failures are ignored the same way: the
+    // flow's real errors end at validation).
+    if let Err(error) = writer.lock().await.set_successor(successor) {
+        eprintln!("pa-cli: could not record the adopted successor: {error}");
+    }
     // `Restoring`: the successor's restore pass reports real counts
     // (the `update_restore_status` poll; spec §9).
-    writer
-        .lock()
-        .await
-        .set_state(UpdateState::Restoring)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    if let Err(error) = writer.lock().await.set_state(UpdateState::Restoring) {
+        eprintln!("pa-cli: could not record the restoring phase: {error}");
+    }
     let (counts, failures) = restore_report(&options.socket_path, budget).await;
-    writer
-        .lock()
-        .await
-        .set_counts(counts)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
-    writer
-        .lock()
-        .await
-        .set_failures(failures)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    if let Err(error) = writer.lock().await.set_counts(counts) {
+        eprintln!("pa-cli: could not record the restore counts: {error}");
+    }
+    if let Err(error) = writer.lock().await.set_failures(failures) {
+        eprintln!("pa-cli: could not record the restore failures: {error}");
+    }
     // The coordinator deletes the prepared dir after `Restoring` (spec §7;
     // idempotent with the supervisor's self-expiry and the boot sweep).
     if let Some(prepared_dir) = roster_path.as_ref().map(|roster_path| {
@@ -513,13 +514,17 @@ async fn drive(
     }) {
         let _ = std::fs::remove_dir_all(prepared_dir);
     }
-    swap::clear_activation_state(&candidate.root)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
-    writer
-        .lock()
-        .await
-        .set_state(UpdateState::Complete)
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    // A stale activation marker is swept by later passes; its cleanup
+    // failure is logged, never a rollback trigger.
+    if let Err(error) = swap::clear_activation_state(&candidate.root) {
+        eprintln!(
+            "pa-cli: could not clear the activation state marker at {}: {error}",
+            candidate.root.display()
+        );
+    }
+    if let Err(error) = writer.lock().await.set_state(UpdateState::Complete) {
+        eprintln!("pa-cli: could not record the complete phase: {error}");
+    }
     let message = if counts.failed > 0 {
         format!(
             "Restarted the daemon with {} session restore failure{}",
@@ -529,11 +534,9 @@ async fn drive(
     } else {
         "Restarted the daemon after the update".to_string()
     };
-    writer
-        .lock()
-        .await
-        .set_message(Some(message))
-        .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    if let Err(error) = writer.lock().await.set_message(Some(message)) {
+        eprintln!("pa-cli: could not record the terminal message: {error}");
+    }
     Ok(())
 }
 
