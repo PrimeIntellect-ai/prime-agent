@@ -305,7 +305,7 @@ fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()>
         return Ok(());
     }
     std::fs::write(&path, install_source).with_context(|| format!("write {}", path.display()))?;
-    std::fs::File::open(&path)?.sync_all()?;
+    crate::platform::fs::sync_file(&path)?;
     Ok(super::install::sync_directory(release_dir)?)
 }
 
@@ -385,7 +385,7 @@ fn sync_release_tree(root: &Path) -> Result<()> {
                 directories.push(path.clone());
                 walk(&path, directories)?;
             } else if file_type.is_file() {
-                std::fs::File::open(&path)?.sync_all()?;
+                crate::platform::fs::sync_file(&path)?;
             }
         }
         Ok(())
@@ -601,6 +601,13 @@ mod tests {
         );
         let again = stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").unwrap();
         assert_eq!(again, release_dir);
+        let mirrored =
+            stage_archive(&archive, &sha, &root, "0.2.0", "https://mirror.example.com").unwrap();
+        assert_eq!(mirrored, release_dir);
+        assert_eq!(
+            std::fs::read_to_string(release_dir.join(".install-source")).unwrap(),
+            "https://mirror.example.com"
+        );
         let releases = root.join("releases");
         for entry in std::fs::read_dir(&releases).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
