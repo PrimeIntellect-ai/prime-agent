@@ -2263,3 +2263,20 @@ fn backfilled_entries_collapse_a_seam_split_retry_episode() {
         3,
     );
 }
+
+#[test]
+fn backfill_preserves_errors_before_an_unrelated_status() {
+    let attempt = |n: u64| {
+        json!({
+            "role": "assistant", "content": [], "stopReason": "error",
+            "errorMessage": format!("attempt {n} failed"), "timestamp": n,
+        })
+    };
+    let outcome = json!({
+        "role": "custom", "customType": "compaction_outcome", "display": true,
+        "content": "Compaction cancelled", "details": { "cancelled": true },
+        "timestamp": 9u64,
+    });
+    joined_matches_full(&[attempt(1), outcome.clone()], 1);
+    joined_matches_full(&[attempt(1), attempt(2), outcome], 1);
+}

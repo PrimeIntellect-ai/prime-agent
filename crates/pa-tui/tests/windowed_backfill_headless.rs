@@ -17,6 +17,7 @@ const HISTORY_MESSAGES: usize = 4;
 struct MockSupervisor {
     listener: UnixListener,
     windowed: bool,
+    failures: usize,
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -25,11 +26,12 @@ impl MockSupervisor {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             windowed,
+            failures: 0,
             requests,
         }
     }
 
-    fn serve(self) {
+    fn serve(mut self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
@@ -66,6 +68,17 @@ impl MockSupervisor {
                 }
                 "get_messages" => {
                     self.requests.lock().unwrap().push(command.clone());
+                    if self.failures > 0 {
+                        self.failures -= 1;
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response", "id": id, "command": "get_messages",
+                                "success": false, "error": "temporary backfill rejection",
+                            }),
+                        );
+                        continue;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
                     write_json(&mut writer, &get_messages_response(id, self.windowed));
                 }
@@ -227,11 +240,20 @@ fn options(socket: PathBuf) -> InteractiveOptions {
 }
 
 fn run_attached(windowed: bool, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Value>) {
+    run_attached_with_failures(windowed, /*failures*/ 0, steps)
+}
+
+fn run_attached_with_failures(
+    windowed: bool,
+    failures: usize,
+    steps: Vec<HeadlessStep>,
+) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
+    let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
+    supervisor.failures = failures;
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -327,4 +349,21 @@ fn a_full_snapshot_attach_never_backfills() {
         requests.is_empty(),
         "a complete snapshot never backfills: {requests:?}"
     );
+}
+
+#[test]
+fn a_rejected_backfill_retries_then_reports_incomplete_history() {
+    let (frames, requests) = run_attached_with_failures(
+        true,
+        /*failures*/ 2,
+        vec![HeadlessStep::WaitRender {
+            needle: "Older history could not be loaded".to_string(),
+            timeout_ms: 5000,
+        }],
+    );
+    assert!(frames
+        .iter()
+        .any(|frame| frame.contains("Older history could not be loaded")));
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1]);
 }
