@@ -1,23 +1,7 @@
-# test_windows_channel_fallback.ps1 — the install.ps1 Windows channel-fallback
-# regression test (the windows battery's third install gate).
-#
-# WHAT IT PROVES (the operator's real-machine report, 2026-10-02: the plain
-# one-liner threw "no artifact row for platform win32-x64 in the stable
-# manifest"):
-#   1. a default-channel install against a stable channel that carries no
-#      win32-x64 row falls back to beta, prints the notice, and publishes
-#      the beta payload (the .prime-agent-install marker names beta);
-#   2. an explicitly requested channel without a win32-x64 row refuses with
-#      the beta one-liner spelled out — the fallback never overrides a
-#      channel the user asked for by name.
-#
-# The payload is a stub tarball (a placeholder prime-agent.exe): this test
-# exercises the channel resolution and the fallback, not the binary — the
-# real-binary proof is the install e2e beside it (test_windows_install.ps1),
-# and the real-channel proof is the raw one-liner check in the same battery.
-#
-# Usage (from the repo root, on windows-latest):
-#   pwsh -NoProfile -File scripts/release/test_windows_channel_fallback.ps1
+# Windows installer channel-selection regression: missing stable artifacts
+# must fail, explicit beta must work, and the production default stays stable.
+# Uses a local HTTP fixture with a stub payload; the Windows runtime battery
+# separately verifies the real executable and production one-liner.
 
 $ErrorActionPreference = 'Stop'
 
@@ -43,10 +27,7 @@ $artifact = Join-Path $scratch $artifactFile
 if ($LASTEXITCODE -ne 0) { throw 'the stub artifact build failed (tar)' }
 $artifactSha = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLower()
 
-# The local channel: the stable pointer + manifest WITHOUT a win32-x64 row
-# (the real stable channel's shape while Windows rides the beta channel
-# only), the beta pointer + manifest WITH the row, the versioned release
-# prefix with the artifact + its sums.
+# Start with a missing stable artifact and an available beta artifact.
 $channel = Join-Path $scratch 'channel'
 $releaseDir = Join-Path $channel "releases\v$betaVersion"
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
@@ -124,44 +105,51 @@ try {
         }
     }
 
-    # Case 1: the default channel falls back to beta and installs.
-    $prefixA = Join-Path $scratch 'prefix-a'
-    New-Item -ItemType Directory -Path $prefixA | Out-Null
-    $runA = Invoke-Installer -Channel $null -Prefix $prefixA
-    if ($runA.Exit -ne 0) {
-        $runA.Lines | Write-Host
-        throw "the default-channel install failed (exit $($runA.Exit))"
-    }
-    $transcriptA = $runA.Lines -join [Environment]::NewLine
-    if ($transcriptA -notmatch [regex]::Escape("stable does not ship Windows builds yet; installing from the beta channel")) {
-        throw 'the fallback notice is missing from the default-channel transcript'
-    }
-    if ($transcriptA -notmatch [regex]::Escape("installing prime-agent $betaVersion from the beta channel ($platform)")) {
-        throw 'the default-channel install did not resolve the beta channel'
-    }
-    $markerPath = Join-Path $prefixA 'share\prime-agent\.prime-agent-install'
-    if (-not (Test-Path $markerPath -PathType Leaf)) { throw "the install marker is missing: $markerPath" }
-    $marker = Get-Content -LiteralPath $markerPath -Raw
-    if ($marker -ne "install-rust.sh channel beta`nversion $betaVersion") { throw "the install marker says '$marker' instead of the beta channel" }
-    if (-not (Test-Path (Join-Path $prefixA 'share\prime-agent\prime-agent.exe') -PathType Leaf)) { throw 'the beta payload is missing from the default-channel install' }
-
-    # Case 2: an explicitly requested channel refuses with the beta route.
-    $prefixB = Join-Path $scratch 'prefix-b'
-    New-Item -ItemType Directory -Path $prefixB | Out-Null
-    $runB = Invoke-Installer -Channel 'stable' -Prefix $prefixB
-    if ($runB.Exit -eq 0) {
-        $runB.Lines | Write-Host
-        throw 'the explicitly requested stable channel must refuse (no win32-x64 row)'
-    }
-    $transcriptB = $runB.Lines -join [Environment]::NewLine
-    if ($transcriptB -notmatch [regex]::Escape('the explicitly requested stable channel ships no win32-x64 build yet')) {
-        throw 'the explicit-channel refusal is missing its headline'
-    }
-    if ($transcriptB -notmatch [regex]::Escape('$env:PRIME_AGENT_RELEASE_CHANNEL = ''beta''; irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex')) {
-        throw 'the explicit-channel refusal does not spell out the beta one-liner'
+    foreach ($selection in @('default', 'stable')) {
+        $prefix = Join-Path $scratch "prefix-missing-$selection"
+        $knob = if ($selection -eq 'default') { $null } else { $selection }
+        $run = Invoke-Installer -ChannelKnob $knob -Prefix $prefix
+        $transcript = $run.Lines -join [Environment]::NewLine
+        if ($run.Exit -eq 0 -or $transcript -notmatch [regex]::Escape('no artifact row for platform win32-x64 in the stable manifest')) {
+            $run.Lines | Write-Host
+            throw "$selection must refuse the missing stable artifact"
+        }
+        if (Test-Path (Join-Path $prefix 'share\prime-agent\prime-agent.exe')) {
+            throw "$selection unexpectedly published a payload"
+        }
     }
 
-    Write-Host "WIN_CHANNEL_FALLBACK default->beta=$betaVersion notice+marker verified; explicit-stable refused with the beta route"
+    # Explicit beta succeeds independently of the incomplete stable release.
+    $prefixBeta = Join-Path $scratch 'prefix-beta'
+    $runBeta = Invoke-Installer -ChannelKnob 'beta' -Prefix $prefixBeta
+    if ($runBeta.Exit -ne 0) {
+        $runBeta.Lines | Write-Host
+        throw 'the explicit beta install failed'
+    }
+    $marker = Get-Content -LiteralPath (Join-Path $prefixBeta 'share\prime-agent\.prime-agent-install') -Raw
+    if ($marker -ne "install-rust.sh channel beta`nversion $betaVersion") { throw "unexpected beta marker: $marker" }
+
+    # Publish stable and verify the production default selects its artifact.
+    $stableFile = "prime-agent-$stableVersion-$platform.tar.gz"
+    $stableDir = Join-Path $channel "releases\v$stableVersion"
+    New-Item -ItemType Directory -Path $stableDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $releaseDir $artifactFile) -Destination (Join-Path $stableDir $stableFile)
+    Set-Content -LiteralPath (Join-Path $stableDir 'SHA256SUMS') -Value "$artifactSha  $stableFile"
+    $stableRow = '{"platform": "' + $platform + '", "file": "' + $stableFile + '", "sha256": "' + $artifactSha + '"}'
+    Set-Content -LiteralPath (Join-Path $channel 'latest.json') -Value ('{"version": "v' + $stableVersion + '", "binaries": [' + $stableRow + '], "binaries_v2": [' + $stableRow + ']}')
+    $prefixStable = Join-Path $scratch 'prefix-stable'
+    $runStable = Invoke-Installer -ChannelKnob $null -Prefix $prefixStable
+    if ($runStable.Exit -ne 0) {
+        $runStable.Lines | Write-Host
+        throw 'the default stable install failed'
+    }
+    $marker = Get-Content -LiteralPath (Join-Path $prefixStable 'share\prime-agent\.prime-agent-install') -Raw
+    if ($marker -ne "install-rust.sh channel stable`nversion $stableVersion") { throw "unexpected stable marker: $marker" }
+    foreach ($prefix in @($prefixBeta, $prefixStable)) {
+        if (-not (Test-Path (Join-Path $prefix 'share\prime-agent\prime-agent.exe') -PathType Leaf)) { throw "missing payload in $prefix" }
+    }
+
+    Write-Host "WIN_CHANNEL_SELECTION default=$stableVersion explicit-beta=$betaVersion; missing stable artifacts refused"
 } finally {
     Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
     # The User PATH: strip ONLY the entries this test added - the ones
