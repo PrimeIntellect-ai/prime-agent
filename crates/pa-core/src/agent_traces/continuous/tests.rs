@@ -822,6 +822,131 @@ fn oversized_cursor_records_fail_closed_with_bounded_reads() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_busy_delivery_lease_leaves_recovery_incomplete_until_release() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("leased-recovery.jsonl", "leased-recovery");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let lease = delivery_lease(&fixture.agent_dir, &path).unwrap();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        !recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink.clone(),
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await,
+        "a leased marker must keep the sweep incomplete so recovery re-arms"
+    );
+    drop(lease);
+    assert!(
+        recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn exhausted_recovery_retries_leave_the_sweep_incomplete() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("exhausted-recovery.jsonl", "exhausted-recovery");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    // Three bounded sweep attempts each exhaust the transport retries.
+    let sink = Arc::new(ScriptedTraceHttp::new(
+        std::iter::repeat_n(Ok(response(503, "{}")), 12).collect(),
+    ));
+    assert!(
+        !recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await,
+        "work still due after the bounded retries must keep the sweep incomplete"
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        None
+    );
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_delivery_lease_does_not_hold_upload_capacity() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let leased = fixture.write_session("lease-wait.jsonl", "lease-wait");
+    let free = fixture.write_session("lease-free.jsonl", "lease-free");
+    let busy_host = controller(&fixture, &leased, true);
+    busy_host.persisted(&leased);
+    let lease = delivery_lease(&fixture.agent_dir, &leased).unwrap();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let busy_task = tokio::spawn(run_controller(
+        Arc::downgrade(&busy_host),
+        permits.clone(),
+        sink.clone(),
+        Some("http://synthetic.invalid".into()),
+    ));
+    // The busy host's due (+1s) must strictly precede the free host's (+1.5s):
+    // startup re-persists each deadline from its own spawn instant, so the
+    // ordering is built from distinct spawn instants, never wake order.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let free_host = controller(&fixture, &free, true);
+    free_host.persisted(&free);
+    let free_task = tokio::spawn(run_controller(
+        Arc::downgrade(&free_host),
+        permits.clone(),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    // The busy host attempts the held lease at +1s and must release the shared
+    // permit while it waits, or the free host only delivers at its +2s retry.
+    let (body, reply) =
+        tokio::time::timeout(DEBOUNCE + Duration::from_millis(250), observed.recv())
+            .await
+            .expect("a busy lease must not starve an unrelated delivery")
+            .unwrap();
+    assert!(
+        body.contains("lease-free"),
+        "the free session delivers first"
+    );
+    reply.send(response(200, "{}")).unwrap();
+    drop(lease);
+    let (body, reply) = tokio::time::timeout(MIN_INTERVAL, observed.recv())
+        .await
+        .expect("the leased session retries after the lease releases")
+        .unwrap();
+    assert!(body.contains("lease-wait"));
+    reply.send(response(200, "{}")).unwrap();
+    drop(busy_host);
+    drop(free_host);
+    busy_task.await.unwrap();
+    free_task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn pending_live_owner_keeps_recovery_incomplete_until_retirement() {
     let fixture = Fixture::new();
     enable_synthetic_fixture(&fixture);

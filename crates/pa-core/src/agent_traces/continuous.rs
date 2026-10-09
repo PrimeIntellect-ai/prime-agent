@@ -644,6 +644,8 @@ async fn run_controller(
             continue;
         };
         let Some(_delivery_lease) = delivery_lease(&controller.agent_dir, &path) else {
+            // A busy lease must not hold delivery capacity while waiting.
+            drop(permit);
             drop(controller);
             tokio::select! { () = tokio::time::sleep(DEBOUNCE) => {}, () = cancel.wait() => return }
             continue;
@@ -831,6 +833,9 @@ async fn recover_with_backoff(
             Err(_) => continue,
         }
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
+            // Another process owns this delivery; a skipped marker must not
+            // complete the sweep or it strands when that process fails.
+            complete = false;
             continue;
         };
         let Some(header) = read_trace_session_header(&path) else {
@@ -871,6 +876,9 @@ async fn recover_with_backoff(
                 break;
             };
             if attempt == 2 {
+                // Exhausted per-entry retries with work still due: the durable
+                // marker is retained, so the sweep must rearm, not complete.
+                complete = false;
                 break;
             }
             tokio::select! { () = tokio::time::sleep_until(due) => {}, () = cancel.wait() => return (false, None) }
