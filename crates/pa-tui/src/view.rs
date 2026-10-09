@@ -732,6 +732,8 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod prepend_tests;
+#[cfg(test)]
 mod chunk_selection_tests {
     use super::chunk_selection;
 
