@@ -28,7 +28,7 @@
 //!       under the parent as its own row.
 //!   (3) `agent_message_rows_dump_their_glyphs` checks non-ASCII text in
 //!       user and assistant headless frames, dumping them when configured.
-//!       It does not validate console glyphs, fonts or ConPTY input/output.
+//!       It does not validate console glyphs, fonts or `ConPTY` input/output.
 //!
 //! The harness is PORTABLE by design: the same battery runs in the linux
 //! CI shards (so every lane gates it) and on the windows-2022 runner (the
@@ -645,7 +645,7 @@ async fn subagent_session_stays_a_distinct_store_entry() {
 }
 
 /// Scenario (3): preserve non-ASCII user/assistant text in headless frames.
-/// This renderer regression does not exercise console, font or ConPTY I/O.
+/// This renderer regression does not exercise console, font or `ConPTY` I/O.
 #[tokio::test]
 async fn agent_message_rows_dump_their_glyphs() {
     let dir = tempfile::TempDir::new().expect("temp dir");
