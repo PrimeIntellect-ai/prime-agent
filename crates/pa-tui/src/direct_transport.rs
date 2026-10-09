@@ -285,7 +285,7 @@ pub(crate) async fn connect_direct(
             }
             // Only this connection's requests fail: a replacement may already
             // have registered its own requests in the same pending map.
-            shared.fail_pending("direct_", "the session connection closed");
+            shared.fail_direct_pending(&owner, "the session connection closed");
             // An intentional close (client `close`, session switch, link
             // replacement) marks the link dead before its writer's
             // shutdown reaches this EOF; only an unmarked exit is the
@@ -565,7 +565,11 @@ mod tests {
     async fn replaced_link_eof_only_fails_its_own_pending_requests() {
         async fn held_link(
             shared: Arc<Shared>,
-        ) -> (DirectLink, tokio::sync::oneshot::Sender<()>, tempfile::TempDir) {
+        ) -> (
+            DirectLink,
+            tokio::sync::oneshot::Sender<()>,
+            tempfile::TempDir,
+        ) {
             let dir = tempfile::TempDir::new().unwrap();
             let socket = dir.path().join("worker.sock");
             let listener = tokio::net::UnixListener::bind(&socket).unwrap();
