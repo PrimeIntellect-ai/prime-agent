@@ -596,6 +596,10 @@ impl SessionUi {
             view.chrome.speed_text = None;
         }
         view.clear_chat();
+        // Retry countdowns belong to the previous event stream. The fresh
+        // snapshot's activity flags own this attachment; only a new retry
+        // event can establish a countdown for it.
+        view.retry = None;
         self.last_status_index = None;
         self.pressed_click = None;
         self.pending_tools.clear();

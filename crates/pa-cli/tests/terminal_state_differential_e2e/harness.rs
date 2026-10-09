@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use nix::fcntl::{FcntlArg::F_SETFL, OFlag, fcntl};
-use nix::pty::{Winsize, openpty};
-use serde_json::{Value, json};
+use nix::fcntl::{fcntl, FcntlArg::F_SETFL, OFlag};
+use nix::pty::{openpty, Winsize};
+use serde_json::{json, Value};
 
 use pa_tui::agents_view::AgentsViewOptions;
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection};
@@ -370,6 +370,7 @@ impl MockSupervisor {
         let mut reader = std::io::BufReader::new(stream);
         let mut events_seen = 0;
         let mut run_open = false;
+        let mut retry_pending = false;
         write_json(
             &mut writer,
             &json!({
@@ -443,6 +444,20 @@ impl MockSupervisor {
                         }),
                     );
                     if run_open {
+                        if retry_pending {
+                            for event in [
+                                json!({ "type": "turn_start" }),
+                                json!({
+                                    "type": "auto_retry_end",
+                                    "success": true,
+                                    "attempt": 1,
+                                }),
+                            ] {
+                                events_seen += 1;
+                                push_event(&mut writer, events_seen, &event);
+                            }
+                            retry_pending = false;
+                        }
                         events_seen += 1;
                         push_event(
                             &mut writer,
@@ -457,7 +472,7 @@ impl MockSupervisor {
                         run_open = false;
                     } else if command.get("message").and_then(Value::as_str) == Some("retry") {
                         // A failed attempt settles before its retry countdown starts.
-                        // Keep the next attempt pending until the test aborts it.
+                        // Keep the next attempt pending until the next prompt.
                         for event in [
                             json!({ "type": "turn_start" }),
                             json!({
@@ -477,6 +492,7 @@ impl MockSupervisor {
                             push_event(&mut writer, events_seen, &event);
                         }
                         run_open = true;
+                        retry_pending = true;
                     } else if command.get("message").and_then(Value::as_str) == Some("step") {
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));

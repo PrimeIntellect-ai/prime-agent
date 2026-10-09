@@ -454,10 +454,10 @@ impl SessionUi {
     }
 
     /// The chat surface's OSC 7501 report: working while a turn or the
-    /// run it belongs to is in flight, else the remembered outcome or
-    /// idle.
-    pub(crate) fn program_status(&self) -> crate::program_status::Status {
-        if self.turn_active || self.run_open {
+    /// run it belongs to is in flight, including a pending provider retry,
+    /// else the remembered outcome or idle.
+    pub(crate) fn program_status(&self, view: &AgentView) -> crate::program_status::Status {
+        if self.turn_active || self.run_open || view.retry.is_some() {
             crate::program_status::Status::Working
         } else {
             self.settled.unwrap_or(crate::program_status::Status::Idle)
