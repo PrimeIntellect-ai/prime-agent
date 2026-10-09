@@ -28,6 +28,23 @@ pub(crate) struct FinalizedToolCallOutcome {
     pub(crate) is_error: bool,
 }
 
+/// Tool lookup by name; the pre-rename `python`/`ipython` names route to
+/// the registered `python_repl`, matching the read paths.
+pub(crate) fn find_tool<'a>(
+    tools: &'a [Arc<dyn AgentTool>],
+    name: &str,
+) -> Option<&'a Arc<dyn AgentTool>> {
+    if let Some(tool) = tools.iter().find(|t| t.name() == name) {
+        return Some(tool);
+    }
+    if pa_types::ai::is_python_tool_name(name) {
+        return tools
+            .iter()
+            .find(|t| t.name() == pa_types::ai::PYTHON_TOOL_NAME);
+    }
+    None
+}
+
 pub(crate) async fn execute_tool_calls(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -41,11 +58,7 @@ pub(crate) async fn execute_tool_calls(
         .cloned()
         .collect::<Vec<ToolCall>>();
     let has_sequential_tool_call = tool_calls.iter().any(|tc| {
-        current_context
-            .tools
-            .iter()
-            .find(|t| t.name() == tc.name)
-            .and_then(|tool| tool.execution_mode())
+        find_tool(&current_context.tools, &tc.name).and_then(|tool| tool.execution_mode())
             == Some(ToolExecutionMode::Sequential)
     });
     if config.tool_execution == ToolExecutionMode::Sequential || has_sequential_tool_call {
