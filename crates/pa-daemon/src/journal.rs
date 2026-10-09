@@ -4,11 +4,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
 
@@ -432,46 +431,6 @@ impl WorkerRecoveryJournal {
     }
 }
 
-pub(crate) fn sweep_orphaned_journals(
-    descriptor_dir: &Path,
-    supervisor_socket_path: &Path,
-) -> usize {
-    let Ok(entries) = fs::read_dir(descriptor_dir) else {
-        return 0;
-    };
-    let candidates: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(RECOVERY_JOURNAL_SUFFIX))
-        })
-        .collect();
-    let referenced: HashSet<OsString> =
-        crate::descriptor::load_descriptors(descriptor_dir, supervisor_socket_path)
-            .into_iter()
-            .filter_map(|(_, descriptor)| {
-                Path::new(&descriptor.recovery_journal_path)
-                    .file_name()
-                    .map(OsStr::to_os_string)
-            })
-            .collect();
-    let mut removed = 0;
-    for candidate in candidates {
-        if candidate
-            .file_name()
-            .is_some_and(|name| referenced.contains(name))
-        {
-            continue;
-        }
-        if fs::remove_file(&candidate).is_ok() {
-            removed += 1;
-        }
-    }
-    removed
-}
-
 const QUEUE_SNAPSHOT_RECORD_TYPE: &str = "queue_snapshot";
 /// The current queue-snapshot record version: the lanes carry the full
 /// item records.
@@ -552,44 +511,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-daemon-journal-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir.join(name)
-    }
-
-    #[test]
-    fn orphan_journal_sweep_removes_only_unreferenced_journals() {
-        let dir = tempfile::tempdir().unwrap();
-        let descriptor_dir = dir.path().join("daemon-workers/key");
-        fs::create_dir_all(&descriptor_dir).unwrap();
-        let supervisor_socket = Path::new("/tmp/orphan-sweep.sock");
-        let referenced = descriptor_dir.join("w-a.recovery.jsonl");
-        let orphaned = descriptor_dir.join("w-b.recovery.jsonl");
-        fs::write(&referenced, "{}\n").unwrap();
-        fs::write(&orphaned, "{}\n").unwrap();
-        let descriptor: crate::descriptor::WorkerDescriptor =
-            serde_json::from_value(serde_json::json!({
-                "version": 2,
-                "workerId": "w-a",
-                "pid": 1,
-                "socketPath": "/tmp/w-a.sock",
-                "recoveryJournalPath": referenced.to_string_lossy(),
-                "supervisorSocketPath": supervisor_socket.to_string_lossy(),
-                "authenticationToken": "token",
-                "rootActiveSessionId": "w-a",
-                "createdAt": "2026-10-07T00:00:00Z",
-                "updatedAt": "2026-10-07T00:00:00Z",
-                "lifecycle": "ready",
-                "createCommand": {},
-                "consecutiveFailures": 0,
-            }))
-            .unwrap();
-        crate::descriptor::persist_worker(&descriptor_dir.join("w-a.json"), &descriptor).unwrap();
-
-        assert_eq!(
-            sweep_orphaned_journals(&descriptor_dir, supervisor_socket),
-            1,
-            "only the orphaned journal is a deletion target"
-        );
-        assert!(referenced.exists());
-        assert!(!orphaned.exists());
     }
 
     #[test]

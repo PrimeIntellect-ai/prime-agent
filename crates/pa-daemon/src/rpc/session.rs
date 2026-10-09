@@ -360,8 +360,9 @@ impl RpcSession {
     }
 
     /// The stdin-close settle: retires the queued-input pumps, waits the
-    /// running turn out, unsubscribes, disposes the kernel, and releases
-    /// the session lease.
+    /// running turn out, unsubscribes, and disposes the kernel. The handle
+    /// retains its lease: bounded kernel disposal may leave host writers
+    /// alive while the process drains its output.
     pub async fn dispose(&self) {
         // Retire the detached pumps first: none may deliver queued input
         // onto the session this settle is about to dispose.
@@ -374,7 +375,6 @@ impl RpcSession {
             subscription.unsubscribe().await;
         }
         engine.dispose_kernel().await;
-        drop(self.handle.write().await.session_lease.take());
     }
 }
 

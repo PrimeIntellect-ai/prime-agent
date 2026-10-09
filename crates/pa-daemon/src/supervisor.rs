@@ -461,13 +461,12 @@ impl Supervisor {
             });
         }
 
+        // Journals without verifiable ownership and flat TS update status
+        // records stay intact: a missing descriptor or a dead coordinator
+        // does not prove that no worker or waiting caller still needs them.
         {
             let supervisor = Arc::clone(&self);
             tokio::task::spawn_blocking(move || {
-                let journals = crate::journal::sweep_orphaned_journals(
-                    &supervisor.descriptor_dir,
-                    &supervisor.options.socket_path,
-                );
                 let leases = crate::lease::reclaim_dead_owner_leases(&supervisor.options.agent_dir);
                 let logs = crate::worker_stderr::prune_socket_logs(
                     &supervisor.options.agent_dir,
@@ -475,9 +474,9 @@ impl Supervisor {
                 );
                 let leftovers =
                     crate::ts_era::sweep_ts_era_leftovers(&supervisor.options.agent_dir);
-                if journals + leases + logs + leftovers > 0 {
+                if leases + logs + leftovers > 0 {
                     supervisor.log_line(&format!(
-                        "boot cleanup: removed {journals} orphaned recovery journal(s), {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
+                        "boot cleanup: removed {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
                     ));
                 }
             });

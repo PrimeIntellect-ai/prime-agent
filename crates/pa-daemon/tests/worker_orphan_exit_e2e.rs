@@ -225,7 +225,7 @@ fn read_exact_timeout(
 }
 
 #[test]
-fn the_orphan_exit_releases_the_held_session_lease() {
+fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
     let dir = tempfile::tempdir().expect("temp dir");
     let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
     let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
@@ -261,9 +261,16 @@ fn the_orphan_exit_releases_the_held_session_lease() {
         "the orphaned worker exited on the supervisor-lost window"
     );
     assert!(
-        !held_lease.exists(),
-        "the orphan exit released the session lease"
+        held_lease.exists(),
+        "process exit retains the dead-owner lease for safe reclamation"
     );
+    let reopened = pa_daemon::lease::acquire_runtime_session_lease(
+        &session_file,
+        &dir.path().join("agent"),
+    )
+    .expect("a new owner can reclaim the lease after the worker exited");
+    reopened.release();
+    assert!(!held_lease.exists(), "the new owner released its lease");
     assert!(
         session_file.exists(),
         "the session file survives the lease release"

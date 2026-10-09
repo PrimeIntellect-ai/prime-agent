@@ -362,7 +362,8 @@ impl Supervisor {
                 // would keep the session file while a retry mints a second worker over it.
                 let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
-                let _ = std::fs::remove_file(&recovery_journal_path);
+                // A failed kill is not proof of death; preserve the journal
+                // even though the existing create-failure path retires metadata.
                 let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
@@ -761,7 +762,7 @@ impl Supervisor {
         let alive_unverified = (start_id.is_none()
             || crate::lease::get_process_start_id(pid).is_none())
             && crate::lease::is_process_alive(pid).unwrap_or(false);
-        match crate::boot_reap::stop_process(pid, start_id).await {
+        match crate::boot_reap::stop_process(pid, start_id.clone()).await {
             crate::boot_reap::ReapOutcome::Survived => {
                 self.log_line(&format!(
                     "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
@@ -775,13 +776,39 @@ impl Supervisor {
                 ));
             }
             _ => {
-                let _ = std::fs::remove_file(&recovery_journal_path);
+                // Metadata retirement historically treats failed liveness probes
+                // as gone. Journal deletion needs positive owner-death evidence:
+                // an unobservable process may still be writing durable work.
+                if recovery_journal_owner_is_gone(
+                    crate::lease::is_process_alive(pid).ok(),
+                    start_id.as_deref(),
+                    crate::lease::get_process_start_id(pid).as_deref(),
+                ) {
+                    let _ = std::fs::remove_file(&recovery_journal_path);
+                }
                 let _ = std::fs::remove_file(&resident.descriptor_path);
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
             }
         }
+    }
+}
+
+/// A dead process or a verified replacement identity proves the old writer
+/// is gone. Failed probes and missing live identities preserve the journal.
+fn recovery_journal_owner_is_gone(
+    process_alive: Option<bool>,
+    expected_start_id: Option<&str>,
+    current_start_id: Option<&str>,
+) -> bool {
+    match process_alive {
+        Some(false) => true,
+        Some(true) => match (expected_start_id, current_start_id) {
+            (Some(expected), Some(current)) => expected != current,
+            _ => false,
+        },
+        None => false,
     }
 }
 
@@ -940,6 +967,26 @@ mod tests {
         pid
     }
 
+    #[test]
+    fn recovery_journal_retirement_requires_positive_owner_death_evidence() {
+        for (alive, expected, current, gone) in [
+            (Some(false), None, None, true),
+            (Some(true), Some("old"), Some("new"), true),
+            (Some(true), Some("same"), Some("same"), false),
+            (Some(true), None, Some("current"), false),
+            (Some(true), Some("expected"), None, false),
+            (Some(true), None, None, false),
+            (None, Some("old"), Some("new"), false),
+            (None, None, None, false),
+        ] {
+            assert_eq!(
+                recovery_journal_owner_is_gone(alive, expected, current),
+                gone,
+                "liveness={alive:?}, expected={expected:?}, current={current:?}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn the_provably_gone_retire_removes_the_recovery_journal() {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -948,6 +995,13 @@ mod tests {
         let pid = reaped_pid();
         let journal_path = descriptor_dir.join("w-gone.recovery.jsonl");
         std::fs::write(&journal_path, "{}\n").expect("journal");
+        let unowned_journal = descriptor_dir.join("w-unowned.recovery.jsonl");
+        let unknown_journal = descriptor_dir.join("w-unknown.recovery.jsonl");
+        let retained = b"{\"queued\":\"durable work\"}\n";
+        std::fs::write(&unowned_journal, retained).expect("unowned journal");
+        std::fs::write(&unknown_journal, retained).expect("unknown journal");
+        std::fs::write(descriptor_dir.join("w-unknown.json"), "not json")
+            .expect("unverifiable descriptor");
         let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
             "version": 2,
             "workerId": "w-gone",
@@ -976,5 +1030,7 @@ mod tests {
             "the journal dies with the descriptor"
         );
         assert!(!descriptor_path.exists());
+        assert_eq!(std::fs::read(unowned_journal).unwrap(), retained);
+        assert_eq!(std::fs::read(unknown_journal).unwrap(), retained);
     }
 }

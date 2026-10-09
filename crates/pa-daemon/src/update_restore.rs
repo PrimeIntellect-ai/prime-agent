@@ -12,8 +12,7 @@ use anyhow::{Context, Result};
 use pa_types::daemon::update_flow::DaemonUpdateResume;
 use pa_types::daemon::update_flow::{
     legacy_update_restart_status, legacy_update_restarts_dir, socket_update_dir,
-    update_restarts_dir, UpdateRoster, UpdateRosterSession, UpdateStatusCounts,
-    UpdateStatusFailure, UPDATE_ROSTER_ENV,
+    UpdateRoster, UpdateRosterSession, UpdateStatusCounts, UpdateStatusFailure, UPDATE_ROSTER_ENV,
 };
 use pa_types::daemon::{DaemonCommand, UpdateId};
 use serde_json::json;
@@ -292,33 +291,15 @@ fn restore_target_mut<'a>(
 
 // Spec §6 step 1: the unconditional boot sweep
 
-/// Delete this socket's update scratch directory, the legacy TS-era
-/// names, and the TS-era flat status records (`<hash16>-<id>.json`)
-/// (spec §6 step 1): no liveness checks; the roster env is consumed
-/// first, so the sweep can delete the file it pointed at.
+/// Delete this socket's update scratch directory and the legacy TS-era
+/// names (spec §6 step 1): the roster env is consumed first. Flat TS
+/// status records remain available to callers waiting for their result,
+/// even after the coordinator exits.
 pub(crate) fn boot_sweep(agent_dir: &Path, socket_path: &Path) {
     let socket_hash = crate::paths::hash_key(&socket_path.to_string_lossy(), 64);
     let _ = std::fs::remove_dir_all(socket_update_dir(agent_dir, &socket_hash));
     let _ = std::fs::remove_dir_all(legacy_update_restarts_dir(agent_dir));
     let _ = std::fs::remove_file(legacy_update_restart_status(agent_dir));
-    if let Ok(entries) = std::fs::read_dir(update_restarts_dir(agent_dir)) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(ts_update_record_name)
-            {
-                let _ = std::fs::remove_file(&path);
-            }
-        }
-    }
-}
-
-fn ts_update_record_name(name: &str) -> bool {
-    name.strip_suffix(".json")
-        .and_then(|stem| stem.split_once('-'))
-        .is_some_and(|(hash, _)| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 // Spec §6 step 2: consume the roster from the spawn env
@@ -907,16 +888,17 @@ mod tests {
         std::fs::create_dir_all(scratch.join("prepared/u-1")).unwrap();
         std::fs::create_dir_all(legacy_update_restarts_dir(&agent_dir)).unwrap();
         std::fs::write(legacy_update_restart_status(&agent_dir), "{}").unwrap();
-        let ts_record = update_restarts_dir(&agent_dir)
+        let ts_record = pa_types::daemon::update_flow::update_restarts_dir(&agent_dir)
             .join("3c5dcf39f81bbe22-4e3a8d9e-1f2b-4c5d-9a0b-c1d2e3f4a5b6.json");
         std::fs::write(&ts_record, "{}").unwrap();
-        let other_socket_dir = update_restarts_dir(&agent_dir).join("0f".repeat(32));
+        let other_socket_dir =
+            pa_types::daemon::update_flow::update_restarts_dir(&agent_dir).join("0f".repeat(32));
         std::fs::create_dir_all(other_socket_dir.join("prepared")).unwrap();
         boot_sweep(&agent_dir, &socket);
         assert!(!scratch.exists());
         assert!(!legacy_update_restarts_dir(&agent_dir).exists());
         assert!(!legacy_update_restart_status(&agent_dir).exists());
-        assert!(!ts_record.exists());
+        assert_eq!(std::fs::read_to_string(&ts_record).unwrap(), "{}");
         assert!(other_socket_dir.exists());
     }
 
