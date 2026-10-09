@@ -940,14 +940,24 @@ mod tests {
         std::fs::rename(&lease.lock_path, dir.path().join(".displaced")).unwrap();
         // Wait past one tick + the grace budget.
         std::thread::sleep(Duration::from_secs(2) + LEASE_DISPLACEMENT_GRACE * 2);
+        // The decisive oracles, both BEFORE Drop (Drop stops and joins
+        // the thread regardless, and compromised() alone is true from
+        // the displaced pathname even if the refresh never ran): the
+        // refresh thread itself set the cached flag, and the thread has
+        // EXITED - a ticking loop (the pre-fix code) would still be
+        // running here.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !lease.refresh.as_ref().unwrap().is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the refresh thread kept ticking after the compromise"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert!(
-            lease.compromised(),
-            "the displacement past the grace is a compromise"
+            lease.compromised.load(std::sync::atomic::Ordering::Acquire),
+            "the refresh thread itself declared the compromise"
         );
-        // The compromised Drop marks the lease released through the
-        // pinned fd and the refresh thread joins cleanly - the thread
-        // exited at the compromise, so no further tick can refresh the
-        // abandoned inode.
         drop(lease);
     }
 
