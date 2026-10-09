@@ -16,6 +16,7 @@ use super::types::AuthStorageData;
 /// a simultaneous rejection in another worker process waits for — and
 /// then peer-checks — this attempt's result instead of spending the
 /// same single-use refresh token twice.
+#[derive(Debug)]
 pub struct RefreshExclusion {
     _guard: crate::platform::lock_dir::LockDir,
 }
@@ -52,8 +53,13 @@ pub trait AuthStorageBackend: Send + Sync {
     /// write span): the file backend holds a dedicated lock file beside
     /// the document; stores with no other process to exclude take
     /// nothing and the in-process flight stands alone.
-    fn refresh_exclusion(&self) -> Option<RefreshExclusion> {
-        None
+    ///
+    /// # Errors
+    ///
+    /// Errors when a live incumbent holds the exclusion past the wait
+    /// bound: the refresh must not exchange without the exclusion.
+    fn refresh_exclusion(&self) -> Result<Option<RefreshExclusion>, String> {
+        Ok(None)
     }
 }
 
@@ -82,20 +88,44 @@ impl FileAuthStorageBackend {
         PathBuf::from(path)
     }
 
-    fn acquire_refresh_exclusion(&self) -> Option<RefreshExclusion> {
-        // The incumbent is another process's live refresh: wait it out
-        // (its result serves this attempt's peer checks once the lock
-        // lands). The staleness judge reclaims a wedged incumbent; past
-        // the bound the refresh proceeds as before — the peer checks and
-        // the write guard still bound the damage.
-        let guard = crate::platform::lock_dir::LockDir::acquire_retrying(
+    /// The owned-acquisition bounds: a live incumbent is never stale
+    /// reclaimed, so the waiter either lands the lock or exhausts the
+    /// bound while the incumbent legitimately holds it.
+    ///
+    /// # Errors
+    ///
+    /// Errors when a live incumbent holds the lock past the bound.
+    fn acquire_refresh_exclusion_with_bound(
+        &self,
+        attempts: u32,
+        interval: Duration,
+    ) -> Result<Option<RefreshExclusion>, String> {
+        // An owned lock: a live incumbent is never reclaimed (only a
+        // provably dead owner's is), and the incumbent's own drop never
+        // deletes a successor's directory — the reclaim is safe even if
+        // the refreshing process dies mid-exchange.
+        match crate::platform::lock_dir::LockDir::acquire_owned_retrying(
             &self.refresh_lock_file(),
             Duration::from_secs(120),
-            120,
-            Duration::from_secs(1),
-        )
-        .ok()?;
-        Some(RefreshExclusion { _guard: guard })
+            attempts,
+            interval,
+        ) {
+            Ok(guard) => Ok(Some(RefreshExclusion { _guard: guard })),
+            // The bound exhausted with a live incumbent: the exchange
+            // never runs without the exclusion — the ordinary ladder
+            // stands, and the incumbent's eventual write serves the
+            // next attempt.
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err("another process is still refreshing the credential".to_string())
+            }
+            // Lock-infrastructure failures degrade as before: the peer
+            // checks and the write guard still bound the damage.
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn acquire_refresh_exclusion(&self) -> Result<Option<RefreshExclusion>, String> {
+        self.acquire_refresh_exclusion_with_bound(60, Duration::from_secs(1))
     }
 
     fn ensure_parent_dir(&self) -> Result<()> {
@@ -289,7 +319,7 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         Ok(())
     }
 
-    fn refresh_exclusion(&self) -> Option<RefreshExclusion> {
+    fn refresh_exclusion(&self) -> Result<Option<RefreshExclusion>, String> {
         self.acquire_refresh_exclusion()
     }
 }
@@ -339,7 +369,7 @@ mod tests {
     fn an_uncontended_refresh_exclusion_takes_the_guard() {
         let dir = tempfile::tempdir().unwrap();
         let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
-        let guard = backend.refresh_exclusion();
+        let guard = backend.refresh_exclusion().unwrap();
         assert!(guard.is_some(), "the lock file lands uncontended");
         // The lock file is a sibling of the document: the document's own
         // write lock stays free while a refresh runs.
@@ -358,7 +388,7 @@ mod tests {
     fn a_memory_store_excludes_nothing() {
         let backend = InMemoryAuthStorageBackend::default();
         assert!(
-            backend.refresh_exclusion().is_none(),
+            backend.refresh_exclusion().unwrap().is_none(),
             "an in-memory store has no other process to exclude"
         );
     }
@@ -367,15 +397,22 @@ mod tests {
     fn a_refresh_exclusion_waits_for_the_incumbent_process() {
         let dir = tempfile::tempdir().unwrap();
         let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
-        // Another process's live refresh holds the lock file.
-        let incumbent = crate::platform::lock_dir::LockDir::acquire(
+        // Another process's live refresh holds the lock file (an owned
+        // acquisition, as a real incumbent holds it).
+        let incumbent = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
             &backend.refresh_lock_file(),
             std::time::Duration::from_secs(120),
+            1,
+            std::time::Duration::from_millis(1),
         )
         .unwrap();
         let waiter = std::thread::spawn({
             let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
-            move || backend.refresh_exclusion().is_some()
+            move || {
+                backend
+                    .refresh_exclusion()
+                    .map(|exclusion| exclusion.is_some())
+            }
         });
         // The waiter cannot take the guard while the incumbent holds it:
         // it is still parked in the wait loop.
@@ -386,8 +423,30 @@ mod tests {
         );
         drop(incumbent);
         assert!(
-            waiter.join().unwrap(),
+            waiter.join().unwrap().unwrap(),
             "the exclusion lands once the incumbent releases"
+        );
+    }
+
+    #[test]
+    fn an_exhausted_refresh_exclusion_never_fails_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        // A live incumbent holds the lock past any bound the waiter is
+        // given (the leak stands in for a wedged-but-alive process).
+        let _incumbent = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
+            &backend.refresh_lock_file(),
+            std::time::Duration::from_secs(120),
+            1,
+            std::time::Duration::from_millis(1),
+        )
+        .unwrap();
+        let outcome =
+            backend.acquire_refresh_exclusion_with_bound(2, std::time::Duration::from_millis(5));
+        assert_eq!(
+            outcome.unwrap_err(),
+            "another process is still refreshing the credential",
+            "the bound's exhaustion keeps the exchange from running"
         );
     }
 

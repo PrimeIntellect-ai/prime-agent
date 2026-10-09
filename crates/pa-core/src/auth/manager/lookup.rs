@@ -214,8 +214,13 @@ impl AuthStorage {
         // Cross-process exclusion: the flight only serializes this
         // process; another worker process refreshing the same shared
         // credential file waits here, and the re-check below then serves
-        // its result without a second exchange.
-        let _cross_process = self.storage.refresh_exclusion();
+        // its result without a second exchange. A live incumbent past the
+        // wait bound keeps the exchange from running at all — the stored
+        // credential stands for a later retry.
+        let Ok(_cross_process) = self.storage.refresh_exclusion() else {
+            self.reload();
+            return None;
+        };
         let fetched = {
             // The gate may have just released a flight that wrote a fresh
             // credential; re-check before spending a refresh token.
@@ -331,8 +336,13 @@ impl AuthStorage {
         let _flight = refresh_flight(provider_id);
         // Cross-process exclusion: another worker process refreshing the
         // same shared credential file waits here, and this attempt's peer
-        // checks then serve its result without a second exchange.
-        let _cross_process = self.storage.refresh_exclusion();
+        // checks then serve its result without a second exchange. A live
+        // incumbent past the wait bound keeps the exchange from running
+        // at all — the ordinary ladder stands.
+        let _cross_process = self
+            .storage
+            .refresh_exclusion()
+            .map_err(ForcedRefreshFailure::NotExchanged)?;
         let peer = self
             .storage
             .read()
