@@ -491,6 +491,54 @@ fn guard_sidecar_matches_for_bare_relative_locks() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn restrictive_umask_never_blocks_owned_lock_lifecycles() {
+    // The umask is process-global and tests run in parallel threads:
+    // the scenario runs in a CHILD PROCESS (this test binary re-run
+    // with the umask probe filter) so no other test ever observes the
+    // restrictive mask.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "platform::lock_dir::tests::restrictive_umask_owned_lock_child",
+        ])
+        .env("PA_UMASK_PROBE", "1")
+        .status()
+        .expect("run the umask probe child");
+    assert!(status.success(), "the umask probe child failed");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn restrictive_umask_owned_lock_child() {
+    if std::env::var("PA_UMASK_PROBE").is_err() {
+        // The direct entry (no env): this body only runs under the
+        // parent's restricted child invocation.
+        return;
+    }
+    // A restrictive umask (0277) strips owner-write from fresh
+    // directories: acquisition and the release placeholder both
+    // write their owner records through fresh dirs, and every such
+    // write must land (the fresh-dir 0700 restoration) or the lock
+    // leaks behind a working lifecycle.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("state.json");
+    let original = unsafe { libc::umask(0o277) };
+    let guard = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE);
+    unsafe { libc::umask(original) };
+    let guard = guard.expect("owned acquisition works under a restrictive umask");
+    guard.ensure_owned().expect("the owner record landed");
+    drop(guard);
+    // The release removed the lock: a fresh acquisition succeeds
+    // immediately, never waiting out the stale window.
+    let next = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE);
+    assert!(
+        next.is_ok(),
+        "the umask-restricted release did not leak the lock"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn guard_sidecar_is_spelling_independent() {
     // Two spellings of one lock path must serialize on the SAME
     // sidecar - or two processes could hold "exclusive" guards for

@@ -340,6 +340,44 @@ fn process_owner_record() -> String {
     format!("{} {token}\n", std::process::id())
 }
 
+/// Write the owner record into the directory the pinned handle names:
+/// `openat` on the directory's own descriptor, so a public-path swap
+/// between the pin and the write cannot redirect the record into a
+/// successor's directory.
+#[cfg(unix)]
+fn write_owner_through(dir: &fs::File, record: &[u8]) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let name = c"owner";
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut written = 0;
+    while written < record.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                record[written..].as_ptr().cast(),
+                record.len() - written,
+            )
+        };
+        if n <= 0 {
+            unsafe { libc::close(fd) };
+            return Err(io::Error::last_os_error());
+        }
+        written += n as usize;
+    }
+    unsafe { libc::close(fd) };
+    Ok(())
+}
+
 /// The kernel-managed serialization guard for the stale-reclaim dance and
 /// the inode-anchored release pass: an flock on a tiny sidecar file, so
 /// a crashed or suspended holder releases it with the process - no
@@ -1270,27 +1308,30 @@ impl LockDir {
         // staleness threshold) time to reclaim this directory and publish
         // a successor, and a capture taken after that I/O would record
         // the SUCCESSOR's identity as "created" - the adoption this
-        // function refuses. An unstattable capture (None) is an abort:
-        // the created-witness is unprovable, so the acquisition fails
-        // (contending honestly) instead of pinning whatever later sits
-        // at the path.
+        // function refuses. An unstattable capture (None) is contention:
+        // the acquisition retries honestly instead of pinning whatever
+        // later sits at the path.
         let created = identity_at(path);
         #[cfg(unix)]
         if created.is_none() {
-            return Err(io::Error::other(format!(
-                "Lock directory {} cannot be witnessed after creation",
-                path.display()
-            )));
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = created;
+            // The witness is unprovable: contention, so a contending
+            // startup retries honestly instead of dying - and the
+            // just-created artifact is removed (this call created it
+            // with mkdir moments ago; an unstattle path at this point
+            // is a reclaim race on our own creation, never a
+            // successor's published lock).
+            let _ = fs::remove_dir(path);
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "Lock directory {} cannot be witnessed after creation",
+                    path.display()
+                ),
+            ));
         }
         // A hostile umask would strip the owner-read bit from the fresh
         // directory and the pin below would fail before any chmod could
-        // fix it: restore the private mode at creation - cleaning the
-        // fresh directory up on failure, never leaving a lock artifact
-        // behind a failed acquisition.
+        // fix it: restore the private mode at creation.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1299,46 +1340,22 @@ impl LockDir {
                 return Err(error);
             }
         }
-        // Every failure below removes the fresh public lock completely -
-        // owner file first (a directory containing it cannot be removed),
-        // then the directory, and the pinned handle (when held) closes
-        // first (EBUSY on these mounts) - never leave a lock artifact
-        // behind a failed acquisition, least of all one carrying a live
-        // owner token (a live PID in the owner file protects the artifact
-        // from stale reclaim until that process dies).
-        if let Some(owner) = owner {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
-                    let _ = fs::remove_dir(path);
-                    return Err(error);
-                }
-            }
-            if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
-                let _ = remove_candidate_dir(path);
-                return Err(error);
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Err(error) =
-                    fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))
-                {
-                    let _ = remove_candidate_dir(path);
-                    return Err(error);
-                }
-            }
-        }
+        // PIN FIRST, VERIFY, THEN WRITE: the pin precedes every owner
+        // write, and the writes go through the PINNED directory handle
+        // (fd-relative, `openat`) - never through the public pathname.
+        // A stale takeover between the witness and the pin lands as the
+        // mismatch refusal below; a takeover between the pin and the
+        // writes cannot redirect them - they target this call's inode,
+        // so a successor's published record is never corrupted.
         let dir = match fs::File::open(path) {
             Ok(dir) => dir,
             Err(error) => {
                 // Never leave a fresh lock artifact behind a failed pin -
-                // it would wedge later acquisitions behind contention until
-                // it goes stale. Remove only the directory this call
-                // created, and only on a positive identity witness: an
-                // unstattable capture must not become one (None == None
-                // would remove without ownership).
+                // it would wedge later acquisitions behind contention
+                // until it goes stale. Remove only the directory this
+                // call created, and only on a positive identity witness:
+                // an unstattable capture must not become one (None ==
+                // None would remove without ownership).
                 if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
                     let _ = remove_candidate_dir(path);
                 }
@@ -1347,8 +1364,8 @@ impl LockDir {
         };
         // The pinned handle must be the directory THIS call created: a
         // suspension past the staleness threshold can let a stale
-        // takeover win between the mkdir and the open, and the open then
-        // pins the SUCCESSOR's inode - adopting another holder's lock
+        // takeover win between the mkdir and the pin, and the pin then
+        // holds the SUCCESSOR's inode - adopting another holder's lock
         // (two acquisitions believing they own one lease). The captured
         // identity is the created-directory witness: a pinned inode that
         // does not match it means the path changed hands, so the
@@ -1366,6 +1383,18 @@ impl LockDir {
                     path.display()
                 ),
             ));
+        }
+        // Owner writes, fd-relative through the pinned handle: they land
+        // in the directory this call created, regardless of what later
+        // happens to the public pathname.
+        if let Some(owner) = owner {
+            if let Err(error) = write_owner_through(&dir, format!("{owner}\n").as_bytes()) {
+                drop(dir);
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = remove_candidate_dir(path);
+                }
+                return Err(error);
+            }
         }
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
