@@ -387,6 +387,8 @@ jobs:
           path: manifests
       - name: Audit the shards and merge their failure reports
         run: |
+          python3 scripts/test_ci_test_shard.py
+          python3 scripts/test_ci_pr_crates.py
           python3 scripts/test_ci_test_shard_summary.py
           python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
