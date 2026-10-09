@@ -464,9 +464,11 @@ impl AuthStorage {
             self.reload();
             return outcome;
         }
-        // Every write attempt failed: serve whatever the store holds — a
-        // peer's fresh credential if one landed — else the rotated grant
-        // itself (the next turn's recovery handles the dead store token).
+        // Every write attempt failed: serve a peer's fresh credential if
+        // one landed (the store holds it), else report the rotation
+        // truthfully — the exchange spent the single-use refresh token,
+        // so the stored grant is dead and the re-login guidance is the
+        // fix, not a retry against the rejected access token.
         self.reload();
         match self
             .data
@@ -474,7 +476,9 @@ impl AuthStorage {
             .filter(|credential| Some(credential) != loaded.as_ref())
         {
             Some(credential) => Ok(credential),
-            None => Ok(new_credential),
+            None => Err(ForcedRefreshFailure::Rejected(
+                "the refreshed credential could not be stored".to_string(),
+            )),
         }
     }
 }

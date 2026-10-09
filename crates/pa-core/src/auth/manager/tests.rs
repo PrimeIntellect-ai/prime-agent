@@ -1038,6 +1038,59 @@ fn a_transient_write_failure_retries_the_locked_write() {
 }
 
 #[test]
+fn a_persistent_write_failure_reports_the_dead_grant() {
+    struct AlwaysFailingWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+    }
+    impl AuthStorageBackend for AlwaysFailingWriteBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            let _ = update(self.inner.read()?)?;
+            anyhow::bail!("persistent write failure")
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(AlwaysFailingWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-dead-write",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-dead-write");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
+                if reason == "the refreshed credential could not be stored"
+        ),
+        "the unwritten rotation reports the dead grant"
+    );
+}
+
+#[test]
 fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
     // A peer refreshed against the same rejection while this fetch ran:
     // the locked write keeps the peer's fresher credential. The fetch
