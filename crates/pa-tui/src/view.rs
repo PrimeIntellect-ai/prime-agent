@@ -514,7 +514,7 @@ impl AgentView {
         } else {
             0
         };
-        self.reanchor_top_window_for_prepend();
+        self.reanchor_paused_window_for_prepend();
         self.chat.splice(0..0, entries);
         self.entry_layout
             .splice(0..0, std::iter::repeat_n([None, None, None], count));

@@ -131,6 +131,18 @@ pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapabil
     ]
 }
 
+pub(crate) fn last_assistant_text_of(chat: &[ChatEntry]) -> Option<String> {
+    chat.iter().rev().find_map(|entry| match entry {
+        ChatEntry::Assistant(message) => {
+            message.blocks.iter().rev().find_map(|block| match block {
+                MessageBlock::Text(text) => Some(text.clone()),
+                MessageBlock::Thinking(_) => None,
+            })
+        }
+        _ => None,
+    })
+}
+
 pub(crate) struct TranscriptBackfillNote {
     pub epoch: u64,
     pub entries: Vec<ChatEntry>,

@@ -71,6 +71,26 @@ fn prepended_history_keeps_a_paused_tail_window() {
         "the paused window matches the full rebuild before the prepend"
     );
 
+    let mut dense = view();
+    dense.splash_suppressed = true;
+    for index in 0..300 {
+        dense.push_entry(body("tail", index));
+    }
+    dense.push_entry(super::expansion::tests::finished_tool_card(
+        "card-b", "beta",
+    ));
+    dense.toggle_card_expansion(300);
+    dense.render_frame(37, 24);
+    dense.scroll_by(-120);
+    dense.resolve_sparse_geometry();
+    dense.sparse_enabled = false;
+    dense.prepend_entries((0..120).map(|index| body("head", index)).collect());
+    assert_eq!(
+        dense.render_frame(37, 24),
+        full.render_frame(37, 24),
+        "a resolved dense window keeps its content across the prepend"
+    );
+
     sparse.prepend_entries(head);
     assert_eq!(
         sparse.render_frame(37, 24),

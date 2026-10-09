@@ -2,10 +2,10 @@
 //! §10 reattach, the attach fold, and the transcript rebuild it feeds),
 //! the stats refresh, and the detach/exit request helpers.
 use super::{
-    attach_capabilities, attach_data_from_response, create_session, mpsc, reconstruct,
-    resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote,
-    Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView, HashSet,
-    InteractiveOptions, LoaderTokenTracker, Map, MessageBlock, ModelCatalogUpdate, PromptOrder,
+    attach_capabilities, attach_data_from_response, create_session, last_assistant_text_of, mpsc,
+    reconstruct, resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry,
+    CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
+    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
     PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
     SessionSelection, SessionUi, ShareNote, TranscriptBackfillNote, UpdateNote, Value,
     EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
@@ -482,19 +482,7 @@ impl SessionUi {
         // or compaction settles): the rebuild below re-syncs it into the
         // chrome exactly like the other reconstructed session fields.
         self.context = reconstructed.context_usage;
-        self.last_assistant_text = reconstructed
-            .chat
-            .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                ChatEntry::Assistant(message) => {
-                    message.blocks.iter().rev().find_map(|block| match block {
-                        MessageBlock::Text(text) => Some(text.clone()),
-                        MessageBlock::Thinking(_) => None,
-                    })
-                }
-                _ => None,
-            });
+        self.last_assistant_text = last_assistant_text_of(&reconstructed.chat);
         self.pending_queue = Some(reconstructed.queued);
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;

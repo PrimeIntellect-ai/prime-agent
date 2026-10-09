@@ -1,9 +1,9 @@
 //! The streamed-event pump: client events, turn updates, assistant/tool
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
-    assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Duration, Map,
-    MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView,
+    assistant_message_parts, event_to_update, last_assistant_text_of, pop_superseded_attempt_row,
+    AgentView, ChatEntry, CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand,
+    Duration, Map, MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView,
     TranscriptBackfillNote, TurnUpdate, Value, UI_REQUEST_TIMEOUT_MS,
 };
 
@@ -205,6 +205,9 @@ impl SessionUi {
             self.goal_view.last_status_index = Some(index + count);
         }
         self.pressed_click = None;
+        if self.last_assistant_text.is_none() {
+            self.last_assistant_text = last_assistant_text_of(&entries);
+        }
         view.prepend_entries(entries);
         self.trim_after_frame = true;
         self.dirty = true;

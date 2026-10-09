@@ -121,8 +121,27 @@ impl AgentView {
         self.sparse_window = Some(window);
     }
 
-    pub(super) fn reanchor_top_window_for_prepend(&mut self) {
+    pub(super) fn reanchor_paused_window_for_prepend(&mut self) {
         let Some(mut window) = self.sparse_window.take() else {
+            if !self.following && self.layout_width > 0 && !self.chat.is_empty() {
+                let sparse = self.sparse_enabled;
+                let old_rows = self.layout_pass(self.layout_width).total;
+                self.sparse_enabled = sparse;
+                if self.has_selection() {
+                    self.rebase_top_selection_to_tail(old_rows);
+                }
+                let distance = old_rows
+                    .saturating_sub(self.scroll_top)
+                    .saturating_sub(self.window_rows);
+                self.sparse_window = Some(SparseWindow {
+                    anchor: Anchor::Tail(distance),
+                    detail: self.detail,
+                    width: self.layout_width,
+                    visible_rows: 0,
+                    cursor: None,
+                    pending: 0,
+                });
+            }
             return;
         };
         let Anchor::Top(offset) = window.anchor else {
