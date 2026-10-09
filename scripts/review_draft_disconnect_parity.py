@@ -528,6 +528,10 @@ def main():
     parser.add_argument("--receipt", required=True, type=Path)
     args = parser.parse_args()
     repo = Path(__file__).resolve().parent.parent
+    receipt_path = args.receipt.resolve()
+    if receipt_path == repo or repo in receipt_path.parents:
+        print("receipt must be outside repository", file=sys.stderr)
+        return 1
     receipt = {"fixture": "pr3401-draft-disconnect", "results": {},
                "fixture_schema_source_commit": TS_SOURCE_COMMIT,
                "comparison_scope": "Targeted accepted logical prompt/draft behavior; complete result recovery is keyed by the actual (clientId, commandId), so same-ID wire retries are recorded but do not dispatch a second prompt. Raw IDs, attempts, terminals and commands are retained; full frame/wire equivalence is not asserted.",
@@ -536,7 +540,6 @@ def main():
                "pre_send_limitation": "A deterministically dead client before send needs the in-process death-watch seam; the binary fixture tests definitive refusal separately."}
     try:
         if sys.platform != "linux": raise RuntimeError("real binary fixture requires Linux")
-        if repo in args.receipt.resolve().parents: raise RuntimeError("receipt must be outside repository")
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if event_path:
             event = json.loads(Path(event_path).read_text())
