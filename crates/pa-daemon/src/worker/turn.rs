@@ -1046,12 +1046,16 @@ impl TurnRunner {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
         };
+        // The note clear rides the same lanes-empty idle settle as the
+        // pane's `run_ended` below, not the fallback's emission: a run whose
+        // `agent_end` the abort gate swallowed still settles the pane idle,
+        // so the same true-end key must clear the note (the engine's own
+        // `agent_end` clear above already ran for a run that reported its
+        // end — one clear rule for both fallback shapes).
+        if !engine_reported_run_end && !more_queued {
+            settle_engine.clear_progress_note();
+        }
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
-            // The same true-end key as the engine `agent_end` above: the
-            // fallback clear leaves the note for queued continuing work.
-            if !more_queued {
-                settle_engine.clear_progress_note();
-            }
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
         {
