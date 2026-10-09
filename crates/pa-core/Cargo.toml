@@ -34,6 +34,7 @@ getrandom = "0.3"
 url = "2"
 hmac = "0.12"
 globset = "0.4"
+toml.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tar = "0.4"
 flate2 = "1"

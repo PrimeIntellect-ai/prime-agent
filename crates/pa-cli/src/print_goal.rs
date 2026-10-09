@@ -541,6 +541,22 @@ impl PrintGoalSurface {
                     .map_err(|error| format!("{error:#}"))?;
                 self.publish_goal_update(engine).await;
             }
+            if let Some(wake_at) = engine.take_goal_backoff_wake_at().await {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    wake_at.saturating_sub(pa_core::autonomous::now_millis()),
+                ))
+                .await;
+                boundary
+                    .admit_continuation(
+                        engine,
+                        model,
+                        api_key.clone(),
+                        pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT,
+                        global_harness_dir.clone(),
+                    )
+                    .await?;
+                continue;
+            }
             return Ok(engine.goal_state().await.status == pa_types::goal::GoalStatus::Active);
         }
     }
@@ -688,6 +704,27 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The wake-marker user rows the goal arm's backoff wake admitted, in any turn.
+    async fn wake_marker_rows(engine: &SessionEngine) -> usize {
+        engine
+            .session
+            .entries()
+            .await
+            .into_iter()
+            .filter(|entry| {
+                let pa_types::session::FileEntry::Message {
+                    message: pa_types::session::AgentMessage::User(user),
+                    ..
+                } = entry
+                else {
+                    return false;
+                };
+                user.content.text()
+                    == pa_core::session_engine::goal_driver::GOAL_BACKOFF_WAKE_MARKER_TEXT
+            })
+            .count()
     }
 
     /// The transcript's assistant turn texts in order.
@@ -1051,6 +1088,90 @@ mod tests {
                 "goal_update:active",
                 "goal_update:error",
             ]
+        );
+    }
+
+    /// An empty goal turn arms the backoff window: the wake marker runs as the next turn at
+    /// the deadline, the recovered reply lands, and the in-loop continuation resumes inside
+    /// the wake run.
+    #[tokio::test(start_paused = true)]
+    async fn backoff_wake_runs_the_marker_turn_and_recovers_the_reply() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(
+            script(&json!([{}, "recovered reply"]), 128_000),
+            no_compaction(),
+            Some(("finish the work", None)),
+        )
+        .await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "the initial run plus the wake turn's run"
+        );
+        assert!(!owns, "the exhausted faux queue fails the resumed goal");
+        assert_eq!(
+            wake_marker_rows(&bed.engine).await,
+            1,
+            "exactly one wake marker turn ran"
+        );
+        assert_eq!(
+            assistant_texts(&bed.engine).await,
+            [String::new(), "recovered reply".to_string()],
+            "the empty turn, then the wake turn's recovered reply"
+        );
+        assert_eq!(
+            bed.engine.goal_state().await.status,
+            pa_types::goal::GoalStatus::Error
+        );
+    }
+
+    /// Three consecutive empty turns end the goal at the cap after exactly three model
+    /// calls — the third wake never runs.
+    #[tokio::test(start_paused = true)]
+    async fn three_empty_turns_hit_the_cap_with_exactly_three_model_calls() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(
+            script(&json!([{}, {}, {}]), 128_000),
+            no_compaction(),
+            Some(("finish the work", None)),
+        )
+        .await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            3,
+            "the prompt turn plus the two wake turns"
+        );
+        assert!(!owns, "the capped goal no longer owns the boundary");
+        assert_eq!(wake_marker_rows(&bed.engine).await, 2);
+        let goal = bed.engine.goal_state().await;
+        assert_eq!(goal.status, pa_types::goal::GoalStatus::Error);
+        assert_eq!(
+            goal.last_error.as_deref(),
+            Some(pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON)
+        );
+        assert_eq!(goal.no_progress_streak, Some(3));
+    }
+
+    /// A non-goal empty turn never wakes: no marker turn, the boundary returns at once.
+    #[tokio::test(start_paused = true)]
+    async fn non_goal_empty_turn_returns_without_a_wake() {
+        let _guard = FAUX_TEST_LOCK.lock().await;
+        let bed = goal_bed(script(&json!([{}]), 128_000), no_compaction(), None).await;
+        let (counter, subscription) = agent_run_counter(&bed.engine).await;
+        let owns = bed.prompt("work").await;
+        subscription.unsubscribe().await;
+        assert!(!owns, "no goal owns the boundary");
+        assert_eq!(counter.load(Ordering::SeqCst), 1, "no wake turn ran");
+        assert_eq!(wake_marker_rows(&bed.engine).await, 0);
+        assert_eq!(
+            bed.engine.goal_state().await.status,
+            pa_types::goal::GoalStatus::Idle
         );
     }
 
