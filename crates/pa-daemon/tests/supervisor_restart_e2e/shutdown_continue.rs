@@ -180,8 +180,11 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         }),
     );
     let created = client.read_response("c4");
-    assert_eq!(created["success"], true, "create in-memory failed: {created}");
-    assert!(created["data"]["sessionFile"].is_null());
+    assert_eq!(
+        created["success"], true,
+        "create in-memory failed: {created}"
+    );
+    assert_eq!(created["data"]["sessionFile"], json!(""));
     let memory_session = created["data"]["id"]
         .as_str()
         .or_else(|| created["data"]["sessionId"].as_str())
