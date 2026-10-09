@@ -32,6 +32,7 @@ mod attach;
 mod compaction;
 mod create;
 mod event_order;
+mod hello_identity;
 mod lifecycle;
 mod read_goldens;
 mod shutdown;

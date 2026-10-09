@@ -2,11 +2,11 @@
 //! between the worker and its supervisor.
 use super::{
     active_session_id_of, anyhow, bind_transport, broadcast, create_daemon_replay_info,
-    current_protocol_info, default_client_capabilities, json, normalize_client_capabilities,
-    peer_command_allowed, response_failure, response_success, worker_peer_command_allowed,
-    worker_server_capabilities, write_frame, write_frame_segments, Arc, AtomicU64, ConnectionRole,
-    Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor, Map, Ordering, Result,
-    TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID,
+    current_protocol_info, daemon_app_version, default_client_capabilities, json,
+    normalize_client_capabilities, peer_command_allowed, response_failure, response_success,
+    worker_peer_command_allowed, worker_server_capabilities, write_frame, write_frame_segments,
+    Arc, AtomicU64, ConnectionRole, Context, DaemonOutbound, DaemonResponse, DaemonResumeCursor,
+    Map, Ordering, Result, TransportStream, Value, Worker, WorkerRecoveryJournal, DAEMON_SCHEMA_ID,
     DAEMON_SCHEMA_REVISION, DEFAULT_PRIVATE_FRAME_LIMITS, PEER_COMMAND_NOT_ALLOWED,
 };
 
@@ -325,7 +325,7 @@ impl Worker {
             protocol: current_protocol_info(),
             schema_id: Some(DAEMON_SCHEMA_ID.to_string()),
             schema_revision: Some(DAEMON_SCHEMA_REVISION),
-            app_version: Some(DAEMON_APP_VERSION.to_string()),
+            app_version: Some(daemon_app_version().to_string()),
             runtime: None,
             supervisor_generation: None,
             supervisor_pid: Some(u64::from(std::process::id())),

@@ -18,10 +18,20 @@ use serde_json::Value;
 /// Minimum protocol version accepted in command envelopes (TS parity).
 pub const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION: u64 = DAEMON_PROTOCOL_VERSION;
 /// The product version the daemon reports in every `daemon_hello`
-/// (`appVersion`): the CLI's `doctor`/`status` "current" classification
-/// compares against the same value, so this must stay the bare product
-/// version (the build identity marker lives in `runtime.buildId`).
-pub const DAEMON_APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// (`appVersion`), stamps into `runtime.buildId` (`pa-daemon-rs-<version>`,
+/// the installer's Rust-daemon probe prefix), and names in the update
+/// roster's from-version: the one canonical build identity
+/// ([`pa_types::version::app_version`]) — the same version the CLI's
+/// `--version` prints from the packaged channel-stamped manifest beside
+/// the executable, which the CLI's `doctor`/`status` "current"
+/// classification compares against, with the compiled-in workspace version
+/// as the dev-build fallback. The hard-wired `env!("CARGO_PKG_VERSION")`
+/// this replaces reported the workspace version on channel-restamped
+/// builds (beta), disagreeing with the same binary's `--version`.
+#[must_use]
+pub fn daemon_app_version() -> &'static str {
+    pa_types::version::app_version()
+}
 
 /// Command types the daemon recognizes (TS `DAEMON_COMMAND_TYPES` in TS
 /// declared order, followed by the Rust-native supervisor/worker frames).
