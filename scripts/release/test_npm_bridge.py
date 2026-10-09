@@ -91,6 +91,7 @@ set -eu
 test "$PRIME_AGENT_VERSION" = "${EXPECT_VERSION:-1.0.0}"
 test "$PRIME_AGENT_RELEASE_CHANNEL" = "stable"
 test "$PRIME_AGENT_PRESERVE_NPM_BRIDGE" = "1"
+test -f "$PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT"
 echo install >> "$INSTALL_LOG"
 echo "installer output stays on stderr"
 if [ "${FAIL_INSTALL:-0}" = 1 ]; then exit 23; fi
@@ -317,6 +318,54 @@ child.on("exit",code=>{process.exitCode=code;});
         self.assertEqual(result.stdout.strip(), expected)
         custom = self.launch("socket", PRIME_AGENT_DAEMON_SOCKET=str(self.root / "custom.sock"))
         self.assertEqual(custom.stdout.strip(), str(self.root / "custom.sock"))
+
+    def test_real_installer_preserves_node_relaunch_only_for_its_npm_bridge(self):
+        installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
+        section = installer.split("# --- the launcher (the takeover lives here)", 1)[1]
+        section = section.split("# The cmd/PowerShell launcher twin", 1)[0]
+        # Reuse the real published launcher section, not the fixture installer:
+        # an old TUI captures the public symlink path in Node's argv before npm
+        # replaces the package. That path must still contain JavaScript later.
+        section = "# --- the launcher (the takeover lives here)" + section
+        self.env["PRIME_AGENT_RUST_PREFIX"] = str(self.npm_prefix)
+        payload = self.npm_prefix / "share/prime-agent"
+        payload.mkdir(parents=True)
+        shutil.copyfile(self.fixture, payload / "prime-agent")
+        (payload / "prime-agent").chmod(0o755)
+        (payload / "version").write_text("1.0.0\n")
+        receipt_dir = self.npm_prefix / "share/.prime-agent-npm-bridge"
+        receipt_dir.mkdir()
+        (receipt_dir / "1.0.0").write_text("installed\n")
+        command = self.npm_prefix / "bin/prime-agent"
+        foreign_entry = self.root / "unrelated.js"
+        foreign_entry.write_text(self.entrypoint.read_text())
+        for flag, target, preserved in (("1", self.entrypoint, True),
+                                        ("1", foreign_entry, False),
+                                        ("0", self.entrypoint, False)):
+            with self.subTest(flag=flag, target=target):
+                command.unlink(missing_ok=True)
+                command.symlink_to(target)
+                result = subprocess.run(["sh", "-eu"], input='''
+PREFIX="$PRIME_AGENT_RUST_PREFIX"
+bin_dir="$PREFIX/bin"
+launcher="$bin_dir/prime-agent"
+WINDOWS=no
+say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
+trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
+''' + section + '\n"$install_probe_launcher" --version\n',
+                    text=True, capture_output=True, timeout=10, env={**self.env,
+                        "PRIME_AGENT_PRESERVE_NPM_BRIDGE": flag,
+                        "PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT": str(self.entrypoint),
+                        "PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET": "1"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "1.0.0")
+                self.assertEqual(command.is_symlink(), preserved)
+                invocation = ["node", str(command)] if preserved else [str(command)]
+                relaunched = subprocess.run([*invocation, "--version"], env=self.env,
+                                            text=True, capture_output=True, timeout=10)
+                self.assertEqual(relaunched.returncode, 0, relaunched.stderr)
+                self.assertEqual(relaunched.stdout.strip(), "1.0.0")
+                self.assertEqual(list(command.parent.glob(".prime-agent.*")), [])
 
     def test_stale_bridge_does_not_downgrade_newer_native_without_receipt(self):
         payload = self.prefix / "share/prime-agent"
