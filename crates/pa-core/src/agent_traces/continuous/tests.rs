@@ -96,8 +96,8 @@ fn consent_off_never_registers_or_schedules_retroactively() {
     assert!(!agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
 }
 
-#[test]
-fn external_consent_change_fails_closed_until_background_reload() {
+#[tokio::test(start_paused = true)]
+async fn external_consent_change_fails_closed_until_background_reload() {
     let fixture = Fixture::new();
     let path = fixture.write_session("changed.jsonl", "changed");
     let c = controller(&fixture, &path, true);
@@ -107,8 +107,29 @@ fn external_consent_change_fails_closed_until_background_reload() {
     )
     .unwrap();
     c.persisted(&path);
-    assert_eq!(c.pending.lock().unwrap().as_ref().unwrap().1.due, None);
-    assert!(!agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+    // The durable intent survives the external change; only the worker's
+    // consent re-read decides whether it is ever delivered.
+    assert!(c.pending.lock().unwrap().as_ref().unwrap().1.due.is_some());
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    tokio::time::advance(MIN_INTERVAL * 2).await;
+    tokio::task::yield_now().await;
+    assert!(
+        observed.try_recv().is_err(),
+        "a disabled project must never deliver its retained intent"
+    );
+    drop(c);
+    task.await.unwrap();
 }
 
 #[test]
@@ -886,6 +907,81 @@ async fn exhausted_recovery_retries_leave_the_sweep_incomplete() {
         None
     );
     assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_credentialless_controller_retries_after_credentials_arrive() {
+    let fixture = Fixture::new();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
+    // Deliberately no auth.json yet: the delivery fails closed, and the live
+    // controller must schedule its own retry rather than park forever.
+    let path = fixture.write_session("late-login.jsonl", "late-login");
+    let c = controller(&fixture, &path, true);
+    c.persisted(&path);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    // Park so the controller really attempts at +1s against the missing
+    // credentials before any write makes one deliverable.
+    tokio::time::sleep(MIN_INTERVAL + DEBOUNCE * 2).await;
+    std::fs::write(
+        fixture.agent_dir.join("auth.json"),
+        r#"{"prime-agent-traces":{"type":"api_key","key":"synthetic-only"}}"#,
+    )
+    .unwrap();
+    let (_body, reply) = tokio::time::timeout(MIN_INTERVAL * 2, observed.recv())
+        .await
+        .expect("a credentialless delivery must retry after credentials arrive")
+        .unwrap();
+    reply.send(response(200, "{}")).unwrap();
+    drop(c);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_settings_change_after_load_still_records_the_write_intent() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("settings-race.jsonl", "settings-race");
+    let c = controller(&fixture, &path, true);
+    // A concurrent project edit changes the settings metadata after the
+    // host captured its consent snapshot: removal is unambiguous.
+    std::fs::remove_file(fixture.agent_dir.join("settings.json")).unwrap();
+    c.persisted(&path);
+    assert!(
+        agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists(),
+        "the write intent must stay durable across a concurrent settings edit"
+    );
+    // The worker re-reads consent before delivery; restore the opted-in edit.
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&c),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (_body, reply) = tokio::time::timeout(MIN_INTERVAL, observed.recv())
+        .await
+        .expect("the worker revalidates consent and delivers the retained intent")
+        .unwrap();
+    reply.send(response(200, "{}")).unwrap();
+    drop(c);
+    task.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

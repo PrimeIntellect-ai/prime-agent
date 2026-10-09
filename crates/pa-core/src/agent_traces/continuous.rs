@@ -42,8 +42,10 @@ impl Schedule {
     }
 
     fn settle(&mut self, now: Instant, started_generation: u64, result: &TraceUploadResult) {
-        let retry = matches!(result, TraceUploadResult::Disabled)
-            || matches!(result, TraceUploadResult::Failed { status_code, .. }
+        let retry = matches!(
+            result,
+            TraceUploadResult::Disabled | TraceUploadResult::MissingCredentials
+        ) || matches!(result, TraceUploadResult::Failed { status_code, .. }
             if status_code.is_none_or(|status| status == 429 || RETRIABLE_HTTP_STATUSES.contains(&status)));
         if let TraceUploadResult::Failed {
             retry_after_ms: Some(ms),
@@ -58,8 +60,9 @@ impl Schedule {
     }
 }
 
-// A changed settings generation fails closed at persist time, including changes
-// made by a different client process. Parsing/reloading happens only in the worker.
+// The generation captures a snapshot so a poisoned metadata read fails closed
+// at persist time; a changed settings generation only re-arms delivery, and
+// parsing/reloading (the consent verdict) stays in the worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConsentGeneration(Vec<Result<Option<(u64, SystemTime)>, std::io::ErrorKind>>);
 
@@ -213,10 +216,7 @@ impl ContinuousTraceUpload {
         let Ok(consent) = self.consent.lock() else {
             return;
         };
-        if !consent.0
-            || consent.1 .0.iter().any(Result::is_err)
-            || consent.1 != ConsentGeneration::read(&self.cwd, &self.agent_dir)
-        {
+        if !consent.0 || consent.1 .0.iter().any(Result::is_err) {
             return;
         }
         drop(consent);
