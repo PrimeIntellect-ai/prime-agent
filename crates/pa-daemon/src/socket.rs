@@ -157,14 +157,38 @@ impl SocketLease {
                 // release pass) skips this tick's refresh - the next
                 // tick retries - so a dance can never hold the lock
                 // while a heartbeat refreshes it mid-verification.
+                // The sidecar gates the mtime WRITE only (a dance or
+                // release pass in progress must not race a refresh
+                // mid-verification); the identity CHECK always runs -
+                // a suspended dance leaves a placeholder at the public
+                // path, and the monitor must observe that displacement
+                // instead of sleeping through it.
                 #[cfg(target_os = "linux")]
-                let Some(guarded) = pa_core::platform::try_reclaim_guard(
+                let guarded = pa_core::platform::try_reclaim_guard(
                     &task_path,
                     std::time::Duration::from_millis(100),
-                ) else {
-                    continue;
-                };
+                );
                 let lost = !lock_identity_matches(&task_path, &task_identity);
+                // The mtime WRITE is the sidecar-gated part: a dance in
+                // progress must never race a refresh mid-verification.
+                // On an unobtainable guard (a suspended dance) the tick
+                // SKIPS the refresh - the next tick retries - while the
+                // identity checks above and below still run, so the
+                // monitor never sleeps through a real displacement.
+                #[cfg(target_os = "linux")]
+                let mut write_error = false;
+                if let Some(guard) = guarded {
+                    write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
+                    drop(guard);
+                } else if !lost && lock_identity_matches(&task_path, &task_identity) {
+                    // Unguarded (a dance or release pass holds the
+                    // sidecar): skip this tick's refresh - the next tick
+                    // retries - while the identity checks above still
+                    // ran, so the monitor never sleeps through a real
+                    // displacement.
+                    continue;
+                }
+                #[cfg(not(target_os = "linux"))]
                 let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
                 if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
                     if write_error && !lost {
@@ -178,8 +202,6 @@ impl SocketLease {
                         // (persistent EIO, a read-only filesystem) is a
                         // compromise, never letting the lock age silently
                         // past the stale threshold.
-                        #[cfg(target_os = "linux")]
-                        drop(guarded);
                         std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
                         #[cfg(target_os = "linux")]
                         match pa_core::platform::try_reclaim_guard(
@@ -224,8 +246,6 @@ impl SocketLease {
                     // displacement that persists past the grace (a
                     // suspended dance's token-protected placeholder, or
                     // a real takeover) is a compromise.
-                    #[cfg(target_os = "linux")]
-                    drop(guarded);
                     std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
                     if !lock_identity_matches(&task_path, &task_identity) {
                         task_compromised.store(true, std::sync::atomic::Ordering::Release);
@@ -444,6 +464,18 @@ impl Drop for SocketLease {
         // a deliberate divergence from proper-lockfile's unconditional
         // release remove - and a reclaiming successor's directory is
         // never touched.
+        // // A compromised or guard-blocked release still MARKS the lease
+        // directory released through the pinned fd (pa-core's openat
+        // helper - this crate forbids unsafe): the fd follows the inode
+        // through every exchange, so the marker lands in this lease's
+        // directory wherever it lives; a concurrent reclaim dance then
+        // consumes the abandoned directory instead of restoring it, and
+        // no judge refuses it behind this process's live pid - mirroring
+        // LockDir::release's marker path for the same case.
+        #[cfg(target_os = "linux")]
+        if self.compromised_after_grace() {
+            pa_core::platform::mark_released_through(&self.lock_dir);
+        }
         if !self.compromised_after_grace() {
             self.release_lock_dir();
         }

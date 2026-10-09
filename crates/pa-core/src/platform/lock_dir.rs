@@ -412,7 +412,7 @@ pub fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
 /// declared the release, and no judge may restore or refuse the
 /// directory afterwards.
 #[cfg(target_os = "linux")]
-fn mark_released_through(dir: &fs::File) {
+pub fn mark_released_through(dir: &fs::File) {
     use std::os::unix::io::AsRawFd;
     let name = c"released";
     let fd = unsafe {
@@ -657,7 +657,24 @@ impl LockDir {
         for attempt in 0..8 {
             let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
             match fs::create_dir(&candidate) {
-                Ok(()) => return Ok(candidate),
+                Ok(()) => {
+                    // A hostile umask (e.g. 0477) strips the owner-read
+                    // bit from the fresh directory, and the caller's
+                    // File::open of the candidate would fail before the
+                    // 0700 chmod could fix it: restore the private mode
+                    // here, at creation, before any open.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Err(error) =
+                            fs::set_permissions(&candidate, fs::Permissions::from_mode(0o700))
+                        {
+                            let _ = fs::remove_dir(&candidate);
+                            return Err(error);
+                        }
+                    }
+                    return Ok(candidate);
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     collision = collision.or(Some(error));
                 }
@@ -1023,13 +1040,13 @@ impl LockDir {
     /// filesystem does not implement it (EINVAL: the flag is unknown
     /// here; ENOSYS: no renameat2 at all; EOPNOTSUPP: the filesystem
     /// rejects the flag - NFS, FUSE and similar mounts) - the mkdir
-    /// protocol is the compatible fallback. Public because the daemon's
-    /// lease release needs the same classification to fall back from
-    /// its no-replace claim to the identity-checked release on the same
-    /// mounts where the acquisition fell back to mkdir.
+    /// protocol is the compatible fallback. Module-private: every
+    /// classification site (the create fallback, the stale dance, the
+    /// inode release pass) lives in this module; the daemon's lease
+    /// release classifies through its exchange-based protocol instead.
     #[cfg(target_os = "linux")]
     #[must_use]
-    pub fn rename_noreplace_unsupported(error: &io::Error) -> bool {
+    fn rename_noreplace_unsupported(error: &io::Error) -> bool {
         matches!(
             error.raw_os_error(),
             Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
@@ -1050,6 +1067,14 @@ impl LockDir {
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         fs::create_dir(path)?;
+        // A hostile umask would strip the owner-read bit from the fresh
+        // directory and the pin below would fail before any chmod could
+        // fix it: restore the private mode at creation.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
         // Every failure below removes the fresh public lock completely -
         // owner file first (a directory containing it cannot be removed),
         // then the directory, and the pinned handle (when held) closes
