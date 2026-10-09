@@ -72,6 +72,16 @@ fn newest_session() -> Result<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
+    // Restore Windows VT on success and early error returns.
+    if let Err(error) = replay() {
+        pa_types::platform::console_restore();
+        return Err(error);
+    }
+    pa_types::platform::console_restore();
+    Ok(())
+}
+
+fn replay() -> Result<()> {
     let args = Args::parse();
     let path = match &args.session {
         Some(p) => std::path::PathBuf::from(p),
