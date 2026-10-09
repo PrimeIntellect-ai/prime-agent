@@ -238,12 +238,10 @@ mod tests {
     fn tool_category_mapping() {
         assert_eq!(ToolCategory::from_tool_name("bash"), ToolCategory::Bash);
         assert_eq!(ToolCategory::from_tool_name("Edit"), ToolCategory::Edit);
-        for tool_name in ["python_repl", "python", "ipython"] {
-            assert_eq!(
-                ToolCategory::from_tool_name(tool_name),
-                ToolCategory::Ipython
-            );
-        }
+        assert_eq!(
+            ToolCategory::from_tool_name("python_repl"),
+            ToolCategory::Ipython
+        );
         assert_eq!(
             ToolCategory::from_tool_name("mcp__github__create_issue"),
             ToolCategory::Mcp

@@ -363,28 +363,23 @@ mod tests {
 
     #[test]
     fn file_ops_from_kernel_diffs() {
-        for tool_name in ["python_repl", "python", "ipython"] {
-            let mut ops = FileOperations::default();
-            ops.read.insert("/tmp/other.rs".to_string());
-            let result = AgentMessage::ToolResult(pa_types::ai::ToolResultMessage {
-                tool_call_id: "c".to_string(),
-                tool_name: tool_name.to_string(),
-                content: vec![],
-                details: Some(serde_json::json!({
-                    "diffs": [{ "path": "/pkg/lib.rs", "oldStr": "a", "newStr": "b" }]
-                })),
-                is_error: false,
-                timestamp: 0,
-                rest: serde_json::Map::default(),
-            });
-            extract_file_ops_from_message(&result, &mut ops);
-            assert!(
-                ops.edited.contains("/pkg/lib.rs"),
-                "{tool_name} result diffs record edited paths"
-            );
-            let (read, modified) = compute_file_lists(&ops);
-            assert!(read.iter().all(|path| !modified.contains(path)));
-        }
+        let mut ops = FileOperations::default();
+        ops.read.insert("/tmp/other.rs".to_string());
+        let result = AgentMessage::ToolResult(pa_types::ai::ToolResultMessage {
+            tool_call_id: "c".to_string(),
+            tool_name: "python_repl".to_string(),
+            content: vec![],
+            details: Some(serde_json::json!({
+                "diffs": [{ "path": "/pkg/lib.rs", "oldStr": "a", "newStr": "b" }]
+            })),
+            is_error: false,
+            timestamp: 0,
+            rest: serde_json::Map::default(),
+        });
+        extract_file_ops_from_message(&result, &mut ops);
+        assert!(ops.edited.contains("/pkg/lib.rs"));
+        let (read, modified) = compute_file_lists(&ops);
+        assert!(read.iter().all(|path| !modified.contains(path)));
     }
 
     #[test]

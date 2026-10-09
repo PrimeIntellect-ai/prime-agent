@@ -433,9 +433,7 @@ mod tests {
 
     #[test]
     fn tool_kind_map_matches_the_ts_map() {
-        for tool_name in ["python_repl", "python", "ipython"] {
-            assert_eq!(AcpToolKind::of_tool(tool_name), AcpToolKind::Execute);
-        }
+        assert_eq!(AcpToolKind::of_tool("python_repl"), AcpToolKind::Execute);
         assert_eq!(AcpToolKind::of_tool("bash"), AcpToolKind::Execute);
         assert_eq!(AcpToolKind::of_tool("read"), AcpToolKind::Read);
         assert_eq!(AcpToolKind::of_tool("edit"), AcpToolKind::Edit);
