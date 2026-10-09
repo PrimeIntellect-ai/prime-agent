@@ -463,12 +463,24 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 
     let prompt_guidelines = config.prompt_guidelines.clone();
 
-    let prompt_model_selector = Some(format!("{}/{}", model_info.provider, model_info.id));
+    let prompt_model_selector = format!("{}/{}", model_info.provider, model_info.id);
     let prompt_vision_capable = Some(model_info.input.contains(&pa_types::ai::ModelInput::Image));
+    let model_prompts = crate::prompts::model_prompts::load_model_prompts(
+        Some(&prompt_model_selector),
+        &config.agent_dir,
+    );
+    if !model_prompts.errors.is_empty() {
+        boot_notice_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(crate::prompts::model_prompts::model_prompt_error_message(
+                &model_prompts.errors,
+            ));
+    }
     let system_prompt = crate::prompts::system_prompt::build_system_prompt(
         &crate::prompts::system_prompt::BuildSystemPromptOptions {
             custom_prompt: resources.system_prompt.clone(),
-            model: prompt_model_selector.as_deref(),
+            model_prompt_extras: model_prompts.extras.as_deref(),
             vision_capable: prompt_vision_capable,
             cwd: cwd.display().to_string(),
             messages_path: conversation_log.clone(),
@@ -488,6 +500,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             // A spawned child's prompt must read "depth: N (not root)" with
             // the child-agent reply doctrine, never the root identity.
             rlm_depth: config.rlm_depth,
+            daemonless: config.rlm_subagent_host.is_none(),
             generic_mcp_servers,
             prompt_guidelines: Some(prompt_guidelines),
             ..Default::default()
