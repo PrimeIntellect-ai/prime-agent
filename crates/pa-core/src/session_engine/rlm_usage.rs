@@ -861,13 +861,14 @@ mod tests {
             aggregate_usage: Usage,
             origin: Option<ChildUsageOrigin>,
         ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+            let target_id = target_id.to_string();
             Box::pin(async move {
                 let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if matches!(self.point, FailurePoint::BeforeSecondAppend) && call == 1 {
                     return Err(std::io::Error::other("injected second append failure"));
                 }
                 self.store
-                    .append_attribution(target_id, child_usage, aggregate_usage, origin)
+                    .append_attribution(&target_id, child_usage, aggregate_usage, origin)
                     .await?;
                 if matches!(self.point, FailurePoint::AfterFirstAppend) && call == 0 {
                     return Err(std::io::Error::other("injected lost append acknowledgment"));
