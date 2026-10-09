@@ -5,10 +5,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
 
 use anyhow::Result;
 
 use super::types::AuthStorageData;
+
+/// Cross-process mutual exclusion for one refresh attempt (the fetch +
+/// write span): held while a process exchanges and persists a grant, so
+/// a simultaneous rejection in another worker process waits for — and
+/// then peer-checks — this attempt's result instead of spending the
+/// same single-use refresh token twice.
+pub struct RefreshExclusion {
+    _guard: crate::platform::lock_dir::LockDir,
+}
 
 /// Locked read/modify/write over the auth document. `update` returns
 /// `(result, next)`; `next: Some` writes it back atomically.
@@ -37,6 +47,14 @@ pub trait AuthStorageBackend: Send + Sync {
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
     ) -> Result<()>;
+
+    /// Cross-process mutual exclusion for refresh attempts (the fetch +
+    /// write span): the file backend holds a dedicated lock file beside
+    /// the document; stores with no other process to exclude take
+    /// nothing and the in-process flight stands alone.
+    fn refresh_exclusion(&self) -> Option<RefreshExclusion> {
+        None
+    }
 }
 
 use crate::platform::lock_dir::LockDir as LockGuard;
@@ -53,6 +71,31 @@ impl FileAuthStorageBackend {
         FileAuthStorageBackend {
             auth_path: auth_path.into(),
         }
+    }
+
+    /// The refresh lock's file: a sibling of the document, so the
+    /// document's own write lock stays free for logins and removals
+    /// while a refresh runs.
+    fn refresh_lock_file(&self) -> PathBuf {
+        let mut path = self.auth_path.clone().into_os_string();
+        path.push(".refresh");
+        PathBuf::from(path)
+    }
+
+    fn acquire_refresh_exclusion(&self) -> Option<RefreshExclusion> {
+        // The incumbent is another process's live refresh: wait it out
+        // (its result serves this attempt's peer checks once the lock
+        // lands). The staleness judge reclaims a wedged incumbent; past
+        // the bound the refresh proceeds as before — the peer checks and
+        // the write guard still bound the damage.
+        let guard = crate::platform::lock_dir::LockDir::acquire_retrying(
+            &self.refresh_lock_file(),
+            Duration::from_secs(120),
+            120,
+            Duration::from_secs(1),
+        )
+        .ok()?;
+        Some(RefreshExclusion { _guard: guard })
     }
 
     fn ensure_parent_dir(&self) -> Result<()> {
@@ -245,6 +288,10 @@ impl AuthStorageBackend for FileAuthStorageBackend {
         drop(guard);
         Ok(())
     }
+
+    fn refresh_exclusion(&self) -> Option<RefreshExclusion> {
+        self.acquire_refresh_exclusion()
+    }
 }
 
 #[derive(Default)]
@@ -287,6 +334,62 @@ pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_uncontended_refresh_exclusion_takes_the_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        let guard = backend.refresh_exclusion();
+        assert!(guard.is_some(), "the lock file lands uncontended");
+        // The lock file is a sibling of the document: the document's own
+        // write lock stays free while a refresh runs.
+        assert!(
+            dir.path().join("auth.json.refresh.lock").exists(),
+            "the refresh lock lands beside the document"
+        );
+        assert!(
+            !dir.path().join("auth.json.lock").exists(),
+            "the refresh lock never takes the document's write lock path"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn a_memory_store_excludes_nothing() {
+        let backend = InMemoryAuthStorageBackend::default();
+        assert!(
+            backend.refresh_exclusion().is_none(),
+            "an in-memory store has no other process to exclude"
+        );
+    }
+
+    #[test]
+    fn a_refresh_exclusion_waits_for_the_incumbent_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+        // Another process's live refresh holds the lock file.
+        let incumbent = crate::platform::lock_dir::LockDir::acquire(
+            &backend.refresh_lock_file(),
+            std::time::Duration::from_secs(120),
+        )
+        .unwrap();
+        let waiter = std::thread::spawn({
+            let backend = FileAuthStorageBackend::new(dir.path().join("auth.json"));
+            move || backend.refresh_exclusion().is_some()
+        });
+        // The waiter cannot take the guard while the incumbent holds it:
+        // it is still parked in the wait loop.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !waiter.is_finished(),
+            "the exclusion waits out the incumbent"
+        );
+        drop(incumbent);
+        assert!(
+            waiter.join().unwrap(),
+            "the exclusion lands once the incumbent releases"
+        );
+    }
 
     #[test]
     fn file_backend_round_trip_and_modes() {

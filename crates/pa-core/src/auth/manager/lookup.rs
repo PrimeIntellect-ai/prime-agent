@@ -211,6 +211,11 @@ impl AuthStorage {
         // land before spending the same single-use refresh token (the
         // forced-refresh path holds the same guarantee).
         let _flight = refresh_flight(provider_id);
+        // Cross-process exclusion: the flight only serializes this
+        // process; another worker process refreshing the same shared
+        // credential file waits here, and the re-check below then serves
+        // its result without a second exchange.
+        let _cross_process = self.storage.refresh_exclusion();
         let fetched = {
             // The gate may have just released a flight that wrote a fresh
             // credential; re-check before spending a refresh token.
@@ -324,6 +329,10 @@ impl AuthStorage {
         // rejection through the expiry-gated path still stands — the peer
         // check below serves its fresh credential without a fetch.
         let _flight = refresh_flight(provider_id);
+        // Cross-process exclusion: another worker process refreshing the
+        // same shared credential file waits here, and this attempt's peer
+        // checks then serve its result without a second exchange.
+        let _cross_process = self.storage.refresh_exclusion();
         let peer = self
             .storage
             .read()
