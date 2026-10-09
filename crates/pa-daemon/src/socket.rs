@@ -975,6 +975,54 @@ mod tests {
         drop(bind_transport(path).await.expect("bind stale socket"));
     }
 
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn restrictive_umask_socket_release_child() {
+        // The socket lease's full lifecycle under a restrictive umask,
+        // in a CHILD PROCESS whose umask is set by a shell wrapper (the
+        // umask is process-global; this crate forbids unsafe; the shell
+        // sets it, the child inherits it).
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "umask 0277; exec \"{}\" --exact socket::tests::restrictive_umask_socket_release_probe",
+                std::env::current_exe().unwrap().display()
+            ))
+            .env("PA_UMASK_PROBE", "1")
+            .status()
+            .expect("run the umask socket-release child");
+        assert!(status.success(), "the umask socket-release child failed");
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn restrictive_umask_socket_release_probe() {
+        if std::env::var("PA_UMASK_PROBE").is_err() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        // Acquire and RELEASE the lease fully under the restrictive
+        // umask (the child inherited it): the release placeholder's
+        // owner write must land (the 0700 restoration) and the lock
+        // directory must be removed - a fresh acquisition takes it
+        // without waiting out the stale window.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let lease = SocketLease::acquire(&socket).await;
+            let lease = lease.expect("lease acquisition works under a restrictive umask");
+            drop(lease); // the release runs INSIDE the umasked child
+        });
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        assert!(
+            !lock_path.exists(),
+            "the umask-restricted release removed the lock directory"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn refresh_ticks_cease_after_compromise() {

@@ -359,6 +359,11 @@ fn write_owner_through(dir: &fs::File, record: &[u8]) -> io::Result<()> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
+    // The create mode is umask-masked (0o600 & ~umask can strip the
+    // owner-read bit): repair the mode through this descriptor so a
+    // restrictive umask never leaves an unreadable owner record (every
+    // later owner_matches/ensure_owned/judge reads it).
+    unsafe { libc::fchmod(fd, 0o600) };
     let mut written = 0;
     while written < record.len() {
         let n = unsafe {
@@ -1315,12 +1320,14 @@ impl LockDir {
         #[cfg(unix)]
         if created.is_none() {
             // The witness is unprovable: contention, so a contending
-            // startup retries honestly instead of dying - and the
-            // just-created artifact is removed (this call created it
-            // with mkdir moments ago; an unstattle path at this point
-            // is a reclaim race on our own creation, never a
-            // successor's published lock).
-            let _ = fs::remove_dir(path);
+            // startup retries honestly instead of dying. REMOVE NOTHING:
+            // with no positive witness, this call cannot know what now
+            // sits at the path - the exact suspension race being fixed
+            // here (B stale-reclaimed A's creation, removed the path,
+            // and published its own successor before A's witness ran)
+            // would have A unlink B's live lock. A's possibly-orphaned
+            // artifact expires through the stale window instead; a
+            // foreign directory is never touched without a witness.
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 format!(
