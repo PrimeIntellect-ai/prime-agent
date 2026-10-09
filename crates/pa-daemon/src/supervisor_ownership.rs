@@ -495,13 +495,14 @@ pub fn shutdown_admission_generation(registry_dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Bump the generation under the caller's registry guard (acquire only).
-fn bump_shutdown_admission_generation(registry_dir: &Path) {
+/// Bump the generation under the caller's registry guard (acquire
+/// only). A write failure FAILS THE ACQUISITION: the concurrent-stop
+/// detection would silently miss a raced shutdown and the caller would
+/// spawn behind the user's completed stop.
+fn bump_shutdown_admission_generation(registry_dir: &Path) -> Result<()> {
     let next = shutdown_admission_generation(registry_dir) + 1;
     let path = shutdown_admission_generation_path(registry_dir);
-    // The bump is best-effort: a write failure degrades the concurrent-stop
-    // DETECTION (reads see 0), never the admission protocol itself.
-    let _ = std::fs::write(&path, next.to_string());
+    std::fs::write(&path, next.to_string()).with_context(|| format!("write {}", path.display()))
 }
 
 /// Read a startup-fence record; `Ok(None)` when absent (TS
@@ -799,7 +800,7 @@ impl ShutdownAdmission {
                     ),
                 };
                 write_record(&path, &record)?;
-                bump_shutdown_admission_generation(&registry_dir);
+                bump_shutdown_admission_generation(&registry_dir)?;
                 Ok(Some(()))
             })?;
             if acquired.is_some() {

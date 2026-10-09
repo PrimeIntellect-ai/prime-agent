@@ -154,6 +154,15 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // predecessor fence, and can bind the socket the rollback
             // still needs. A re-acquire failure is another window's
             // socket: the rollback cannot run under it.
+            // The concurrent-stop generation is read BEFORE the
+            // re-close: every successful acquire (the re-close included)
+            // bumps the counter, so the check must compare against the
+            // world as it was before our own re-acquire - exactly one
+            // increment is drive's own; two or more means a foreign stop
+            // raced in between.
+            let generation_now = pa_daemon::supervisor_ownership::shutdown_admission_generation(
+                &pa_daemon::supervisor_ownership::default_registry_dir().unwrap_or_default(),
+            );
             // A SINGLE-ATTEMPT re-close: drive released its window
             // microseconds ago, so the record is either free NOW or a
             // genuinely concurrent stop holds it - queuing behind that stop
@@ -183,13 +192,12 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             let Some(mut rollback_admission) = rollback_admission else {
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
-            // A concurrent stop raced the update's release-to-spawn window:
-            // the generation advanced past drive's own single acquire. The
-            // user's shutdown has reported success by now - the rollback
-            // refuses to spawn a daemon behind it.
-            let generation_now = pa_daemon::supervisor_ownership::shutdown_admission_generation(
-                &pa_daemon::supervisor_ownership::default_registry_dir().unwrap_or_default(),
-            );
+            // A concurrent stop raced the update's release-to-spawn
+            // window: the generation advanced past drive's own single
+            // acquire (the read happened before the re-close's own bump,
+            // so exactly one increment is ours). The user's shutdown has
+            // reported success by now - the rollback refuses to spawn a
+            // daemon behind it.
             if generation_now > generation_before + 1 {
                 {
                     let mut status = writer.lock().await;
