@@ -386,12 +386,7 @@ fn reclaim_guard_path(path: &Path) -> PathBuf {
 #[must_use]
 pub fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
     use std::os::unix::io::AsRawFd;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(reclaim_guard_path(path))
-        .ok()?;
+    let file = open_sidecar(&reclaim_guard_path(path))?;
     let deadline = std::time::Instant::now() + budget;
     loop {
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -403,6 +398,78 @@ pub fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Open the sidecar for flock, hardened against a planted or
+/// umask-tightened path: a FIFO or other non-regular file at the
+/// predictable sidecar name would block an ordinary `.open()` forever
+/// (a FIFO write-open waits for a reader), and a hostile umask (0277)
+/// strips the owner-write bit at creation so every later write-open
+/// fails EACCES - wedging every judge behind permanent contention. The
+/// open is nonblocking and no-follow, the file type must be a regular
+/// file (checked through the descriptor), and a read-only descriptor is
+/// sufficient: `flock` needs no write permission, and the mode is
+/// repaired best-effort through the descriptor so later writers can
+/// open normally. Anything else at the sidecar path (a symlink, a
+/// directory, a device) fails closed - `None`, contention, the
+/// documented floor for a hostile sidecar.
+#[cfg(target_os = "linux")]
+fn open_sidecar(path: &Path) -> Option<fs::File> {
+    let fd = unsafe {
+        libc::open(
+            std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes())
+                .ok()?
+                .as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd >= 0 {
+        if let Some(file) = regular_or_close(fd) {
+            return Some(file);
+        }
+    } else {
+        // An umask-tightened existing sidecar (mode 0400) denies the
+        // read-write open: fall back to a read-only descriptor - flock
+        // works on any descriptor - and repair the mode best-effort.
+        let errno = std::io::Error::last_os_error();
+        if errno.raw_os_error() == Some(libc::EACCES) || errno.raw_os_error() == Some(libc::EROFS) {
+            let ro = unsafe {
+                libc::open(
+                    std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes())
+                        .ok()?
+                        .as_ptr(),
+                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+                )
+            };
+            if ro >= 0 {
+                if let Some(file) = regular_or_close(ro) {
+                    // Best-effort repair through the descriptor: the next
+                    // writer's read-write open works normally.
+                    unsafe { libc::fchmod(ro, 0o600) };
+                    return Some(file);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Wrap a raw descriptor as a `File` only when it is a regular file;
+/// close it otherwise. A planted FIFO, directory, symlink
+/// (`O_NOFOLLOW`),
+/// or device at the sidecar path never reaches the flock loop.
+#[cfg(target_os = "linux")]
+fn regular_or_close(fd: i32) -> Option<fs::File> {
+    use std::os::unix::io::FromRawFd;
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, std::ptr::addr_of_mut!(stat)) } == 0
+        && stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    {
+        return Some(unsafe { fs::File::from_raw_fd(fd) });
+    }
+    unsafe { libc::close(fd) };
+    None
 }
 
 /// Mark this guard's directory released through the pinned handle: the
@@ -1839,6 +1906,62 @@ mod tests {
             "the placeholder stays until its own process clears it"
         );
         let _ = remove_candidate_dir(&path);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn planted_fifo_at_the_sidecar_fails_closed_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let sidecar = reclaim_guard_path(&file);
+        std::fs::write(std::path::Path::new(&sidecar).with_file_name("warmup"), b"").ok();
+        // Plant a FIFO at the sidecar path: an ordinary write-open
+        // blocks forever; the hardened open must fail closed fast.
+        let fifo_name = std::ffi::CString::new(
+            sidecar
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned()
+                .as_bytes(),
+        )
+        .unwrap();
+        unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+        let started = std::time::Instant::now();
+        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(guard.is_none(), "a planted sidecar fails closed");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the failed open is nonblocking"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn umask_tightened_sidecar_still_serializes() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let sidecar = reclaim_guard_path(&file);
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        // An umask-0277 creation: owner-read only - the write-open of
+        // every later guard acquisition would fail EACCES.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(&sidecar)
+            .unwrap();
+        std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o400)).unwrap();
+        // The first acquisition repairs the mode through the descriptor
+        // and takes the flock; the second contends; the third (after the
+        // repair) opens read-write normally.
+        drop(try_reclaim_guard(&file, Duration::from_millis(200)));
+        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(
+            guard.is_some(),
+            "the umask-tightened sidecar still serializes"
+        );
     }
 
     #[cfg(target_os = "linux")]
