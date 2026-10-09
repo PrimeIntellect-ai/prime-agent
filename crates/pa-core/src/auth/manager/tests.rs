@@ -768,7 +768,7 @@ fn a_rejected_force_refresh_keeps_the_stored_credential() {
             Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
                 if reason == "OpenAI Codex token refresh failed (401): expired"
         ),
-        "the provider's rejection classifies for the re-login surface: {outcome:?}"
+        "the provider's rejection classifies for the re-login surface"
     );
     assert_eq!(
         auth.get_api_key("x-revoked").as_deref(),
@@ -801,7 +801,7 @@ fn force_refresh_without_forced_support_reports_it() {
             Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
                 if reason == "x-plain has no forced-refresh support"
         ),
-        "the unexchanged attempt classifies for the ordinary ladder: {outcome:?}"
+        "the unexchanged attempt classifies for the ordinary ladder"
     );
     assert_eq!(
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -834,7 +834,7 @@ fn a_transient_refresh_failure_never_reads_as_a_rejection() {
             Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
                 if reason == "OpenAI Codex token refresh failed (503): overloaded"
         ),
-        "the transient endpoint failure keeps the ordinary ladder: {outcome:?}"
+        "the transient endpoint failure keeps the ordinary ladder"
     );
 }
 
