@@ -623,11 +623,37 @@ async fn run_loop(
         .await;
         match execution {
             Race::Aborted => {
+                // The dispatch already reached the adapter before the abort
+                // won: record the unknown outcome and count the execution,
+                // like the deadline and adapter-error arms, instead of
+                // letting a supervisor retry a possibly-applied action.
+                state.executed += 1;
+                state.trace.push(RouterStepTrace {
+                    step,
+                    timestamp_ms: decision_started_ms,
+                    latency_ms,
+                    action: Some(action.name.clone()),
+                    params: decision.params.clone(),
+                    confidence: Some(confidence),
+                    gate: RouterGateTrace {
+                        threshold,
+                        verdict: RouterGateVerdict::Pass,
+                    },
+                    observation_digest: digest,
+                    observation_chars: observation_chars(&observation),
+                    result: format!(
+                        "dispatched {}; outcome unknown (router aborted mid-execution)",
+                        action.name
+                    ),
+                    terminal: false,
+                    thinking_level: options.model.thinking_level.clone(),
+                    usage: decision.usage,
+                });
                 return Ok(state.finish(
                     RouterRunStatus::Failed,
                     "aborted",
                     "Router aborted during the current step.".to_string(),
-                ))
+                ));
             }
             Race::Deadline => {
                 // The dispatch already reached the adapter: record the unknown

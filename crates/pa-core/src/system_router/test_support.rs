@@ -20,6 +20,9 @@ pub struct ScriptedEnvironment {
     /// Every `observe` reply waits this many milliseconds first: the
     /// deadline-window batteries race a reply against the segment budget.
     observe_delay_ms: Mutex<u64>,
+    /// Every `execute` reply waits this many milliseconds first: the abort
+    /// batteries race a dispatch against the external signal.
+    execute_delay_ms: Mutex<u64>,
     /// Every `reset`/`observe`/`execute` call, in order, as
     /// `"reset"`/`"observe"`/`"execute:<action>"`.
     pub calls: Arc<Mutex<Vec<String>>>,
@@ -39,6 +42,7 @@ impl ScriptedEnvironment {
             observations: Mutex::new(observations.into_iter().map(Ok).collect()),
             executions: Mutex::new(VecDeque::new()),
             observe_delay_ms: Mutex::new(0),
+            execute_delay_ms: Mutex::new(0),
             calls: Arc::new(Mutex::new(Vec::new())),
             closes: Arc::new(Mutex::new(0)),
             init_actions: Mutex::new(None),
@@ -68,6 +72,14 @@ impl ScriptedEnvironment {
         Arc::clone(self)
     }
 
+    /// Delay every `execute` reply by `delay_ms` (the abort batteries keep a
+    /// dispatch in flight while the external signal fires).
+    #[must_use]
+    pub fn with_execute_delay_ms(self: &Arc<Self>, delay_ms: u64) -> Arc<Self> {
+        *self.execute_delay_ms.lock().unwrap() = delay_ms;
+        Arc::clone(self)
+    }
+
     /// The same observation forever (the repeated-state case).
     #[must_use]
     pub fn with_observation(observation: RouterObservation) -> Arc<Self> {
@@ -76,6 +88,7 @@ impl ScriptedEnvironment {
             observations: Mutex::new(VecDeque::from(vec![Ok(observation)])),
             executions: Mutex::new(VecDeque::new()),
             observe_delay_ms: Mutex::new(0),
+            execute_delay_ms: Mutex::new(0),
             calls: Arc::new(Mutex::new(Vec::new())),
             closes: Arc::new(Mutex::new(0)),
             init_actions: Mutex::new(None),
@@ -174,6 +187,10 @@ impl RouterEnvironment for ScriptedEnvironment {
     > {
         Box::pin(async move {
             self.calls.lock().unwrap().push(format!("execute:{action}"));
+            let delay_ms = *self.execute_delay_ms.lock().unwrap();
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
             let mut executions = self.executions.lock().unwrap();
             let next = match executions.len() {
                 0 => Some(Ok(RouterExecution {

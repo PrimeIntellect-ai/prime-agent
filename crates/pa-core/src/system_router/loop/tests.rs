@@ -527,6 +527,62 @@ async fn a_pre_aborted_signal_fails_before_reset() {
     assert!(env.calls.lock().unwrap().is_empty());
 }
 
+/// An abort that wins while `execute` is in flight keeps the same ledger
+/// the deadline and adapter-error arms keep: the dispatched action counts as
+/// executed with an unknown outcome (a later segment cannot re-dispatch a
+/// possibly-applied side effect), and the finished decision that paid for it
+/// lands in the trace with its usage instead of vanishing from it.
+#[tokio::test(start_paused = true)]
+async fn an_abort_mid_execute_records_the_dispatched_action() {
+    let env = support::ScriptedEnvironment::with_observation(support::observation("boss room"))
+        .with_execute_delay_ms(50);
+    let controller = AbortController::new();
+    let aborting = controller.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        aborting.abort();
+    });
+    let mut options = options(
+        Arc::clone(&env),
+        support::scripted_decide(vec![support::valid_decision(
+            "press",
+            &[("button", "a")],
+            0.9,
+        )]),
+    );
+    options.signal = Some(controller.signal());
+    let result = run_system_router_loop(options).await.unwrap();
+    assert_eq!(result.status, RouterRunStatus::Failed);
+    assert_eq!(result.reason, "aborted");
+    assert_eq!(result.summary, "Router aborted during the current step.");
+    assert_eq!(result.steps, 1);
+    // The dispatch reached the adapter before the abort won.
+    assert_eq!(result.executed, 1);
+    assert_eq!(result.trace[0].action.as_deref(), Some("press"));
+    assert_eq!(result.trace[0].gate.verdict, RouterGateVerdict::Pass);
+    assert!(result.trace[0]
+        .result
+        .contains("outcome unknown (router aborted mid-execution)"));
+    // The decision's usage is matched by its trace row, not left unattributed.
+    assert_eq!(
+        result.trace[0].usage,
+        Some(RouterUsage {
+            input_tokens: 7,
+            output_tokens: 3
+        })
+    );
+    assert_eq!(result.usage.input_tokens, 7);
+    assert_eq!(result.usage.output_tokens, 3);
+    assert_eq!(
+        *env.calls.lock().unwrap(),
+        vec![
+            "reset".to_string(),
+            "observe".to_string(),
+            "execute:press".to_string(),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn an_abort_mid_decision_fails_the_segment() {
     let env = support::ScriptedEnvironment::with_observation(support::observation("x"));
