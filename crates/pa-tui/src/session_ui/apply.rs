@@ -155,29 +155,33 @@ impl SessionUi {
         let epoch = self.transcript_epoch;
         let notes = self.backfill_notes.clone();
         let task = tokio::spawn(async move {
-            let mut entries = Vec::new();
-            if let Ok(mut data) = client
-                .request_ok(DaemonCommand::GetMessages {
+            let entries: Result<Vec<ChatEntry>> = async {
+                let command = DaemonCommand::GetMessages {
                     id: None,
                     active_session_id,
                     before: Some(before as u64),
                     capabilities: Some(crate::session_ui::attach_capabilities()),
                     rest: Map::default(),
-                })
-                .await
-            {
-                if let Some(serde_json::Value::Array(messages)) =
-                    data.get_mut("messages").map(serde_json::Value::take)
-                {
-                    if let Ok(decoded) = tokio::task::spawn_blocking(move || {
-                        crate::snapshot::transcript_to_entries(&messages)
-                    })
-                    .await
-                    {
-                        entries = decoded;
+                };
+                // A read-only request can safely retry once on a live link. Keep
+                // the same cursor; a second failure must not masquerade as an empty page.
+                let mut data = match client.request_ok(command.clone()).await {
+                    Ok(data) => data,
+                    Err(error) if crate::daemon_client::is_daemon_timeout(&error) => {
+                        return Err(error)
                     }
-                }
+                    Err(_) => client.request_ok(command).await?,
+                };
+                let Some(Value::Array(messages)) = data.get_mut("messages").map(Value::take) else {
+                    return Err(anyhow::anyhow!("missing messages in history response"));
+                };
+                Ok(tokio::task::spawn_blocking(move || {
+                    crate::snapshot::transcript_to_entries(&messages)
+                })
+                .await?)
             }
+            .await;
+            let entries = entries.map_err(|error| error.to_string());
             let _ = notes.send(TranscriptBackfillNote { epoch, entries });
         });
         self.transcript_backfill = Some(task);
@@ -192,8 +196,20 @@ impl SessionUi {
             return;
         }
         self.transcript_backfill = None;
-        let mut entries = note.entries;
-        crate::snapshot::join_backfilled_entries(&mut entries, view.chat.first());
+        let mut entries = match note.entries {
+            Ok(entries) => entries,
+            Err(error) => {
+                view.push_entry(ChatEntry::Status {
+                    text: format!(
+                        "Older history could not be loaded: {error}. Reopen the session to retry."
+                    ),
+                    kind: StatusKind::Warning,
+                });
+                self.dirty = true;
+                return;
+            }
+        };
+        crate::snapshot::join_backfilled_entries(&mut entries, self.backfill_seam);
         let count = entries.len();
         if let Some(index) = self.last_status_index {
             self.last_status_index = Some(index + count);

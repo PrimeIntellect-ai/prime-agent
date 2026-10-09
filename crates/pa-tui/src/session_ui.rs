@@ -145,7 +145,7 @@ pub(crate) fn last_assistant_text_of(chat: &[ChatEntry]) -> Option<String> {
 
 pub(crate) struct TranscriptBackfillNote {
     pub epoch: u64,
-    pub entries: Vec<ChatEntry>,
+    pub entries: std::result::Result<Vec<ChatEntry>, String>,
 }
 
 pub(crate) struct SessionUi {
@@ -355,6 +355,7 @@ pub(crate) struct SessionUi {
     transcript_epoch: u64,
     pub(crate) transcript_backfill: Option<tokio::task::JoinHandle<()>>,
     pending_backfill: Option<usize>,
+    backfill_seam: crate::snapshot::BackfillSeam,
     backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,

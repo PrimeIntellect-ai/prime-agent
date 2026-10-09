@@ -172,6 +172,7 @@ impl SessionUi {
             transcript_epoch: 0,
             transcript_backfill: None,
             pending_backfill: None,
+            backfill_seam: crate::snapshot::BackfillSeam::Preserve,
             backfill_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
@@ -516,6 +517,7 @@ impl SessionUi {
         self.trim_after_frame = true;
         self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
         self.transcript_backfill = None;
+        self.backfill_seam = reconstructed.backfill_seam;
         self.pending_backfill =
             Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())

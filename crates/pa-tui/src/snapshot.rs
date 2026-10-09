@@ -80,6 +80,7 @@ pub struct Reconstructed {
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
     pub history_before: usize,
+    pub(crate) backfill_seam: BackfillSeam,
 }
 
 impl Reconstructed {
@@ -221,7 +222,19 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
 /// Replay a whole transcript, folding `toolResult` messages onto their
 /// pending cards; one id-to-index map keeps the fold linear.
 pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
+    transcript_with_backfill_seam(messages).0
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) enum BackfillSeam {
+    #[default]
+    Preserve,
+    RetryOutcome,
+}
+
+fn transcript_with_backfill_seam(messages: &[Value]) -> (Vec<ChatEntry>, BackfillSeam) {
     let ordered = order_messages_for_transcript(messages);
+    let mut seam = BackfillSeam::Preserve;
     let mut chat: Vec<ChatEntry> = Vec::new();
     let mut card_index: HashMap<String, Vec<usize>> = HashMap::new();
     for message in ordered {
@@ -248,6 +261,10 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
                 == Some(crate::custom_message::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE)
         {
             pop_superseded_attempts(&mut chat);
+            if chat.is_empty() {
+                // This outcome also supersedes attempts in the omitted prefix.
+                seam = BackfillSeam::RetryOutcome;
+            }
         }
         let first_new = chat.len();
         chat.extend(message_value_to_entries(message));
@@ -260,7 +277,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             }
         }
     }
-    chat
+    (chat, seam)
 }
 
 /// Settle one result onto the LAST pending card among `indices` (the
@@ -319,18 +336,18 @@ fn pop_superseded_attempts(chat: &mut Vec<ChatEntry>) {
     }
 }
 
-pub fn join_backfilled_entries(head: &mut Vec<ChatEntry>, tail_first: Option<&ChatEntry>) {
-    if matches!(tail_first, Some(ChatEntry::Status { .. })) {
+pub(crate) fn join_backfilled_entries(head: &mut Vec<ChatEntry>, seam: BackfillSeam) {
+    if matches!(seam, BackfillSeam::RetryOutcome) {
         pop_superseded_attempts(head);
     }
 }
 
 pub fn reconstruct(attach: &AttachData) -> Reconstructed {
     let snapshot = &attach.snapshot;
-    let messages = snapshot
+    let (messages, backfill_seam) = snapshot
         .get("messages")
         .and_then(Value::as_array)
-        .map(|messages| transcript_to_entries(messages))
+        .map(|messages| transcript_with_backfill_seam(messages))
         .unwrap_or_default();
     let state = snapshot.get("state");
     let (model_id, model_provider) = state
@@ -434,6 +451,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         service_tier,
         last_user_prompt_ms,
         history_before,
+        backfill_seam,
     }
 }
 

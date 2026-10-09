@@ -2182,9 +2182,9 @@ fn comparable(entries: &[ChatEntry]) -> Vec<ChatEntry> {
 
 fn joined_matches_full(full: &[Value], cut: usize) {
     let expected = comparable(&transcript_to_entries(full));
-    let tail_entries = transcript_to_entries(&full[cut..]);
+    let (tail_entries, seam) = transcript_with_backfill_seam(&full[cut..]);
     let mut joined = transcript_to_entries(&full[..cut]);
-    join_backfilled_entries(&mut joined, tail_entries.first());
+    join_backfilled_entries(&mut joined, seam);
     joined.extend(tail_entries);
     assert_eq!(comparable(&joined), expected, "cut {cut}: {joined:?}");
 }
@@ -2278,5 +2278,9 @@ fn backfill_preserves_errors_before_an_unrelated_status() {
         "timestamp": 9u64,
     });
     joined_matches_full(&[attempt(1), outcome.clone()], 1);
-    joined_matches_full(&[attempt(1), attempt(2), outcome], 1);
+    joined_matches_full(&[attempt(1), attempt(2), outcome.clone()], 1);
+    // An empty assistant is a legal worker cut but renders no row, exposing
+    // the unrelated custom status as the first entry of the tail.
+    let empty = json!({ "role": "assistant", "content": [], "stopReason": "stop" });
+    joined_matches_full(&[attempt(1), empty, outcome], 1);
 }
