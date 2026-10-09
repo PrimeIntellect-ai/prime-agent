@@ -75,7 +75,10 @@ mod progress;
 
 use progress::CONTINUATION_NO_PROGRESS_CAP;
 pub use progress::{terminal_provider_failure, turn_produced_no_output};
-pub use progress::{GOAL_BACKOFF_WAKE_CRON_LABEL, GOAL_BACKOFF_WAKE_MARKER_TEXT};
+pub use progress::{
+    CONTINUATION_NO_PROGRESS_CAP_REASON, GOAL_BACKOFF_WAKE_CRON_LABEL,
+    GOAL_BACKOFF_WAKE_MARKER_TEXT,
+};
 
 impl GoalDriver {
     #[must_use]
@@ -522,8 +525,7 @@ impl GoalDriver {
         if self.state.status == GoalStatus::Active
             && self.no_progress_streak >= CONTINUATION_NO_PROGRESS_CAP
         {
-            let reason =
-                "Goal continuation cap reached: consecutive turns made no progress".to_string();
+            let reason = progress::CONTINUATION_NO_PROGRESS_CAP_REASON.to_string();
             self.set_state(
                 session,
                 GoalState {
@@ -687,6 +689,20 @@ impl GoalDriver {
     pub fn backoff_wake_at(&self) -> Option<u64> {
         let until = self.no_progress_backoff_until_ms;
         (self.state.status == GoalStatus::Active && until > now_millis()).then_some(until)
+    }
+
+    /// Take the armed backoff window's deadline: the print surface's settled
+    /// boundary reads it after its run, so an overdue window still yields
+    /// (the caller's sleep saturates to zero) and the take consumes it —
+    /// one wake per strike.
+    #[must_use]
+    pub fn take_backoff_wake_at(&mut self) -> Option<u64> {
+        let until = self.no_progress_backoff_until_ms;
+        if self.state.status != GoalStatus::Active || until == 0 {
+            return None;
+        }
+        self.no_progress_backoff_until_ms = 0;
+        Some(until)
     }
 
     #[must_use]
