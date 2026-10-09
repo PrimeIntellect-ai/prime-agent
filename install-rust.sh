@@ -2333,15 +2333,14 @@ if [ ! -x "${stage}/${BINARY_NAME}" ]; then
   rm -rf "$stage"
   die "the tarball did not contain an executable ${BINARY_NAME} payload"
 fi
-# --ARCHIVE ONLY: the archive's name is the version contract (the marker
+# The archive's name is the version contract (the marker
 # records it and the rollback later reports it), so the payload's own
 # --version must agree — a mis-named archive would publish a marker that
-# lies about its payload. The CHANNEL install is out of scope by design:
-# its tarball already passed the manifest's sha256 gate (the row's exact
-# checksum for this exact version), so the channel's integrity needs no
-# second opinion — and a probe there would add a new failure mode (a
-# cold-start binary slower than the bound) the pre-existing flow never
-# had. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
+# lies about its payload. npm bridge channel installs also need this probe:
+# a checksum-valid binary may be incompatible with the host. Reject it
+# before replacing the public npm command so the bridge can retain its
+# working TypeScript recovery path. Other channel installs retain their
+# existing checksum-only behavior. The probe is BOUNDED by a portable watchdog — NOT the `timeout`
 # command: on Windows `timeout` on PATH is timeout.exe, which waits
 # instead of running a command and would refuse every probe, and macOS
 # ships no GNU timeout at all. A payload whose --version blocks is
@@ -2351,9 +2350,8 @@ fi
 # payload-writable stage: an extracted archive could forge a done marker
 # where the loop looks and hang past the bound (the trailing wait would
 # block on the hanging payload forever).
-if [ "$MODE" != "archive" ]; then
-  # The channel install publishes without the name probe (see the block
-  # comment above); the stage continues to the marker write.
+if [ "$MODE" != "archive" ] && [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" != 1 ]; then
+  # A non-bridge channel install continues to the marker write.
   :
 else
 probe_out="$dl/.version-probe.out"
@@ -2867,13 +2865,23 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 # (the uid suffix) and rust-only: it never collides with the TypeScript
 # daemon's own ${TMPDIR}/prime-agent-$(id -u) socket, so after the
 # installer's clean TS-daemon stop the two daemons cannot fight again.
-export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+# An npm migration restores the running TS daemon into its existing namespace.
+# The durable marker survives payload replacement and later curl updates.
+if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" ]; then
+  export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
+else
+  export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+fi
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
 fi
 chmod 0755 "$launcher_tmp"
 mv -f "$launcher_tmp" "$launcher"
 launcher_tmp=""
+if [ "${PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET:-0}" = 1 ]; then
+  mkdir -p "${PREFIX}/share/.prime-agent-npm-bridge"
+  printf 'legacy\n' > "${PREFIX}/share/.prime-agent-npm-bridge/legacy-daemon-socket"
+fi
 # The cmd/PowerShell launcher twin (Windows only): the same
 # ../share/prime-agent payload, resolved from the .cmd's own location, so
 # `prime-agent` answers from cmd.exe and PowerShell too (the sh launcher
@@ -2947,7 +2955,10 @@ last_stop_was_rust=""
 # build) and this product's daemon runs a named pipe - the unix-socket
 # ladder below never applies. The Windows daemon stop already ran, before
 # the publish (the file-lock ruling).
-if [ "$WINDOWS" != "yes" ]; then
+# The historical npm updater launches its restart coordinator through the
+# migration bridge. That coordinator must capture the TS restart manifest
+# before stopping the old daemon; the bridge explicitly transfers that duty.
+if [ "$WINDOWS" != "yes" ] && [ "${PRIME_AGENT_DEFER_DAEMON_STOP:-0}" != 1 ]; then
   stop_daemon_candidate "$ts_socket" ts
   ts_stop_stopped_ts="$last_stop_recorded"
   ts_stop_was_rust_ts="$last_stop_was_rust"
@@ -3000,14 +3011,16 @@ fi
 # keyword), with the restore command printed. Exact package `prime-agent`
 # only; best-effort — an npm failure warns and moves on. Windows never had
 # a TS npm install (the TS product shipped darwin/linux only), so the whole
-# step is darwin/linux.
-if [ "$WINDOWS" != "yes" ] && command -v npm >/dev/null 2>&1; then
+# step is darwin/linux. The npm migration bridge remains the package manager's
+# command entry point: removing it during its child installer would delete the
+# running launcher's files and break later package-manager updates.
+if [ "$WINDOWS" != "yes" ] && [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" != 1 ] && command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [ -n "$npm_root" ] && [ -f "${npm_root}/prime-agent/package.json" ]; then
     ts_version="$("$UVPY" -c 'import json, sys
 try:
     package = json.load(open(sys.argv[1]))
-    if package.get("name") == "prime-agent":
+    if package.get("name") == "prime-agent" and package.get("primeAgentRustBridge") is not True:
         print(package.get("version", ""))
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"

@@ -215,6 +215,26 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Verify fresh channel install and reinstall
+        # Host detection must match the packaged artifact. Intel macOS is
+        # cross-built; its existing Rosetta version probe remains separate.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/test_channel_install.py \
+            --archive "${archives[0]}" --installer install-rust.sh \
+            --report "target/${{ matrix.target }}/dist/channel-install.json"
+      - name: Verify the shipped TypeScript update command
+        # The x64 Darwin artifact is cross-built on arm64. Its historical
+        # installer detects the host, so this gate runs on native hosts only.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/verify_legacy_release.py \
+            --candidate "${archives[0]}" \
+            --report "target/${{ matrix.target }}/dist/legacy-upgrade.json"
       # The homebrew-core submission candidate: the source tarball the
       # formula pins (scripts/release/assemble_source.py — the git tree at
       # the tag plus the validated catalog assets at the archive root). One
@@ -254,6 +274,8 @@ jobs:
             target/${{ matrix.target }}/dist/prime-agent-*
             target/${{ matrix.target }}/dist/SHA256SUMS
             target/${{ matrix.target }}/dist/manifest.json
+            target/${{ matrix.target }}/dist/legacy-upgrade.json
+            target/${{ matrix.target }}/dist/channel-install.json
           if-no-files-found: error
 
   build-darwin:
@@ -331,6 +353,26 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Verify fresh channel install and reinstall
+        # Host detection must match the packaged artifact. Intel macOS is
+        # cross-built; its existing Rosetta version probe remains separate.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/test_channel_install.py \
+            --archive "${archives[0]}" --installer install-rust.sh \
+            --report "target/${{ matrix.target }}/dist/channel-install.json"
+      - name: Verify the shipped TypeScript update command
+        # The x64 Darwin artifact is cross-built on arm64. Its historical
+        # installer detects the host, so this gate runs on native hosts only.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/verify_legacy_release.py \
+            --candidate "${archives[0]}" \
+            --report "target/${{ matrix.target }}/dist/legacy-upgrade.json"
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -339,6 +381,8 @@ jobs:
             target/${{ matrix.target }}/dist/prime-agent-*
             target/${{ matrix.target }}/dist/SHA256SUMS
             target/${{ matrix.target }}/dist/manifest.json
+            target/${{ matrix.target }}/dist/legacy-upgrade.json
+            target/${{ matrix.target }}/dist/channel-install.json
           if-no-files-found: error
 
   # The Windows build: its own job (the build-darwin pattern), because the
@@ -642,31 +686,12 @@ jobs:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
           print(f"hash continuity verified for all archives")
           PY
-      # Prime Agent 0.9.8 (the TypeScript release) updates itself with its
-      # bundled installer, which installs any archive that carries install.sh,
-      # theme/prime.json, export-html/template.html and photon_rs_bg.wasm.
-      # The Rust archive lacks all four, and that is the only thing stopping a
-      # TS client from installing a Rust release into the TS layout (which
-      # breaks it). TS needs all four, so refusing a root-level install.sh
-      # keeps every Rust archive uninstallable by the TS updater.
-      - name: Refuse archives the TypeScript updater would install
+      # Existing TS updaters execute their retained installer. Verify the
+      # archive that installer activates, not merely the new curl installer.
+      - name: Verify historical native updater compatibility
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import pathlib, sys, tarfile
-          incoming = pathlib.Path("incoming")
-          failures = []
-          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
-              for archive in sorted(entry_dir.glob("prime-agent-*.tar.gz")):
-                  with tarfile.open(archive) as tar:
-                      names = {pathlib.PurePosixPath(m.name).parts for m in tar.getmembers()}
-                  if ("install.sh",) in names:
-                      failures.append(f"{archive.name}: contains a root-level install.sh")
-          if failures:
-              sys.exit("a TypeScript Prime Agent updater could install these archives:\n"
-                       + "\n".join(failures))
-          print("no archive carries the TypeScript installer layout")
-          PY
+          python3 verification-source/scripts/release/native_compat.py incoming/*/prime-agent-*.tar.gz
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
           set -euo pipefail
@@ -729,6 +754,20 @@ jobs:
                   tar.extractall(unpacked, filter="data")
           PY
           ls -la release-out release-unpacked
+      - name: Assemble the npm migration bridge
+        run: |
+          set -euo pipefail
+          channel=stable
+          case "$RELEASE_VERSION" in *-beta*) channel=beta ;; esac
+          # Keep a working TS fallback when an existing npm installation
+          # cannot run the native target. The packer verifies its pinned hash.
+          curl --fail --location --silent --show-error --retry 3 \
+            https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.8/prime-agent-0.9.8.tgz \
+            --output /tmp/prime-agent-typescript-fallback.tgz
+          python3 verification-source/scripts/release/npm_bridge.py \
+            --repo-root verification-source --version "${RELEASE_VERSION#v}" --out-dir release-out --channel "$channel" \
+            --fallback-tarball /tmp/prime-agent-typescript-fallback.tgz
+          (cd release-out && sha256sum "prime-agent-${RELEASE_VERSION#v}.tgz" >> SHA256SUMS)
       - name: Emit the channel manifest (latest.json stable / beta.json nightly)
         run: |
           set -euo pipefail
@@ -813,7 +852,13 @@ jobs:
                   "the channel manifest must carry a row for every known "
                   "platform (one build job per platform)"
               )
-          document = {"version": f"v{version}"}
+          # Prime Agent 0.6+ npm clients consume package/tarball; native
+          # clients consume binaries. Keep both routes in one manifest.
+          document = {
+              "version": f"v{version}",
+              "package": "prime-agent",
+              "tarball": f"releases/v{version}/prime-agent-{version}.tgz",
+          }
           v1_rows = [row for row in rows if row["platform"] in v1_platforms]
           if v1_rows:
               document["binaries"] = v1_rows
@@ -884,7 +929,7 @@ jobs:
           # the channel manifests reference. The homebrew-core source
           # tarball rides the GitHub release only (packagers pin it
           # there; the R2 pointers never name it).
-          for artifact in release-out/prime-agent-*.tar.gz; do
+          for artifact in release-out/prime-agent-*.tar.gz release-out/prime-agent-*.tgz; do
             case "$artifact" in *-src.tar.gz) continue ;; esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
@@ -1107,6 +1152,7 @@ jobs:
         with:
           subject-path: |
             release-out/prime-agent-*.tar.gz
+            release-out/prime-agent-*.tgz
             release-out/*.debug.gz
       - name: Attach to GitHub release
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
@@ -1122,6 +1168,7 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             release-out/prime-agent-*.tar.gz
+            release-out/prime-agent-*.tgz
             release-out/*.debug.gz
             release-out/SHA256SUMS
             release-out/*.json

@@ -5,6 +5,13 @@
 
 use std::process::Command;
 
+/// The real Unix user id, matching Node `process.getuid()` for daemon namespaces.
+#[cfg(unix)]
+#[must_use]
+pub fn current_user_id() -> u32 {
+    nix::unistd::Uid::current().as_raw()
+}
+
 /// Termination signal for [`kill_pid`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
