@@ -1,0 +1,1 @@
+- Daemon housekeeping now reclaims dead-owner session leases and obsolete cache files, retains recent socket logs, and removes retired worker recovery journals only after their writer is proven gone. Journals with unverifiable ownership and update status records are preserved, and RPC and orphan exits retain their lease until process death.
