@@ -63,15 +63,6 @@ impl TransportStream for tokio::net::TcpStream {
     }
 }
 
-impl TransportListener for tokio::net::TcpListener {
-    fn accept(&self) -> AcceptFuture<'_> {
-        Box::pin(async move {
-            let (stream, _address) = self.accept().await?;
-            Ok(Box::new(stream) as Box<dyn TransportStream>)
-        })
-    }
-}
-
 /// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
 #[cfg(unix)]
 const MAX_SUN_PATH: usize = 107;
