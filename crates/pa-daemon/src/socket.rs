@@ -152,10 +152,20 @@ impl SocketLease {
         let (refresh_stop, stop_rx) = std::sync::mpsc::channel();
         let refresh = std::thread::spawn(move || {
             while stop_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-                if !lock_identity_matches(&task_path, &task_identity)
-                    || task_dir.set_modified(std::time::SystemTime::now()).is_err()
-                    || !lock_identity_matches(&task_path, &task_identity)
-                {
+                let lost = !lock_identity_matches(&task_path, &task_identity);
+                let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
+                if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
+                    if write_error && !lost {
+                        // A persistent mtime-refresh failure (EIO, a
+                        // read-only filesystem) is a compromise on its
+                        // own: the lock ages past the stale threshold
+                        // while the supervisor keeps serving. It is
+                        // distinct from a transient displacement and is
+                        // reported immediately, exactly as before.
+                        task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                        task_tx.send_replace(true);
+                        break;
+                    }
                     // A stale-reclaim dance may hold this lease's
                     // directory displaced for the microseconds of its
                     // exchange: tolerate a bounded grace before
@@ -185,17 +195,53 @@ impl SocketLease {
         })
     }
 
+    /// Whether the lock path still names this lease's pinned inode.
+    fn path_lost(&self) -> bool {
+        !lock_identity_matches(&self.lock_path, &self.identity)
+    }
+
     /// Whether ownership of this exact lock inode was lost.
     #[must_use]
     pub fn compromised(&self) -> bool {
-        self.compromised.load(std::sync::atomic::Ordering::Acquire)
-            || !lock_identity_matches(&self.lock_path, &self.identity)
+        self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost()
     }
 
-    /// Resolve when this lease loses its lock directory.
+    /// Compromise verdict for the direct synchronous callers (boot
+    /// fences, the serve-completion recheck, Drop): a single transient
+    /// identity mismatch - a stale-reclaim dance holding this lease's
+    /// directory displaced for the microseconds of its exchange - gets
+    /// the same bounded grace the refresh thread has; a displacement
+    /// persisting past the grace is a real compromise. A cached
+    /// compromise flag set by the refresh thread is definitive without
+    /// re-probing.
+    fn compromised_after_grace(&self) -> bool {
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        if !self.path_lost() {
+            return false;
+        }
+        std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+        self.path_lost()
+    }
+
+    /// Resolve when this lease loses its lock directory. A single
+    /// transient mismatch (a reclaim dance's displacement) gets the
+    /// same bounded grace before it counts; a displacement persisting
+    /// past the grace is a real compromise.
     pub async fn wait_compromised(&self) {
         let mut changes = self.compromise_tx.subscribe();
-        while !self.compromised() {
+        loop {
+            if self.compromised() {
+                break;
+            }
+            if self.path_lost() {
+                tokio::time::sleep(LEASE_DISPLACEMENT_GRACE).await;
+                if self.path_lost() || self.compromised() {
+                    break;
+                }
+                continue;
+            }
             if changes.changed().await.is_err() {
                 break;
             }
@@ -216,7 +262,7 @@ impl SocketLease {
                 path.display()
             ));
         }
-        if self.compromised() {
+        if self.compromised_after_grace() {
             return Err(anyhow!(
                 "Daemon socket lease for {} was compromised",
                 path.display()
@@ -339,7 +385,7 @@ impl Drop for SocketLease {
         // a deliberate divergence from proper-lockfile's unconditional
         // release remove - and a reclaiming successor's directory is
         // never touched.
-        if !self.compromised() {
+        if !self.compromised_after_grace() {
             self.release_lock_dir();
         }
         let _ = &self.lock_dir;
@@ -386,9 +432,18 @@ impl SocketLease {
 fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
     // Serialize with any concurrent stale-reclaim dance (the sidecar's
     // flock): the lease's release choreography and the dance's
-    // exchanges must never interleave on the same lock directory.
-    let guarded =
-        pa_core::platform::try_reclaim_guard(lock_path, std::time::Duration::from_millis(100));
+    // exchanges must never interleave on the same lock directory. The
+    // guard is MANDATORY: without it (a suspended dance holds the
+    // sidecar past the budget) the choreography would race the dance's
+    // exchanges - vacating the public path mid-dance, stranding a live
+    // successor - so the release is skipped entirely and the lease
+    // artifact expires through the stale window instead, the documented
+    // floor.
+    let Some(guarded) =
+        pa_core::platform::try_reclaim_guard(lock_path, std::time::Duration::from_millis(100))
+    else {
+        return;
+    };
     let claim = match claim_lock_dir_under_private_name(lock_path) {
         Ok(claim) => claim,
         Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
