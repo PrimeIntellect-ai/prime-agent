@@ -703,8 +703,22 @@ fn release_lock_dir_identity(
                     == Some(expected)
             });
             if identity_proved {
-                let _ = std::fs::remove_file(placeholder.join("owner"));
-                let _ = std::fs::remove_dir(&placeholder);
+                let removed = std::fs::remove_file(placeholder.join("owner"))
+                    .and_then(|()| std::fs::remove_dir(&placeholder));
+                if removed.is_err() {
+                    // The residue carries this process's live owner
+                    // record and sits at the PUBLIC path - a silent
+                    // failure would wedge every acquisition behind the
+                    // stale window while this process lives. Mark it
+                    // released through the pinned fd (the dance then
+                    // consumes it) and surface the error.
+                    pa_core::platform::mark_released_through(lock_dir);
+                    let error = removed
+                        .err()
+                        .unwrap_or_else(|| std::io::Error::other("placeholder cleanup failed"));
+                    drop(guarded);
+                    return Err(error);
+                }
             }
             drop(guarded);
             return Ok(());
@@ -714,11 +728,24 @@ fn release_lock_dir_identity(
                 if lock_identity_matches(&placeholder, identity) {
                     // This lease's directory, held where nothing can
                     // replace it: remove it completely, then clear the
-                    // placeholder from the public path.
+                    // placeholder from the public path. A failed removal
+                    // of the public residue (the owner file, then the
+                    // directory) must not wedge: mark it released
+                    // through the pinned fd and surface the error -
+                    // judge_and_reclaim will not reclaim a stale
+                    // directory with a live owner and no marker.
+                    let removed = std::fs::remove_file(lock_path.join("owner"))
+                        .and_then(|()| std::fs::remove_dir(lock_path));
+                    if removed.is_err() {
+                        pa_core::platform::mark_released_through(lock_dir);
+                        let error = removed.err().unwrap_or_else(|| {
+                            std::io::Error::other("lock directory cleanup failed")
+                        });
+                        drop(guarded);
+                        return Err(error);
+                    }
                     let _ = std::fs::remove_file(placeholder.join("owner"));
                     let _ = std::fs::remove_dir(&placeholder);
-                    let _ = std::fs::remove_file(lock_path.join("owner"));
-                    let _ = std::fs::remove_dir(lock_path);
                 } else {
                     // Not this lease's directory: a successor's live
                     // lock. Swap it home atomically and remove the
