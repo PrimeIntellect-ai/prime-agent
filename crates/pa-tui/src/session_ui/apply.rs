@@ -273,6 +273,7 @@ impl SessionUi {
                     self.turn_active = false;
                     self.run_open = false;
                     view.working = None;
+                    view.retry = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});
