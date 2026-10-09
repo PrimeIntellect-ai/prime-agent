@@ -8,16 +8,22 @@ use pa_core::session_engine::provider_adapter::ProviderTarget;
 impl AgentSessionEngine {
     /// The stored request auth for the target's OWN model, applied in
     /// place: only the key and headers change, and only when the store
-    /// resolves a credential (nothing stored never clears what the
-    /// target already serves with). A resolved credential REPLACES the
-    /// pair: its headers land even when it carries none, so a rotated
-    /// credential without a team header clears the previous credential's
-    /// `X-Prime-Team-ID` instead of serving it on the new key.
+    /// serves a live credential for the model's provider. The configured
+    /// `models.json` fallback key — what the resolution serves when the
+    /// store is unreadable OR holds no credential — is not a stored
+    /// credential and never replaces what the target already serves
+    /// with. A resolved credential REPLACES the pair: its headers land
+    /// even when it carries none, so a rotated credential without a team
+    /// header clears the previous credential's `X-Prime-Team-ID` instead
+    /// of serving it on the new key.
     fn refresh_request_auth(&self, target: &mut ProviderTarget) {
-        let (api_key, headers) = self.resolve_request_key_and_headers(&target.model);
-        if let Some(api_key) = api_key {
-            target.api_key = Some(api_key);
-            target.headers = headers;
+        let (api_key, headers, store_auth) =
+            self.resolve_request_key_and_headers_and_store_health(&target.model);
+        if store_auth {
+            if let Some(api_key) = api_key {
+                target.api_key = Some(api_key);
+                target.headers = headers;
+            }
         }
     }
 
@@ -32,7 +38,12 @@ impl AgentSessionEngine {
     /// `set_model`, image-route swap, or retirement is never clobbered by
     /// an older snapshot). A routed episode's armed target and its saved
     /// session-target fallback refresh from the same store, or the next
-    /// model-turn attempt would reinstall the stale credentials. The MCP
+    /// model-turn attempt would reinstall the stale credentials. The
+    /// rebinds run only off live STORE auth — a credential the store
+    /// actually holds on a healthy read: the configured `models.json`
+    /// fallback key (served when the store is unreadable OR holds no
+    /// credential for the provider) is not a stored credential and
+    /// never replaces the session's last-good pair. The MCP
     /// manager re-reads its settings and the shared auth store (the same
     /// reload the connections view applies on open). The auth store's
     /// reload gates the whole session half and its failure propagates:
@@ -91,8 +102,9 @@ impl AgentSessionEngine {
             .as_ref()
             .map(|target| target.model.clone());
         if let Some(model) = live_model {
-            let (api_key, headers) = self.resolve_request_key_and_headers(&model);
-            {
+            let (api_key, headers, store_auth) =
+                self.resolve_request_key_and_headers_and_store_health(&model);
+            if store_auth {
                 let mut slot = self
                     .provider_target
                     .write()
@@ -100,12 +112,18 @@ impl AgentSessionEngine {
                 if let Some(target) = slot.as_mut() {
                     // The model may have moved under the store read: a
                     // switch or route swap installed a new target. The
-                    // auth then re-resolves for whatever is live NOW;
-                    // a cleared slot stays cleared.
+                    // auth then re-resolves for whatever is live NOW,
+                    // under the same gate; a cleared slot stays cleared.
                     let (api_key, headers) = if target.model == model {
                         (api_key, headers)
                     } else {
-                        self.resolve_request_key_and_headers(&target.model)
+                        match self.resolve_request_key_and_headers_and_store_health(&target.model) {
+                            (Some(key), headers, true) => (Some(key), headers),
+                            // The moved-to model's provider has no live
+                            // stored credential: the target keeps its
+                            // last-good pair.
+                            _ => (None, None),
+                        }
                     };
                     // A resolved credential replaces the pair: headers
                     // clear when the fresh credential carries none.

@@ -677,3 +677,53 @@ fn restored_primary_target_keeps_the_override_key_and_captured_headers_off_a_fai
         "the healthy restore keeps the override key"
     );
 }
+
+/// A healthy store that no longer holds the provider's credential
+/// leaves the target untouched: the resolution would serve the
+/// configured models.json fallback key, which is not a stored
+/// credential — the same never-clears contract a broken store keeps.
+#[test]
+fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_credential_backed_provider(&agent_dir);
+    write_oauth_credential(&agent_dir, "live-access");
+    let engine = credential_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("the custom model resolves");
+    *engine
+        .provider_target
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("live-access".to_string()),
+        model,
+        headers: None,
+    });
+    // Another process removes the credential: the store stays healthy,
+    // but nothing is stored for the provider.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    engine.reload_live_inputs().expect("the reload applies");
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert!(
+        target.api_key.as_deref() == Some("live-access"),
+        "an empty store keeps the last-good stored credential"
+    );
+    // A re-login restores the credential and the rebind resumes.
+    write_oauth_credential(&agent_dir, "fresh-access");
+    engine.reload_live_inputs().expect("the reload applies");
+    let target = engine
+        .provider_target
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the reload keeps the target set");
+    assert!(
+        target.api_key.as_deref() == Some("fresh-access"),
+        "a restored credential rebinds the request auth"
+    );
+}

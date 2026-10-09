@@ -379,12 +379,14 @@ impl AgentSessionEngine {
         (api_key, headers)
     }
 
-    /// [`Self::resolve_request_key_and_headers`] plus the auth store's
-    /// read health: `false` means the store's last load failed (an
-    /// unreadable `auth.json`), in which case the registry resolves the
-    /// configured fallback key — not a stored credential. A caller that
-    /// replaces last-good auth with a resolved pair must check this the
-    /// way `/reload`'s gate does.
+    /// [`Self::resolve_request_key_and_headers`] plus whether the store
+    /// holds a live credential for the model's provider on a healthy
+    /// read. `false` means the resolved key is the configured
+    /// `models.json` fallback — served when the store is unreadable OR
+    /// holds no credential for the provider — which is not a stored
+    /// credential and must never replace a serving pair (the
+    /// create-config override is store-independent; callers apply it
+    /// themselves).
     pub(crate) fn resolve_request_key_and_headers_and_store_health(
         &self,
         model: &Model,
@@ -393,22 +395,28 @@ impl AgentSessionEngine {
         Option<std::collections::BTreeMap<String, String>>,
         bool,
     ) {
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        // One read cycle answers both questions: the store's health AND
+        // whether it holds a credential for this provider (the same
+        // lookup the registry's resolution runs internally).
         let store_healthy = auth.load_error().is_none();
+        let stored_credential = auth
+            .get_api_key_with_source_token(&model.provider, false)
+            .api_key
+            .is_some();
+        let store_auth = store_healthy && stored_credential;
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
         let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS
-            // `getApiKeyAndHeaders` override path. The pair's health is the
-            // store's, not the override's: the key stands in memory, but the
-            // resolved headers still ride the store read, so a health-gated
-            // caller keeps the captured headers (a pair that carries the
-            // same override key) when the store fails.
-            return (Some(api_key.clone()), resolved.headers, store_healthy);
+            // `getApiKeyAndHeaders` override path. The flag stays the
+            // store's: a caller pairing the override key with headers
+            // keeps its last-good headers when the store cannot serve.
+            return (Some(api_key.clone()), resolved.headers, store_auth);
         }
-        (resolved.api_key, resolved.headers, store_healthy)
+        (resolved.api_key, resolved.headers, store_auth)
     }
 
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
@@ -443,23 +451,25 @@ impl AgentSessionEngine {
         // failed read keeps the captured headers — the last-good team
         // context — instead of the header-less resolution.
         let override_key = self.current_selection().api_key;
-        let (api_key, headers, store_healthy) =
+        let (api_key, headers, store_auth) =
             self.resolve_request_key_and_headers_and_store_health(primary);
-        // The capture backs the restore when the store resolves nothing
-        // OR the store itself failed to read: an unreadable `auth.json`
-        // makes the fresh resolution fall to the configured fallback key,
-        // which is not a credential — the captured pair is the last-good
-        // one, exactly the overwrite `/reload`'s gate avoids. A healthy
-        // resolution REPLACES the pair, headers included.
+        // The capture backs the restore whenever the store cannot serve a
+        // live credential — a failed read OR a healthy store with nothing
+        // stored: both resolve the configured `models.json` fallback key,
+        // which is not a stored credential, the same overwrite
+        // `/reload`'s gate avoids. The create-config key override stands
+        // in memory regardless, keeping the captured headers when the
+        // store cannot serve them; a live stored credential REPLACES the
+        // pair, headers included.
         let (api_key, headers) = if let Some(override_key) = override_key {
-            if store_healthy {
+            if store_auth {
                 (Some(override_key), headers)
             } else {
                 (Some(override_key), captured_headers.or(headers))
             }
         } else {
             match api_key {
-                Some(api_key) if store_healthy => (Some(api_key), headers),
+                Some(api_key) if store_auth => (Some(api_key), headers),
                 _ => (captured_api_key, captured_headers),
             }
         };
