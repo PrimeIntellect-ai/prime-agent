@@ -1264,6 +1264,28 @@ impl LockDir {
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         fs::create_dir(path)?;
+        // The created-directory witness is captured IMMEDIATELY after the
+        // mkdir, before any further I/O on the path: the later chmod and
+        // owner writes give a stale takeover (a suspension past the
+        // staleness threshold) time to reclaim this directory and publish
+        // a successor, and a capture taken after that I/O would record
+        // the SUCCESSOR's identity as "created" - the adoption this
+        // function refuses. An unstattable capture (None) is an abort:
+        // the created-witness is unprovable, so the acquisition fails
+        // (contending honestly) instead of pinning whatever later sits
+        // at the path.
+        let created = identity_at(path);
+        #[cfg(unix)]
+        if created.is_none() {
+            return Err(io::Error::other(format!(
+                "Lock directory {} cannot be witnessed after creation",
+                path.display()
+            )));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = created;
+        }
         // A hostile umask would strip the owner-read bit from the fresh
         // directory and the pin below would fail before any chmod could
         // fix it: restore the private mode at creation - cleaning the
@@ -1308,7 +1330,6 @@ impl LockDir {
                 }
             }
         }
-        let created = identity_at(path);
         let dir = match fs::File::open(path) {
             Ok(dir) => dir,
             Err(error) => {
@@ -1337,7 +1358,7 @@ impl LockDir {
             use std::os::unix::fs::MetadataExt;
             (metadata.dev(), metadata.ino())
         });
-        if created.is_some() && pinned_identity != created {
+        if pinned_identity != created {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!(

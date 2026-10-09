@@ -548,7 +548,7 @@ impl Supervisor {
         let _boot_tasks = boot_ownership.await;
 
         #[cfg(unix)]
-        if let Err(error) = socket_lease.assert_held() {
+        if let Err(error) = socket_lease.assert_held_async().await {
             // The same fence the serving loop's compromise arm runs: the
             // spawned ownership passes must not outlive a lost lease on
             // this exit path either - aborting them (not dropping the
