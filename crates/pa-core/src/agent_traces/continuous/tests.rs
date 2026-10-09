@@ -1,5 +1,7 @@
 use super::*;
-use crate::agent_traces::tests::{response, Fixture, ScriptedTraceHttp};
+use crate::agent_traces::tests::{
+    clear_trace_credentials, env_lock, response, Fixture, ScriptedTraceHttp,
+};
 use std::io::Write;
 
 async fn recover(
@@ -910,7 +912,11 @@ async fn exhausted_recovery_retries_leave_the_sweep_incomplete() {
 }
 
 #[tokio::test(start_paused = true)]
+// The env lock is held across awaits by design (env must stay stable).
+#[allow(clippy::await_holding_lock)]
 async fn a_credentialless_controller_retries_after_credentials_arrive() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
     let fixture = Fixture::new();
     let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
     settings.set_agent_traces_enabled(true).unwrap();
@@ -985,7 +991,11 @@ async fn a_settings_change_after_load_still_records_the_write_intent() {
 }
 
 #[tokio::test(start_paused = true)]
+// The env lock is held across awaits by design (env must stay stable).
+#[allow(clippy::await_holding_lock)]
 async fn missing_credentials_leave_the_sweep_incomplete_until_provided() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
     let fixture = Fixture::new();
     let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
     settings.set_agent_traces_enabled(true).unwrap();
