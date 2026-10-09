@@ -604,3 +604,69 @@ requirement of `GLIBC_2.34`, below the release ceiling of `GLIBC_2.35`. This can
 was built on Debian 12: the inspection is not evidence of an Ubuntu 22.04 build or
 runtime test. The stable release Linux jobs separately build and livecheck inside
 the pinned Ubuntu 22.04 container and enforce the symbol ceiling on both arches.
+
+### Lost preparation reply regression
+
+A focused Unix-socket verifier models the shipped TypeScript failure window:
+it durably writes a manifest containing queued custom-message and turn-action
+work, then closes the preparation connection without replying. The coordinator
+must recover the manifest, preserve both queues in its durable Rust checkpoint,
+reconnect to the same predecessor, and only then send shutdown. The test also
+checks that the source survives and a changed predecessor identity cannot adopt
+the checkpoint. Disabling the lost-reply fallback in the disposable remote
+source made this test fail at the shutdown observation; restoring the fix passed
+the six-test coordinator suite. Separate cases check stale source rejection and
+that an explicit refusal with an unchanged earlier manifest clears its attempt
+so a fresh update remains possible.
+
+This verifier uses a protocol fixture, not provider inference or a released
+TypeScript executable. The real-version migration runs above remain separate
+evidence; a newly packaged candidate must be rerun after this recovery fix.
+
+## Executable-probe rejection preserves genuine npm recovery
+
+A red-first integration used the actual v0.6.0 npm updater, the genuine v0.9.8
+fallback, and a checksum-valid release archive whose executable named a
+nonexistent interpreter. npm and the Rust installer shared the same prefix.
+The isolated red installer differed only by skipping its staged execution
+probe in channel mode: the public npm launcher was replaced and the next
+`--version` exited **127**, unable to execute the published payload.
+
+With the staged probe enabled for npm migration, the same integration passed:
+the unusable payload was rejected before publication, the public command
+remained the npm bridge symlink, no native payload or successful migration
+receipt existed, and a failure receipt was recorded. An explicit retry failed
+honestly. Genuine TS v0.9.8 resumed the original saved session through its real
+daemon and worker, retained the transcript, and accepted local input. Cleanup
+waited for observable fixture daemon/worker exit before removing their files.
+
+- Red installer SHA256: `b54a3a93066d6b7441cf70095ce436000196e0c4370d7ce5f8bda1e65150692d`.
+- Green installer SHA256: `323328cea0ede4d60aedfef486ba383ea081457e65ccedb1782ca6a0575a7f09`.
+- Green bridge SHA256: `59247f63476c3b021009e1fb96a6784c5582c4124dca32ffdda367932b3d7ce1`.
+- Repacked unusable archive SHA256: `c99e71dfe91487ac661ab8d3f4b09d95ecd33ecf523da7007da14ba146a21b41`.
+
+Reports: `/tmp/prime-legacy-artifacts/probe-red.json` and
+`/tmp/prime-legacy-artifacts/probe-green.json`. Exact isolated source snapshots:
+`/tmp/prime-legacy-artifacts/npm-probe-source-evidence.tar.gz`.
+
+## Failed npm migration can reach a later release
+
+A genuine integration first ran the published v0.6.0 updater against the
+v1.0.0 bridge while the real installer rejected an unsupported architecture.
+The original public command then reported genuine TS v0.9.8. The local feed
+was advanced to a real v1.0.1 bridge and native archive, and the architecture
+wrapper was removed. Running the original public `prime-agent update --force`
+then fetched the newer package, exited successfully, recorded the v1.0.1
+receipt, and reported Rust v1.0.1. A real TUI resumed the original saved session
+with a v1.0.1 daemon, attached client, preserved transcript, and responsive input.
+
+- Initial Rust archive SHA256: `7a5e663b535d1755504f8315d4f13de0857ed746ac5c6fdc6c5e55db84ec11b3`.
+- Initial bridge SHA256: `95f7245c19a0076d60229784057cba655fd335e0090fde4888d6a75dcc92ae1d`.
+- Recovery Rust archive SHA256: `f46a36e1456dc6d7ddfefaf85bad68b29a0b06d863cb1577ce5e3445d4cad97a`.
+- Recovery bridge SHA256: `c400ec2589e0c05204b8b8dab5e278e4ed26045a70fc5d00f2367686108a89ac`.
+
+The focused bridge unit suite passed 25 tests. The genuine integration report
+is `/tmp/prime-legacy-artifacts/future-release-recovery.json`; reproduce using
+`test_legacy_npm_fallback.py --recovery-archive <newer-release-archive>` with
+the usual genuine npm fixture arguments. These recovery tests remain distinct
+from the later consolidated release-candidate matrix.

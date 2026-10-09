@@ -224,21 +224,22 @@ async fn restart(
                 persist(&roster_path, &serde_json::to_value(&roster)?)?;
                 roster
             }
-            Err(error) => match recover_prepared(
-                &roster_path,
-                &attempt_path,
-                &source_path,
-                socket,
-                Some(&hello),
-            )? {
-                Some(roster) => roster,
-                None => {
+            Err(error) => {
+                if let Some(roster) = recover_prepared(
+                    &roster_path,
+                    &attempt_path,
+                    &source_path,
+                    socket,
+                    Some(&hello),
+                )? {
+                    roster
+                } else {
                     if refused {
                         std::fs::remove_file(&attempt_path)?;
                     }
                     return Err(error);
                 }
-            },
+            }
         }
     };
     {

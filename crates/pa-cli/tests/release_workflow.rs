@@ -745,11 +745,10 @@ fn single_artifact_release_finds_the_downloaded_manifest() {
         expected_merged_sums(std::slice::from_ref(&row)),
         "the merged sums must carry the single target's checksum line"
     );
-    assert!(
-        cwd.path()
-            .join("release-unpacked/x86_64-unknown-linux-gnu/prime-agent")
-            .is_file()
-    );
+    assert!(cwd
+        .path()
+        .join("release-unpacked/x86_64-unknown-linux-gnu/prime-agent")
+        .is_file());
 }
 
 /// The full five-target release (the TS test's both-channels case): every
