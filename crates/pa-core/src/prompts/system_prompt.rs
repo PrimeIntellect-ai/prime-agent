@@ -88,6 +88,8 @@ pub struct BuildSystemPromptOptions<'a> {
     pub rlm_depth: Option<u32>,
     /// Human-readable parent name or id for child communication doctrine.
     pub rlm_parent_agent: Option<&'a str>,
+    /// Whether the session has no RLM child runtime (no daemon to spawn through).
+    pub daemonless: bool,
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
 }
@@ -303,6 +305,12 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         "Recursive agent depth: {depth}{}",
         if depth == 0 { " (root)" } else { " (not root)" }
     )];
+    if options.daemonless {
+        lines.push(
+            "Subagents and completion notifications are unavailable in this session (no daemon): rlm.spawn will error, and nothing wakes you after your turn ends, so await background commands before ending it. Plan to do all work yourself."
+                .to_string(),
+        );
+    }
     if !has_ipython {
         lines.push(
             "This session has no Python REPL (`python_repl` tool): the programmatic tools described above are unavailable here."
