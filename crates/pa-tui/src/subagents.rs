@@ -41,7 +41,7 @@ impl SessionIdentity {
             keys.push(format!("session:{id}"));
         }
         if let Some(path) = self.session_file.as_deref() {
-            keys.push(format!("file:{path}"));
+            keys.push(crate::agents_view_state::file_identity(path));
         }
         keys
     }
@@ -78,7 +78,7 @@ pub(crate) fn summary_parent_keys(summary: &Value) -> Vec<String> {
         keys.push(format!("session:{id}"));
     }
     if let Some(path) = get_str(summary, "parentSessionPath") {
-        keys.push(format!("file:{path}"));
+        keys.push(crate::agents_view_state::file_identity(path));
     }
     keys
 }
@@ -93,7 +93,7 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
         keys.push(format!("session:{id}"));
     }
     if let Some(path) = get_str(summary, "sessionFile") {
-        keys.push(format!("file:{path}"));
+        keys.push(crate::agents_view_state::file_identity(path));
     }
     keys
 }
@@ -147,7 +147,13 @@ pub(crate) fn depth_consistent_binding(
     else {
         return false;
     };
-    parent_file == Some(parent_path) && parent_depth == Some(depth - 1)
+    // The binding compares the SAME file's two Windows string forms (the
+    // raw summary form against the ledger's verbatim form), so it folds
+    // through the shared normalizer - an exact compare detaches the
+    // ledger's children exactly where the forest's keys do.
+    let parent_file = parent_file.map(crate::agents_view_state::normalize_session_file_path);
+    let normalized_path = crate::agents_view_state::normalize_session_file_path(parent_path);
+    parent_file.as_deref() == Some(normalized_path.as_str()) && parent_depth == Some(depth - 1)
 }
 
 /// Every row whose summary descends from `parent`, breadth-first over the
