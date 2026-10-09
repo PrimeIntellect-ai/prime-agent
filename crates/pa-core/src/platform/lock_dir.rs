@@ -1517,6 +1517,7 @@ impl LockDir {
     /// above, which has no window.
     #[cfg(unix)]
     fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
+        use std::os::fd::FromRawFd;
         // The mode is fixed AT CREATION (mkdir under the module's
         // umask toggle): no pathname chmod follows the mkdir, so a
         // symlink swapped onto the path after the creation can never
@@ -1558,9 +1559,26 @@ impl LockDir {
         // mismatch refusal below; a takeover between the pin and the
         // writes cannot redirect them - they target this call's inode,
         // so a successor's published record is never corrupted.
-        let dir = match fs::File::open(path) {
-            Ok(dir) => dir,
-            Err(error) => {
+        // The pin is a NO-FOLLOW, DIRECTORY-ONLY open: a parent-writer
+        // who swaps a FIFO onto the path between the mkdir and this
+        // open must fail (ENOTDIR) instead of hanging the acquisition
+        // indefinitely on a blocking read (the retry budget and every
+        // identity check live BELOW this open - they cannot run until
+        // it returns). A swapped symlink fails the open with ELOOP -
+        // the same refusal the takeover-mismatch arm reports.
+        let raw_path =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+                .map_err(|_| io::Error::other("non-null-free lock path"))?;
+        let pfd = unsafe {
+            libc::open(
+                raw_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        let dir = match pfd {
+            pfd if pfd >= 0 => unsafe { fs::File::from_raw_fd(pfd) },
+            _ => {
+                let error = io::Error::last_os_error();
                 // Never leave a fresh lock artifact behind a failed pin -
                 // it would wedge later acquisitions behind contention
                 // until it goes stale. Remove only the directory this
