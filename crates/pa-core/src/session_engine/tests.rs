@@ -826,6 +826,90 @@ async fn prompt_persists_tool_results() {
     assert!(entry["timestamp"].as_str().is_some());
 }
 
+/// Pre-rename sessions replay `ipython`/`python` tool calls; read paths
+/// accept them, so dispatch must route them to the registered python
+/// tool. The bridge owns the aliasing, so the check runs through a real
+/// `ToolDefinitionBridge`.
+#[tokio::test]
+async fn legacy_python_tool_names_dispatch_to_python_repl() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let definition = crate::tools::tool_definition::ToolDefinition {
+        name: pa_types::ai::PYTHON_TOOL_NAME.to_string(),
+        label: "Python".to_string(),
+        description: "Echoes its input".to_string(),
+        prompt_snippet: String::new(),
+        parameters: serde_json::json!({ "type": "object" }),
+        execution_mode: None,
+        prepare_arguments: None,
+        execute: {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_id, params, _signal, _on_update| {
+                let text = params
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    Ok(crate::tools::tool_definition::ToolExecutionResult::text(
+                        format!("echo:{text}"),
+                    ))
+                })
+            })
+        },
+    };
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(
+        Some("calling"),
+        vec![
+            ("call-1", "ipython", serde_json::json!({ "text": "a" })),
+            ("call-2", "python", serde_json::json!({ "text": "b" })),
+        ],
+    );
+    provider.push_text_turn("done");
+    let options = AgentOptions {
+        initial_state: AgentInitialState {
+            model: Some(test_model()),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    };
+    let agent = Agent::new(options);
+    agent
+        .set_tools(vec![crate::session_engine::tool_bridge::bridge_tool(
+            definition,
+        )])
+        .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let session = SessionManager::in_memory(tmp.path());
+    let engine = AgentSession::new(Arc::new(agent), session, vec![])
+        .await
+        .unwrap();
+    engine.prompt("go", PromptOptions::default()).await.unwrap();
+    engine.agent().wait_for_idle().await;
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let entries = engine.entries().await;
+    let texts: Vec<&str> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            FileEntry::Message {
+                message: SessionAgentMessage::ToolResult(result),
+                ..
+            } => Some(result),
+            _ => None,
+        })
+        .map(|result| {
+            assert!(!result.is_error, "result: {result:?}");
+            match &result.content[..] {
+                [pa_types::ai::UserContentBlock::Text(text)] => text.text.as_str(),
+                _ => panic!("expected a single text block: {result:?}"),
+            }
+        })
+        .collect();
+    assert_eq!(texts, ["echo:a", "echo:b"]);
+}
+
 /// A `toolResult` entry captured from a live TS session (read-only, from
 /// the installed product's own session store) parses into the Rust
 /// session types and re-serializes to the identical wire shape.
