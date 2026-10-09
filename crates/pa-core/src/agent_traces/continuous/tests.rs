@@ -148,6 +148,7 @@ async fn controller_drop_cancels_timer_without_waiting_for_delivery() {
     assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).is_file());
 }
 
+// Informational default CI measurement; calibrated host benchmarks own latency gates.
 #[test]
 fn measure_synchronous_pending_marker_cost() {
     let fixture = Fixture::new();
@@ -519,4 +520,40 @@ async fn fallback_only_restart_schedules_the_live_controller_without_a_fresh_wri
     drop(c);
     task.await.unwrap();
     assert!(fallback.exists());
+}
+
+#[test]
+fn recovery_registry_releases_inactive_directory_capacity_and_preserves_other_hosts() {
+    let fixture = Fixture::new();
+    let c = controller(&fixture, &fixture.session_dir.join("registry.jsonl"), true);
+    let another_host = controller(&fixture, &fixture.session_dir.join("other.jsonl"), true);
+    let dead_cancel = TraceUploadCancel::new();
+    let live_cancel = TraceUploadCancel::new();
+    let mut recovered = RecoveryRuns::new();
+    for n in 0..MAX_CONTROLLERS - 1 {
+        recovered.insert(
+            PathBuf::from(format!("synthetic-inactive-{n}")),
+            (
+                dead_cancel.clone(),
+                Arc::new(std::sync::atomic::AtomicU8::new(2)),
+            ),
+        );
+    }
+    recovered.insert(
+        fixture.agent_dir.clone(),
+        (
+            live_cancel.clone(),
+            Arc::new(std::sync::atomic::AtomicU8::new(1)),
+        ),
+    );
+    let weak = Arc::downgrade(&c);
+    drop(c);
+    retain_live_recoveries(&mut recovered, &[weak, Arc::downgrade(&another_host)]);
+    assert!(dead_cancel.is_cancelled());
+    assert!(!live_cancel.is_cancelled());
+    assert_eq!(recovered.len(), 1);
+    drop(another_host);
+    retain_live_recoveries(&mut recovered, &[]);
+    assert!(live_cancel.is_cancelled());
+    assert!(recovered.is_empty());
 }

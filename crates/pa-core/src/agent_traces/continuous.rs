@@ -373,25 +373,37 @@ fn service() -> &'static Service {
     })
 }
 
+// Recovery phases: 0 pending, 1 running, 2 completed for the current live hosts.
+type RecoveryRuns =
+    std::collections::HashMap<PathBuf, (TraceUploadCancel, Arc<std::sync::atomic::AtomicU8>)>;
+
+fn retain_live_recoveries(
+    recovered: &mut RecoveryRuns,
+    controllers: &[Weak<ContinuousTraceUpload>],
+) {
+    let live: std::collections::HashSet<_> = controllers
+        .iter()
+        .filter_map(Weak::upgrade)
+        .map(|c| c.agent_dir.clone())
+        .collect();
+    recovered.retain(|directory, (cancel, _)| {
+        if live.contains(directory) {
+            true
+        } else {
+            cancel.cancel();
+            false
+        }
+    });
+}
+
 async fn run_service() {
     let service = service();
     let permits = Arc::new(tokio::sync::Semaphore::new(4));
     // Recovery belongs to all live hosts sharing this directory, not its first host.
-    let mut recovered: std::collections::HashMap<
-        PathBuf,
-        (TraceUploadCancel, Arc<std::sync::atomic::AtomicU8>),
-    > = std::collections::HashMap::new();
+    let mut recovered = RecoveryRuns::new();
     loop {
         let controllers = service.controllers.lock().unwrap().clone();
-        for (directory, (cancel, _)) in &recovered {
-            if !controllers
-                .iter()
-                .filter_map(Weak::upgrade)
-                .any(|c| &c.agent_dir == directory)
-            {
-                cancel.cancel();
-            }
-        }
+        retain_live_recoveries(&mut recovered, &controllers);
         for weak in controllers {
             if let Some(controller) = weak.upgrade() {
                 if controller.consent.lock().unwrap().0
