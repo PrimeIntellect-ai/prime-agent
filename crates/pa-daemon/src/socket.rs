@@ -140,10 +140,7 @@ impl SocketLease {
                 // acquisition is removed, and a displaced successor is
                 // restored, never unlinked.
                 #[cfg(target_os = "linux")]
-                let release_result = release_lock_dir_identity(&lock_path, &identity, &lock_dir);
-                #[cfg(not(target_os = "linux"))]
-                let release_result = Ok(());
-                let _ = release_result;
+                let _ = release_lock_dir_identity(&lock_path, &identity, &lock_dir);
                 return Err(error.into());
             }
         };
