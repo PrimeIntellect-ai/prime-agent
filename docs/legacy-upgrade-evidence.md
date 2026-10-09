@@ -6,10 +6,20 @@ Support scope starts at 0.6.0; no earlier versions are required.
 
 ## Current verification status
 
-The consolidated source includes recovery hardening and current-main integration.
-Its final full repository gate and packaged-artifact migration rerun are pending.
-Earlier successful results below identify their exact snapshot; they are not
-silently attributed to the latest source.
+The recovery-hardening snapshot passed the full repository gate, but its real
+TS `/update` rerun exposed a request-ID collision after reconnecting: TS replayed
+the preparation response instead of executing shutdown. The follow-up uses
+distinct preparation and shutdown envelope IDs. A deliberate collision fails
+the regression; the fix passes all six coordinator tests. Full gates and actual
+migrations for this follow-up remain pending. Earlier results below are not
+attributed to the latest source.
+
+The consolidated full run encountered `ETXTBSY` (text file busy) in the existing
+`update::download::tests::stages_a_local_payload_directory` test. A diagnostic
+single-test run and the complete core library suite then passed (1,160 passed,
+3 ignored), without product changes or retry logic. The cause is unproven; the
+original failure is retained in `make-check-hardened-etxtbsy-red.log`. One fresh
+full run passed; this does not by itself establish that the failure is fixed.
 
 | Check | Verified result |
 | --- | --- |
@@ -24,7 +34,7 @@ silently attributed to the latest source.
 | Busy-session continuation before follow-up input | Real worker regression reproduced red; 19 focused restore tests passed |
 | npm bridge unit suite | 25 passed, including IPC, fd3, signals, retry, and prefix behavior |
 | Packaging suites | 39 passed: native compatibility, restamping, decoder, catalog |
-| Earlier full repository gate | fmt, clippy, 5,145 tests passed (19 ignored), release build passed |
+| Consolidated full repository gate | fmt, clippy, 5,206 tests passed (19 ignored), release build passed |
 
 ## Published-version matrix
 
@@ -112,13 +122,13 @@ to `/tmp/prime-legacy-artifacts/` in the maintainer workspace. Key reports:
 `native-upgrade-evidence-optimized.tar.gz`, `native-tui-optimized-0.9.{5,6,7,8}.json`,
 `channel-install-probe-final.json`, `probe-red.json`, `probe-green.json`,
 `future-release-recovery.json`, `legacy-recovery-red-green.tar.gz`, and
-`make-check-final.log`. Matrix bundles contain each case's exact archive and
+`make-check-hardened.log`. Matrix bundles contain each case's exact archive and
 bridge hashes. Intermediate evidence remains in Git history and
 `evidence-history-before-condensing.md` beside the raw reports.
 
 ## Remaining release gates and limits
 
-- Rerun the full gate and migration matrix against the consolidated final source.
+- Complete full gates and the migration matrix against the corrected optimized artifact.
 - Verify production artifacts on all supported hosts. The Linux candidate was
   built on Debian 12 with fixture catalog data. Its highest required GLIBC
   symbol is 2.34, but that is not an Ubuntu 22.04 runtime test.
