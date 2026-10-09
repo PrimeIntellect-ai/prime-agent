@@ -1069,11 +1069,16 @@ impl LockDir {
         fs::create_dir(path)?;
         // A hostile umask would strip the owner-read bit from the fresh
         // directory and the pin below would fail before any chmod could
-        // fix it: restore the private mode at creation.
+        // fix it: restore the private mode at creation - cleaning the
+        // fresh directory up on failure, never leaving a lock artifact
+        // behind a failed acquisition.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o700)) {
+                let _ = fs::remove_dir(path);
+                return Err(error);
+            }
         }
         // Every failure below removes the fresh public lock completely -
         // owner file first (a directory containing it cannot be removed),
