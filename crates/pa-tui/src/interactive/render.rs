@@ -486,6 +486,7 @@ impl Renderer {
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 } else {
                     let _ = self.flush_to_main_screen(view);
+                    crate::program_status::clear_if_reported();
                     // The shared exit tail ends the parity teardown: the synchronized-output
                     // release, the SGR reset, the cursor show, and the cooked-tty verification
                     // end in the same terminal state every exit path guarantees.

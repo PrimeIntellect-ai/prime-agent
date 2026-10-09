@@ -368,6 +368,7 @@ impl MockSupervisor {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
+        let mut events_seen = 0;
         write_json(
             &mut writer,
             &json!({
@@ -419,6 +420,45 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
                 }
+                // The scripted turn: a prompt starts one, an abort ends it,
+                // and a `finish` message completes the thread goal on the
+                // way (the OSC 7501 routes).
+                "prompt" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "prompt",
+                            "success": true,
+                            "data": {},
+                        }),
+                    );
+                    events_seen += 1;
+                    push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                    if command.get("message").and_then(Value::as_str) == Some("finish") {
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({ "type": "goal_update", "goal": { "status": "complete" } }),
+                        );
+                    }
+                }
+                "abort" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "abort",
+                            "success": true,
+                            "data": {},
+                        }),
+                    );
+                    events_seen += 1;
+                    push_event(&mut writer, events_seen, &json!({ "type": "turn_end" }));
+                }
                 _ => {
                     write_json(
                         &mut writer,
@@ -441,6 +481,19 @@ pub(crate) fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Va
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write mock frame");
     writer.flush().expect("flush mock frame");
+}
+
+/// Push one unsolicited `session_event` frame with a fresh sequence.
+fn push_event(writer: &mut std::os::unix::net::UnixStream, sequence: u64, event: &Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": event,
+            "meta": { "sequence": sequence },
+        }),
+    );
 }
 
 /// The attach snapshot: a small transcript whose last row carries a

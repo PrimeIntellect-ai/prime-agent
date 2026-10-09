@@ -1910,6 +1910,17 @@ async fn run_interactive_surface(
 
         session.sync_goal_tray(&mut view);
 
+        // OSC 7501 program status.
+        if renderer.is_terminal() {
+            crate::program_status::report(if session.turn_active {
+                crate::program_status::Status::Working
+            } else {
+                session
+                    .goal_terminal
+                    .unwrap_or(crate::program_status::Status::Idle)
+            });
+        }
+
         // Spinner animation: the wall clock drives the phase, not the render rate — the frame gate
         // below caps renders, and only a phase change dirties the frame.
         let animating = session.turn_active

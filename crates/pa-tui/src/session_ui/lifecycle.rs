@@ -109,6 +109,7 @@ impl SessionUi {
             context: None,
             list_rows: Vec::new(),
             turn_active: false,
+            goal_terminal: None,
             turn_ends_seen: 0,
             last_prompt_turn_end: 0,
             steering_mode: "all".to_string(),
@@ -499,6 +500,7 @@ impl SessionUi {
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
+        self.goal_terminal = None;
         // The resynced state owns the loader: a turn still live behind the
         // re-attach keeps the spinner, one that died with the old link does not.
         let streaming = attach.snapshot.get("state").is_some_and(|state| {

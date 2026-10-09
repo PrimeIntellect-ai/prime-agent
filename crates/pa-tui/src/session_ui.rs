@@ -216,6 +216,12 @@ pub(crate) struct SessionUi {
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// The goal's terminal outcome of the most recent work (the OSC 7501
+    /// report's done/error input): Complete/Error from the latest
+    /// `goal_update`, cleared at the next turn's start and at attach — the
+    /// raw goal status persists past completion, so a later ordinary turn
+    /// or a fresh session must not re-report a stale done.
+    pub(crate) goal_terminal: Option<crate::program_status::Status>,
     /// Completed turns observed on this connection. A prompt ACK may arrive
     /// after its entire streamed turn; it must not restart the loader then.
     turn_ends_seen: u64,

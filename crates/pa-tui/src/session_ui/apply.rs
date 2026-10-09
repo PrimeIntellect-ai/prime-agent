@@ -372,6 +372,7 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
+                self.goal_terminal = None;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();

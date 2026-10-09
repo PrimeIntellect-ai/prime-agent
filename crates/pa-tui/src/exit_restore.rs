@@ -71,6 +71,7 @@ pub(crate) fn restore_terminal() {
     // and starve the drain. A no-op when no reader is alive.
     crate::input::request_reader_stop();
     if out.is_terminal() {
+        crate::program_status::clear_if_reported();
         crate::enhanced_keys::drain_for_exit(&mut out);
         let _ = crate::mouse_tracking::disable(&mut out);
         let _ = crate::enhanced_keys::disable(&mut out);

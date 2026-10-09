@@ -1,0 +1,1 @@
+- The Rust TUI now speaks OSC 7501 (the Program Status Protocol): a terminal such as Rex tracks a prime-agent chat or session picker as working/idle/done/error while it runs, and quitting clears the record.
