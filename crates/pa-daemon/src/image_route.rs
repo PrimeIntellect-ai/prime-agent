@@ -89,6 +89,15 @@ impl AgentSessionEngine {
     /// at every model-turn attempt; a text-only session model with an
     /// unusable or missing `settings.imageModel` returns the refusal.
     pub(crate) fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
+        // The lock spans the route's auth resolution AND its publication:
+        // a `/reload` in between would refresh a route the arm then
+        // overwrites with the older pair (the reload's own refreshes run
+        // under the same lock, so whichever runs last leaves the newest
+        // store standing).
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
@@ -110,15 +119,6 @@ impl AgentSessionEngine {
         };
         let armed = match route {
             Some(resolved) => {
-                // The arm's auth resolve-and-install serializes with
-                // `/reload`'s live-input refresh (the route target is one
-                // of the reload's refreshes): a reload landing between
-                // this resolution and the route install must not be
-                // clobbered by the arm's older pair.
-                let _reload_serialized = self
-                    .reload_lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let agent_model = json_round_trip(&resolved.model)
                     .ok_or_else(|| "model conversion failed".to_string())?;
                 Some(ImageRoute {
@@ -211,6 +211,19 @@ impl AgentSessionEngine {
     /// fresh resolution, so a mid-episode model switch is honored): the
     /// next dispatched batch re-evaluates the routing against it.
     pub(crate) fn clear_image_route(&self) {
+        // The lock spans the route take AND the clear's resolve-and-install:
+        // the reload refreshes the armed route in place, so a clear that
+        // took the route first would leave the reload unable to refresh
+        // the detached pair, and the clear's fallback restore would then
+        // clobber the reload's slot refresh with the pre-reload
+        // `session_target`. Both run under the same lock — whichever runs
+        // last leaves the newest store standing. This runs on the turn's
+        // blocking thread (the worker parks the turn there), so the
+        // synchronous resolution never touches an async executor worker.
+        let _reload_serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let route = self
             .image_route
             .lock()
@@ -226,18 +239,6 @@ impl AgentSessionEngine {
         if let Some(agent) = agent {
             agent.set_model_override(None);
         }
-        // The clear's resolve-and-install serializes with `/reload`'s
-        // live-input refresh (the failover restore's fence): without the
-        // lock, a reload landing between the fresh resolution and the
-        // slot write is clobbered by the clear's older pair — a login
-        // that just reloaded never reaches the next turn. This runs on
-        // the turn's blocking thread (the worker parks the turn there),
-        // so the synchronous resolution never touches an async executor
-        // worker.
-        let _reload_serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut target = match self.resolve_model() {
             Ok(model) => {
                 let (api_key, headers) = self.resolve_request_key_and_headers(&model);
