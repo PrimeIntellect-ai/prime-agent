@@ -414,3 +414,53 @@ async fn a_joined_summary_that_would_not_relieve_falls_back_to_the_fresh_path() 
     assert_eq!(compaction_rows(&engine).await, 1);
     summarizer.registration.unregister();
 }
+
+/// A retained custom row in the kept tail is kept context: a joined
+/// summary that would leave the rebuilt context over the blocking
+/// threshold is discarded even with no mid-window growth — the fresh path
+/// re-prepares and re-summarizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joined_summary_over_a_large_kept_custom_row_falls_back_to_the_fresh_path() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    // The kept tail's custom row predates the preparation, so the growth
+    // term cannot carry it; only the kept estimate can.
+    {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_custom_message_retained(
+            "custom_type",
+            UserContent::Text("x".repeat(400_000)),
+            false,
+            None,
+        );
+    }
+    let mut summarizer = held_summarizer(1, vec![follow_up("## Goal\nfresh summary")]);
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    release(&summarizer);
+    let compact = spawn_compact(&engine, &summarizer.model);
+    compact
+        .await
+        .expect("the compact task joined")
+        .expect("the fresh compaction ran");
+    assert_eq!(
+        summarizer.registration.call_count(),
+        2,
+        "the join that ignored the kept custom row was discarded"
+    );
+    let entry = engine
+        .entries()
+        .await
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            FileEntry::Compaction { payload, .. } => Some(payload.summary.clone()),
+            _ => None,
+        })
+        .expect("the compaction row");
+    assert_eq!(entry, "## Goal\nfresh summary");
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}

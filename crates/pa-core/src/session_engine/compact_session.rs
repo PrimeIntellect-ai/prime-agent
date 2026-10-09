@@ -201,12 +201,14 @@ pub(crate) fn prepare_attempt(
         }),
     );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    // Every context-producing row counts, not just messages: the rebuilt
+    // context carries kept custom and branch-summary rows too. Digest rows
+    // count even when the built context keeps only the newest —
+    // over-rejecting a join falls to the fresh summarize.
     let kept_tokens: u64 = entries[cut.first_kept_entry_index..]
         .iter()
-        .filter_map(|entry| match entry {
-            FileEntry::Message { message, .. } => Some(estimate_tokens(message)),
-            _ => None,
-        })
+        .filter_map(crate::session::context_message)
+        .map(|message| estimate_tokens(&message))
         .sum();
     super::compaction_trace::trace(
         "compact.tokens_before_computed",
