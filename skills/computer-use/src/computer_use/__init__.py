@@ -960,12 +960,13 @@ class App:
         show in a value: unverifiable means the clipboard must be preserved
         rather than restored.
         """
-        if not text:
+        if not text or baseline is None:
+            # no readable baseline grounds the comparison: unverifiable
             return False
         fingerprint = ax._window_fingerprint(self._pid)
         if fingerprint is None:
             return False
-        before_head = baseline[4] if baseline is not None else None
+        before_head = baseline[4]
         after_head = fingerprint[4]
         return bool(after_head) and after_head != before_head and text[: ax._FINGERPRINT_VALUE_CHARS] in after_head
 

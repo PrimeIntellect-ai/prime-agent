@@ -1134,6 +1134,15 @@ class RestoreAfterSettleTests(AppTestCase):
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
+    async def test_an_unreadable_baseline_proves_nothing_about_consumption(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        constant = ("Main", 1, "AXTextField", None, "payload")
+        env.fingerprint_values = [None, constant, constant, constant]
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
 
 if __name__ == "__main__":
     unittest.main()
