@@ -171,6 +171,33 @@ mod win32 {
 pub struct LockDir {
     path: PathBuf,
     owner: Option<String>,
+    /// The creation identity (device, inode) of the directory this
+    /// guard created: a displaced holder never releases a successor's
+    /// lock (a judge may park the directory aside and a rival may
+    /// re-lock the path; the recorded identity keeps the drop from
+    /// removing the rival's directory). The creation-probe mtime alone
+    /// cannot tell two locks created inside the same wall-second apart.
+    created: Option<(u64, u64)>,
+}
+
+/// The creation identity of a lock directory, unique per creation on
+/// every platform (dev+inode on Unix, the NTFS file index on Windows).
+#[cfg(unix)]
+#[allow(clippy::unnecessary_wraps)] // the Windows twin is fallible; one shape
+fn lock_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn lock_identity(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    // The NTFS file index needs an unstable feature; the probe-bumped
+    // creation mtime is the Windows identity (it can false-match a
+    // rival created inside the same wall-second - a platform limitation
+    // the owner checks still bound).
+    let modified = meta.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some((duration.as_secs(), u64::from(duration.subsec_nanos())))
 }
 
 impl LockDir {
@@ -202,7 +229,7 @@ impl LockDir {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path, owner.as_deref()) {
-            Ok(()) => Ok(LockDir { path, owner }),
+            Ok(()) => Ok(Self::guard_for(path, owner)),
             // Only an existing path is a lock collision; other failures
             // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -210,7 +237,7 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path, owner.as_deref()) {
-                    Ok(()) => Ok(LockDir { path, owner }),
+                    Ok(()) => Ok(Self::guard_for(path, owner)),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -221,6 +248,20 @@ impl LockDir {
                 }
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Wrap the created lock directory in a guard recording its creation
+    /// mtime: a displaced holder's drop never releases a successor's
+    /// lock at the canonical path.
+    fn guard_for(path: PathBuf, owner: Option<String>) -> Self {
+        let created = fs::symlink_metadata(&path)
+            .ok()
+            .and_then(|meta| lock_identity(&meta));
+        LockDir {
+            path,
+            owner,
+            created,
         }
     }
 
@@ -514,6 +555,30 @@ impl LockDir {
     /// else already reclaimed it (the TS release tolerates ENOENT); other
     /// failures go to the trace log (`Drop` cannot propagate).
     pub fn release(&self) {
+        // A displaced guard never releases a successor's lock: the
+        // directory at the canonical path must still carry this guard's
+        // creation mtime. A judge that parked this directory aside left
+        // the path empty (nothing to release) or to a rival (whose lock
+        // survives this drop). The check runs BEFORE the owner-file
+        // removal: removing a child updates the directory's own mtime.
+        if let Some(created) = self.created {
+            match fs::symlink_metadata(&self.path) {
+                Ok(meta) => {
+                    if lock_identity(&meta) != Some(created) {
+                        return;
+                    }
+                }
+                // Already gone: the release tolerates ENOENT as before.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to inspect lock {} before release: {error}",
+                        self.path.display()
+                    );
+                    return;
+                }
+            }
+        }
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
                 return;
@@ -567,6 +632,30 @@ mod tests {
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
+    }
+
+    /// A displaced guard never releases a successor's lock: a judge
+    /// parked this guard's directory aside, a rival re-locked the
+    /// canonical path, and the guard's own drop leaves the rival's
+    /// directory standing.
+    #[test]
+    fn a_displaced_guard_never_releases_a_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("auth.json");
+        std::fs::write(&file, "{}").unwrap();
+        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
+        // A judge parks this guard's directory aside.
+        let aside = dir.path().join("parked-aside");
+        fs::rename(&guard.path, &aside).unwrap();
+        // A rival re-locks the canonical path.
+        let rival = LockDir::acquire(&file, MIN_STALE).unwrap();
+        guard.release();
+        assert!(
+            guard.path.exists(),
+            "the rival's lock survives the displaced guard's drop"
+        );
+        rival.release();
+        assert!(!guard.path.exists(), "the rival's own release cleans up");
     }
 
     /// The parked-successor disposition never deletes a live lock: an
