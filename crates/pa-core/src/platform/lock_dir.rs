@@ -362,8 +362,14 @@ fn write_owner_through(dir: &fs::File, record: &[u8]) -> io::Result<()> {
     // The create mode is umask-masked (0o600 & ~umask can strip the
     // owner-read bit): repair the mode through this descriptor so a
     // restrictive umask never leaves an unreadable owner record (every
-    // later owner_matches/ensure_owned/judge reads it).
-    unsafe { libc::fchmod(fd, 0o600) };
+    // later owner_matches/ensure_owned/judge reads it). A chmod that
+    // FAILS (a chmod-rejecting fallback mount) must not report success
+    // with the unreadable record: the write aborts with the error.
+    if unsafe { libc::fchmod(fd, 0o600) } != 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
     let mut written = 0;
     while written < record.len() {
         let n = unsafe {

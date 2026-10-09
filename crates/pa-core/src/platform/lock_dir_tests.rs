@@ -525,7 +525,7 @@ fn restrictive_umask_owned_lock_child() {
     // lifecycle.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("state.json");
-    let mask_bits: libc::mode_t = mask.parse().unwrap();
+    let mask_bits: libc::mode_t = u32::from_str_radix(&mask, 8).unwrap();
     let original = unsafe { libc::umask(mask_bits) };
     let guard = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE);
     unsafe { libc::umask(original) };
