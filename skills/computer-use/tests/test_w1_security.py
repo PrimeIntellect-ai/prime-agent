@@ -1104,6 +1104,26 @@ class RestoreAfterSettleTests(AppTestCase):
             [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
         )
 
+    async def test_an_unconsumed_paste_preserves_the_payload_and_says_so(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        # a busy app: the fingerprint never changes, so no consumption signal exists
+        env.fingerprint_values = [("Main", 1, "AXTextField", None, "unchanged value")]
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertIn(("write", ("text", "payload")), env.clipboard_calls)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_a_verified_paste_restores_the_clipboard(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        status = await app.paste("payload")
+        self.assertIn("restored", status)
+        self.assertEqual(
+            env.clipboard_calls,
+            [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

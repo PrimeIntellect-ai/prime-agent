@@ -765,15 +765,16 @@ class App:
 
         await self._action("secondary", dispatch, settle=True)
 
-    async def paste(self, text: str, format: str = "text") -> None:
-        """Paste text through the clipboard with cmd+v, restoring the clipboard after.
+    async def paste(self, text: str, format: str = "text") -> str:
+        """Paste text through the clipboard with cmd+v, returning a status line.
 
         format is one of text, md, or html; only html writes rich clipboard
         data, text and md paste plain. Refuses when the focused element is a
-        secure field (secrets are the user's to paste). The clipboard is
-        restored afterwards, unless it no longer holds the pasted payload —
-        a copy made during the paste window is kept, and a failed snapshot
-        aborts before anything is written.
+        secure field (secrets are the user's to paste). The user's clipboard
+        is restored after a verified paste and after any failure that never
+        posted cmd+v; a copy made during the paste window is kept. When the
+        app's consumption cannot be verified, the payload stays on the
+        clipboard and the status line says so.
         """
         if format not in _PASTE_FORMATS:
             raise ComputerUseError(
@@ -788,9 +789,13 @@ class App:
                 {"text": type(text).__name__},
             )
 
+        posted = False
+        consumed = False
+
         def dispatch() -> None:
             from . import inject
 
+            nonlocal posted, consumed
             with _PASTE_LOCK:
                 self._refuse_secure_focus()
                 saved = _save_clipboard()
@@ -833,12 +838,14 @@ class App:
                                 {},
                             )
                         inject._press_key(self._pid, "cmd+v")
+                        posted = True
                         time.sleep(_PASTE_SETTLE_SECONDS)
                         # cmd+v rides the app's event queue: wait for the UI
                         # to consume the paste before the restore, so a busy
                         # app never reads the user's prior clipboard instead
                         # of the payload
                         self._settle()
+                        consumed = self._paste_consumed(text)
                     except ComputerUseError:
                         raise
                     except Exception as error:
@@ -849,15 +856,27 @@ class App:
                         ) from error
                 finally:
                     # A failed write leaves the cleared pasteboard behind:
-                    # restore it. A successful write restores only when the
-                    # change count has not moved, so a copy made during the
-                    # paste window wins over the restore.
+                    # restore it. A successful write restores when the
+                    # change count has not moved AND the paste is verified
+                    # consumed (or nothing was ever posted); a copy made
+                    # during the paste window wins over the restore, and an
+                    # unconsumed paste keeps the payload in place - a busy
+                    # app must never read the user's prior clipboard.
                     if wrote and not _clipboard_unchanged(change_count):
+                        pass
+                    elif posted and not consumed:
                         pass
                     else:
                         _restore_clipboard(saved)
 
         await self._action("paste", dispatch, settle=False)
+        if posted and not consumed:
+            return (
+                "pasted, but the app's consumption could not be verified; the "
+                "payload remains on the clipboard (the user's prior clipboard "
+                "content was not restored)"
+            )
+        return "pasted; the user's clipboard was restored"
 
     async def _refresh(self, diff_on: bool = True) -> str:
         """Observe the app and store the new snapshot, returning its text."""
@@ -929,6 +948,20 @@ class App:
             await _emit_action(action, "error", started, error_code=error.code)
             raise
         await _emit_action(action, "ok", started)
+
+    def _paste_consumed(self, text: str) -> bool:
+        """Report whether a real consumption signal shows the paste landed.
+
+        The one signal macOS exposes: a text paste changes the focused
+        element's value to carry the payload. An unreadable or unchanged
+        value means the consumption cannot be verified, and the clipboard
+        must be preserved rather than restored.
+        """
+        fingerprint = ax._window_fingerprint(self._pid)
+        if fingerprint is None:
+            return False
+        value_head = fingerprint[4]
+        return bool(value_head) and text[: ax._FINGERPRINT_VALUE_CHARS] in value_head
 
     def _settle(self) -> None:
         """Wait for the app to process injected input, bounded by the poll interval and cap.

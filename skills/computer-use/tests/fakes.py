@@ -477,6 +477,8 @@ class AppEnvironment:
         self.fingerprint_values: list[Any] | None = None  # queued window_fingerprint reads; None = unreadable
         self.fingerprint_reads = 0
         self.pasteboard_holds_payload = True  # _clipboard_unchanged verdict for paste
+        self.pasted_text: str | None = None  # the last written paste payload
+        self.paste_consumed = True  # the default app consumes pastes into the focused value
         self.clipboard_change_count: int | None = 3  # _clipboard_change_count reading
         self.window_id: int | None = 4321
         self.drift = False  # when True, live fingerprints mismatch the snapshot (stale refs)
@@ -513,11 +515,17 @@ class AppEnvironment:
                 ref.get("title") if isinstance(ref, dict) else None)
 
     def _window_fingerprint(self, pid: Any, timeout_seconds: float | None = None) -> Any:
-        """Serve the queued fingerprint reads, cycling while more than one is queued."""
+        """Serve the queued fingerprint reads, cycling while more than one is queued.
+
+        Without queued values, a consumed paste shows in the focused value: the
+        fingerprint carries the pasted payload head (the default app state),
+        or nothing when paste_consumed is False - the busy-app oracle."""
         self.fingerprint_reads += 1
-        if self.fingerprint_values is None:
-            return None
-        return self.fingerprint_values[(self.fingerprint_reads - 1) % len(self.fingerprint_values)]
+        if self.fingerprint_values is not None:
+            return self.fingerprint_values[(self.fingerprint_reads - 1) % len(self.fingerprint_values)]
+        if self.paste_consumed and self.pasted_text:
+            return ("Main", 1, "AXTextField", None, self.pasted_text[:200])
+        return None
 
     def _running_apps(self) -> list[Any]:
         if self.running_error is not None:
@@ -537,6 +545,7 @@ class AppEnvironment:
 
     def _write_clipboard(self, text: str, format: str) -> None:
         self.clipboard_calls.append(("write", (format, text)))
+        self.pasted_text = text
 
     def _restore_clipboard(self, saved: dict[str, Any] | None) -> None:
         self.clipboard_calls.append(("restore", saved))
