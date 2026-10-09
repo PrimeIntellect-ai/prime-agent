@@ -135,6 +135,34 @@ fn a_short_pane_keeps_the_row_and_the_fitting_note_lines() {
     );
 }
 
+/// A top-section selection with a note taller than the viewport shifts
+/// the slice past the section heading; the clipped heading still gets
+/// its leading `...`.
+#[test]
+fn a_top_row_with_a_tall_note_keeps_the_leading_ellipsis() {
+    let (mut mode, index) = mode_with_row("worker", "mock-1");
+    let note = (0..40)
+        .map(|n| format!("word{n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    note_into(&mut mode, index, &note);
+    mode.selected = index;
+    let lines = flat_lines(&mut mode, 60, 7);
+    let worker_row = lines
+        .iter()
+        .position(|line| line.contains("worker"))
+        .expect("the selected row stays visible: {lines:?}");
+    assert!(
+        worker_row > 2,
+        "the worker row must sit under the header rows: {lines:?}"
+    );
+    assert_eq!(
+        lines[worker_row - 1].trim(),
+        "...",
+        "the leading ellipsis marks the clipped heading: {lines:?}"
+    );
+}
+
 /// The note lines are no click targets; rows below still click their own
 /// rows.
 #[test]

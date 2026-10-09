@@ -354,15 +354,38 @@ impl AgentsViewMode {
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
-        let show_leading = start > 0 && visible_rows > 1;
-        let show_trailing = start + visible_rows < display.len() && visible_rows > 2;
-        let content_rows = visible_rows - usize::from(show_leading) - usize::from(show_trailing);
-        let slice_start = if block_end >= start as isize + content_rows as isize {
-            (block_end + 1 - content_rows as isize).min(selected_display_index) as usize
-        } else {
-            start
-        };
-        let slice_end = (slice_start + content_rows).min(display.len());
+        // The clip markers read the FINAL slice: the shift below can move
+        // the slice past the section heading of a top selection, and a
+        // hidden side must always paint its `...`. The markers' rows fold
+        // out of the row budget before the slice is placed, so the reserved
+        // rows and the painted `...` agree with what the slice actually
+        // hides — the markers only turn on as the budget shrinks, so the
+        // fold settles in a pass or two.
+        let mut show_leading = start > 0 && visible_rows > 1;
+        let mut show_trailing = start + visible_rows < display.len() && visible_rows > 2;
+        let mut content_rows =
+            visible_rows - usize::from(show_leading) - usize::from(show_trailing);
+        let mut slice_start;
+        let mut slice_end;
+        loop {
+            // Shift the window forward when the selected row's note block
+            // is taller than the anchored window: pin the block's tail to
+            // the window's bottom edge, never past the selected row.
+            slice_start = if block_end >= start as isize + content_rows as isize {
+                (block_end + 1 - content_rows as isize).min(selected_display_index) as usize
+            } else {
+                start
+            };
+            slice_end = (slice_start + content_rows).min(display.len());
+            let leading = slice_start > 0 && visible_rows > 1;
+            let trailing = slice_end < display.len() && visible_rows > 2;
+            if (leading, trailing) == (show_leading, show_trailing) {
+                break;
+            }
+            show_leading = leading;
+            show_trailing = trailing;
+            content_rows = visible_rows - usize::from(leading) - usize::from(trailing);
+        }
         // The viewport's front rows shift the session rows down — the click rows and the hover
         // band carry the shift.
         let shift = header_rows + usize::from(show_leading);
