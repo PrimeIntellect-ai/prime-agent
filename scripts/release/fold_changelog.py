@@ -19,10 +19,9 @@ Fragments:
 - README.md is not a fragment (the pattern's explanation lives there).
 
 The changelog:
-- a missing CHANGELOG.md is seeded here: a header pointing at the TS
-  product's changelogs (packages/*/CHANGELOG.md on `main`) for the pre-0.10.0
-  history - the rust version line starts at 0.10.0 and does not back-fill
-  0.9.x content.
+- a missing CHANGELOG.md is seeded here: a header pointing at the
+  TypeScript product's changelogs on the v0.9.8 tag for historical notes;
+  Rust releases do not back-fill that content.
 - a stray `## [Unreleased]` section is absorbed into the new section (an
   old-style entry is never stranded).
 - folding a version that already has a section is refused (a double fold).
@@ -57,15 +56,12 @@ UNRELEASED_RE = re.compile(
     r"(^|\n)## \[Unreleased\][ \t]*\n?([\s\S]*?)(?=\n## \[|$)")
 SECTION_START_RE = re.compile(r"^## \[", re.M)
 
-# The seed header: written when CHANGELOG.md does not exist yet. The rust
-# version line starts at 0.10.0 and continues the TS product's history; every
-# release before it stays recorded in the TS changelogs.
+# The seed header: written when CHANGELOG.md does not exist yet. Historical
+# TypeScript release notes stay linked to their immutable release tag.
 SEED_HEADER = """# Changelog
 
-Release notes for Prime Agent (the Rust port). The version line starts at
-0.10.0 and continues the TypeScript product's release history; every release
-before 0.10.0 is recorded in the TS changelogs (packages/*/CHANGELOG.md on the
-`main` branch of this repository).
+Release notes for Prime Agent. Historical TypeScript release notes are
+recorded in the [TypeScript changelog](https://github.com/PrimeIntellect-ai/prime-agent/blob/v0.9.8/packages/coding-agent/CHANGELOG.md).
 """
 
 
