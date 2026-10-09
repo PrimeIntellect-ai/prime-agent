@@ -904,6 +904,7 @@ mod trace_replacement_tests {
 
     #[test]
     fn failed_new_session_prepare_preserves_the_live_trace_registration() {
+        let _env = crate::trace_test_env::lock_env();
         let dir = tempfile::tempdir().unwrap();
         let blocked = dir.path().join("not-a-directory");
         std::fs::write(&blocked, "synthetic blocker").unwrap();

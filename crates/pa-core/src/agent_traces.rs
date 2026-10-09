@@ -577,7 +577,7 @@ fn record_agent_trace_outbox_upload(
     std::fs::create_dir_all(agent_trace_outbox_dir(agent_dir))?;
     let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
     let mutation = outbox_mutation_lock(&entry_path)?;
-    mutation.lock()?;
+    crate::platform::lock_exclusive(&mutation)?;
     let temp = entry_path.with_extension(format!(
         "{}.{}.tmp",
         std::process::id(),

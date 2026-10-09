@@ -262,7 +262,7 @@ fn mark_pending(agent_dir: &Path, session_file: &Path) -> std::io::Result<()> {
     let mutation = outbox_mutation_lock(&primary)?;
     // Never wait behind a pruner or cursor writer on the host thread. A stable
     // fallback marker retains intent even if the primary is about to be pruned.
-    let acquired = mutation.try_lock().is_ok();
+    let acquired = crate::platform::try_lock_exclusive(&mutation).is_ok();
     let entry = if acquired {
         primary
     } else {
@@ -311,7 +311,7 @@ fn prune_entry(entry: &Path, observed: &str, missing_session: Option<&Path>) {
     let Ok(mutation) = outbox_mutation_lock(entry) else {
         return;
     };
-    if mutation.try_lock().is_err() {
+    if crate::platform::try_lock_exclusive(&mutation).is_err() {
         return;
     }
     let mut current = String::new();
@@ -346,7 +346,7 @@ fn delivery_lease(agent_dir: &Path, path: &Path) -> Option<std::fs::File> {
     options.create(true).read(true).write(true).truncate(false);
     crate::platform::perms::set_private_mode(&mut options);
     let file = options.open(lock).ok()?;
-    file.try_lock().ok()?;
+    crate::platform::try_lock_exclusive(&file).ok()?;
     Some(file)
 }
 

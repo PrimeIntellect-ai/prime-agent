@@ -634,6 +634,7 @@ mod trace_fork_tests {
 
     #[tokio::test]
     async fn below_capacity_fork_keeps_its_prepared_controller() {
+        let _env = crate::trace_test_env::lock_env();
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
         let session_dir = agent_dir.join("sessions");
@@ -700,6 +701,7 @@ mod trace_fork_tests {
 
     #[tokio::test]
     async fn fork_at_capacity_publishes_with_the_predecessors_slot() {
+        let _env = crate::trace_test_env::lock_env();
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");
         let session_dir = agent_dir.join("sessions");
