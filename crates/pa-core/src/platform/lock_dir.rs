@@ -410,7 +410,15 @@ fn setup_private_dir(
         // regenerate, never touch.
         return Err(swap_refusal(path));
     }
-    let empty = std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+    let mut entries = std::fs::read_dir(path)?;
+    let empty = match entries.next() {
+        None => true,
+        Some(Ok(_)) => false,
+        // A listing error is a real I/O error, never a phantom swap
+        // refusal. Only a successfully read NON-EMPTY directory is a
+        // swap refusal.
+        Some(Err(error)) => return Err(error),
+    };
     if !empty {
         // A swapped non-empty victim: its notes are not ours to touch.
         return Err(swap_refusal(path));
@@ -1128,13 +1136,24 @@ impl LockDir {
     #[cfg(target_os = "linux")]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         let candidate = Self::claim_candidate_name(path)?;
-        // The candidate's setup runs through the no-follow pinned handle
-        // with the creation-time discipline: a pre-existing victim
-        // directory fails the ctime check, a swapped symlink or file
-        // fails the type check, a swapped non-empty directory fails the
-        // emptiness check. Fail closed on every refusal - no blind
-        // remove (a leaked inert dotname beats unlinking through a
-        // possible symlink into a victim's notes).
+        // The candidate's setup runs through the no-follow pinned handle:
+        // a swapped symlink or file fails the type check, a swapped
+        // non-empty directory fails the emptiness check. Fail closed on
+        // every refusal - no blind remove (a leaked inert dotname beats
+        // unlinking through a possible symlink into a victim's notes).
+        // ACCEPTED RISK (conductor-ruled, the parent-dir-write
+        // precedent): a parent writer can pre-create an EMPTY
+        // directory and swap it onto the fresh name inside the
+        // mkdir->pin window - no user-space witness can prove which
+        // inode a replaceable name's mkdir created (the ctime variant
+        // was removed: clock skew rejected genuine creations on the
+        // NFS/CIFS mounts this fallback serves). The no-follow pin,
+        // the emptiness refusal, the dual-open identity check, the
+        // fail-closed cleanups, and the name entropy are the full
+        // defenseable surface; the parent-dir-write actor is out of
+        // scope by the PR's own earlier accepted-risk scoping, which
+        // this residual strictly subclasses (they can replace the
+        // public lock path outright).
         let dir = match setup_private_dir(&candidate, 0o700, owner, None) {
             Ok((dir, _identity)) => dir,
             Err(error) => return Err(error),
