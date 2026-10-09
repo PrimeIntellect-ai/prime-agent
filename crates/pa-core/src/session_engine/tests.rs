@@ -826,12 +826,10 @@ async fn prompt_persists_tool_results() {
     assert!(entry["timestamp"].as_str().is_some());
 }
 
-/// Pre-rename sessions replay `ipython`/`python` tool calls; read paths
-/// accept them, so dispatch must route them to the registered python
-/// tool. The bridge owns the aliasing, so the check runs through a real
-/// `ToolDefinitionBridge`.
+/// Persisted `ipython`/`python` calls dispatch through `ToolDefinitionBridge`
+/// to the registered Python tool.
 #[tokio::test]
-async fn legacy_python_tool_names_dispatch_to_python_repl() {
+async fn python_tool_aliases_dispatch_to_python_repl() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let definition = crate::tools::tool_definition::ToolDefinition {
         name: pa_types::ai::PYTHON_TOOL_NAME.to_string(),
