@@ -2819,7 +2819,17 @@ fi
 # is the Rust port's now (the TS tree itself was preserved above). An
 # UNOWNED regular file at the path is not silently destroyed: it is moved
 # aside first, so nothing this script did not write is ever lost.
-if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+# Old npm TUIs may have captured `node <prefix>/bin/prime-agent` before
+# updating. Keep that npm-owned JS symlink executable by Node when npm and
+# Rust share a prefix. The bridge delegates directly to the native payload.
+preserve_npm_launcher=no
+if [ "${PRIME_AGENT_PRESERVE_NPM_BRIDGE:-0}" = 1 ] \
+   && [ -n "${PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT:-}" ] \
+   && [ -L "$launcher" ] \
+   && [ "$launcher" -ef "$PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT" ]; then
+  preserve_npm_launcher=yes
+fi
+if [ "$preserve_npm_launcher" != yes ] && { [ -e "$launcher" ] || [ -L "$launcher" ]; }; then
   if [ -L "$launcher" ]; then
     say "replacing the prime-agent command symlink (was: $(readlink "$launcher" 2>/dev/null || true));"
     say "  the keyword is the Rust port's now"
@@ -2876,8 +2886,16 @@ exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF
 fi
 chmod 0755 "$launcher_tmp"
-mv -f "$launcher_tmp" "$launcher"
-launcher_tmp=""
+if [ "$preserve_npm_launcher" = yes ]; then
+  # Probing the public bridge while it holds its migration lock would
+  # recurse into this install. Use the generated sibling wrapper for these
+  # checks; its relative payload path is identical, and EXIT removes it.
+  install_probe_launcher="$launcher_tmp"
+else
+  mv -f "$launcher_tmp" "$launcher"
+  launcher_tmp=""
+  install_probe_launcher="$launcher"
+fi
 if [ "${PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET:-0}" = 1 ]; then
   mkdir -p "${PREFIX}/share/.prime-agent-npm-bridge"
   printf 'legacy\n' > "${PREFIX}/share/.prime-agent-npm-bridge/legacy-daemon-socket"
@@ -3141,7 +3159,7 @@ if uv_on_path \
   # unkillable launcher must not hold the console, the detail fd 3, or the
   # captured pipe a wrapper waits on past this script's exit.
   (
-    "$launcher" --prime-agent-bootstrap >"$prewarm_out" 2>&1 &
+    "$install_probe_launcher" --prime-agent-bootstrap >"$prewarm_out" 2>&1 &
     printf '%s\n' "$!" >"$prewarm_pid_file"
     # The status rides a file (set -e would take a nonzero wait as an
     # abort): the done marker, not the pid, is the loop's signal.
@@ -3293,8 +3311,7 @@ if uv_on_path \
       note "  stopped; provisioning may still be running - the first session bootstraps the"
       note "  kernel itself and needs the network once."
     fi
-  elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then
-    step_ok "Kernel ready"
+  elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then    step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
     say "$(cat "$prewarm_out" 2>/dev/null || true)"
   else
@@ -3328,7 +3345,7 @@ fi
 # failure prints the output plus a re-run hint instead of failing the
 # install over it.
 version_ok="yes"
-if version_out="$("$launcher" --version 2>&1)"; then
+if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
   version_ok="no"

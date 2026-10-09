@@ -292,6 +292,7 @@ async function main() {
         env: { ...nativeEnvironment, PRIME_AGENT_VERSION: metadata.version,
           PRIME_AGENT_RELEASE_CHANNEL: metadata.primeAgentReleaseChannel,
           PRIME_AGENT_RUST_PREFIX: prefix, PRIME_AGENT_PRESERVE_NPM_BRIDGE: "1",
+          PRIME_AGENT_NPM_BRIDGE_ENTRYPOINT: path.join(packageRoot, "dist", "bundle", "cli.js"),
           PRIME_AGENT_USE_LEGACY_DAEMON_SOCKET: "1",
           PRIME_AGENT_DEFER_DAEMON_STOP: coordinator ? "1" : "0" },
         stdio: ["ignore", process.stderr, process.stderr],

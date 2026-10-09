@@ -1464,7 +1464,9 @@ fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
     let transcript = dir.path().join("transcript");
     let dead_tmpdir = dir.path().join("no-such-dir");
     let harness = format!(
-        "#!/bin/sh\n         set -e\n         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n         uv_on_path() {{ return 0; }}\n         launcher='never-run'\n         TMPDIR={dead_tmpdir}\n         export TMPDIR\n         {block}\
+        "#!/bin/sh\n         set -e\n         step_start() {{ printf 'start %s\\n' \"$1\" >> {transcript}; }}\n         step_ok() {{ printf 'ok %s\\n' \"$1\" >> {transcript}; }}\n         step_fail() {{ printf 'fail %s %s\\n' \"$1\" \"$2\" >> {transcript}; }}\n         say() {{ printf 'say %s\\n' \"$*\" >> {transcript}; }}\n         note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n         uv_on_path() {{ return 0; }}\n         launcher='never-run'\n\
+         install_probe_launcher='never-run'\n\
+         TMPDIR={dead_tmpdir}\n         export TMPDIR\n         {block}\
          printf 'flow-continued\\n' >> {transcript}\n         exit 0\n",
         transcript = transcript.display(),
         dead_tmpdir = dead_tmpdir.display(),
@@ -1516,6 +1518,8 @@ fn install_rust_sh_prewarm_skips_when_the_scratch_cannot_be_made() {
          note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
          uv_on_path() {{ return 0; }}\n\
          launcher=true\n\
+         install_probe_launcher=true\n\
+\
          TMPDIR={tmpdir}\n\
          export TMPDIR\n\
          PATH={rm_stub}:$PATH\n\
@@ -1592,6 +1596,8 @@ fn install_rust_sh_prewarm_runner_releases_the_captured_pipe() {
          note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
          uv_on_path() {{ return 0; }}\n\
          launcher=true\n\
+         install_probe_launcher=true\n\
+\
          prewarm_bound_s=2\n\
          {block}\
          printf 'flow-continued\\n' >> {transcript}\n\
@@ -1678,6 +1684,7 @@ fn install_rust_sh_prewarm_kill_contains_a_respawning_launcher() {
          note() {{ printf 'note %s\\n' \"$*\" >> {transcript}; }}\n\
          uv_on_path() {{ return 0; }}\n\
          launcher='{launcher}'\n\
+         install_probe_launcher='{launcher}'\n\
          prewarm_bound_s=2\n\
          {block}\
          printf 'flow-continued\\n' >> {transcript}\n\
@@ -1924,6 +1931,7 @@ fn drive_sh_prewarm_block(
          todo() {{ printf 'todo %s\\n' \"$*\" >> {transcript}; }}\n\
          uv_on_path() {{ return 0; }}\n\
          launcher='{launcher}'\n\
+         install_probe_launcher='{launcher}'\n\
          prewarm_bound_s={bound}\n\
          {block}\
          printf 'flow-continued\\n' >> {transcript}\n\
