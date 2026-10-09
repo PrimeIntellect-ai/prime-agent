@@ -837,6 +837,7 @@ class App:
                                 "the clipboard changed during the paste; the payload was not pasted",
                                 {},
                             )
+                        baseline = ax._window_fingerprint(self._pid)
                         inject._press_key(self._pid, "cmd+v")
                         posted = True
                         time.sleep(_PASTE_SETTLE_SECONDS)
@@ -845,7 +846,7 @@ class App:
                         # app never reads the user's prior clipboard instead
                         # of the payload
                         self._settle()
-                        consumed = self._paste_consumed(text)
+                        consumed = self._paste_consumed(text, baseline)
                     except ComputerUseError:
                         raise
                     except Exception as error:
@@ -949,19 +950,24 @@ class App:
             raise
         await _emit_action(action, "ok", started)
 
-    def _paste_consumed(self, text: str) -> bool:
-        """Report whether a real consumption signal shows the paste landed.
+    def _paste_consumed(self, text: str, baseline: Any) -> bool:
+        """Report whether an attributable transition shows the paste landed.
 
-        The one signal macOS exposes: a text paste changes the focused
-        element's value to carry the payload. An unreadable or unchanged
-        value means the consumption cannot be verified, and the clipboard
-        must be preserved rather than restored.
+        The one signal macOS exposes: the focused element's value CHANGES to
+        carry the payload. The pre-paste fingerprint is the baseline - a
+        value that already carried the payload proves nothing, an unchanged
+        or unreadable value proves nothing, and an empty payload can never
+        show in a value: unverifiable means the clipboard must be preserved
+        rather than restored.
         """
+        if not text:
+            return False
         fingerprint = ax._window_fingerprint(self._pid)
         if fingerprint is None:
             return False
-        value_head = fingerprint[4]
-        return bool(value_head) and text[: ax._FINGERPRINT_VALUE_CHARS] in value_head
+        before_head = baseline[4] if baseline is not None else None
+        after_head = fingerprint[4]
+        return bool(after_head) and after_head != before_head and text[: ax._FINGERPRINT_VALUE_CHARS] in after_head
 
     def _settle(self) -> None:
         """Wait for the app to process injected input, bounded by the poll interval and cap.

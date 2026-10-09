@@ -1124,6 +1124,16 @@ class RestoreAfterSettleTests(AppTestCase):
             [("save", None), ("write", ("text", "payload")), ("restore", {"string": "saved"})],
         )
 
+    async def test_a_preexisting_value_proves_nothing_about_consumption(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        # the focused field already carried the payload before the paste, and
+        # a busy app's consumption is still pending: no attributable transition
+        env.fingerprint_values = [("Main", 1, "AXTextField", None, "payload")]
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
 
 if __name__ == "__main__":
     unittest.main()

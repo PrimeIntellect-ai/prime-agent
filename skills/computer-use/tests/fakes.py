@@ -478,6 +478,8 @@ class AppEnvironment:
         self.fingerprint_reads = 0
         self.pasteboard_holds_payload = True  # _clipboard_unchanged verdict for paste
         self.pasted_text: str | None = None  # the last written paste payload
+        self.presses_at_write = 0  # cmd+v presses seen when the payload was written
+        self.preexisting_value_head: str | None = ""  # the focused value before any paste
         self.paste_consumed = True  # the default app consumes pastes into the focused value
         self.clipboard_change_count: int | None = 3  # _clipboard_change_count reading
         self.window_id: int | None = 4321
@@ -517,15 +519,21 @@ class AppEnvironment:
     def _window_fingerprint(self, pid: Any, timeout_seconds: float | None = None) -> Any:
         """Serve the queued fingerprint reads, cycling while more than one is queued.
 
-        Without queued values, a consumed paste shows in the focused value: the
-        fingerprint carries the pasted payload head (the default app state),
-        or nothing when paste_consumed is False - the busy-app oracle."""
+        Without queued values, the focused value head models a consumed paste
+        ONLY after a cmd+v press that followed the payload write - the
+        baseline reads before the press serve the pre-existing value, so a
+        consumption verdict requires an attributable transition."""
         self.fingerprint_reads += 1
         if self.fingerprint_values is not None:
             return self.fingerprint_values[(self.fingerprint_reads - 1) % len(self.fingerprint_values)]
-        if self.paste_consumed and self.pasted_text:
+        if self.pasted_text is None:
+            return None  # no paste in flight: the fingerprint stays unreadable
+        if self.paste_consumed and self._cmd_v_presses() > self.presses_at_write:
             return ("Main", 1, "AXTextField", None, self.pasted_text[:200])
-        return None
+        return ("Main", 1, "AXTextField", None, self.preexisting_value_head)
+
+    def _cmd_v_presses(self) -> int:
+        return sum(1 for name, args in self.recorder.calls if name == "press_key" and args.get("key") == "cmd+v")
 
     def _running_apps(self) -> list[Any]:
         if self.running_error is not None:
@@ -546,6 +554,7 @@ class AppEnvironment:
     def _write_clipboard(self, text: str, format: str) -> None:
         self.clipboard_calls.append(("write", (format, text)))
         self.pasted_text = text
+        self.presses_at_write = self._cmd_v_presses()
 
     def _restore_clipboard(self, saved: dict[str, Any] | None) -> None:
         self.clipboard_calls.append(("restore", saved))
