@@ -22,6 +22,10 @@ It then prints ONE merged report: the scope, which binaries failed, in which
 shard, with their failing test names — the single place a lane looks when a
 PR run goes red, instead of crawling the job logs.
 
+Artifact selection uses the latest *available* manifest per shard. A rerun
+that crashes before uploading a manifest cannot be inferred from artifacts;
+the matrix job's own failure remains a separate required CI gate.
+
 Usage (from the repo root, in ci.yml's test summary job):
 
   python3 scripts/ci_test_shard_summary.py --total 4 --dir manifests
@@ -30,8 +34,10 @@ Usage (from the repo root, in ci.yml's test summary job):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -43,11 +49,50 @@ def shard_of(unit_id: str, total: int) -> int:
 
 
 def load_manifests(manifest_dir: Path, total: int):
-    manifests = {}
+    """Choose the newest numeric attempt independently for each shard."""
+    candidates = {}
+    problems = []
+    pattern = re.compile(r"shard-manifest-(\d+)(?:-attempt-(\d+))?\.json")
     for path in sorted(manifest_dir.glob("shard-manifest-*.json")):
-        shard = json.loads(path.read_text(encoding="utf-8"))
-        manifests[shard["shard"]] = shard
-    return manifests
+        match = pattern.fullmatch(path.name)
+        if not match:
+            problems.append(f"unrecognized manifest filename: {path.name}")
+            continue
+        shard_number, attempt = int(match[1]), int(match[2] or 1)
+        if not 1 <= shard_number <= total or attempt < 1:
+            problems.append(f"invalid shard/attempt in {path.name}")
+            continue
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError("JSON root must be an object")
+            recorded_attempt = manifest.get("run_attempt", 1)
+            if (type(manifest["shard"]) is not int or manifest["shard"] != shard_number
+                    or type(manifest["total"]) is not int or manifest["total"] != total
+                    or type(recorded_attempt) is not int or recorded_attempt != attempt):
+                raise ValueError("filename, shard, total, or attempt metadata disagree")
+            if ((os.environ.get("GITHUB_RUN_ID") and
+                 manifest.get("run_id") != os.environ["GITHUB_RUN_ID"]) or
+                (os.environ.get("GITHUB_SHA") and
+                 manifest.get("commit_sha") != os.environ["GITHUB_SHA"])):
+                raise ValueError("run/commit identity mismatch")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            problems.append(f"{path.name}: invalid manifest: {error}")
+            continue
+        key = (shard_number, attempt)
+        if key in candidates:
+            problems.append(f"shard {shard_number} attempt {attempt}: duplicate manifests "
+                            f"({candidates[key][0].name}, {path.name})")
+        else:
+            candidates[key] = (path, manifest)
+    manifests = {}
+    retained = {}
+    for shard in range(1, total + 1):
+        attempts = sorted(attempt for number, attempt in candidates if number == shard)
+        if attempts:
+            manifests[shard] = candidates[(shard, attempts[-1])][1]
+            retained[shard] = attempts[:-1]
+    return manifests, retained, problems
 
 
 def run_scope(manifests: dict) -> tuple[str, list[str] | None]:
@@ -87,13 +132,54 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                             "finishing (see that job's log)")
     if problems:
         return problems, failed_units
+    incomplete = []
+    for shard, manifest in sorted(manifests.items()):
+        if not isinstance(manifest.get("all_unit_ids"), list) or not isinstance(manifest.get("units"), list):
+            problems.append(f"shard {shard}: missing enumeration or unit results")
+        elif (any(not isinstance(uid, str) for uid in manifest["all_unit_ids"])
+              or any(not isinstance(unit, dict) or not isinstance(unit.get("id"), str)
+                     or type(unit.get("rc")) is not int
+                     for unit in manifest["units"])):
+            problems.append(f"shard {shard}: malformed enumeration or unit results")
+        if "selected_unit_ids" in manifest and (
+                not isinstance(manifest["selected_unit_ids"], list)
+                or any(not isinstance(uid, str) for uid in manifest["selected_unit_ids"])):
+            problems.append(f"shard {shard}: malformed selected unit ids")
+        if manifest.get("complete") is not True:
+            incomplete.append(f"shard {shard} is incomplete: complete must be literal true")
+        scope = manifest.get("scope", {"kind": "all"})
+        if (not isinstance(scope, dict) or scope.get("kind") not in ("all", "crates")
+                or (scope.get("kind") == "all" and "crates" in scope)
+                or (scope.get("kind") == "crates" and
+                    (not isinstance(scope.get("crates"), list) or
+                     any(not isinstance(crate, str) for crate in scope["crates"])))):
+            problems.append(f"shard {shard}: invalid selection scope")
+    if problems:
+        return problems + incomplete, failed_units
+
+    identities = {(m.get("run_id"), m.get("commit_sha")) for m in manifests.values()}
+    if (len(identities) != 1 or any(not run_id or not sha for run_id, sha in identities)
+            or (os.environ.get("GITHUB_RUN_ID") and
+                any(run_id != os.environ["GITHUB_RUN_ID"] for run_id, _ in identities))
+            or (os.environ.get("GITHUB_SHA") and
+                any(sha != os.environ["GITHUB_SHA"] for _, sha in identities))):
+        problems.append("selected shards have mismatched or missing run/commit identity")
+        return problems + incomplete, failed_units
 
     id_lists = {tuple(m["all_unit_ids"]) for m in manifests.values()}
     if len(id_lists) != 1:
         problems.append("shards enumerated different unit sets — the merge "
                         "ref changed mid-run or a manifest is stale; rerun CI")
-        return problems, failed_units
+        return problems + incomplete, failed_units
     all_ids = manifests[1]["all_unit_ids"]
+    if len(all_ids) != len(set(all_ids)):
+        problems.append("enumeration contains duplicate unit ids")
+    expected_digest = hashlib.sha256("\n".join(all_ids).encode("utf-8")).hexdigest()
+    for shard, manifest in sorted(manifests.items()):
+        if manifest.get("digest") != expected_digest:
+            problems.append(f"shard {shard}: enumeration digest mismatch")
+    if problems:
+        return problems + incomplete, failed_units
 
     kind, crates = run_scope(manifests)
     if kind == "MIXED":
@@ -102,9 +188,15 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         problems.append("shards recorded different selection scopes — a "
                         "mixed-scope wave is a broken partition: " +
                         ", ".join(described))
-        return problems, failed_units
+        return problems + incomplete, failed_units
     selection = selected_ids(manifests[1], crates)
     selection_set = set(selection)
+    expected_selection = [uid for uid in all_ids if crates is None or _unit_package(uid) in set(crates)]
+    for shard, manifest in sorted(manifests.items()):
+        if selected_ids(manifest, crates) != expected_selection:
+            problems.append(f"shard {shard}: selected unit ids disagree with scope/enumeration")
+    if problems:
+        return problems + incomplete, failed_units
 
     executed: dict[str, str] = {}  # unit id -> shard that ran it
     for shard, manifest in sorted(manifests.items()):
@@ -113,6 +205,8 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
             if uid not in all_ids:
                 problems.append(f"shard {shard}: executed unknown unit {uid}")
                 continue
+            if shard_of(uid, total) != shard - 1:
+                problems.append(f"shard {shard}: unit {uid} belongs to shard {shard_of(uid, total) + 1}")
             if uid in executed:
                 problems.append(f"unit {uid} ran in shards {executed[uid]} "
                                 f"and {shard} — assignments must be disjoint")
@@ -132,23 +226,42 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         problems.append(f"assigned outside the enumeration: {outside}")
 
     for shard, manifest in sorted(manifests.items()):
-        if not manifest.get("complete", False):
+        if manifest.get("complete") is not True:
             assigned = [i for i in selection if shard_of(i, total) == shard - 1]
             unfinished = sorted(set(assigned) - {u["id"] for u in manifest["units"]})
             problems.append(f"shard {shard} is incomplete; units it never "
                             f"reported: {unfinished}")
-    return problems, failed_units
+    return problems + incomplete, failed_units
 
 
 def merged_report(manifests: dict, total: int, problems: list[str],
-                  failed_units: set[str]) -> str:
-    kind, crates = run_scope(manifests)
+                  failed_units: set[str], retained: dict | None = None) -> str:
+    if problems:
+        lines = [f"### test summary ({total} shards)",
+                 "- attempt selection: latest available manifest per shard; the matrix job "
+                 "separately reports reruns that uploaded no manifest"]
+        for shard in sorted(manifests):
+            older = (retained or {}).get(shard, [])
+            lines.append(f"- shard {shard}: selected attempt "
+                         f"{manifests[shard].get('run_attempt', 1)}; retained prior attempts: "
+                         f"{', '.join(map(str, older)) if older else 'none'}")
+        lines.extend(["", "**partition audit FAILED**", *(f"- {problem}" for problem in problems)])
+        return "\n".join(lines)
+    kind, crates = run_scope(manifests) if manifests else ("all", None)
     scope = ("full selection" if kind == "all"
              else f"crate selection: {', '.join(crates or [])}")
     selected = selected_ids(manifests.get(1, {"all_unit_ids": []}), crates)
     union_size = len(manifests.get(1, {}).get("all_unit_ids", []))
     lines = [f"### test summary ({total} shards)",
-             f"- scope: {scope} — {len(selected)} of {union_size} units selected"]
+             f"- scope: {scope} — {len(selected)} of {union_size} units selected",
+             "- attempt selection: latest available manifest per shard; the matrix job "
+             "separately reports reruns that uploaded no manifest"]
+    for shard in range(1, total + 1):
+        if shard in manifests:
+            attempt = manifests[shard].get("run_attempt", 1)
+            older = (retained or {}).get(shard, [])
+            lines.append(f"- shard {shard}: selected attempt {attempt}; retained prior attempts: "
+                         f"{', '.join(map(str, older)) if older else 'none'}")
     for shard in sorted(manifests):
         manifest = manifests[shard]
         units = manifest["units"]
@@ -182,9 +295,10 @@ def main() -> int:
                         help="directory with shard-manifest-*.json files")
     args = parser.parse_args()
 
-    manifests = load_manifests(args.dir, args.total)
-    problems, failed_units = audit(manifests, args.total)
-    report = merged_report(manifests, args.total, problems, failed_units)
+    manifests, retained, load_problems = load_manifests(args.dir, args.total)
+    audit_problems, failed_units = audit(manifests, args.total)
+    problems = load_problems + audit_problems
+    report = merged_report(manifests, args.total, problems, failed_units, retained)
     print(report)
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:

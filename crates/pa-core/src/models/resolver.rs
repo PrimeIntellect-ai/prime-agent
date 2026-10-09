@@ -189,7 +189,7 @@ pub fn find_preferred_default_model(available_models: &[Model]) -> Option<&Model
         .find(|model| default_model_per_provider(&model.provider).is_some_and(|id| model.id == id))
 }
 
-fn is_valid_thinking_level(value: &str) -> bool {
+pub(crate) fn is_valid_thinking_level(value: &str) -> bool {
     matches!(
         value,
         "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"

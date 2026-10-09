@@ -41,6 +41,9 @@ futures = { workspace = true }
 crossterm = "0.28"
 nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
+# `test-util` (tokio time pause) is test-only: the goal backoff-wake tests
+# drive the 10s/20s windows through the paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints.clippy]
 # pa-cli keeps its OWN lints table (not `workspace = true`): the
