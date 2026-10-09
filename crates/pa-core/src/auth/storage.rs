@@ -110,7 +110,12 @@ impl FileAuthStorageBackend {
             attempts,
             interval,
         ) {
-            Ok(guard) => Ok(Some(RefreshExclusion { _guard: guard })),
+            // A guard whose owner file a racing judge already reclaimed
+            // is no exclusion at all: fail closed rather than exchange.
+            Ok(guard) if guard.ensure_owned().is_ok() => {
+                Ok(Some(RefreshExclusion { _guard: guard }))
+            }
+            Ok(_) => Err("the refresh lock was reclaimed before this attempt held it".to_string()),
             // The bound exhausted with a live incumbent: the exchange
             // never runs without the exclusion — the ordinary ladder
             // stands, and the incumbent's eventual write serves the

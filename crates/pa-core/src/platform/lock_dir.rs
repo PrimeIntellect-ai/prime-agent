@@ -425,15 +425,44 @@ impl LockDir {
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
-                match fs::remove_file(&owner_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                // Stale: remove and let the caller retry.
-                match fs::remove_dir(path) {
-                    Ok(()) => return Ok(()),
-                    // A racing holder released it first.
+                // Stale by observation: reclaim by renaming the directory
+                // aside — the rename is the atomic decision. A successor
+                // lock another waiter installed between the observation
+                // and the rename is detected by identity (the mtime this
+                // judge observed) and restored untouched: only the lock
+                // that was stale at observation is ever deleted.
+                let aside = path.with_extension(format!("stale-{}", uuid::Uuid::new_v4()));
+                match fs::rename(path, &aside) {
+                    Ok(()) => {
+                        let renamed_is_observed = fs::symlink_metadata(&aside)
+                            .and_then(|meta| meta.modified())
+                            .is_ok_and(|renamed_modified| renamed_modified == modified);
+                        if renamed_is_observed {
+                            // The observed stale lock: delete and let the
+                            // caller retry the create.
+                            if let Err(error) = fs::remove_dir_all(&aside) {
+                                if error.kind() != io::ErrorKind::NotFound {
+                                    return Err(error);
+                                }
+                            }
+                            return Ok(());
+                        }
+                        // A live successor holds the path now: restore it
+                        // untouched and report contention. An owned
+                        // successor whose directory this judge grabbed
+                        // cannot be restored reports contention anyway
+                        // (its release is owner-checked and never
+                        // deletes a successor).
+                        if fs::rename(&aside, path).is_err() {
+                            let _ = fs::remove_dir_all(&aside);
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!("Lock file is already being held: {}", path.display()),
+                        ));
+                    }
+                    // A racing holder or reclamer acted first: retry the
+                    // create.
                     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
                     Err(error) => return Err(error),
                 }
