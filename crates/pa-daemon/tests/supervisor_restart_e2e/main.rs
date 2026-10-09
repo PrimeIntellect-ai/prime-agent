@@ -408,6 +408,7 @@ fn distinct(values: Vec<String>) -> Vec<String> {
 // The restart regression families live in the child modules (same tree
 // position); every child's use-super glob resolves through this root's
 // harness, and the one test binary stays one CI shard unit.
+mod boot_cleanup;
 mod plain_boot;
 mod restart;
 mod revival;
