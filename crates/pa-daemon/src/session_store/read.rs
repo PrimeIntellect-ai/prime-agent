@@ -156,6 +156,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
         };
@@ -214,6 +215,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown,
             skipped_lines: 0,
         };
@@ -281,6 +283,7 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
+        full.trace_upload.clone_from(&self.trace_upload);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
         // can disagree, a post-snapshot marker must hydrate, and an
@@ -309,6 +312,7 @@ impl SessionFile {
             leaf_id: None,
             window: None,
             lease: None,
+            trace_upload: None,
             anthropic_warning_shown: false,
             skipped_lines: 0,
         }

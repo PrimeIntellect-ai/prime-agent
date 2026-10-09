@@ -205,6 +205,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  migration-packaging:
+    name: historical upgrade packaging
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify native and npm compatibility packaging
+        run: |
+          python3 scripts/release/test_native_compat.py
+          python3 scripts/release/test_npm_bridge.py
+          python3 scripts/release/test_restamp.py
+
   clippy-test:
     name: check + clippy (workspace)
     needs: trust
