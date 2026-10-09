@@ -1564,8 +1564,16 @@ impl LockDir {
         // open must fail (ENOTDIR) instead of hanging the acquisition
         // indefinitely on a blocking read (the retry budget and every
         // identity check live BELOW this open - they cannot run until
-        // it returns). A swapped symlink fails the open with ELOOP -
-        // the same refusal the takeover-mismatch arm reports.
+        // it returns). A swapped symlink fails the same way: with
+        // O_DIRECTORY the kernel checks the directory requirement
+        // without following the link, so it is ENOTDIR as well, and
+        // the raw errno surfaces untouched (never blanket-mapped into
+        // a takeover or a collision: the witness-gated cleanup below
+        // cannot touch either entry, because identity_at's lstat of
+        // a symlink or a FIFO never matches the created directory's
+        // inode). A takeover that wins the open - a real directory
+        // at the path - is caught by the pinned-identity mismatch
+        // refusal below.
         let raw_path =
             std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
                 .map_err(|_| io::Error::other("non-null-free lock path"))?;
