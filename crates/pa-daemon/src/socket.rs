@@ -295,6 +295,39 @@ impl SocketLease {
         Ok(())
     }
 
+    /// The async-facing fence: identical to `assert_held`, with the
+    /// grace waited ASYNCHRONOUSLY - the synchronous `compromised_after_grace`
+    /// blocks its thread for the grace period, which stalls every task
+    /// and timer on a Tokio worker (the entire runtime on a
+    /// current-thread one). The async socket-preparation paths use this
+    /// variant so a displaced lock path costs an await, never a stall.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this lease was displaced or compromised.
+    #[cfg(unix)]
+    pub async fn assert_held_async(&self) -> Result<()> {
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                self.socket_path.display()
+            ));
+        }
+        if !self.path_lost() {
+            return Ok(());
+        }
+        tokio::time::sleep(LEASE_DISPLACEMENT_GRACE).await;
+        // The cached flag set by the refresh thread during the grace is
+        // definitive even if the path reappeared.
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost() {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                self.socket_path.display()
+            ));
+        }
+        Ok(())
+    }
+
     /// Claim the socket file at `path` under a private name in its own
     /// directory. On filesystems without a no-replace rename (NFS, FUSE)
     /// the claim fails and the cleanup no-ops: the leftover socket file
@@ -590,6 +623,20 @@ fn release_lock_dir_identity(
         let placeholder = parent.join(format!(".l{pid:x}{nanos:x}{attempt:x}"));
         if let Err(_error) = std::fs::create_dir(&placeholder) {
             continue;
+        }
+        // A restrictive umask strips the owner-write bit from the fresh
+        // directory and the owner write below would fail, leaking the
+        // lease behind a normal shutdown: restore the private mode at
+        // creation (same as the acquisition candidates).
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o700))
+                .is_err()
+            {
+                let _ = std::fs::remove_dir(&placeholder);
+                drop(guarded);
+                return;
+            }
         }
         // The placeholder carries this process's live owner record for
         // the whole exchange interval: a suspended release leaves a

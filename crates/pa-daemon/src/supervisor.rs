@@ -365,7 +365,7 @@ impl Supervisor {
         #[cfg(not(unix))]
         socket::prepare_socket_path(&self.options.socket_path).await?;
         #[cfg(unix)]
-        socket_lease.assert_held()?;
+        socket_lease.assert_held_async().await?;
         let listener = bind_transport(&self.options.socket_path)
             .await
             .with_context(|| {
@@ -375,7 +375,7 @@ impl Supervisor {
                 )
             })?;
         #[cfg(unix)]
-        socket_lease.assert_held()?;
+        socket_lease.assert_held_async().await?;
         socket::bind_capture_gap().await;
         // Capture the bound file's identity before anything can replace
         // it (TS daemon-supervisor.ts:879, between `listen` and

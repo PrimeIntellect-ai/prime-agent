@@ -1324,6 +1324,28 @@ impl LockDir {
                 return Err(error);
             }
         };
+        // The pinned handle must be the directory THIS call created: a
+        // suspension past the staleness threshold can let a stale
+        // takeover win between the mkdir and the open, and the open then
+        // pins the SUCCESSOR's inode - adopting another holder's lock
+        // (two acquisitions believing they own one lease). The captured
+        // identity is the created-directory witness: a pinned inode that
+        // does not match it means the path changed hands, so the
+        // acquisition FAILS (contending honestly) and removes NOTHING -
+        // the current content is the successor's, never ours to unlink.
+        let pinned_identity = dir.metadata().ok().map(|metadata| {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        });
+        if created.is_some() && pinned_identity != created {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "Lock directory {} was taken over while acquiring it",
+                    path.display()
+                ),
+            ));
+        }
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
             // Never leave a lock artifact behind a failed probe - but only
