@@ -39,7 +39,7 @@ pub trait GateCommandRunner: Send + Sync {
     }
 }
 
-/// The product runner: `bash -c <command>` in the session cwd.
+/// The product runner: the platform-selected shell in the session cwd.
 #[derive(Debug, Clone)]
 pub struct ShellGateRunner {
     cwd: PathBuf,
@@ -451,8 +451,10 @@ pub async fn run_gate_command(
     cwd: &Path,
     timeout_ms: u64,
 ) -> anyhow::Result<ChildProcessResult> {
-    let args = ["-c".to_string(), command.to_string()];
-    run_child_process("bash", &args, cwd, timeout_ms).await
+    let shell = crate::platform::get_shell_config(None)?;
+    let mut args = shell.args;
+    args.push(command.to_string());
+    run_child_process(&shell.shell, &args, cwd, timeout_ms).await
 }
 
 /// Read one output pipe to EOF, keeping at most `cap` characters; the
