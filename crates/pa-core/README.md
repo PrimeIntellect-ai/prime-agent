@@ -83,3 +83,29 @@ The Unix platform process API exposes `current_user_id()` for the daemon
 endpoint namespace to match the TypeScript `process.getuid()` contract on
 macOS as well as Linux. This reads the OS identity without filesystem or
 subprocess work.
+
+Automatic trace delivery (`agent_traces::ContinuousTraceUpload`) owns consent-gated
+persist scheduling and startup outbox recovery alongside the existing manual uploader.
+Hosts reuse `load_settings` to capture consent before their existing settings parse,
+attach `persisted` after successful disk writes, and own the returned installation
+for the session lifetime. Replacements use `rebind` with the effective cwd; forks
+use `forked`. The installation never drains on drop. A detached process-wide runtime
+owns all transcript reads, scans, settings reloads, networking and retries; a maximum
+of 256 registered controllers and four deliveries bounds resident work. Admission
+returns `None` at capacity and logs rejection; hosts attach no hook in that case.
+Retired descriptors free capacity only after background recovery acknowledges them.
+Session replacement transfers its existing slot and cancels the predecessor; forks
+require a distinct slot. Replacement retains a bounded retirement flag until the
+background recovery snapshot acknowledges its exact controller identity. The synchronous
+persist seam checks the cached consent snapshot and performs an exists/create
+pending-marker write; consent metadata reads and reloads stay in the worker after
+the host captures its initial settings generation; it does not fsync the marker (matching TS v0.9.8 process-crash
+recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention
+records one stable fallback marker per session, which is retained conservatively
+until a future sender has delivered it. Its cost must be measured
+separately; startup/paint parity is not established by scheduler unit tests.
+Active requests monitor consent changes every second on the worker and cancel on
+revocation/errors; bytes already sent cannot be recalled. Recovery belongs to all
+live hosts sharing the agent directory and cancels when the last host disappears.
+Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
+and releases upload capacity during retry waits; exhaustion retains durable intent.

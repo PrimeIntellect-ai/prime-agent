@@ -135,6 +135,9 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
 
     let app_mode = mode::AppMode::resolve(&parsed, std::io::stdin().is_terminal());
 
+    // Enable Windows VT processing before raw ANSI mode writes.
+    pa_types::platform::console_init();
+
     if public_command.attach_agent.is_some() && app_mode != mode::AppMode::Interactive {
         return Err("attach requires an interactive terminal".to_string());
     }
