@@ -229,7 +229,7 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
-                        opened.trace_upload = Some(traces(&opened.path));
+                        opened.trace_upload = traces(&opened.path);
                         opened_existing_session = true;
                         // The session-model restore records its decision only for a path
                         // this worker opened — a failed open never leaks the binding into a
@@ -294,7 +294,7 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
-                created.trace_upload = Some(traces(&created.path));
+                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -333,7 +333,7 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
-                created.trace_upload = Some(traces(&created.path));
+                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();

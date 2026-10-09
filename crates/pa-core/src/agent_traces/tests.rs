@@ -30,6 +30,10 @@ impl ScriptedTraceHttp {
     fn last_request(&self) -> CapturedRequest {
         self.requests.lock().unwrap().last().cloned().unwrap()
     }
+
+    pub(super) fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
 }
 
 impl TraceHttp for ScriptedTraceHttp {

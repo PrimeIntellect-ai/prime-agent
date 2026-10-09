@@ -42,7 +42,7 @@ impl SessionNavigation {
                 .store
                 .as_ref()
                 .and_then(|old| old.trace_upload.as_ref())
-                .map(|traces| traces.rebind(std::path::Path::new(&core.cwd), &file.path));
+                .and_then(|traces| traces.rebind(std::path::Path::new(&core.cwd), &file.path));
         }
         let branch_entries = file.branch_file_entries();
         let new_path = file.path.clone();
@@ -136,7 +136,7 @@ impl SessionNavigation {
                 .store
                 .as_ref()
                 .and_then(|old| old.trace_upload.as_ref())
-                .map(|traces| traces.rebind(std::path::Path::new(&cwd), &fresh.path));
+                .and_then(|traces| traces.rebind(std::path::Path::new(&cwd), &fresh.path));
             if let Err(error) = fresh.rewrite() {
                 return Err(response_failure(
                     None,

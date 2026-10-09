@@ -143,7 +143,7 @@ impl ContinuousTraceUpload {
     /// Bind a replacement session without parsing settings or awaiting delivery.
     /// A cwd change starts with consent off until the background reader verifies it.
     #[must_use]
-    pub fn rebind(&self, cwd: &Path, path: &Path) -> Arc<Self> {
+    pub fn rebind(&self, cwd: &Path, path: &Path) -> Option<Arc<Self>> {
         let Ok(consent) = self.consent.lock() else {
             return Self::install(
                 cwd,
@@ -169,19 +169,21 @@ impl ContinuousTraceUpload {
 
     /// Fork within this installation's effective working directory.
     #[must_use]
-    pub fn forked(&self, path: &Path) -> Arc<Self> {
+    pub fn forked(&self, path: &Path) -> Option<Arc<Self>> {
         self.rebind(&self.cwd, path)
     }
 
     /// Install without scanning the outbox or waiting for networking. Consent
     /// is captured around the host's existing settings load.
+    /// Returns `None` when the bounded registry cannot admit this installation.
+    /// No persist hook may be attached to a rejected installation.
     #[must_use]
     pub fn install(
         cwd: &Path,
         agent_dir: &Path,
         session_file: Option<&Path>,
         consent: TraceConsentSnapshot,
-    ) -> Arc<Self> {
+    ) -> Option<Arc<Self>> {
         let controller = Arc::new(Self {
             cwd: cwd.to_path_buf(),
             agent_dir: Arc::new(agent_dir.to_path_buf()),
@@ -192,18 +194,12 @@ impl ContinuousTraceUpload {
             started: AtomicBool::new(false),
         });
         let service = service();
-        let Ok(mut registrations) = service.controllers.lock() else {
-            tracing::warn!("trace registration failed; durable intent retained for recovery");
-            return controller;
-        };
-        // Dead registrations are acknowledged only by the background service,
-        // so even a host that retires between service ticks retains its directory.
-        // A registration is a weak handle: every live host is admitted, so a
-        // busy service tick can never strand its uploads behind a silent cap.
-        // Sweep concurrency stays bounded by the recovery registry.
-        registrations.push(Registration::of(&controller));
-        service.wake.notify_one();
-        controller
+        if service.register(&controller) {
+            Some(controller)
+        } else {
+            tracing::warn!("trace installation rejected: registry unavailable or at capacity");
+            None
+        }
     }
 
     /// Called only after a successful transcript write. This performs no
@@ -354,6 +350,22 @@ impl Registration {
 struct Service {
     controllers: Mutex<Vec<Registration>>,
     wake: tokio::sync::Notify,
+}
+
+impl Service {
+    fn register(&self, controller: &Arc<ContinuousTraceUpload>) -> bool {
+        let Ok(mut registrations) = self.controllers.lock() else {
+            return false;
+        };
+        // Only the background service acknowledges dead descriptors, preserving
+        // retirements between ticks. Rejection never returns a usable controller.
+        if registrations.len() >= MAX_CONTROLLERS {
+            return false;
+        }
+        registrations.push(Registration::of(controller));
+        self.wake.notify_one();
+        true
+    }
 }
 
 fn service() -> &'static Service {
@@ -737,6 +749,42 @@ async fn recover_with_backoff(
     cancel: TraceUploadCancel,
     live_controllers: Option<Vec<Weak<ContinuousTraceUpload>>>,
 ) -> (bool, Option<Instant>) {
+    recover_with_io(
+        cwd,
+        agent_dir,
+        permits,
+        http,
+        base_url,
+        cancel,
+        live_controllers,
+        |_, _| Ok(()),
+    )
+    .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecoveryRead {
+    Directory,
+    Iteration,
+    RecordMetadata,
+    Record,
+    SessionMetadata,
+    Header,
+}
+
+// Keep fault injection at the I/O boundary so deterministic recovery tests can
+// exercise transient failures without changing filesystem permissions or users.
+#[allow(clippy::too_many_arguments)]
+async fn recover_with_io(
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    permits: Arc<tokio::sync::Semaphore>,
+    http: Arc<dyn TraceHttp>,
+    base_url: Option<String>,
+    cancel: TraceUploadCancel,
+    live_controllers: Option<Vec<Weak<ContinuousTraceUpload>>>,
+    before_read: impl Fn(RecoveryRead, &Path) -> std::io::Result<()> + Send + Sync,
+) -> (bool, Option<Instant>) {
     let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
     if !settings.errors().is_empty() || !settings.get_agent_traces_enabled() {
         return (false, None);
@@ -746,14 +794,24 @@ async fn recover_with_backoff(
     let Some(_recovery_lease) = delivery_lease(&agent_dir, &agent_dir.join("catch-up")) else {
         return (false, None);
     };
-    let Ok(mut entries) = tokio::fs::read_dir(agent_trace_outbox_dir(&agent_dir)).await else {
-        return (false, None);
+    let outbox = agent_trace_outbox_dir(&agent_dir);
+    let read_directory = async {
+        before_read(RecoveryRead::Directory, &outbox)?;
+        tokio::fs::read_dir(&outbox).await
+    };
+    let mut entries = match read_directory.await {
+        Ok(entries) => entries,
+        Err(error) => return (error.kind() == std::io::ErrorKind::NotFound, None),
     };
     let gate = TraceRequestGate::new();
     let mut complete = true;
     let mut not_before: Option<Instant> = None;
     loop {
-        let entry = match entries.next_entry().await {
+        let next = async {
+            before_read(RecoveryRead::Iteration, &outbox)?;
+            entries.next_entry().await
+        };
+        let entry = match next.await {
             Ok(Some(entry)) => entry,
             Ok(None) => break,
             Err(error) => {
@@ -772,20 +830,33 @@ async fn recover_with_backoff(
             continue;
         }
         // Outbox records contain only a path/cursor; bound corrupt record reads.
-        if entry.metadata().await.is_ok_and(|m| m.len() > 64 * 1024) {
-            continue;
+        let record_metadata = async {
+            before_read(RecoveryRead::RecordMetadata, &entry.path())?;
+            entry.metadata().await
+        };
+        match record_metadata.await {
+            Ok(metadata) if metadata.len() > 64 * 1024 => continue,
+            Ok(_) => {}
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         }
         let read_entry = async {
             use tokio::io::AsyncReadExt;
+            before_read(RecoveryRead::Record, &entry.path())?;
             let file = tokio::fs::File::open(entry.path()).await?;
             let mut raw = String::new();
             file.take(64 * 1024 + 1).read_to_string(&mut raw).await?;
             Ok::<_, std::io::Error>(raw)
         };
-        let Ok(raw) = read_entry.await else {
-            // A transient record read must not let the sweep complete.
-            complete = false;
-            continue;
+        let raw = match read_entry.await {
+            Ok(raw) => raw,
+            Err(error) => {
+                // Invalid UTF-8 is terminal data, not a transient filesystem fault.
+                complete &= error.kind() == std::io::ErrorKind::InvalidData;
+                continue;
+            }
         };
         if raw.len() > 64 * 1024 {
             continue;
@@ -831,7 +902,11 @@ async fn recover_with_backoff(
             complete = false;
             continue;
         }
-        match tokio::fs::metadata(&path).await {
+        let session_metadata = async {
+            before_read(RecoveryRead::SessionMetadata, &path)?;
+            tokio::fs::metadata(&path).await
+        };
+        match session_metadata.await {
             Ok(meta) if meta.is_file() => {}
             Ok(_) => {
                 prune_entry(&entry.path(), &raw, Some(&path));
@@ -853,11 +928,15 @@ async fn recover_with_backoff(
             complete = false;
             continue;
         };
-        let Some(header) = read_trace_session_header(&path) else {
-            // An unreadable session header may be transient; the marker stays
-            // and the sweep must rearm rather than complete without it.
-            complete = false;
-            continue;
+        let header = before_read(RecoveryRead::Header, &path)
+            .and_then(|()| read_trace_session_header_checked(&path));
+        let header = match header {
+            Ok(Some(header)) => header,
+            Ok(None) => continue,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         };
         let session_cwd = PathBuf::from(&header.cwd);
         let options = TraceUploadOptions {

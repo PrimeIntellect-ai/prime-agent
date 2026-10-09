@@ -393,7 +393,7 @@ impl TreeNavigation {
                     forked.trace_upload = store
                         .trace_upload
                         .as_ref()
-                        .map(|traces| traces.forked(&forked.path));
+                        .and_then(|traces| traces.forked(&forked.path));
                     if let Some(lease) = &store.lease {
                         forked.lease =
                             Some(lease.acquire_target(&forked.path).map_err(|error| {

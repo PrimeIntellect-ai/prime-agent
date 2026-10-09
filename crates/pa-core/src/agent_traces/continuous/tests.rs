@@ -1038,61 +1038,170 @@ async fn missing_credentials_leave_the_sweep_incomplete_until_provided() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn an_unreadable_session_header_leaves_the_sweep_incomplete() {
-    let fixture = Fixture::new();
-    enable_synthetic_fixture(&fixture);
-    let path = fixture.session_dir.join("headerless.jsonl");
-    std::fs::write(&path, "not a session header\n").unwrap();
-    mark_pending(&fixture.agent_dir, &path).unwrap();
-    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
-    assert!(
-        !recover(
+// Keep credential lookup stable across injected background I/O failures.
+#[allow(clippy::await_holding_lock)]
+async fn transient_recovery_reads_rearm_and_deliver_after_restoration() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
+    for stage in [
+        RecoveryRead::Directory,
+        RecoveryRead::Iteration,
+        RecoveryRead::RecordMetadata,
+        RecoveryRead::Record,
+        RecoveryRead::SessionMetadata,
+        RecoveryRead::Header,
+    ] {
+        let fixture = Fixture::new();
+        enable_synthetic_fixture(&fixture);
+        let path = fixture.write_session("transient.jsonl", "transient");
+        mark_pending(&fixture.agent_dir, &path).unwrap();
+        let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+        let (complete, _) = recover_with_io(
             fixture.cwd.clone(),
             fixture.agent_dir.clone(),
             Arc::new(tokio::sync::Semaphore::new(1)),
-            sink,
+            sink.clone(),
             Some("http://synthetic.invalid".into()),
             TraceUploadCancel::new(),
+            Some(Vec::new()),
+            |read, _| {
+                if read == stage {
+                    Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+                } else {
+                    Ok(())
+                }
+            },
         )
-        .await,
-        "an unreadable header must keep the sweep incomplete so it re-arms"
-    );
-    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+        .await;
+        assert!(!complete, "{stage:?} must keep recovery incomplete");
+        assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+        assert_eq!(sink.request_count(), 0);
+        assert!(
+            recover(
+                fixture.cwd.clone(),
+                fixture.agent_dir.clone(),
+                Arc::new(tokio::sync::Semaphore::new(1)),
+                sink.clone(),
+                Some("http://synthetic.invalid".into()),
+                TraceUploadCancel::new(),
+            )
+            .await
+        );
+        assert_eq!(sink.request_count(), 1);
+        assert_eq!(
+            read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+            TraceUploadSignature::of(&path)
+        );
+    }
 }
 
-#[test]
-fn controller_admission_is_never_capped_by_registration_capacity() {
+#[tokio::test(start_paused = true)]
+async fn terminal_invalid_records_and_headers_complete_without_network_or_rescan() {
     let fixture = Fixture::new();
-    let hosts: Vec<_> = (0..=MAX_CONTROLLERS)
-        .map(|n| {
-            ContinuousTraceUpload::install(
-                &fixture.cwd,
-                &fixture.agent_dir,
-                Some(&fixture.session_dir.join(format!("capacity-{n}.jsonl"))),
-                TraceConsentSnapshot {
-                    enabled: false,
-                    generation: ConsentGeneration::read(&fixture.cwd, &fixture.agent_dir),
-                },
-            )
-        })
-        .collect();
-    let registered = {
-        let registrations = service().controllers.lock().unwrap();
-        hosts
-            .iter()
-            .filter(|host| {
-                let identity = Arc::as_ptr(host).cast::<()>();
-                registrations
-                    .iter()
-                    .any(|registration| registration.controller.as_ptr().cast::<()>() == identity)
-            })
-            .count()
+    enable_synthetic_fixture(&fixture);
+    let valid = fixture.write_session("valid.jsonl", "valid");
+    let header = std::fs::read_to_string(&valid).unwrap();
+    for (name, bytes) in [
+        ("malformed", b"not a header\n".to_vec()),
+        ("utf8", vec![0xff, b'\n']),
+        ("empty", Vec::new()),
+        (
+            "oversized",
+            [
+                header.lines().next().unwrap().as_bytes(),
+                &vec![b' '; 256 * 1024],
+            ]
+            .concat(),
+        ),
+    ] {
+        let path = fixture.session_dir.join(format!("{name}.jsonl"));
+        std::fs::write(&path, bytes).unwrap();
+        mark_pending(&fixture.agent_dir, &path).unwrap();
+    }
+    let outbox = agent_trace_outbox_dir(&fixture.agent_dir);
+    std::fs::write(outbox.join("invalid-utf8.json"), [0xff]).unwrap();
+    std::fs::write(outbox.join("oversized.json"), vec![b' '; 64 * 1024 + 1]).unwrap();
+    std::fs::write(outbox.join("malformed.json"), "{").unwrap();
+    let sink = Arc::new(ScriptedTraceHttp::new(Vec::new()));
+    let (complete, not_before) = recover_with_backoff(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink.clone(),
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+        Some(Vec::new()),
+    )
+    .await;
+    assert_eq!((complete, not_before), (true, None));
+    let state = std::sync::atomic::AtomicU8::new(1);
+    settle_recovery_run(&state, complete, not_before, &TraceUploadCancel::new()).await;
+    assert_eq!(state.load(Ordering::Acquire), 2);
+    assert_eq!(sink.request_count(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+// The env lock is held across awaits to keep credential lookup deterministic.
+#[allow(clippy::await_holding_lock)]
+async fn bounded_admission_preserves_retirement_and_delivers_on_readmission() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("admission.jsonl", "admission");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let service = Service {
+        controllers: Mutex::new(Vec::new()),
+        wake: tokio::sync::Notify::new(),
     };
-    assert_eq!(
-        registered,
-        hosts.len(),
-        "every admitted host must be registered for the service to discover"
-    );
+    let mut hosts = Vec::new();
+    for n in 0..MAX_CONTROLLERS {
+        let host = controller(
+            &fixture,
+            &fixture.session_dir.join(format!("host-{n}.jsonl")),
+            false,
+        );
+        assert!(service.register(&host));
+        hosts.push(host);
+    }
+    let candidate = controller(&fixture, &path, true);
+    assert!(!service.register(&candidate));
+    assert_eq!(service.controllers.lock().unwrap().len(), MAX_CONTROLLERS);
+    let mut recovered = RecoveryRuns::new();
+    let run = RecoveryRun::new(hosts.iter().map(Arc::downgrade).collect());
+    run.state.store(2, Ordering::Release);
+    recovered.insert(fixture.agent_dir.clone(), run);
+    drop(hosts.pop().unwrap());
+    // Retirement cannot be discarded by foreground admission before replay sees it.
+    assert!(!service.register(&candidate));
+    let snapshot = service.controllers.lock().unwrap().clone();
+    let retired = retain_live_recoveries(&mut recovered, &snapshot);
+    assert!(recovered[&fixture.agent_dir]
+        .replay_needed
+        .load(Ordering::Acquire));
+    assert_eq!(retired.len(), 1);
+    acknowledge_retired_registrations(&mut service.controllers.lock().unwrap(), &retired);
+    assert!(service.register(&candidate));
+    assert_eq!(service.controllers.lock().unwrap().len(), MAX_CONTROLLERS);
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&candidate),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+    ));
+    // Admission resumes the durable marker with no restart or fresh persist.
+    let (_body, reply) = tokio::time::timeout(MIN_INTERVAL, observed.recv())
+        .await
+        .expect("readmitted controller must deliver existing intent")
+        .unwrap();
+    reply.send(response(200, "{}")).unwrap();
+    drop(candidate);
+    task.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]

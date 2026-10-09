@@ -290,21 +290,35 @@ impl TraceUploadSignature {
 // Session header + context
 
 fn read_trace_session_header(path: &Path) -> Option<pa_types::session::SessionHeader> {
+    read_trace_session_header_checked(path).ok().flatten()
+}
+
+fn read_trace_session_header_checked(
+    path: &Path,
+) -> std::io::Result<Option<pa_types::session::SessionHeader>> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path)?;
     let mut first_line = String::new();
     // Corrupt headers must not allocate an entire unbounded transcript line.
-    std::io::Read::take(std::io::BufReader::new(file), 256 * 1024)
+    if let Err(error) = std::io::Read::take(std::io::BufReader::new(file), 256 * 1024 + 1)
         .read_line(&mut first_line)
-        .ok()?;
-    if first_line.trim().is_empty() {
-        return None;
+    {
+        return if error.kind() == std::io::ErrorKind::InvalidData {
+            Ok(None)
+        } else {
+            Err(error)
+        };
     }
-    let value: Value = serde_json::from_str(first_line.trim()).ok()?;
+    if first_line.len() > 256 * 1024 || first_line.trim().is_empty() {
+        return Ok(None);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(first_line.trim()) else {
+        return Ok(None);
+    };
     if !is_trace_session_header(&value) {
-        return None;
+        return Ok(None);
     }
-    serde_json::from_value(value).ok()
+    Ok(serde_json::from_value(value).ok())
 }
 
 fn is_trace_session_header(value: &Value) -> bool {

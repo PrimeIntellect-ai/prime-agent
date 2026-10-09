@@ -1276,7 +1276,8 @@ fn hydrating_full_history_preserves_the_trace_controller() {
     assert!(windowed.window.is_some());
     let (_, consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(&dir, &dir);
     let controller =
-        pa_core::agent_traces::ContinuousTraceUpload::install(&dir, &dir, Some(&path), consent);
+        pa_core::agent_traces::ContinuousTraceUpload::install(&dir, &dir, Some(&path), consent)
+            .unwrap();
     windowed.trace_upload = Some(controller.clone());
     windowed.ensure_full_history().unwrap();
     assert!(windowed.window.is_none());

@@ -191,13 +191,18 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     };
     let (settings, trace_consent) =
         crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
-    if session_manager.is_persisted() {
-        let traces = crate::agent_traces::ContinuousTraceUpload::install(
-            &cwd,
-            &config.agent_dir,
-            session_manager.get_session_file(),
-            trace_consent,
-        );
+    let traces = session_manager
+        .is_persisted()
+        .then(|| {
+            crate::agent_traces::ContinuousTraceUpload::install(
+                &cwd,
+                &config.agent_dir,
+                session_manager.get_session_file(),
+                trace_consent,
+            )
+        })
+        .flatten();
+    if let Some(traces) = traces {
         session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
     }
     let wiring = super::runtime_wiring::wire_session_runtime(
