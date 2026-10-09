@@ -60,6 +60,7 @@ pub mod auth;
 pub mod autonomous;
 pub mod cron;
 pub mod export_html;
+pub mod factory_eval;
 pub mod goals;
 pub mod kernel;
 pub mod mcp;

@@ -413,13 +413,13 @@ impl SupervisorChildSessionsInner {
         let mut record = record.lock().await;
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
-            // A settled preview is never overwritten with a later miss; a
-            // `None` capture (the settle raced the admission-to-run
-            // hand-off) recovers on a later refresh.
-            if !record.answer_captured || record.answer_preview.is_none() {
-                record.answer_preview = answer;
-                record.answer_captured = true;
-            }
+        }
+        // A settled preview is never overwritten with a later miss; a
+        // `None` capture (the settle raced the admission-to-run
+        // hand-off) recovers on a later refresh.
+        if !record.answer_captured || record.answer_preview.is_none() {
+            record.answer_preview = answer;
+            record.answer_captured = true;
         }
     }
 
@@ -461,44 +461,14 @@ impl SupervisorChildSessionsInner {
                     continue;
                 }
                 self.refresh_record(record).await;
-                // The run's final rows are attributed before the terminal
-                // notice rides the parent's follow-up route.
-                self.emit_child_usage(record).await;
-                // TS records the return before delivering the notice: the
-                // pending edge must be on the parent's ledger before the
-                // notice's follow-up turn mints its own request.
-                self.record_child_return(record).await;
-                self.emit_child_update(record).await;
-                // Only a successful run completes the display (TS
-                // `completeRlmSubagentRuntime`); a cancelled or failed run
-                // stays `running`, which a restart relists as `error`.
-                let completed = {
-                    let record = record.lock().await;
-                    (record.settled_status == Some("done"))
-                        .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
-                };
-                if let Some((session_dir, child_id)) = completed {
-                    if let Err(error) = tokio::task::spawn_blocking(move || {
-                        let Some(mut display) =
-                            crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
-                        else {
-                            return Ok(());
-                        };
-                        if display.child_id != child_id || display.status != "running" {
-                            return Ok(());
-                        }
-                        display.status = "completed".to_string();
-                        crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
-                    })
-                    .await
-                    .unwrap_or_else(|error| Err(anyhow!(error)))
-                    {
-                        eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
-                    }
+                if !self.run_settle_tail(record).await {
+                    // The verdict was re-cleared while this tail ran its
+                    // round trips (a collect's grace found the child busy
+                    // again: a follow-up turn is running): the watcher
+                    // owns the run again and keeps watching instead of
+                    // retiring on a verdict nobody owns.
+                    continue;
                 }
-                self.deliver_settle_notice(record).await;
-                // A settled child releases an owed goal continuation.
-                self.fire_settle_hook(record).await;
                 return;
             }
             // Still running (a timed-out slice or a re-queued continuation):
@@ -537,6 +507,72 @@ impl SupervisorChildSessionsInner {
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
         }
+    }
+
+    /// The watcher's settle tail: the run-settle effects in TS order —
+    /// the final usage flush, the child's return on the parent's
+    /// semantic-edge ledger, the notice claim, the child-update feed
+    /// row, the display completion, and the settle funnel. The claim is
+    /// the funnel's commit AND the verdict's commit: every effect that
+    /// marks the run durably complete lands only after it. Returns
+    /// whether the watcher may retire (`false`: a collect's grace
+    /// re-cleared the verdict while this tail ran its round trips; the
+    /// watcher keeps watching the follow-up turn).
+    pub(super) async fn run_settle_tail(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        // The run's final rows are attributed before the terminal notice
+        // rides the parent's follow-up route.
+        self.emit_child_usage(record).await;
+        // TS records the return before delivering the notice: the pending
+        // edge must be on the parent's ledger before the notice's
+        // follow-up turn mints its own request. A re-clear cannot undo
+        // it: the misread case (the child never ran) finds nothing
+        // committed, and a genuine prior settle keeps the return its run
+        // really owes the ledger.
+        self.record_child_return(record).await;
+        if !self.deliver_settle_notice(record).await {
+            return false;
+        }
+        // The settled row rides the child-update feed here (main's
+        // settle-site emission, after the claim like the display write:
+        // a pre-claim `done` row could outlive a re-cleared verdict, and
+        // the feed's own status dedup would then swallow the genuine
+        // settle's row when the follow-up turn finishes).
+        self.emit_child_update(record).await;
+        // Only a successful run completes the display (TS
+        // `completeRlmSubagentRuntime`); a cancelled or failed run stays
+        // `running`, which a restart relists as `error`. The write sits
+        // AFTER the claim: a display marked completed before the commit
+        // could outlive a re-cleared verdict — the record would read
+        // `running` while the durable display said `completed`, and the
+        // restart reseed (`ledger_child_records`) trusts the display, so
+        // a live child would relist as `done` with no notice owed.
+        let completed = {
+            let record = record.lock().await;
+            (record.settled_status == Some("done"))
+                .then(|| (record.session_dir.clone(), record.rlm_child_id.clone()))
+        };
+        if let Some((session_dir, child_id)) = completed {
+            if let Err(error) = tokio::task::spawn_blocking(move || {
+                let Some(mut display) =
+                    crate::rlm_ledger::read_rlm_subagent_display(Path::new(&session_dir))
+                else {
+                    return Ok(());
+                };
+                if display.child_id != child_id || display.status != "running" {
+                    return Ok(());
+                }
+                display.status = "completed".to_string();
+                crate::rlm_ledger::write_rlm_subagent_display(&display).map(|_| ())
+            })
+            .await
+            .unwrap_or_else(|error| Err(anyhow!(error)))
+            {
+                eprintln!("pa-daemon: RLM child display completion failed: {error:#}");
+            }
+        }
+        // A settled child releases an owed goal continuation.
+        self.fire_settle_hook(record).await;
+        true
     }
 
     /// Record a settled child's return in the parent's semantic-edge ledger
@@ -588,11 +624,21 @@ impl SupervisorChildSessionsInner {
     /// sent an agent message to the parent. Exactly-once: the record's
     /// notice claim collapses the races between the watcher, a natural
     /// settle during `delete_subagent`, and the delete path itself.
-    async fn deliver_settle_notice(&self, record: &Arc<Mutex<ChildRecord>>) {
+    ///
+    /// The claim is the settle tail's commit, and a verdict a collect's
+    /// grace re-cleared while the tail ran its round trips (the child went
+    /// busy again: a follow-up turn) has nothing to commit: claiming it
+    /// would deliver a completion notice for a running child and let the
+    /// funnel retire the watcher on a record nobody owns. Returns whether
+    /// the tail may retire (`false`: the watcher keeps watching the run).
+    pub(super) async fn deliver_settle_notice(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         let message = {
             let mut record = record.lock().await;
+            if record.settled_status.is_none() {
+                return false;
+            }
             if record.notice_delivered || record.replied_since_task {
-                return;
+                return true;
             }
             record.notice_delivered = true;
             let notice = RlmChildTerminalNotice::CompletedWithoutReply {
@@ -603,6 +649,7 @@ impl SupervisorChildSessionsInner {
             create_rlm_child_terminal_notice(&notice, now_ms())
         };
         self.deliver_terminal_notice(message).await;
+        true
     }
 
     /// Settle one child as failed (TS's thrown-run arm): the record

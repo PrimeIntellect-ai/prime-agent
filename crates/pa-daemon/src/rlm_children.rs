@@ -167,6 +167,14 @@ struct ChildRecord {
     /// nothing has been observed since the reseed, and the first delivery
     /// primes the cursor at the file's tail.
     attributed_rows: Option<usize>,
+    /// A collect already returned this record's settled result: the
+    /// collect stability grace guards only a settle no reader has
+    /// consumed yet (an admission-window misread must not be a first
+    /// collect's binding answer), while an already-returned result keeps
+    /// itself on later collects (TS completed children stay readable
+    /// until deleted). A running snapshot does not set it: a later
+    /// collect may still settle the record and needs the grace then.
+    result_returned: bool,
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
@@ -631,6 +639,53 @@ impl SupervisorChildSessions {
         }
     }
 
+    /// Push a child that already settled (test-only): the capture-recovery
+    /// regression — a settle that raced the admission-to-run hand-off left
+    /// the record settled with no captured answer, and the answer must
+    /// re-capture on the next refresh/collect read.
+    #[cfg(test)]
+    pub(crate) async fn push_test_settled_child(
+        &self,
+        identity: RlmChildIdentity,
+        settled_status: Option<&'static str>,
+        answer_preview: Option<String>,
+    ) {
+        self.inner
+            .children
+            .lock()
+            .await
+            .push(Arc::new(Mutex::new(ChildRecord {
+                rlm_child_id: identity.rlm_child_id,
+                session_name: identity.session_name,
+                active_session_id: identity.active_session_id,
+                session_id: identity.session_id.clone(),
+                session_dir: String::new(),
+                model: String::new(),
+                label: String::new(),
+                started_at_ms: 0,
+                settled_status,
+                // The settle funnel's flag (the record was pushed already
+                // settled): the quiescence predicate reads it, so a
+                // seam-pushed settled record must not count as running.
+                settled: true,
+                answer_captured: answer_preview.is_some(),
+                answer_preview,
+                replied_since_task: false,
+                notice_delivered: false,
+                prompt_admitted: true,
+                error: None,
+                closed_by_parent: false,
+                session_file: None,
+                attributed_rows: Some(0),
+                result_returned: false,
+                usage_watch_live: false,
+                usage_rearm: false,
+                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+                last_emitted_status: None,
+                rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            })));
+    }
+
     /// Test seam: admit one child record without the supervisor round trip
     /// (the controller tests exercise the family join on registry state).
     #[cfg(test)]
@@ -659,6 +714,7 @@ impl SupervisorChildSessions {
                 closed_by_parent: false,
                 session_file: None,
                 attributed_rows: Some(0),
+                result_returned: false,
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

@@ -47,6 +47,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         closed_by_parent: false,
         session_file: Some(session_file.display().to_string()),
         attributed_rows: Some(0),
+        result_returned: false,
         usage_watch_live: false,
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
