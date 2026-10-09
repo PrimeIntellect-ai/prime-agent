@@ -121,6 +121,48 @@ impl AgentView {
         self.sparse_window = Some(window);
     }
 
+    pub(super) fn reanchor_top_window_for_prepend(&mut self) {
+        let Some(mut window) = self.sparse_window.take() else {
+            return;
+        };
+        let Anchor::Top(offset) = window.anchor else {
+            self.sparse_window = Some(window);
+            return;
+        };
+        let sparse = self.sparse_enabled;
+        let old_rows = self.layout_pass(self.layout_width).total;
+        self.sparse_enabled = sparse;
+        if self.has_selection() {
+            self.rebase_top_selection_to_tail(old_rows);
+        }
+        window.anchor = Anchor::Tail(
+            old_rows
+                .saturating_sub(offset)
+                .saturating_sub(self.window_rows),
+        );
+        self.sparse_window = Some(window);
+    }
+
+    pub(super) fn note_prepended_entries(&mut self, count: usize, seam_before: usize) {
+        if self.layout_width == 0 {
+            return;
+        }
+        if let Some((index, rows)) = self.sparse_mutation {
+            self.sparse_mutation = Some((index + count, rows));
+        }
+        let Some(mut window) = self.sparse_window.take() else {
+            return;
+        };
+        let seam_after = self.count_entry_rows(count, self.layout_width);
+        window.cursor = match window.cursor.take() {
+            Some((0, _)) => Some((count + 1, seam_after.saturating_sub(seam_before))),
+            Some((1, row)) => Some((count + 1, (row + seam_after).saturating_sub(seam_before))),
+            Some((section, row)) => Some((section + count, row)),
+            None => None,
+        };
+        self.sparse_window = Some(window);
+    }
+
     /// The delta of a just-appended entry, countable because the push
     /// landed.
     pub(super) fn sparse_note_append(&mut self) {

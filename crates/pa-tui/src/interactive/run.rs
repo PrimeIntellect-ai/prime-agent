@@ -208,6 +208,8 @@ async fn run_interactive_surface(
     // autocomplete provider.
     let (commands_tx, mut commands_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
+    let (backfill_tx, mut backfill_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::TranscriptBackfillNote>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the pair while this loop is
     // wedged in a daemon request; a std-thread watchdog enforces the exit deadline without the
     // runtime.
@@ -308,6 +310,7 @@ async fn run_interactive_surface(
         let bash_tx = bash_tx.clone();
         let factory_tx = factory_tx.clone();
         let commands_tx = commands_tx.clone();
+        let backfill_tx = backfill_tx.clone();
         let waits_through_update_restart = route == SessionOpenRoute::AgentsView;
         tokio::spawn(async move {
             crate::update_restart_wait::wait_through_update_restart(
@@ -335,6 +338,7 @@ async fn run_interactive_surface(
                     let bash_tx = bash_tx.clone();
                     let factory_tx = factory_tx.clone();
                     let commands_tx = commands_tx.clone();
+                    let backfill_tx = backfill_tx.clone();
                     async move {
                         let (client, events) = match first {
                             Some(first) => first,
@@ -362,6 +366,7 @@ async fn run_interactive_surface(
                                 factory: factory_tx,
                                 commands: commands_tx,
                             },
+                            backfill_tx,
                         )
                         .await?;
                         Ok((events, session))
@@ -823,6 +828,9 @@ async fn run_interactive_surface(
     let mut session_reconnect: Option<SessionReconnect> = None;
 
     'run: while running {
+        if !session.dirty {
+            session.spawn_pending_backfill();
+        }
         if enhanced_keys_pending {
             if let Some((kitty, modify_other_keys)) = crate::enhanced_keys::settle_state() {
                 if let Some(telemetry) = &session.telemetry {
@@ -1516,6 +1524,11 @@ async fn run_interactive_surface(
                     session.apply_background_note(&note, &mut view);
                 }
             }
+            maybe_backfill = backfill_rx.recv() => {
+                if let Some(note) = maybe_backfill {
+                    session.apply_transcript_backfill(note, &mut view);
+                }
+            }
             maybe_compaction_abort = compaction_abort_rx.recv() => {
                 if let Some(outcome) = maybe_compaction_abort {
                     session.apply_compaction_abort_outcome(outcome, &mut view);
@@ -2009,6 +2022,15 @@ async fn run_interactive_surface(
     // switch into a mid-teardown process kill ("shutdown stalled; forced exit.", the live report),
     // so the deadline covers only the leaves that end this process.
     let handing_off = session.open_agents_view || session.pending_selection.is_some();
+    if renderer.is_terminal() && !session.open_agents_view {
+        session.spawn_pending_backfill();
+        if let Some(task) = session.transcript_backfill.as_mut() {
+            let _ = task.await;
+            while let Ok(note) = backfill_rx.try_recv() {
+                session.apply_transcript_backfill(note, &mut view);
+            }
+        }
+    }
     if renderer.is_terminal() && !handing_off {
         exit_guard.arm_for_exit();
     }

@@ -599,6 +599,8 @@ pub enum DaemonCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         active_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
         #[serde(flatten)]
         rest: JsonMap,
     },

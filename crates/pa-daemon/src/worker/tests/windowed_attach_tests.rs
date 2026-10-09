@@ -13,10 +13,10 @@ fn header_line(id: &str) -> String {
 }
 
 fn parent_json(prev: Option<&str>) -> String {
-    serde_json::to_string(&prev.map(String::from).map(Value::String).unwrap_or(Value::Null)).unwrap()
+    serde_json::to_string(&prev).unwrap()
 }
 
-fn message_row(prev: Option<&str>, id: &str, message: Value) -> String {
+fn message_row(prev: Option<&str>, id: &str, message: &Value) -> String {
     format!(
         "{{\"type\":\"message\",\"message\":{},\"id\":\"{id}\",\"parentId\":{},\"timestamp\":\"2026-01-01T00:00:00.000Z\"}}\n",
         serde_json::to_string(&message).unwrap(),
@@ -57,23 +57,12 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn push(&mut self, row: String) -> String {
+    fn row(&mut self, build: impl FnOnce(Option<&str>, &str) -> String) {
+        let prev = self.prev.clone();
         self.id += 1;
         let row_id = format!("m{:07}", self.id);
-        let row = row.replace("THE_ID", &row_id);
-        self.content.push_str(&row);
-        self.prev = Some(row_id.clone());
-        row_id
-    }
-
-    fn message(&mut self, message: Value) {
-        let prev = self.prev.clone();
-        self.push(message_row(prev.as_deref(), "THE_ID", message));
-    }
-
-    fn custom(&mut self) {
-        let prev = self.prev.clone();
-        self.push(custom_row(prev.as_deref(), "THE_ID"));
+        self.content.push_str(&build(prev.as_deref(), &row_id));
+        self.prev = Some(row_id);
     }
 }
 
@@ -146,24 +135,34 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
         prev: None,
         id: 0,
     };
-    fixture.message(json!({
-        "role": "user",
-        "content": "the head prompt",
-        "timestamp": 1000u64,
-    }));
-    fixture.custom();
-    fixture.custom();
+    fixture.row(|prev, id| {
+        message_row(
+            prev,
+            id,
+            &json!({
+                "role": "user",
+                "content": "the head prompt",
+                "timestamp": 1000u64,
+            }),
+        )
+    });
+    fixture.row(custom_row);
+    fixture.row(custom_row);
     for _ in 0..197 {
-        fixture.message(assistant_message("kept context"));
+        fixture.row(|prev, id| message_row(prev, id, &assistant_message("kept context")));
     }
     for _ in 0..800 {
-        fixture.message(tool_result_message());
+        fixture.row(|prev, id| message_row(prev, id, &tool_result_message()));
     }
     std::fs::write(&path, fixture.content).unwrap();
 
     let worker = worker_over(&dir, &path).await;
     let full = full_messages(&worker).await;
-    assert_eq!(full.len(), 1000, "the walk visits every message-bearing row");
+    assert_eq!(
+        full.len(),
+        1000,
+        "the walk visits every message-bearing row"
+    );
 
     let data = attach(&worker, TUI_CAPABILITIES).await;
     let snapshot = &data["snapshot"];
@@ -172,8 +171,7 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     assert_eq!(omitted, 199, "the cut snaps back off the tool result run");
     assert_eq!(tail.len(), 801, "the tail keeps the whole tool result run");
     assert_eq!(
-        tail[0]["role"],
-        "assistant",
+        tail[0]["role"], "assistant",
         "the first tail message is never a tool result"
     );
     assert_eq!(
@@ -184,6 +182,15 @@ async fn a_windowed_attach_serves_a_tool_result_safe_tail() {
     assert_eq!(
         snapshot["lastUserPromptMs"], 1000,
         "the newest user timestamp rides the windowed snapshot"
+    );
+    let head = worker
+        .dispatch("get_messages", &json!({ "before": omitted }))
+        .await;
+    assert!(head.success, "the head fetch failed: {head:?}");
+    assert_eq!(
+        head.data.expect("head data")["messages"],
+        serde_json::json!(full[..omitted as usize]),
+        "the before range serves the walk's omitted prefix"
     );
 
     let plain = attach(&worker, &["attach_snapshot", "event_sequence"]).await;
@@ -212,21 +219,20 @@ async fn a_windowed_attach_never_cuts_inside_the_compaction_retained_segment() {
         id: 0,
     };
     for _ in 0..10 {
-        fixture.message(assistant_message("compacted away"));
+        fixture.row(|prev, id| message_row(prev, id, &assistant_message("compacted away")));
     }
     let first_kept = fixture.prev.clone().expect("retained start");
     for _ in 1..retained {
-        fixture.message(assistant_message("retained"));
+        fixture.row(|prev, id| message_row(prev, id, &assistant_message("retained")));
     }
-    let prev = fixture.prev.clone().expect("retained end");
-    fixture.id += 1;
-    let compaction_id = format!("m{:07}", fixture.id);
-    fixture.content.push_str(&format!(
-        "{{\"type\":\"compaction\",\"summary\":\"the story\",\"firstKeptEntryId\":\"{first_kept}\",\"tokensBefore\":4000,\"id\":\"{compaction_id}\",\"parentId\":\"{prev}\",\"timestamp\":\"2026-01-01T00:00:00.000Z\"}}\n"
-    ));
-    fixture.prev = Some(compaction_id);
+    fixture.row(|prev, id| {
+        format!(
+            "{{\"type\":\"compaction\",\"summary\":\"the story\",\"firstKeptEntryId\":\"{first_kept}\",\"tokensBefore\":4000,\"id\":\"{id}\",\"parentId\":{},\"timestamp\":\"2026-01-01T00:00:00.000Z\"}}\n",
+            parent_json(prev),
+        )
+    });
     for _ in 0..post {
-        fixture.message(assistant_message("after compaction"));
+        fixture.row(|prev, id| message_row(prev, id, &assistant_message("after compaction")));
     }
     std::fs::write(&path, fixture.content).unwrap();
 

@@ -2143,7 +2143,6 @@ fn elided_image_tool_results_render_their_marker_metadata() {
 
 mod thinking_pins;
 
-
 #[test]
 fn a_windowed_snapshot_reconstructs_the_full_history_scalars() {
     let mut full = slim_attach();
@@ -2160,10 +2159,9 @@ fn a_windowed_snapshot_reconstructs_the_full_history_scalars() {
     windowed["snapshot"]["historyBefore"] = json!(1u64);
     windowed["snapshot"]["lastUserPromptMs"] = json!(100u64);
 
-    let full_prompt_ms = reconstruct(&attach_data_from_response(full).unwrap())
-        .last_user_prompt_ms;
-    let windowed_prompt_ms = reconstruct(&attach_data_from_response(windowed).unwrap())
-        .last_user_prompt_ms;
+    let full_prompt_ms = reconstruct(&attach_data_from_response(full).unwrap()).last_user_prompt_ms;
+    let windowed_prompt_ms =
+        reconstruct(&attach_data_from_response(windowed).unwrap()).last_user_prompt_ms;
     assert_eq!(full_prompt_ms, Some(100));
     assert_eq!(windowed_prompt_ms, full_prompt_ms);
 }
@@ -2194,9 +2192,7 @@ fn joined_matches_full(full: &[Value], cut: usize) {
 #[test]
 fn backfilled_entries_match_the_full_decode_across_the_seam() {
     let user = |text: &str| json!({ "role": "user", "content": text, "timestamp": 1u64 });
-    let answer = |text: &str| {
-        json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 2u64 })
-    };
+    let answer = |text: &str| json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 2u64 });
     let tool_call = json!({
         "role": "assistant",
         "content": [{ "type": "toolCall", "id": "call-1", "name": "bash", "arguments": { "command": "ls" } }],
@@ -2212,7 +2208,10 @@ fn backfilled_entries_match_the_full_decode_across_the_seam() {
     });
     joined_matches_full(&[user("one"), answer("a"), user("two"), answer("b")], 2);
     joined_matches_full(&[user("one"), tool_call, tool_result, answer("done")], 1);
-    joined_matches_full(&[summary, user("kept one"), user("kept two"), answer("after")], 3);
+    joined_matches_full(
+        &[summary, user("kept one"), user("kept two"), answer("after")],
+        3,
+    );
 }
 
 #[test]
@@ -2231,10 +2230,36 @@ fn backfilled_entries_collapse_a_seam_split_retry_episode() {
         })
     };
     let user = |text: &str| json!({ "role": "user", "content": text, "timestamp": 1u64 });
-    let answer = |text: &str| {
-        json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 20u64 })
-    };
-    joined_matches_full(&[user("run"), attempt(2), attempt(3), outcome(), answer("done")], 3);
-    joined_matches_full(&[user("run"), attempt(2), attempt(3), attempt(4), outcome(), answer("done")], 2);
-    joined_matches_full(&[user("run"), attempt(2), attempt(3), user("next turn"), answer("later")], 3);
+    let answer = |text: &str| json!({ "role": "assistant", "content": [{ "type": "text", "text": text }], "timestamp": 20u64 });
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            outcome(),
+            answer("done"),
+        ],
+        3,
+    );
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            attempt(4),
+            outcome(),
+            answer("done"),
+        ],
+        2,
+    );
+    joined_matches_full(
+        &[
+            user("run"),
+            attempt(2),
+            attempt(3),
+            user("next turn"),
+            answer("later"),
+        ],
+        3,
+    );
 }

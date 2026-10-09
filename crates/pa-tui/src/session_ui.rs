@@ -121,6 +121,11 @@ pub(crate) struct CommandCatalogUpdate {
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
+pub(crate) struct TranscriptBackfillNote {
+    pub epoch: u64,
+    pub entries: Vec<ChatEntry>,
+}
+
 pub(crate) struct SessionUi {
     pub(crate) client: DaemonClient,
     pub(crate) active_session_id: String,
@@ -325,6 +330,10 @@ pub(crate) struct SessionUi {
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
     pub(crate) transcript_stale: bool,
+    transcript_epoch: u64,
+    pub(crate) transcript_backfill: Option<tokio::task::JoinHandle<()>>,
+    pending_backfill: Option<usize>,
+    backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,

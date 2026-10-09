@@ -44,13 +44,13 @@ fn session_events_since(
 }
 
 mod abort_boundary_tests;
-mod windowed_attach_tests;
 mod connection_state_tests;
 mod goal_tests;
 mod kill_broadcast_tests;
 mod queue_tests;
 mod summary_tests;
 mod warning_marker_tests;
+mod windowed_attach_tests;
 #[tokio::test]
 async fn background_refinement_event_is_fenced_to_its_review_session() {
     let dir = std::env::temp_dir().join(format!("pa-refine-event-{}", uuid::Uuid::new_v4()));

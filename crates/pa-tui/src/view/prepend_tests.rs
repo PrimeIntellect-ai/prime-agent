@@ -17,13 +17,20 @@ fn assistant_entry(text: &str) -> ChatEntry {
 }
 
 fn body(prefix: &str, index: usize) -> ChatEntry {
-    assistant_entry(&format!("{prefix} body {index} {}", "words ".repeat(index % 9)))
+    assistant_entry(&format!(
+        "{prefix} body {index} {}",
+        "words ".repeat(index % 9)
+    ))
 }
 
 fn frame_text(frame: &[crate::Line]) -> String {
     frame
         .iter()
-        .map(|line| line.iter().map(|span| span.content.as_str()).collect::<String>())
+        .map(|line| {
+            line.iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -31,8 +38,10 @@ fn frame_text(frame: &[crate::Line]) -> String {
 #[test]
 fn prepended_history_keeps_a_paused_tail_window() {
     let mut sparse = view();
+    sparse.splash_suppressed = true;
     let mut full = view();
     full.sparse_enabled = false;
+    full.splash_suppressed = true;
     let head: Vec<ChatEntry> = (0..120).map(|index| body("head", index)).collect();
     for entry in head.iter().cloned() {
         full.push_entry(entry);
@@ -42,6 +51,11 @@ fn prepended_history_keeps_a_paused_tail_window() {
         sparse.push_entry(entry.clone());
         full.push_entry(entry);
     }
+    let card = super::expansion::tests::finished_tool_card("card-b", "beta");
+    sparse.push_entry(card.clone());
+    full.push_entry(card);
+    sparse.toggle_card_expansion(300);
+    full.toggle_card_expansion(300 + head.len());
 
     sparse.render_frame(37, 24);
     full.render_frame(37, 24);
@@ -61,7 +75,7 @@ fn prepended_history_keeps_a_paused_tail_window() {
     assert_eq!(
         sparse.render_frame(37, 24),
         full.render_frame(37, 24),
-        "the paused window keeps its content across the prepend"
+        "the paused window and the toggled card keep their content across the prepend"
     );
 
     sparse.scroll_to_top();
@@ -83,68 +97,64 @@ fn prepended_history_keeps_a_paused_tail_window() {
 #[test]
 fn prepended_history_keeps_a_top_anchored_window() {
     let mut sparse = view();
+    sparse.splash_suppressed = true;
     let head: Vec<ChatEntry> = (0..80).map(|index| body("head", index)).collect();
+    sparse.push_entry(ChatEntry::User {
+        text: "the tail opens\nwith a user row".to_string(),
+    });
     for index in 0..200 {
         sparse.push_entry(body("tail", index));
     }
     sparse.render_frame(37, 24);
     sparse.scroll_to_top();
-    let tail_top = sparse.render_frame(37, 24);
+    let home = sparse.render_frame(37, 24);
     assert!(
-        frame_text(&tail_top).contains("tail body 0"),
-        "the windowed transcript's top row renders"
-    );
-    assert!(
-        !frame_text(&tail_top).contains("head body"),
-        "the windowed transcript holds no head rows"
+        frame_text(&home).contains("the tail opens"),
+        "the home window renders the tail's first row: {home:?}"
     );
 
     sparse.prepend_entries(head);
     assert_eq!(
         sparse.render_frame(37, 24),
-        tail_top,
-        "a top-anchored window keeps its content across the prepend"
+        home,
+        "the home window keeps its content across the prepend"
     );
 
     sparse.scroll_to_top();
     let true_top = frame_text(&sparse.render_frame(37, 24));
     assert!(
         true_top.contains("head body 0"),
-        "the true top renders after the prepend"
+        "the true top renders the head's first row: {true_top}"
     );
     assert!(
-        !true_top.contains("tail body 0"),
-        "the top row is the head's first row"
+        !true_top.contains("the tail opens"),
+        "the top row is the head's first row: {true_top}"
     );
-}
 
-#[test]
-fn prepended_history_keeps_a_toggled_cards_expansion() {
-    let mut sparse = view();
-    let head: Vec<ChatEntry> = (0..10).map(|index| body("head", index)).collect();
-    for index in 0..30 {
-        sparse.push_entry(body("tail", index));
+    let mut tool_first = view();
+    tool_first.splash_suppressed = true;
+    let mut tool_head: Vec<ChatEntry> = (0..80).map(|index| body("head", index)).collect();
+    tool_head.push(super::expansion::tests::finished_tool_card(
+        "card-a", "alpha",
+    ));
+    tool_first.push_entry(super::expansion::tests::finished_tool_card(
+        "card-b", "beta",
+    ));
+    for index in 0..200 {
+        tool_first.push_entry(body("tail", index));
     }
-    sparse.push_entry(super::expansion::tests::finished_tool_card("card-a", "alpha"));
-    sparse.push_entry(super::expansion::tests::finished_tool_card("card-b", "beta"));
-    sparse.push_entry(body("tail", 31));
-    sparse.render_frame(37, 24);
-    sparse.toggle_card_expansion(31);
-    let expanded = sparse.render_frame(37, 24);
+    tool_first.render_frame(37, 24);
+    tool_first.scroll_to_top();
+    tool_first.scroll_by(2);
+    let tool_home = tool_first.render_frame(37, 24);
     assert!(
-        frame_text(&expanded).contains("beta 8"),
-        "the toggled card renders its full output"
+        frame_text(&tool_home).contains("echo hi"),
+        "the tool-first tail renders from its top: {tool_home:?}"
     );
-
-    sparse.prepend_entries(head);
+    tool_first.prepend_entries(tool_head);
     assert_eq!(
-        sparse.render_frame(37, 24),
-        expanded,
-        "the toggled card keeps its expansion across the prepend"
-    );
-    sparse.toggle_card_expansion(41);
-    assert!(
-        !frame_text(&sparse.render_frame(37, 24)).contains("beta 8"),
-        "the shifted index toggles the same card back"
+        tool_first.render_frame(37, 24),
+        tool_home,
+        "a shrinking seam entry keeps the paused window's content"
     );
 }

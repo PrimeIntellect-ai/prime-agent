@@ -94,7 +94,7 @@ impl Worker {
                 self.handle_wait_for_headless_completion(payload).await
             }
             "get_state" => self.handle_get_state(),
-            "get_messages" => self.handle_get_messages(),
+            "get_messages" => self.handle_get_messages(payload),
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
             "get_model_catalog" => self.handle_get_model_catalog(),
@@ -454,16 +454,20 @@ impl Worker {
         response_success(None, "get_session_stats", Some(stats))
     }
 
-    fn handle_get_messages(&self) -> DaemonResponse {
+    fn handle_get_messages(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("get_messages") {
             return response;
         }
+        let before = payload
+            .get("before")
+            .and_then(Value::as_u64)
+            .and_then(|before| usize::try_from(before).ok());
         let core = self.core.lock().unwrap();
-        let messages: Vec<Value> = core
-            .store
-            .as_ref()
-            .map(crate::session_store::SessionFile::messages)
-            .unwrap_or_default();
+        let messages: Vec<Value> = match (core.store.as_ref(), before) {
+            (Some(store), Some(before)) => store.messages_before(before),
+            (Some(store), None) => store.messages(),
+            (None, _) => Vec::new(),
+        };
         response_success(None, "get_messages", Some(json!({ "messages": messages })))
     }
 

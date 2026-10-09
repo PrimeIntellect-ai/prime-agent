@@ -758,6 +758,8 @@ impl Worker {
     }
 }
 
+const ATTACH_TAIL_MESSAGE_BUDGET: usize = 512;
+
 impl Worker {
     pub(crate) fn handle_attach(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("attach") {
@@ -825,18 +827,26 @@ impl Worker {
             core.attached_client_ids.push(client_id.clone());
         }
         let summary = self.summary_locked(&core, summary_inputs);
-        let mut messages: Vec<Value> = core
-            .store
-            .as_ref()
-            .map(crate::session_store::SessionFile::messages)
-            .unwrap_or_default();
+        let client_capabilities = echoed_client_capabilities
+            .clone()
+            .unwrap_or_else(|| capabilities.clone());
+        let windowed = crate::snapshot_stream::wants_windowed(&client_capabilities);
+        let (mut messages, omitted, last_user_prompt_ms) = match core.store.as_ref() {
+            Some(store) if windowed => {
+                let windowed = store.windowed_messages(ATTACH_TAIL_MESSAGE_BUDGET);
+                (
+                    windowed.messages,
+                    windowed.omitted,
+                    windowed.last_user_prompt_ms,
+                )
+            }
+            Some(store) => (store.messages(), 0, None),
+            None => (Vec::new(), 0, None),
+        };
         // The image-payload elision: `elide_snapshot_images` clients read the
         // transcript without base64 payloads; the client's set is
         // `capabilities` unless the routed attach carried
         // `clientCapabilities`.
-        let client_capabilities = echoed_client_capabilities
-            .clone()
-            .unwrap_or_else(|| capabilities.clone());
         if crate::snapshot_stream::wants_image_elision(&client_capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
         }
@@ -863,6 +873,12 @@ impl Worker {
             "children": [],
         });
         snapshot["messages"] = Value::Array(messages);
+        if omitted > 0 {
+            snapshot["historyBefore"] = json!(omitted);
+            if let Some(last_user_prompt_ms) = last_user_prompt_ms {
+                snapshot["lastUserPromptMs"] = json!(last_user_prompt_ms);
+            }
+        }
         // Slim clients read summary/messages from the snapshot; duplicating
         // them at the top level would serialize the history twice per attach.
         let slim = capabilities.iter().any(|cap| cap == "slim_attach");

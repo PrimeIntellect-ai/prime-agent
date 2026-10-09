@@ -79,6 +79,7 @@ pub struct Reconstructed {
     /// The session's effective service tier (`state.serviceTier`), the
     /// `/fast` toggle's baseline.
     pub service_tier: Option<String>,
+    pub history_before: usize,
 }
 
 impl Reconstructed {
@@ -246,9 +247,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             && message.get("customType").and_then(Value::as_str)
                 == Some(crate::custom_message::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE)
         {
-            while chat.last().is_some_and(is_superseded_attempt_row) {
-                chat.pop();
-            }
+            pop_superseded_attempts(&mut chat);
         }
         let first_new = chat.len();
         chat.extend(message_value_to_entries(message));
@@ -312,6 +311,18 @@ fn orphan_card(result: ToolResultReplay) -> ChatEntry {
         result: Some(view),
         ..Default::default()
     }))
+}
+
+fn pop_superseded_attempts(chat: &mut Vec<ChatEntry>) {
+    while chat.last().is_some_and(is_superseded_attempt_row) {
+        chat.pop();
+    }
+}
+
+pub fn join_backfilled_entries(head: &mut Vec<ChatEntry>, tail_first: Option<&ChatEntry>) {
+    if matches!(tail_first, Some(ChatEntry::Status { .. })) {
+        pop_superseded_attempts(head);
+    }
 }
 
 pub fn reconstruct(attach: &AttachData) -> Reconstructed {
@@ -386,7 +397,13 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let last_user_prompt_ms =
+    let history_before = snapshot
+        .get("historyBefore")
+        .and_then(Value::as_u64)
+        .map_or(0, |history| history as usize);
+    let last_user_prompt_ms = if history_before > 0 {
+        snapshot.get("lastUserPromptMs").and_then(Value::as_u64)
+    } else {
         snapshot
             .get("messages")
             .and_then(Value::as_array)
@@ -399,7 +416,8 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
                             && message_timestamp_ms(message).is_some()
                     })
                     .and_then(message_timestamp_ms)
-            });
+            })
+    };
     Reconstructed {
         chat: messages,
         model_id,
@@ -415,6 +433,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         queued,
         service_tier,
         last_user_prompt_ms,
+        history_before,
     }
 }
 

@@ -298,6 +298,7 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
         "chunked_snapshot",
         "client_owned_sessions",
         "elide_snapshot_images",
+        "windowed_snapshot",
     ]
 }
 

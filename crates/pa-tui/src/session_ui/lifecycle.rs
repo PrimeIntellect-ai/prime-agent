@@ -7,8 +7,8 @@ use super::{
     DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
     Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
     RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
-    ShareNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS,
-    UI_REQUEST_TIMEOUT_MS,
+    ShareNote, TranscriptBackfillNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS,
+    EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -27,6 +27,7 @@ impl SessionUi {
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
+        backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -168,6 +169,10 @@ impl SessionUi {
             input_submission_generation: 0,
             prompt_in_flight: 0,
             transcript_stale: false,
+            transcript_epoch: 0,
+            transcript_backfill: None,
+            pending_backfill: None,
+            backfill_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
@@ -346,6 +351,7 @@ impl SessionUi {
                 "event_sequence".to_string(),
                 "slim_attach".to_string(),
                 "elide_snapshot_images".to_string(),
+                "windowed_snapshot".to_string(),
             ]),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
@@ -526,6 +532,10 @@ impl SessionUi {
         // The rebuild's first frame materializes the visible window; arm the
         // post-frame trim so its wrap/render churn returns too.
         self.trim_after_frame = true;
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        self.transcript_backfill = None;
+        self.pending_backfill =
+            Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())
     }
 

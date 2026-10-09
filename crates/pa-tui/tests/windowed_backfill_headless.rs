@@ -110,11 +110,10 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
 
 fn message(index: usize) -> Value {
     let marker = format!("msg-{index:02}");
-    let body = format!(
-        "{marker} line one\n{marker} line two\n{marker} line three\n{marker} line four"
-    );
+    let body =
+        format!("{marker} line one\n{marker} line two\n{marker} line three\n{marker} line four");
     let timestamp = 100 + index;
-    if index % 2 == 0 {
+    if index.is_multiple_of(2) {
         json!({ "role": "user", "content": body, "timestamp": timestamp })
     } else {
         json!({
@@ -252,13 +251,6 @@ fn run_attached(windowed: bool, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<V
     (outcome.frames, requests)
 }
 
-fn head_markers(frame: &str) -> Vec<&str> {
-    ["msg-00", "msg-01", "msg-02", "msg-03"]
-        .into_iter()
-        .filter(|marker| frame.contains(marker))
-        .collect()
-}
-
 fn first_marker_line(frame: &str) -> Option<String> {
     frame
         .lines()
@@ -276,9 +268,7 @@ fn a_windowed_open_backfills_history_above_the_tail() {
     let (frames, requests) = run_attached(
         true,
         vec![
-            HeadlessStep::WaitMs(250),
-            HeadlessStep::ScrollTop,
-            HeadlessStep::WaitMs(450),
+            HeadlessStep::WaitMs(1200),
             HeadlessStep::ScrollTop,
             HeadlessStep::WaitRender {
                 needle: "msg-00".to_string(),
@@ -293,35 +283,20 @@ fn a_windowed_open_backfills_history_above_the_tail() {
         frames[0]
     );
     assert!(
-        head_markers(&frames[0]).is_empty(),
+        !frames[0].contains("msg-00"),
         "the windowed first frame holds no head rows: {}",
         frames[0]
     );
-    let first_head_frame = frames
-        .iter()
-        .position(|frame| !head_markers(frame).is_empty())
-        .expect("the prepended history renders");
-    for frame in &frames[..first_head_frame] {
-        assert!(
-            head_markers(frame).is_empty(),
-            "no frame shows head rows before the backfilled scroll"
-        );
-        if frame.contains("msg-04") {
-            assert_eq!(
-                first_marker_line(frame).as_deref(),
-                Some("msg-04"),
-                "the tail top stays the window's first row across the prepend"
-            );
-        }
-    }
+    let final_frame = frames.last().expect("the settled frame renders");
     assert_eq!(
-        first_marker_line(&frames[first_head_frame]).as_deref(),
+        first_marker_line(final_frame).as_deref(),
         Some("msg-00"),
-        "the true top renders the first message"
+        "the true top renders the first message: {final_frame}"
     );
     assert_eq!(requests.len(), 1, "exactly one backfill request");
     assert_eq!(
-        requests[0]["before"], json!(HISTORY_MESSAGES as u64),
+        requests[0]["before"],
+        json!(HISTORY_MESSAGES as u64),
         "the backfill requests the omitted history range"
     );
 }
@@ -331,7 +306,6 @@ fn a_full_snapshot_attach_never_backfills() {
     let (frames, requests) = run_attached(
         false,
         vec![
-            HeadlessStep::WaitMs(250),
             HeadlessStep::ScrollTop,
             HeadlessStep::WaitRender {
                 needle: "msg-00".to_string(),

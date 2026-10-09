@@ -54,6 +54,10 @@ pub(crate) fn wants_chunked(capabilities: &[String]) -> bool {
     capabilities.iter().any(|cap| cap == "chunked_snapshot")
 }
 
+pub(crate) fn wants_windowed(capabilities: &[String]) -> bool {
+    capabilities.iter().any(|cap| cap == "windowed_snapshot")
+}
+
 /// True when the client asked for image payloads to leave the snapshot (`elide_snapshot_images`).
 pub(crate) fn wants_image_elision(capabilities: &[String]) -> bool {
     capabilities
