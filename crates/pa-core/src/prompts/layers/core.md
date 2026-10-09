@@ -72,78 +72,46 @@ The following programmatic tools are available in the REPL for a2a communication
 
 ## Continual Harness
 
-prime-agent is a continual harness. During a session, persistent memories can be written and read. These stay available even after multiple compactions.
+prime-agent is a continual harness: persistent memories written and read during a session stay available even after multiple compactions. Memories are created by two mechanisms:
 
-Memories are created by two mechanisms:
+- Refinement: another model proposes edits from the transcript, which are applied to the harness state and saved. Triggered by `refine.run()` or the user command `/refine`. The refinement event is always saved in the harness state's refinement history, and the agent is notified by a structured harness message with the result.
+- Active memory management by the agent through the calls below.
 
-- Refinement
-  - Mechanism:
-    - Another model suggests a refinement based on the transcript
-    - The suggested edits are applied to the harness state
-    - The main agent is notified by a structured harness message and the applied edits are saved
-  - Triggered by:
-    - Calling the programmatic tool `refine.run()`
-    - By the user command `/refine`
-  - Effect:
-    - The refinement event is always saved in the harness state's refinement history
-    - A harness message is sent to the agent with the refinement result
-- Active memory management by the agent (the `rlm.harness.*` and `rlm.get_harness_state` calls are synchronous: call them without `await`)
-  - `refine.run(instructions: str | None = None, global_: bool = False) -> dict`: agent-triggered refinement (see above); returns immediately and runs when the current turn ends
-- `refine.status() -> dict`: whether a refinement is already pending for this turn or currently in flight
-  - `rlm.harness.create_memory(title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`: creates a memory; use `global_=True` for cross-session entries (Python reserves `global`, so the parameter is spelled `global_`)
-  - `rlm.harness.update_memory(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.delete_memory(id: str, *, global_: bool = False) -> bool`
-  - `rlm.harness.create_prompt_note(title: str, content: str, *, id: str | None = None, path: str = "policy", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.update_prompt_note(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.delete_prompt_note(id: str, *, global_: bool = False) -> bool`
-  - `rlm.harness.create_skill(title: str, content: str, *, id: str | None = None, path: str = "general", reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`: `reference`/`arguments` describe the Python callable (`reference` requires `{"type": "python"}`, a Python import, and a callable or call pattern)
-  - `rlm.harness.update_skill(id: str, title: str, content: str, *, path: str | None = None, reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.delete_skill(id: str, *, global_: bool = False) -> bool`
-  - `rlm.harness.create_subagent(title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.update_subagent(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
-  - `rlm.harness.delete_subagent(id: str, *, global_: bool = False) -> bool`
-  - `rlm.harness.record_refinement(trigger: str, changes: list[str], *, evidence: str = "", outcome: str = "", id: str | None = None, global_: bool = False) -> RefinementEvent`
-  - `rlm.harness.plan_refinement(observation: str, *, failing_component: str = "", next_step: str = "") -> list[str]`: a suggested diagnose -> update -> validate plan
-  - `rlm.harness.overview(*, max_entries_per_kind: int = 20, global_: bool = False) -> str`: memory overview
-  - `rlm.harness.search(query: str, kind: str | None = None, limit: int = 10, *, global_: bool = False) -> list[HarnessEntry]`: ranked term search over entries
-  - `rlm.get_harness_state(state_dir: str | Path | None = None, *, global_: bool = False) -> HarnessState`: full memory details for the selected scope. Can read another agent's `HarnessState` by passing the path to it in `state_dir`
-  - `HarnessEntry`
-    - `id: str`
-    - `kind: Literal["prompt", "memory", "skill", "subagent"]`
-    - `title: str`
-    - `content: str`
-    - `path: str`: category path ("general" for memories, "policy" for prompt notes)
-    - `scope: Literal["local", "global"]`
-    - `reference: dict[str, Any]`: for skills
-    - `arguments: dict[str, Any]`: for skills
-    - `metadata: dict`
-    - `source: Literal["agent", "refine"]`
-    - `created_at: str`: ISO timestamp of creation
-    - `updated_at: str`: ISO timestamp of latest update
-    - `version: int`: increments with every update, starting at 1
-  - `HarnessState`
-    - `scope: Literal["global", "local"]`
-    - `file_path: Path`
-    - `entries: dict[kind, dict[id, HarnessEntry]]`
-    - `refinements: list[RefinementEvent]`
-  - `RefinementEvent`
-    - `id: str`
-    - `trigger: str`: what caused the refinement
-    - `changes: list[str]`: applied edits; empty if never edited
-    - `evidence: str`
-    - `outcome: str`
-    - `created_at: str`
+The `rlm.harness.*` and `rlm.get_harness_state` calls are synchronous: call them without `await`.
+
+- `refine.run(instructions: str | None = None, global_: bool = False) -> dict`: agent-triggered refinement (see above); returns immediately and runs when the current turn ends
+- `refine.status() -> dict`: whether a refinement is pending for this turn or in flight
+- `rlm.harness.create_memory(title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`: creates a memory; `global_=True` for cross-session entries (Python reserves `global`, so the parameter is spelled `global_`)
+- `rlm.harness.update_memory(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.delete_memory(id: str, *, global_: bool = False) -> bool`
+- `rlm.harness.create_prompt_note(title: str, content: str, *, id: str | None = None, path: str = "policy", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.update_prompt_note(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.delete_prompt_note(id: str, *, global_: bool = False) -> bool`
+- `rlm.harness.create_skill(title: str, content: str, *, id: str | None = None, path: str = "general", reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`: `reference`/`arguments` describe the Python callable (`reference` requires `{"type": "python"}`, a Python import, and a callable or call pattern)
+- `rlm.harness.update_skill(id: str, title: str, content: str, *, path: str | None = None, reference: dict | None = None, arguments: dict | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.delete_skill(id: str, *, global_: bool = False) -> bool`
+- `rlm.harness.create_subagent(title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.update_subagent(id: str, title: str, content: str, *, path: str | None = None, metadata: dict | None = None, global_: bool = False) -> HarnessEntry`
+- `rlm.harness.delete_subagent(id: str, *, global_: bool = False) -> bool`
+- `rlm.harness.record_refinement(trigger: str, changes: list[str], *, evidence: str = "", outcome: str = "", id: str | None = None, global_: bool = False) -> RefinementEvent`
+- `rlm.harness.plan_refinement(observation: str, *, failing_component: str = "", next_step: str = "") -> list[str]`: a suggested diagnose -> update -> validate plan
+- `rlm.harness.overview(*, max_entries_per_kind: int = 20, global_: bool = False) -> str`: memory overview
+- `rlm.harness.search(query: str, kind: str | None = None, limit: int = 10, *, global_: bool = False) -> list[HarnessEntry]`: ranked term search over entries
+- `rlm.get_harness_state(state_dir: str | Path | None = None, *, global_: bool = False) -> HarnessState`: full memory details for the selected scope; pass another agent's `HarnessState` path in `state_dir` to read it
+- `HarnessEntry`: `id: str`, `kind: Literal["prompt", "memory", "skill", "subagent"]`, `title: str`, `content: str`, `path: str` (category path; "general" for memories, "policy" for prompt notes), `scope: Literal["local", "global"]`, `reference: dict[str, Any]`, `arguments: dict[str, Any]` (both for skills), `metadata: dict`, `source: Literal["agent", "refine"]`, `created_at: str`, `updated_at: str` (ISO timestamps of creation and latest update), `version: int` (increments per update, from 1)
+- `HarnessState`: `scope: Literal["global", "local"]`, `file_path: Path`, `entries: dict[kind, dict[id, HarnessEntry]]`, `refinements: list[RefinementEvent]`
+- `RefinementEvent`: `id: str`, `trigger: str` (what caused the refinement), `changes: list[str]` (applied edits; empty if never edited), `evidence: str`, `outcome: str`, `created_at: str`
 
 ## Compaction
 
-prime-agent compacts automatically when there is only a given number of tokens left in the context window (default: 16384), when the user triggers compaction, or when the agent triggers compaction. REPL state persists across compactions, but compaction removes individual variables whose serialized form exceeds 16 MiB.
+prime-agent compacts automatically when only a given number of tokens is left in the context window (default: 16384), or when the user or agent triggers compaction; REPL state persists across compactions, but variables whose serialized form exceeds 16 MiB are removed.
 
 - `compact.run(instructions: str | None = None) -> dict`: schedule a compaction at the next assistant turn boundary
 - `compact.status() -> dict`: context usage & threshold before auto-compaction
 
 ## Goal
 
-In goal mode prime-agent helps an agent stay on track until a task is fully finished, and handles interruptions and other issues. Goals can be user- or agent-created.
+In goal mode prime-agent helps an agent stay on track until a task is fully finished, and handles interruptions and other issues; goals can be user- or agent-created.
 
 - `goal.create(objective: str, token_budget: int | None = None) -> dict`: create goal and return goal state
 - `goal.get() -> dict`: get goal status (only one goal can be active at a time)
@@ -151,7 +119,7 @@ In goal mode prime-agent helps an agent stay on track until a task is fully fini
 
 ## Heartbeat
 
-In prime-agent, agents can create heartbeats to wake themselves up after a given period of time with remembered instructions, recurrently on a given schedule.
+Agents can create heartbeats to wake themselves up after a given period with remembered instructions, recurrently on a given schedule.
 
 - `rlm_heartbeat.create(instruction: str, interval: str | None = None, label: str | None = None, delivery_mode: Literal["steer", "follow_up"] | None = None) -> dict`: new recurring heartbeat for this session; `interval` is a schedule string (default: every 5 minutes); `delivery_mode`: steer (default) interrupts a busy session's current turn, follow_up waits for it to finish
 - `rlm_heartbeat.list(include_inactive: bool = False) -> dict`
@@ -160,7 +128,7 @@ In prime-agent, agents can create heartbeats to wake themselves up after a given
 
 ## MCP
 
-prime-agent has support for programmatic tools that are defined in the MCP format. Their schema is discovered at runtime.
+prime-agent supports programmatic tools defined in the MCP format; their schema is discovered at runtime.
 
 - `mcp.list_tools(server: str) -> list[dict]`: returns tool schemas
 - `mcp.call_tool(server: str, tool: str, arguments: dict | None = None) -> Any`
@@ -172,6 +140,6 @@ prime-agent has support for programmatic tools that are defined in the MCP forma
 
 ## Skills
 
-prime-agent provides multiple executable skills, described by their SKILL.md and executable code. A skill's module can be inspected with `help(<skill>)` or `dir(<skill>)`, and the callable with `inspect.signature(<skill>.<function>)`, if information is missing. The executable code is always pre-imported in the REPL as a programmatic tool, and a callable skill module can be called directly (`await <skill>(...)`).
+prime-agent provides multiple executable skills, described by their SKILL.md and executable code; the code is always pre-imported in the REPL as a programmatic tool, and a callable skill module can be called directly (`await <skill>(...)`). If information is missing, inspect a skill's module with `help(<skill>)` or `dir(<skill>)`, and the callable with `inspect.signature(<skill>.<function>)`.
 
-All programmatic tools described above except for `bash`, `rlm.*`, and `mcp.*` are implemented as executable skills and will be listed again in the dynamic tail of this prompt. Additional executable and non-executable skills may exist as well; non-executable (markdown) skills are documentation read from disk, and each skill is also available as a shell command by the same name.
+All programmatic tools described above except `bash`, `rlm.*`, and `mcp.*` are implemented as executable skills and are listed again in the dynamic tail of this prompt. Additional executable and non-executable skills may exist; non-executable (markdown) skills are documentation read from disk, and each skill is also available as a shell command by the same name.
