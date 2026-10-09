@@ -77,11 +77,17 @@ impl AgentSessionEngine {
         let closure_provider = provider.clone();
         let forced = tokio::task::spawn_blocking(move || {
             let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
-            let Some(pa_core::auth::AuthCredential::Oauth {
-                access, refresh, ..
-            }) = auth.get_all().credential(&closure_provider)
-            else {
+            let Some(credential) = auth.get_all().credential(&closure_provider) else {
                 return StoreOutcome::NotApplicable;
+            };
+            let pa_core::auth::AuthCredential::Oauth {
+                access, refresh, ..
+            } = &credential
+            else {
+                // A non-OAuth replacement (an API-key re-login) outran
+                // the stale target slot: rebinding serves it without an
+                // exchange, exactly as the storage layer would.
+                return StoreOutcome::Fresher;
             };
             // A store that already outgrew the served key is a re-login,
             // not a dead session: rebinding to the stored credential
@@ -395,6 +401,46 @@ mod tests {
             slot.api_key.as_deref(),
             Some("fresh-access"),
             "the retry re-issues against the stored re-login"
+        );
+    }
+
+    /// A non-OAuth re-login lands the same way: an API-key
+    /// replacement outrunning the stale target slot serves through the
+    /// rebind without any exchange.
+    #[tokio::test]
+    async fn a_landed_api_key_relogin_rebinds_without_an_exchange() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "faux": {
+                    "type": "api_key",
+                    "key": "sk-relogin"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine = engine_over(dir.path());
+        *engine.provider_target.write().unwrap() =
+            Some(target("faux", "faux-1", Some("stale-access")));
+        assert_eq!(
+            engine.recover_provider_auth("faux".to_string()).await,
+            AuthRecoveryOutcome::NewCredential,
+            "the landed API-key re-login serves without an exchange"
+        );
+        let slot = engine
+            .provider_target
+            .read()
+            .unwrap()
+            .clone()
+            .expect("the target stays");
+        assert_eq!(
+            slot.api_key.as_deref(),
+            Some("sk-relogin"),
+            "the rebind resolves the replacement key"
         );
     }
 
