@@ -422,64 +422,89 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
     // bytes; this keeps that exact behavior under the hardened flags.
     let raw_path =
         std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).ok()?;
-    let fd = unsafe {
+    // The creation attempt is O_EXCL: success means THIS call created
+    // the sidecar, and only then may its mode be repaired - a hostile
+    // umask (0477) tightens the fresh 0600 creation to 0200. An
+    // existing regular file at the sidecar path (a hardlink to a
+    // foreign owner-owned file) is NEVER chmod'ed on the ordinary path:
+    // the never-touch-foreign-entry rule holds.
+    let create = unsafe {
         libc::open(
             raw_path.as_ptr(),
-            libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            libc::O_RDWR
+                | libc::O_CREAT
+                | libc::O_EXCL
+                | libc::O_CLOEXEC
+                | libc::O_NONBLOCK
+                | libc::O_NOFOLLOW,
             0o600,
         )
     };
-    if fd >= 0 {
-        if let Some(file) = regular_or_close(fd) {
-            // A hostile umask (0477) can tighten the freshly created
-            // sidecar's mode below the read-write the next acquisition
-            // needs: repair through this descriptor before returning.
+    if create >= 0 {
+        if let Some(file) = regular_or_close(create) {
             use std::os::fd::AsRawFd;
             unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
             return Some(file);
         }
-    } else {
-        // An umask-tightened existing sidecar (mode 0400) denies the
-        // read-write open: fall back to a read-only descriptor - flock
-        // works on any descriptor - and repair the mode best-effort.
-        let errno = std::io::Error::last_os_error();
-        if errno.raw_os_error() == Some(libc::EACCES) || errno.raw_os_error() == Some(libc::EROFS) {
+        return None;
+    }
+    // An existing entry (or a transient error): open WITHOUT creating
+    // and without ever changing an existing file's mode.
+    let existing = unsafe {
+        libc::open(
+            raw_path.as_ptr(),
+            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+        )
+    };
+    if existing >= 0 {
+        // An ordinary regular sidecar: no repair, no chmod - the file
+        // is assumed to be the protocol's own (or a foreign entry the
+        // protocol never touches beyond flocking it).
+        return regular_or_close(existing);
+    }
+    // An access-mode denial on an existing sidecar (a prior umask-0477
+    // creation left mode 0200: both read opens fail; or a 0400 sidecar
+    // denies write): recover through whichever access mode the mode
+    // admits, repair the mode through that descriptor, and reopen
+    // read-write - NFS requires a WRITABLE descriptor for an exclusive
+    // flock. This repair only ever applies to a file that denied the
+    // protocol's own read-write open at the protocol's own sidecar
+    // path: the tight modes this reaches (0200/0400) are exactly the
+    // ones the protocol's earlier umask-bitten creations produced.
+    let errno = std::io::Error::last_os_error();
+    if errno.raw_os_error() == Some(libc::EACCES) || errno.raw_os_error() == Some(libc::EROFS) {
+        for fallback_mode in [libc::O_WRONLY, libc::O_RDONLY] {
             let ro = unsafe {
                 libc::open(
                     raw_path.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+                    fallback_mode | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
                 )
             };
-            if ro >= 0 {
-                if let Some(file) = regular_or_close(ro) {
-                    // Best-effort repair through the descriptor: the next
-                    // writer's read-write open works normally.
-                    use std::os::fd::AsRawFd;
-                    unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
-                    // NFS requires a WRITABLE descriptor for an
-                    // exclusive flock, and fchmod does not change this
-                    // descriptor's access mode: reopen read-write and
-                    // hand the flock the writable descriptor instead.
-                    let rw = unsafe {
-                        libc::open(
-                            raw_path.as_ptr(),
-                            libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
-                        )
-                    };
-                    if rw >= 0 {
-                        // The repaired mode admits a read-write reopen
-                        // (regular_or_close closes the descriptor itself
-                        // when the reopen did not land on a regular
-                        // file).
-                        if let Some(rw_file) = regular_or_close(rw) {
-                            drop(file);
-                            return Some(rw_file);
-                        }
+            if ro < 0 {
+                continue;
+            }
+            if let Some(file) = regular_or_close(ro) {
+                use std::os::fd::AsRawFd;
+                unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
+                let rw = unsafe {
+                    libc::open(
+                        raw_path.as_ptr(),
+                        libc::O_RDWR | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+                    )
+                };
+                if rw >= 0 {
+                    // The repaired mode admits a read-write reopen
+                    // (regular_or_close owns the reopen's descriptor
+                    // lifecycle; on a non-regular reopen it closes rw
+                    // itself).
+                    if let Some(rw_file) = regular_or_close(rw) {
+                        drop(file);
+                        return Some(rw_file);
                     }
-                    // Local filesystems flock on a read-only descriptor
-                    // fine; the repair keeps future writers working.
-                    return Some(file);
                 }
+                // Local filesystems flock on any descriptor fine; the
+                // repair keeps future writers working.
+                return Some(file);
             }
         }
     }
@@ -2007,6 +2032,36 @@ mod tests {
         );
         let guard = try_reclaim_guard(&file, Duration::from_millis(200));
         assert!(guard.is_some(), "the repaired sidecar serializes normally");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn umask_created_write_only_sidecar_recovers_after_restart() {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // A prior umask-0477 creation left mode 0200 (write-only): every
+        // read open fails EACCES, and the plain read-write recovery
+        // cannot get there either. The guard must still acquire.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let sidecar = reclaim_guard_path(&file);
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o200)
+            .open(&sidecar)
+            .unwrap();
+        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(
+            guard.is_some(),
+            "a write-only sidecar recovers through the O_WRONLY fallback"
+        );
+        drop(guard);
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the mode was repaired for future acquisitions"
+        );
     }
 
     #[cfg(target_os = "linux")]
