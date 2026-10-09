@@ -96,6 +96,9 @@ async fn engine_runs_tool_loop_and_persists() {
     assert!(engine
         .system_prompt
         .contains("Recursive agent depth: 0 (root)"));
+    assert!(engine.system_prompt.contains(
+        "Subagents are unavailable in this session (no daemon): rlm.spawn will error. Plan to do all work yourself."
+    ));
 
     let outcome = engine
         .prompt("run the echo tool", PromptOptions::default())

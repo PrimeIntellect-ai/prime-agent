@@ -88,6 +88,8 @@ pub struct BuildSystemPromptOptions<'a> {
     pub rlm_depth: Option<u32>,
     /// Human-readable parent name or id for child communication doctrine.
     pub rlm_parent_agent: Option<&'a str>,
+    /// Whether the session has no RLM child runtime (no daemon to spawn through).
+    pub daemonless: bool,
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
 }
@@ -303,6 +305,12 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         "Recursive agent depth: {depth}{}",
         if depth == 0 { " (root)" } else { " (not root)" }
     )];
+    if options.daemonless {
+        lines.push(
+            "Subagents are unavailable in this session (no daemon): rlm.spawn will error. Plan to do all work yourself."
+                .to_string(),
+        );
+    }
     if !has_ipython {
         lines.push(
             "This session has no Python REPL (`ipython` tool): the programmatic tools described above are unavailable here."
@@ -483,6 +491,20 @@ mod tests {
             .contains("Enabled generic MCP servers: `slack`"));
         assert!(right.assembled[right.cached_prefix_len..]
             .contains("You are a child agent spawned by the lead."));
+    }
+
+    #[test]
+    fn daemonless_disclosure_follows_the_depth_line() {
+        let disclosure = "Subagents are unavailable in this session (no daemon): rlm.spawn will error. Plan to do all work yourself.";
+        let mut options = base_options();
+        options.daemonless = true;
+        let prompt = build_system_prompt(&options);
+        let mut lines = prompt
+            .lines()
+            .skip_while(|line| !line.starts_with("Recursive agent depth:"));
+        lines.next().expect("depth line");
+        assert_eq!(lines.next(), Some(disclosure));
+        assert!(!build_system_prompt(&base_options()).contains(disclosure));
     }
 
     #[test]

@@ -5,7 +5,7 @@ The following are mandatory rules, only to be overridden by clear user intent.
 - Goals must only be created at a user's request.
 - Agents run shell commands with `bash()`, not `subprocess`/`os.system`: subprocess calls block the kernel, show the user nothing while they run, and spawn processes the harness cannot see or stop.
 - `bash("""...""")` should be used over `bash("...")` because it makes using quotation marks inside bash easy.
-- Bash commands must be run in the background; if they are quick, or the agent is doing other heavy work in the same `ipython` call, they should be awaited or polled in the same `ipython` call interleaved with other work, or a subsequent one; otherwise, the agent should wait for the notification; blocking calls reduce user responsiveness.
+- Bash commands must be run in the background; if they are quick, or the agent is doing other heavy work in the same `ipython` call, they should be awaited or polled in the same `ipython` call interleaved with other work, or a subsequent one; otherwise, the agent should end its turn instead of awaiting completion and wait for the notification; blocking calls reduce user responsiveness.
 - Shell state does not persist between calls, but agents can use `os.chdir(...)` for the working directory and `os.environ[...]` for environment variables — both persist in the REPL and apply to later `bash()` calls through POSIX process inheritance (since each bash call is a fresh process, Python does not inherit environment variables from bash).
 - Edits of existing files must be performed using `edit` with exact old/new strings; if the text contains triple double quotes ("""), the agent should use triple single-quoted variables or build `old`/`new` from inspected file slices.
 - Agents use Python for reading files and searching in them — it gives them reusable variables they can slice, filter, and act on without re-reading; using Python variables to find or produce, and to save the strings used in `edit` is also encouraged.
@@ -27,6 +27,7 @@ The following are mandatory rules, only to be overridden by clear user intent.
 - Instructions to agents for multi-agent work:
   - When spawning a subagent, keep the handle to stop or inspect the child later.
   - Ask for an explicit reply when needed; not every message needs a reply.
+  - Harness notices that require no action need no reply — never produce a status message that adds no information; respond only when there is something to relay or decide.
   - Use `await rlm.list_subagents()` after kernel restart or compaction.
   - Have children write files and read those files for fan-in.
   - Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.
