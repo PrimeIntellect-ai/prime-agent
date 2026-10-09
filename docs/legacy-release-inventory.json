@@ -1,0 +1,354 @@
+{
+  "retrieved_at": "2026-10-09",
+  "github_release_pages": 2,
+  "github_release_count": 107,
+  "stable_count": 18,
+  "releases": [
+    {
+      "tag": "v0.9.8",
+      "target_commitish": "7d442aafa985f9342134fac16c2ef41f03fb45c1",
+      "published_at": "2026-09-29T22:06:42Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.8",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.8.tgz",
+          "digest": "sha256:d7b72785119efc28bfbca8ec4a7f47a1fcdcf47fcd8cebdb60bffaa79e3e1274",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.8/prime-agent-0.9.8.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "beta",
+      "target_commitish": "7d442aafa985f9342134fac16c2ef41f03fb45c1",
+      "published_at": "2026-07-17T23:04:57Z",
+      "prerelease": true,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/beta",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.8-beta.2286.1.7d442aa.tgz",
+          "digest": "sha256:7a311e2d7fd45c0b9f134197bb3101ebc11233c6c2bf649c4d574a0d98d3473b",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/beta/prime-agent-0.9.8-beta.2286.1.7d442aa.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.7",
+      "target_commitish": "08ff1b2e2794ea9e8f4a08d12bc95408a66e1074",
+      "published_at": "2026-09-28T23:13:49Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.7",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.7.tgz",
+          "digest": "sha256:d696f2636cd7780d2d67296142bc1d13d72960c8be4e5cfae0bbba82f9d8707d",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.7/prime-agent-0.9.7.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.6",
+      "target_commitish": "e260085dd8f742e0def3d871860c9a888b114851",
+      "published_at": "2026-09-24T01:01:53Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.6",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.6.tgz",
+          "digest": "sha256:e5bf0e349e55b3f75c79e66006c993b10c51ed1c9bf15863b06658fcaf0232b2",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.6/prime-agent-0.9.6.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "releases/v0.9.1-fhcache1",
+      "target_commitish": "da819d32f6a3f57e71f5d5fb784a4958929dbdae",
+      "published_at": "2026-09-20T03:45:42Z",
+      "prerelease": true,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/releases/v0.9.1-fhcache1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.1-fhcache1.tgz",
+          "digest": "sha256:4a461bf7fc9d8e6e4e61471b66341aff05ba94e02c6c25f678851d26d1b27d2c",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/releases/v0.9.1-fhcache1/prime-agent-0.9.1-fhcache1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "fhcache-candidate-1",
+      "target_commitish": "da819d32f6a3f57e71f5d5fb784a4958929dbdae",
+      "published_at": "2026-09-20T03:33:40Z",
+      "prerelease": true,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/fhcache-candidate-1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.1-fhcache1.tgz",
+          "digest": "sha256:4a461bf7fc9d8e6e4e61471b66341aff05ba94e02c6c25f678851d26d1b27d2c",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/fhcache-candidate-1/prime-agent-0.9.1-fhcache1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.5",
+      "target_commitish": "a7d791bc1be09793ed5f3ec05bf4cccbc60679ea",
+      "published_at": "2026-09-16T00:13:49Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.5",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.5.tgz",
+          "digest": "sha256:349f1682c7909550842f1b04a71ba95814341b136474ade736df93f8ec006876",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.5/prime-agent-0.9.5.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.4",
+      "target_commitish": "f771dfcedd684d1afff84ca2c6fa95c7a21efbc2",
+      "published_at": "2026-09-08T23:18:05Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.4",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.4.tgz",
+          "digest": "sha256:b8d752a53d11a8c9a7580e1fb5fc24f7ce74ccad979c7e6e6aa8880fc3ad90b0",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.4/prime-agent-0.9.4.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.3",
+      "target_commitish": "915c78f42c248b08238dd27fcd4bcab32c60beab",
+      "published_at": "2026-09-06T10:44:04Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.3",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.3.tgz",
+          "digest": "sha256:ce71049389877770aa31b9be64c473685a86159adbbd2466bd43e4a9113242f1",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.3/prime-agent-0.9.3.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.2",
+      "target_commitish": "9c54a35dac3a2ad17910074d66664859ea175666",
+      "published_at": "2026-09-05T19:14:39Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.2",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.2.tgz",
+          "digest": "sha256:d649b9f0258c77de7d02aba33d786925ce41a36b601e8e24eef0f00bdc2f1f49",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.2/prime-agent-0.9.2.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.1",
+      "target_commitish": "81ae3cb34d27d38ee37f9e205a1e73694993b344",
+      "published_at": "2026-09-01T18:54:36Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.1.tgz",
+          "digest": "sha256:573bce0cd004fc62052e9a924089941b7f39266ab71e66a94c85a1f9d35835ba",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.1/prime-agent-0.9.1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.0",
+      "target_commitish": "c394506e2f0dd887b3f94908da9f2910b43c846b",
+      "published_at": "2026-09-01T18:18:51Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.9.0",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.9.0.tgz",
+          "digest": "sha256:fc560ec74195297999405d4fbfd0d308598cf502e0fccef7f02eb60032213108",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.0/prime-agent-0.9.0.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.1",
+      "target_commitish": "514633727bf26d74f39f3119c2b0e31a5ceb2a9d",
+      "published_at": "2026-08-26T05:14:48Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.8.1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.8.1.tgz",
+          "digest": "sha256:46c24db1782dd31adc35d5c6cbcc75564faba6ced3bf2ccf03d836ee77134475",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.8.1/prime-agent-0.8.1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.0",
+      "target_commitish": "8d7deeab5861bf9d77bde3d8511046a5c799818d",
+      "published_at": "2026-08-21T21:18:10Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.8.0",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.8.0.tgz",
+          "digest": "sha256:f5b0093c7e0fddb73f94773d74383585456adfa84f12a4082d3098f23bb8fab6",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.8.0/prime-agent-0.8.0.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.4",
+      "target_commitish": "af0b8e00b9f704e834787fd321065ca78281f2aa",
+      "published_at": "2026-08-19T23:44:42Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.4",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.7.4.tgz",
+          "digest": "sha256:dea045d7c170466a102e030e940f459cc13f2c113465f40be1c7505d80405d2e",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.4/prime-agent-0.7.4.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.3",
+      "target_commitish": "61131b2d195ba7a67a4ce8ac60bb10cecae07b67",
+      "published_at": "2026-08-17T22:38:17Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.3",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.7.3.tgz",
+          "digest": "sha256:2a188738318b91ff91ea77b8a0b215c41543cf0483fcb18a53475dc4e7032784",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.3/prime-agent-0.7.3.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.2",
+      "target_commitish": "83a0f9f9566219551fcb6ffaf7f519a815749a58",
+      "published_at": "2026-08-11T19:00:48Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.2",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.7.2.tgz",
+          "digest": "sha256:bc5471f2a626d727b88a45eb745fff93b10c554a3c4fc5912f25d8c64b987f5e",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.2/prime-agent-0.7.2.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.1",
+      "target_commitish": "95afd319a78ae017a41241d50b013d656a0685ce",
+      "published_at": "2026-08-07T18:39:08Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.7.1.tgz",
+          "digest": "sha256:d68612c83239caafab72cc76c55ac572bfd07a059ea8fbd2a3ddbe1f2b55dcdb",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.1/prime-agent-0.7.1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.0",
+      "target_commitish": "be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387",
+      "published_at": "2026-08-05T18:41:37Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.7.0",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.7.0.tgz",
+          "digest": "sha256:88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.7.0/prime-agent-0.7.0.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.6.1",
+      "target_commitish": "8bd7c18f16bfdc356c1cd20fb9fcf01119147cda",
+      "published_at": "2026-08-05T14:55:26Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.6.1",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.6.1.tgz",
+          "digest": "sha256:4c7150dbfe5807c8480676d20c3104e63045b8ca2463abf38f021062e9fcacef",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.6.1/prime-agent-0.6.1.tgz"
+        }
+      ]
+    },
+    {
+      "tag": "v0.6.0",
+      "target_commitish": "7db7b69c60be0f7b271faf948864891813b27182",
+      "published_at": "2026-08-05T04:36:20Z",
+      "prerelease": false,
+      "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/tag/v0.6.0",
+      "npm_assets": [
+        {
+          "name": "prime-agent-0.6.0.tgz",
+          "digest": "sha256:8ef229a0422398174ba8f0ba4f7101adfc614b023a8f819f6ef3920e5d2350c6",
+          "browser_download_url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.6.0/prime-agent-0.6.0.tgz"
+        }
+      ]
+    }
+  ],
+  "support_scope": "Prime Agent 0.6.0 onward",
+  "rust_beta_tags": [
+    "v0.9.9-beta.10",
+    "v0.9.9-beta.4",
+    "v0.9.9-beta.6",
+    "v0.9.9-beta.7",
+    "v0.9.9-beta.8",
+    "v0.9.9-beta.9",
+    "v0.9.9-beta.11",
+    "v0.9.9-beta.17",
+    "v0.9.9-beta.18",
+    "v0.9.9-beta.21",
+    "v0.9.9-beta.22",
+    "v0.9.9-beta.23",
+    "v0.9.9-beta.24",
+    "v0.9.9-beta.25",
+    "v0.9.9-beta.26",
+    "v0.9.9-beta.27",
+    "v0.9.9-beta.28",
+    "v0.9.9-beta.29",
+    "v0.9.9-beta.30",
+    "v0.9.9-beta.31",
+    "v0.9.9-beta.32",
+    "v0.9.9-beta.33",
+    "v0.9.9-beta.34",
+    "v0.9.9-beta.35",
+    "v0.9.9-beta.36",
+    "v0.9.9-beta.37",
+    "v0.9.9-beta.38",
+    "v0.9.9-beta.39",
+    "v0.9.9-beta.40",
+    "v0.9.9-beta.41",
+    "v0.9.9-beta.42",
+    "v0.9.9-beta.43",
+    "v0.9.9-beta.44",
+    "v0.9.9-beta.45",
+    "v0.9.9-beta.46",
+    "v0.9.9-beta.47",
+    "v0.9.9-beta.48",
+    "v0.9.9-beta.49",
+    "v0.9.9-beta.50",
+    "v0.9.9-beta.51",
+    "v0.9.9-beta.52",
+    "v0.9.9-beta.53",
+    "v0.9.9-beta.54",
+    "v0.9.9-beta.55",
+    "v0.9.9-beta.56",
+    "v0.9.9-beta.57",
+    "v0.9.9-beta.58",
+    "v0.9.9-beta.59",
+    "v0.9.9-beta.60"
+  ]
+}
