@@ -889,6 +889,107 @@ async fn exhausted_recovery_retries_leave_the_sweep_incomplete() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn missing_credentials_leave_the_sweep_incomplete_until_provided() {
+    let fixture = Fixture::new();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(true).unwrap();
+    // Deliberately no auth.json yet: the upload must fail closed.
+    let path = fixture.write_session("no-credentials.jsonl", "no-credentials");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        !recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink.clone(),
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await,
+        "missing credentials must keep the sweep incomplete so it re-arms"
+    );
+    std::fs::write(
+        fixture.agent_dir.join("auth.json"),
+        r#"{"prime-agent-traces":{"type":"api_key","key":"synthetic-only"}}"#,
+    )
+    .unwrap();
+    assert!(
+        recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unreadable_session_header_leaves_the_sweep_incomplete() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.session_dir.join("headerless.jsonl");
+    std::fs::write(&path, "not a session header\n").unwrap();
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        !recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await,
+        "an unreadable header must keep the sweep incomplete so it re-arms"
+    );
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+}
+
+#[test]
+fn controller_admission_is_never_capped_by_registration_capacity() {
+    let fixture = Fixture::new();
+    let hosts: Vec<_> = (0..=MAX_CONTROLLERS)
+        .map(|n| {
+            ContinuousTraceUpload::install(
+                &fixture.cwd,
+                &fixture.agent_dir,
+                Some(&fixture.session_dir.join(format!("capacity-{n}.jsonl"))),
+                TraceConsentSnapshot {
+                    enabled: false,
+                    generation: ConsentGeneration::read(&fixture.cwd, &fixture.agent_dir),
+                },
+            )
+        })
+        .collect();
+    let registered = {
+        let registrations = service().controllers.lock().unwrap();
+        hosts
+            .iter()
+            .filter(|host| {
+                let identity = Arc::as_ptr(host).cast::<()>();
+                registrations
+                    .iter()
+                    .any(|registration| registration.controller.as_ptr().cast::<()>() == identity)
+            })
+            .count()
+    };
+    assert_eq!(
+        registered,
+        hosts.len(),
+        "every admitted host must be registered for the service to discover"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_busy_delivery_lease_does_not_hold_upload_capacity() {
     let fixture = Fixture::new();
     enable_synthetic_fixture(&fixture);

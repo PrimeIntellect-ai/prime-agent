@@ -195,14 +195,11 @@ impl ContinuousTraceUpload {
         };
         // Dead registrations are acknowledged only by the background service,
         // so even a host that retires between service ticks retains its directory.
-        if registrations.len() < MAX_CONTROLLERS {
-            registrations.push(Registration::of(&controller));
-            service.wake.notify_one();
-        } else {
-            tracing::warn!(
-                "trace controller capacity reached; durable intent retained for recovery"
-            );
-        }
+        // A registration is a weak handle: every live host is admitted, so a
+        // busy service tick can never strand its uploads behind a silent cap.
+        // Sweep concurrency stays bounded by the recovery registry.
+        registrations.push(Registration::of(&controller));
+        service.wake.notify_one();
         controller
     }
 
@@ -755,7 +752,19 @@ async fn recover_with_backoff(
     let gate = TraceRequestGate::new();
     let mut complete = true;
     let mut not_before: Option<Instant> = None;
-    while let Ok(Some(entry)) = entries.next_entry().await {
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) => {
+                // A transient directory-iteration failure must not let the
+                // sweep complete: unexamined markers stay eligible and the
+                // bounded cooldown re-arms another sweep.
+                tracing::warn!(%error, "trace outbox iteration failed");
+                complete = false;
+                break;
+            }
+        };
         if cancel.is_cancelled() {
             return (false, None);
         }
@@ -774,6 +783,8 @@ async fn recover_with_backoff(
             Ok::<_, std::io::Error>(raw)
         };
         let Ok(raw) = read_entry.await else {
+            // A transient record read must not let the sweep complete.
+            complete = false;
             continue;
         };
         if raw.len() > 64 * 1024 {
@@ -830,7 +841,11 @@ async fn recover_with_backoff(
                 prune_entry(&entry.path(), &raw, Some(&path));
                 continue;
             }
-            Err(_) => continue,
+            // A transient metadata error must not let the sweep complete.
+            Err(_) => {
+                complete = false;
+                continue;
+            }
         }
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
             // Another process owns this delivery; a skipped marker must not
@@ -839,6 +854,9 @@ async fn recover_with_backoff(
             continue;
         };
         let Some(header) = read_trace_session_header(&path) else {
+            // An unreadable session header may be transient; the marker stays
+            // and the sweep must rearm rather than complete without it.
+            complete = false;
             continue;
         };
         let session_cwd = PathBuf::from(&header.cwd);
@@ -862,9 +880,13 @@ async fn recover_with_backoff(
             let result = deliver_with_consent(&options, Some(&gate)).await;
             log_agent_trace_outcome(&agent_dir, Some(&path), &result);
             drop(permit);
-            if matches!(result, TraceUploadResult::Disabled) {
-                // A revoked project must not block other opted-in projects.
-                // Retain its marker and rearm the shared sweep at a bounded rate.
+            if matches!(
+                result,
+                TraceUploadResult::Disabled | TraceUploadResult::MissingCredentials
+            ) {
+                // A revoked project must not block other opted-in projects, and
+                // missing credentials may arrive later. Retain the marker and
+                // rearm the shared sweep at a bounded rate.
                 complete = false;
                 break;
             }
