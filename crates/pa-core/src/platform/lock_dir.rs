@@ -381,6 +381,22 @@ impl LockDir {
     /// Decide the fate of an incumbent at `path`. Returns only when the
     /// incumbent was removed (or vanished) and acquisition may be retried;
     /// surfaces `WouldBlock` while a live or not-yet-stale lock holds it.
+    /// Restore a directory this judge parked aside but never observed
+    /// stale. The path's current occupant is itself short-lived (a live
+    /// lock): retry the restore while it releases; if restoration stays
+    /// impossible, the parked directory stays put as residue — a live
+    /// lock is never deleted. The restored lock keeps its owner file, so
+    /// its holder releases normally, and a later judge re-judges it on
+    /// its own merits.
+    fn restore_or_park(aside: &Path, path: &Path) {
+        for _ in 0..25 {
+            if fs::rename(aside, path).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn judge_and_reclaim(path: &Path, stale_after: Duration) -> io::Result<()> {
         let metadata = match fs::symlink_metadata(path) {
             Ok(metadata) => metadata,
@@ -448,14 +464,9 @@ impl LockDir {
                             return Ok(());
                         }
                         // A live successor holds the path now: restore it
-                        // untouched and report contention. An owned
-                        // successor whose directory this judge grabbed
-                        // cannot be restored reports contention anyway
-                        // (its release is owner-checked and never
-                        // deletes a successor).
-                        if fs::rename(&aside, path).is_err() {
-                            let _ = fs::remove_dir_all(&aside);
-                        }
+                        // untouched — never delete a lock that was not
+                        // observed stale — and report contention.
+                        Self::restore_or_park(&aside, path);
                         return Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             format!("Lock file is already being held: {}", path.display()),
@@ -521,6 +532,40 @@ mod tests {
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
+    }
+
+    /// The parked-successor disposition never deletes a live lock: an
+    /// occupied path keeps its occupant and the parked directory until
+    /// the occupant releases, then the parked directory restores.
+    #[test]
+    fn a_parked_successor_never_deletes_the_live_occupant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_of(&dir.path().join("auth.json"));
+        let aside = path.with_extension("stale-parked");
+        // The parked directory: a successor this judge moved aside.
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("owner"), "999999 tok").unwrap();
+        // A live occupant holds the path.
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("owner"), format!("{} tok", std::process::id())).unwrap();
+        LockDir::restore_or_park(&aside, &path);
+        assert!(
+            path.join("owner").exists(),
+            "the live occupant is never deleted"
+        );
+        assert!(
+            aside.join("owner").exists(),
+            "the parked successor stays parked while the path is occupied"
+        );
+        // The occupant releases: the parked directory restores untouched.
+        std::fs::remove_file(path.join("owner")).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        LockDir::restore_or_park(&aside, &path);
+        assert!(
+            fs::read_to_string(path.join("owner")).is_ok_and(|owner| owner == "999999 tok"),
+            "the parked successor restores once the path frees"
+        );
+        assert!(!aside.exists(), "nothing stays parked after the restore");
     }
 
     #[test]
