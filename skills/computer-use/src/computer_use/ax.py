@@ -272,22 +272,29 @@ def _budget_spent(deadline: float) -> bool:
 
 
 def _paste_baseline(pid: int) -> tuple[Any, str] | None:
-    """The focused element ref and its value head, grounding a paste verdict.
+    """The focused element ref and its own value head, grounding a paste verdict.
 
-    The focused ref pins the element whose value must show the paste; the
-    value head is the compared signal. An unreadable fingerprint, a missing
-    value head, or an unreadable focused element leaves the paste
-    unverifiable rather than guessed.
+    The ref is read first and the value is read FROM THAT REF, so a focus
+    move cannot mix one element's identity with another's value. An
+    unreadable focus, an unverifiable or secure role, or a missing value
+    head leaves the paste unverifiable rather than guessed - and a secure
+    field's value is never read at all.
     """
-    fingerprint = _window_fingerprint(pid)
-    if fingerprint is None or fingerprint[4] is None:
-        return None
     app_services = _require_mac().app_services
     app_element = app_services.AXUIElementCreateApplication(pid)
+    _set_messaging_timeout(app_services, app_element)
     focused = _copy_value(app_services, app_element, "AXFocusedUIElement")
     if focused is None:
         return None
-    return (focused, fingerprint[4])
+    role_ok, role = _read_attribute(app_services, focused, "AXRole")
+    subrole_ok, subrole = _read_subrole(app_services, focused)
+    if not role_ok or not subrole_ok or _is_secure_field({"role": role, "subrole": subrole}):
+        return None
+    value = _copy_value(app_services, focused, "AXValue")
+    value_head = _cap(_text(value))
+    if value_head is None:
+        return None
+    return (focused, value_head[:_FINGERPRINT_VALUE_CHARS])
 
 
 def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple[Any, ...] | None:

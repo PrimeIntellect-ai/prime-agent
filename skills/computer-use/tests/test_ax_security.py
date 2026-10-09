@@ -740,19 +740,7 @@ class UnreadableRoleWithAbsentSubroleTests(unittest.TestCase):
 
 
 class PasteBaselineTests(unittest.TestCase):
-    def test_an_unreadable_fingerprint_yields_no_baseline(self) -> None:
-        with mock.patch.object(ax, "_window_fingerprint", lambda pid, timeout_seconds=None: None), mock.patch.object(
-            ax, "_require_mac", side_effect=AssertionError("must not touch the frameworks without a fingerprint")
-        ):
-            self.assertIsNone(ax._paste_baseline(4242))
-
-    def test_a_missing_value_head_yields_no_baseline(self) -> None:
-        with mock.patch.object(
-            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, None)
-        ), mock.patch.object(ax, "_require_mac", side_effect=AssertionError("must not touch the frameworks without a head")):
-            self.assertIsNone(ax._paste_baseline(4242))
-
-    def test_an_unreadable_focused_element_yields_no_baseline(self) -> None:
+    def test_an_unreadable_focus_yields_no_baseline(self) -> None:
         class Services:
             kAXErrorSuccess = 0
 
@@ -768,12 +756,58 @@ class PasteBaselineTests(unittest.TestCase):
                 raise AssertionError(f"unexpected attribute {attribute}")
 
         services = Services()
-        with mock.patch.object(
-            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, "draft")
-        ), mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
             self.assertIsNone(ax._paste_baseline(4242))
 
-    def test_a_readable_baseline_pins_the_focus_and_its_value_head(self) -> None:
+    def test_a_secure_focus_is_never_read_into_a_baseline(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedUIElement":
+                    return (self.kAXErrorSuccess, "focus")
+                if attribute == "AXRole":
+                    return (self.kAXErrorSuccess, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (self.kAXErrorSuccess, "AXSecureTextField")
+                raise AssertionError("a secure field's value is never read")
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIsNone(ax._paste_baseline(4242))
+
+    def test_a_missing_value_head_yields_no_baseline(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedUIElement":
+                    return (self.kAXErrorSuccess, "focus")
+                if attribute == "AXRole":
+                    return (self.kAXErrorSuccess, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (self.kAXErrorSuccess, None)
+                if attribute == "AXValue":
+                    return (self.kAXErrorSuccess, None)
+                raise AssertionError(f"unexpected attribute {attribute}")
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIsNone(ax._paste_baseline(4242))
+
+    def test_a_readable_baseline_pins_the_focus_and_its_own_value(self) -> None:
         class Services:
             kAXErrorSuccess = 0
 
@@ -786,13 +820,45 @@ class PasteBaselineTests(unittest.TestCase):
             def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
                 if attribute == "AXFocusedUIElement":
                     return (self.kAXErrorSuccess, "focused")
+                if attribute == "AXRole":
+                    return (self.kAXErrorSuccess, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (self.kAXErrorSuccess, None)
+                if attribute == "AXValue":
+                    return (self.kAXErrorSuccess, "draft")
                 raise AssertionError(f"unexpected attribute {attribute}")
 
         services = Services()
-        with mock.patch.object(
-            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, "draft")
-        ), mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
             self.assertEqual(ax._paste_baseline(4242), ("focused", "draft"))
+
+
+class BaselineOwnValueTests(unittest.TestCase):
+    def test_the_baseline_value_comes_from_the_pinned_focus_itself(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedUIElement":
+                    return (self.kAXErrorSuccess, "focus-b")
+                if attribute == "AXRole":
+                    return (self.kAXErrorSuccess, "AXTextField")
+                if attribute == "AXSubrole":
+                    return (self.kAXErrorSuccess, None)
+                if attribute == "AXValue":
+                    return (self.kAXErrorSuccess, "focus-b-value")
+                raise AssertionError(f"unexpected attribute {attribute}")
+
+        services = Services()
+        with mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            baseline = ax._paste_baseline(4242)
+        self.assertEqual(baseline, ("focus-b", "focus-b-value"))
 
 
 if __name__ == "__main__":

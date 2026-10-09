@@ -1162,6 +1162,34 @@ class RestoreAfterSettleTests(AppTestCase):
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
+    async def test_a_copy_during_the_baseline_read_aborts_the_paste(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+
+        def copying_during_baseline() -> None:
+            # a user copy lands while the baseline read runs
+            env.pasteboard_holds_payload = False
+
+        env.paste_baseline_side_effect = copying_during_baseline
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.paste("payload")
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("clipboard changed during the paste", caught.exception.message)
+
+    async def test_a_focus_move_onto_secure_during_the_baseline_read_aborts(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+
+        def focusing_secure_during_baseline() -> None:
+            # the focus moves onto a password field while the baseline read runs
+            env.secure_focus = True
+
+        env.paste_baseline_side_effect = focusing_secure_during_baseline
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.paste("payload")
+        self.assertIn(caught.exception.code, ("ACTION_UNSUPPORTED", "TRANSPORT_ERROR"))
+        self.assertNotIn(("press_key", {"pid": env.pid, "key": "cmd+v"}), env.recorder.calls)
+
 
 if __name__ == "__main__":
     unittest.main()

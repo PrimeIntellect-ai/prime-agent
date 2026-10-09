@@ -483,6 +483,7 @@ class AppEnvironment:
         self.paste_consumed = True  # the default app consumes pastes into the focused value
         self.paste_baselines: list[Any] | None = None  # queued paste-baseline reads, cycling
         self.baseline_reads = 0
+        self.paste_baseline_side_effect: Any = None  # runs mid-paste during the baseline read
         self.paste_focus_before: Any = object()  # the focused element before the paste
         self.paste_focus_after: Any = object()  # the focused element after a focus move
         self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
@@ -548,6 +549,8 @@ class AppEnvironment:
         the preexisting head before the press and the payload head after it,
         and the focus-move oracle serves the new focus's preexisting value."""
         self.baseline_reads += 1
+        if self.paste_baseline_side_effect is not None:
+            self.paste_baseline_side_effect()
         if self.paste_baselines is not None:
             return self.paste_baselines[(self.baseline_reads - 1) % len(self.paste_baselines)]
         if not self.pasted_text:

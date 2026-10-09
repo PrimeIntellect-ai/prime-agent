@@ -825,7 +825,10 @@ class App:
                             )
                         # a queued paste rechecks the gates the moment it
                         # holds the lock: the focus and the app state may
-                        # have moved while another paste held the lock
+                        # have moved while another paste held the lock. The
+                        # baseline read itself can take seconds on a slow
+                        # app, so the gates sit IMMEDIATELY before the press
+                        baseline = ax._paste_baseline(self._pid)
                         self._refuse_secure_focus()
                         self._guard()
                         if not _clipboard_unchanged(change_count):
@@ -837,7 +840,6 @@ class App:
                                 "the clipboard changed during the paste; the payload was not pasted",
                                 {},
                             )
-                        baseline = ax._paste_baseline(self._pid)
                         inject._press_key(self._pid, "cmd+v")
                         posted = True
                         time.sleep(_PASTE_SETTLE_SECONDS)
