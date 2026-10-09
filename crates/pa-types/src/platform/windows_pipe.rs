@@ -281,7 +281,10 @@ mod tests {
             .expect("deadline");
         let mut buf = [0u8; 5];
         assert_eq!(
-            stream.read(&mut buf).expect_err("reply is held back").kind(),
+            stream
+                .read(&mut buf)
+                .expect_err("reply is held back")
+                .kind(),
             std::io::ErrorKind::TimedOut
         );
         reply_tx.send(()).expect("release reply");
