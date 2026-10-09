@@ -42,7 +42,8 @@ impl Schedule {
     }
 
     fn settle(&mut self, now: Instant, started_generation: u64, result: &TraceUploadResult) {
-        let retry = matches!(result, TraceUploadResult::Failed { status_code, .. }
+        let retry = matches!(result, TraceUploadResult::Disabled)
+            || matches!(result, TraceUploadResult::Failed { status_code, .. }
             if status_code.is_none_or(|status| status == 429 || RETRIABLE_HTTP_STATUSES.contains(&status)));
         if let TraceUploadResult::Failed {
             retry_after_ms: Some(ms),
@@ -432,16 +433,16 @@ async fn run_service() {
                         let state = state.clone();
                         let permits = permits.clone();
                         tokio::spawn(async move {
-                            let complete = recover(
+                            let (complete, not_before) = recover_with_backoff(
                                 cwd,
                                 agent_dir,
                                 permits,
                                 Arc::new(ReqwestTraceHttp),
                                 None,
-                                cancel,
+                                cancel.clone(),
                             )
                             .await;
-                            state.store(if complete { 2 } else { 0 }, Ordering::Release);
+                            settle_recovery_run(&state, complete, not_before, &cancel).await;
                         });
                     }
                 }
@@ -457,6 +458,24 @@ async fn run_service() {
         }
         tokio::select! { () = service.wake.notified() => {}, () = tokio::time::sleep(DEBOUNCE) => {} }
     }
+}
+
+async fn settle_recovery_run(
+    state: &std::sync::atomic::AtomicU8,
+    complete: bool,
+    not_before: Option<Instant>,
+    cancel: &TraceUploadCancel,
+) {
+    if !complete {
+        // Mixed-consent directories may need another background sweep. Keep its
+        // state running during cooldown; the service rechecks consent before rearm.
+        let due = (Instant::now() + MIN_INTERVAL).max(not_before.unwrap_or_else(Instant::now));
+        tokio::select! {
+            () = tokio::time::sleep_until(due) => {},
+            () = cancel.wait() => {},
+        }
+    }
+    state.store(if complete { 2 } else { 0 }, Ordering::Release);
 }
 
 async fn run_controller(
@@ -502,6 +521,7 @@ async fn run_controller(
             );
             initialized = true;
         }
+        let enabled = controller.consent.lock().unwrap().0;
         let due = controller
             .pending
             .lock()
@@ -512,10 +532,15 @@ async fn run_controller(
         let cancel = controller.cancel.clone();
         // Weak ownership during waits is essential: timers cannot keep a session alive.
         drop(controller);
-        if due.is_none_or(|due| due > Instant::now()) {
-            let wait = due.map_or(DEBOUNCE, |due| {
-                due.saturating_duration_since(Instant::now()).min(DEBOUNCE)
-            });
+        if !enabled || due.is_none_or(|due| due > Instant::now()) {
+            // Overdue work must not spin or acquire capacity while consent is off.
+            let wait = if enabled {
+                due.map_or(DEBOUNCE, |due| {
+                    due.saturating_duration_since(Instant::now()).min(DEBOUNCE)
+                })
+            } else {
+                DEBOUNCE
+            };
             tokio::select! { () = wake.notified() => {}, () = tokio::time::sleep(wait) => {}, () = cancel.wait() => return }
             continue;
         }
@@ -618,30 +643,32 @@ async fn deliver_with_consent(
     }
 }
 
-async fn recover(
+async fn recover_with_backoff(
     cwd: PathBuf,
     agent_dir: PathBuf,
     permits: Arc<tokio::sync::Semaphore>,
     http: Arc<dyn TraceHttp>,
     base_url: Option<String>,
     cancel: TraceUploadCancel,
-) -> bool {
+) -> (bool, Option<Instant>) {
     let settings = crate::settings::SettingsManager::create(&cwd, &agent_dir);
     if !settings.errors().is_empty() || !settings.get_agent_traces_enabled() {
-        return false;
+        return (false, None);
     }
     // Workers share an agent directory: only one startup sweep may deliver it
     // at a time. OS locks release on crashes without stale-directory retries.
     let Some(_recovery_lease) = delivery_lease(&agent_dir, &agent_dir.join("catch-up")) else {
-        return false;
+        return (false, None);
     };
     let Ok(mut entries) = tokio::fs::read_dir(agent_trace_outbox_dir(&agent_dir)).await else {
-        return false;
+        return (false, None);
     };
     let gate = TraceRequestGate::new();
+    let mut complete = true;
+    let mut not_before: Option<Instant> = None;
     while let Ok(Some(entry)) = entries.next_entry().await {
         if cancel.is_cancelled() {
-            return false;
+            return (false, None);
         }
         if entry.path().extension().is_none_or(|ext| ext != "json") {
             continue;
@@ -706,6 +733,12 @@ async fn recover(
             }
             Err(_) => continue,
         }
+        // Successful cursor entries owe no bytes, even if their project opted out.
+        if TraceUploadSignature::of(&path).is_some_and(|signature| {
+            read_agent_trace_outbox_entry(&agent_dir, &path) == Some(signature)
+        }) {
+            continue;
+        }
         let Some(_delivery_lease) = delivery_lease(&agent_dir, &path) else {
             continue;
         };
@@ -728,22 +761,31 @@ async fn recover(
         // Bound catch-up retries per entry; exhaustion leaves its durable marker.
         let mut schedule = Schedule::default();
         for attempt in 0..3 {
-            let permit = tokio::select! { p = permits.clone().acquire_owned() => p.unwrap(), () = cancel.wait() => return false };
+            let permit = tokio::select! { p = permits.clone().acquire_owned() => p.unwrap(), () = cancel.wait() => return (false, None) };
             let generation = schedule.start(Instant::now());
             let result = deliver_with_consent(&options, Some(&gate)).await;
             log_agent_trace_outcome(&agent_dir, Some(&path), &result);
             drop(permit);
+            if matches!(result, TraceUploadResult::Disabled) {
+                // A revoked project must not block other opted-in projects.
+                // Retain its marker and rearm the shared sweep at a bounded rate.
+                complete = false;
+                break;
+            }
             schedule.settle(Instant::now(), generation, &result);
+            if let Some(deadline) = schedule.not_before {
+                not_before = Some(not_before.map_or(deadline, |old| old.max(deadline)));
+            }
             let Some(due) = schedule.due else {
                 break;
             };
             if attempt == 2 {
                 break;
             }
-            tokio::select! { () = tokio::time::sleep_until(due) => {}, () = cancel.wait() => return false }
+            tokio::select! { () = tokio::time::sleep_until(due) => {}, () = cancel.wait() => return (false, None) }
         }
     }
-    !cancel.is_cancelled()
+    (complete && !cancel.is_cancelled(), not_before)
 }
 
 #[cfg(test)]

@@ -514,8 +514,17 @@ fn read_agent_trace_outbox_entry(
     agent_dir: &Path,
     session_file: &Path,
 ) -> Option<TraceUploadSignature> {
+    use std::io::Read;
     let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
-    let raw = std::fs::read_to_string(entry_path).ok()?;
+    let mut raw = String::new();
+    std::fs::File::open(entry_path)
+        .ok()?
+        .take(64 * 1024 + 1)
+        .read_to_string(&mut raw)
+        .ok()?;
+    if raw.len() > 64 * 1024 {
+        return None;
+    }
     let (recorded_file, uploaded) = parse_outbox_entry(&raw)?;
     if recorded_file != session_file.to_string_lossy() {
         return None;

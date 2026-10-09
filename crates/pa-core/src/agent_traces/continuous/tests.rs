@@ -2,6 +2,19 @@ use super::*;
 use crate::agent_traces::tests::{response, Fixture, ScriptedTraceHttp};
 use std::io::Write;
 
+async fn recover(
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    permits: Arc<tokio::sync::Semaphore>,
+    http: Arc<dyn TraceHttp>,
+    base_url: Option<String>,
+    cancel: TraceUploadCancel,
+) -> bool {
+    recover_with_backoff(cwd, agent_dir, permits, http, base_url, cancel)
+        .await
+        .0
+}
+
 fn controller(fixture: &Fixture, path: &Path, enabled: bool) -> Arc<ContinuousTraceUpload> {
     Arc::new(ContinuousTraceUpload {
         cwd: fixture.cwd.clone(),
@@ -270,6 +283,7 @@ async fn disabling_consent_cancels_an_inflight_request_without_shutting_down_the
         Some("http://synthetic.invalid".into()),
     ));
     let (_body, _reply) = observed.recv().await.unwrap();
+    let first_start = Instant::now();
     let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
     settings.set_agent_traces_enabled(false).unwrap();
     cancelled.notified().await;
@@ -278,6 +292,15 @@ async fn disabling_consent_cancels_an_inflight_request_without_shutting_down_the
         read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
         None
     );
+    tokio::time::advance(MIN_INTERVAL * 2).await;
+    tokio::task::yield_now().await;
+    assert!(observed.try_recv().is_err(), "consent off must not deliver");
+    settings.set_agent_traces_enabled(true).unwrap();
+    let (_body, _reply) = tokio::time::timeout(MIN_INTERVAL * 2, observed.recv())
+        .await
+        .expect("restoring consent resumes without another persist")
+        .unwrap();
+    assert!(Instant::now() - first_start >= MIN_INTERVAL);
     drop(c);
     task.await.unwrap();
 }
@@ -556,4 +579,240 @@ fn recovery_registry_releases_inactive_directory_capacity_and_preserves_other_ho
     retain_live_recoveries(&mut recovered, &[]);
     assert!(live_cancel.is_cancelled());
     assert!(recovered.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn revoked_recovery_retains_intent_and_resumes_after_consent_restoration() {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let path = fixture.write_session("revoked-recovery.jsonl", "revoked-recovery");
+    mark_pending(&fixture.agent_dir, &path).unwrap();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: cancelled.clone(),
+    });
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let task = tokio::spawn(recover(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        permits.clone(),
+        sink.clone(),
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+    ));
+    let (_body, _reply) = observed.recv().await.unwrap();
+    let mut settings = crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+    settings.set_agent_traces_enabled(false).unwrap();
+    cancelled.notified().await;
+    assert!(!tokio::time::timeout(DEBOUNCE * 2, task)
+        .await
+        .unwrap()
+        .unwrap());
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &path).exists());
+    assert!(delivery_lease(&fixture.agent_dir, &path).is_some());
+    assert_eq!(permits.available_permits(), 1);
+    assert!(
+        !recover(
+            fixture.cwd.clone(),
+            fixture.agent_dir.clone(),
+            permits.clone(),
+            sink.clone(),
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert!(observed.try_recv().is_err());
+    settings.set_agent_traces_enabled(true).unwrap();
+    let task = tokio::spawn(recover(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        permits,
+        sink,
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+    ));
+    let (_body, reply) = tokio::time::timeout(MIN_INTERVAL, observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    reply.send(response(200, "{}")).unwrap();
+    assert!(task.await.unwrap());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        TraceUploadSignature::of(&path)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn incomplete_recovery_cooldown_is_bounded_and_shutdown_cancellable() {
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(1));
+    let cancel = TraceUploadCancel::new();
+    let task_state = state.clone();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        settle_recovery_run(&task_state, false, None, &task_cancel).await;
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(MIN_INTERVAL - DEBOUNCE).await;
+    assert_eq!(state.load(Ordering::Acquire), 1);
+    tokio::time::advance(DEBOUNCE).await;
+    task.await.unwrap();
+    assert_eq!(state.load(Ordering::Acquire), 0);
+    state.store(1, Ordering::Release);
+    let task_state = state.clone();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        settle_recovery_run(&task_state, false, None, &task_cancel).await;
+    });
+    tokio::task::yield_now().await;
+    let began = Instant::now();
+    cancel.cancel();
+    task.await.unwrap();
+    assert_eq!(Instant::now(), began);
+    assert_eq!(state.load(Ordering::Acquire), 0);
+}
+
+fn mixed_consent_fixture() -> (Fixture, PathBuf, PathBuf, PathBuf) {
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let first = fixture.write_session("disabled-project.jsonl", "disabled-project");
+    let second = fixture.write_session("enabled-project.jsonl", "enabled-project");
+    let second_cwd = fixture.agent_dir.join("other-project");
+    std::fs::create_dir_all(&second_cwd).unwrap();
+    for (path, cwd) in [(&first, &fixture.cwd), (&second, &second_cwd)] {
+        let raw = std::fs::read_to_string(path).unwrap();
+        let (header, tail) = raw.split_once('\n').unwrap();
+        let mut header: Value = serde_json::from_str(header).unwrap();
+        header["cwd"] = json!(cwd);
+        std::fs::write(path, format!("{header}\n{tail}")).unwrap();
+        mark_pending(&fixture.agent_dir, path).unwrap();
+    }
+    let config = fixture.cwd.join(crate::settings::storage::CONFIG_DIR_NAME);
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("settings.json"),
+        r#"{"agentTraces":{"enabled":false}}"#,
+    )
+    .unwrap();
+    (fixture, first, second, second_cwd)
+}
+
+#[tokio::test(start_paused = true)]
+async fn disabled_project_recovery_does_not_block_other_opted_in_projects() {
+    let (fixture, first, second, second_cwd) = mixed_consent_fixture();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        !recover(
+            second_cwd,
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &first),
+        None
+    );
+    assert!(agent_trace_outbox_entry_path(&fixture.agent_dir, &first).exists());
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &second),
+        TraceUploadSignature::of(&second)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn disabled_uploaded_cursor_does_not_rearm_recovery() {
+    let (fixture, first, second, second_cwd) = mixed_consent_fixture();
+    record_agent_trace_outbox_upload(
+        &fixture.agent_dir,
+        &first,
+        TraceUploadSignature::of(&first).unwrap(),
+    )
+    .unwrap();
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    assert!(
+        recover(
+            second_cwd,
+            fixture.agent_dir.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+            sink,
+            Some("http://synthetic.invalid".into()),
+            TraceUploadCancel::new(),
+        )
+        .await
+    );
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &second),
+        TraceUploadSignature::of(&second)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn mixed_consent_rescan_preserves_exhausted_rate_limit_deadline() {
+    let (fixture, _first, _second, second_cwd) = mixed_consent_fixture();
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let sink = Arc::new(ObservedSink {
+        requests,
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = tokio::spawn(recover_with_backoff(
+        second_cwd,
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink,
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+    ));
+    for _ in 0..3 {
+        let (_body, reply) = observed.recv().await.unwrap();
+        let mut limited = response(429, "{}");
+        limited.retry_after = Some("120".into());
+        reply.send(limited).unwrap();
+    }
+    let (complete, not_before) = task.await.unwrap();
+    assert!(!complete);
+    let began = Instant::now();
+    assert_eq!(not_before, Some(began + Duration::from_secs(120)));
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(1));
+    let task_state = state.clone();
+    let task = tokio::spawn(async move {
+        settle_recovery_run(&task_state, complete, not_before, &TraceUploadCancel::new()).await;
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(MIN_INTERVAL).await;
+    assert_eq!(
+        state.load(Ordering::Acquire),
+        1,
+        "must not rescan after only 60 seconds"
+    );
+    tokio::time::advance(MIN_INTERVAL).await;
+    task.await.unwrap();
+    assert_eq!(state.load(Ordering::Acquire), 0);
+    assert_eq!(Instant::now(), began + Duration::from_secs(120));
+}
+
+#[test]
+fn oversized_cursor_records_fail_closed_with_bounded_reads() {
+    let fixture = Fixture::new();
+    let path = fixture.write_session("large-cursor.jsonl", "large-cursor");
+    record_agent_trace_outbox_upload(
+        &fixture.agent_dir,
+        &path,
+        TraceUploadSignature::of(&path).unwrap(),
+    )
+    .unwrap();
+    let entry = agent_trace_outbox_entry_path(&fixture.agent_dir, &path);
+    let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&entry).unwrap()).unwrap();
+    value["padding"] = json!(" ".repeat(64 * 1024));
+    std::fs::write(entry, value.to_string()).unwrap();
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &path),
+        None
+    );
 }
