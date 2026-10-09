@@ -48,11 +48,8 @@ fn boot_cleanup_preserves_unverifiable_journals_and_waiting_callers_status() {
                 std::fs::write(&descriptor_path, descriptor.to_string())
                     .expect("descriptor fixture");
                 if worker_id == "unreadable" {
-                    std::fs::set_permissions(
-                        &descriptor_path,
-                        std::fs::Permissions::from_mode(0),
-                    )
-                    .expect("unreadable descriptor");
+                    std::fs::set_permissions(&descriptor_path, std::fs::Permissions::from_mode(0o0))
+                        .expect("unreadable descriptor");
                 }
             }
             _ => unreachable!("fixture worker id"),

@@ -11,8 +11,8 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use pa_types::daemon::update_flow::DaemonUpdateResume;
 use pa_types::daemon::update_flow::{
-    legacy_update_restart_status, legacy_update_restarts_dir, socket_update_dir,
-    UpdateRoster, UpdateRosterSession, UpdateStatusCounts, UpdateStatusFailure, UPDATE_ROSTER_ENV,
+    legacy_update_restart_status, legacy_update_restarts_dir, socket_update_dir, UpdateRoster,
+    UpdateRosterSession, UpdateStatusCounts, UpdateStatusFailure, UPDATE_ROSTER_ENV,
 };
 use pa_types::daemon::{DaemonCommand, UpdateId};
 use serde_json::json;

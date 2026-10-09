@@ -264,11 +264,9 @@ fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
         held_lease.exists(),
         "process exit retains the dead-owner lease for safe reclamation"
     );
-    let reopened = pa_daemon::lease::acquire_runtime_session_lease(
-        &session_file,
-        &dir.path().join("agent"),
-    )
-    .expect("a new owner can reclaim the lease after the worker exited");
+    let reopened =
+        pa_daemon::lease::acquire_runtime_session_lease(&session_file, &dir.path().join("agent"))
+            .expect("a new owner can reclaim the lease after the worker exited");
     reopened.release();
     assert!(!held_lease.exists(), "the new owner released its lease");
     assert!(
