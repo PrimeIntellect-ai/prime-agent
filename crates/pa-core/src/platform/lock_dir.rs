@@ -1898,6 +1898,23 @@ impl LockDir {
             // instead of restoring it, and no judge refuses a marked
             // directory behind its live pid record.
             if let Some(guard) = try_reclaim_guard(&self.path, Duration::from_millis(100)) {
+                // The marker written through the pinned fd BEFORE the
+                // handle closes carries the release through every
+                // downstream failure: a metadata() read that could not
+                // recover the identity (this arm's inode-anchored pass
+                // never runs without it), an inode-anchored pass that
+                // Failed at placeholder creation (an unowned lock has
+                // no owner record for the gated pathname fallback to
+                // check), an unsupported mount with no record to gate
+                // on - a marked directory is consumed by the next
+                // judge instead of wedging acquisitions behind a
+                // record this process no longer has. Marking before a
+                // successful removal is harmless (the removal deletes
+                // the marker with the directory) and lets a concurrent
+                // dance consume a released incumbent.
+                if let Some(dir) = self.dir.as_ref() {
+                    mark_released_through(dir);
+                }
                 #[cfg(unix)]
                 drop(self.dir.take());
                 #[cfg(target_os = "linux")]
