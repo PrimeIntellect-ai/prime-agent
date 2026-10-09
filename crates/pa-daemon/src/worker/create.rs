@@ -194,6 +194,7 @@ impl Worker {
         // Set by the continuing arm when it OPENED an existing session file:
         // `is_continuing` reads this arm fact, never an existence check.
         let mut opened_existing_session = false;
+        let mut restored_tier: Option<Option<pa_types::ai::ServiceTier>> = None;
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
@@ -220,9 +221,10 @@ impl Worker {
                         // this worker opened — a failed open never leaks the binding into a
                         // later create.
                         self.engine.set_session_file(path.clone());
-                        // One fold serves both consumers: the model restore takes its saved
+                        // One fold serves all consumers: the model restore takes its saved
                         // context off the store this create just opened.
                         let restored = opened.restored_settings();
+                        restored_tier = opened.has_service_tier().then_some(restored.service_tier);
                         let has_thinking_level = opened.has_thinking_level();
                         let saved = crate::agent_engine::saved_session_context_from_parts(
                             &restored,
@@ -429,9 +431,6 @@ impl Worker {
                 }
             }
         }
-        let restored_tier = store
-            .has_service_tier()
-            .then(|| store.restored_settings().service_tier);
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
         let (steering, follow_up) = {

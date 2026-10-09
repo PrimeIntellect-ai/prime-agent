@@ -469,3 +469,78 @@ fn walk_pins_the_compaction_boundary_sequences() {
     assert_eq!(messages[2]["role"], "custom");
     assert_eq!(messages[4]["content"], "u3");
 }
+
+/// The restored-settings fold on a windowed open must answer the full open's
+/// scalars without re-materializing the transcript: the window walk already
+/// resolved model/thinking/tier across the active ancestry, and only rows
+/// appended past the loaded window join the fold.
+fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std::path::Path) {
+    let windowed = SessionFile::open_windowed(path).unwrap();
+    assert!(
+        windowed.window.is_some(),
+        "{name}: the windowed reader must engage"
+    );
+    let restored = windowed.restored_settings();
+    let reference = SessionFile::open(path).unwrap().restored_settings();
+    assert!(
+        !reference.messages.is_empty(),
+        "{name}: the fixture must carry a transcript"
+    );
+    assert_eq!(
+        restored.model, reference.model,
+        "{name}: the restored model must match the full open"
+    );
+    assert_eq!(
+        restored.thinking_level, reference.thinking_level,
+        "{name}: the restored thinking level must match the full open"
+    );
+    assert_eq!(
+        restored.service_tier, reference.service_tier,
+        "{name}: the restored service tier must match the full open"
+    );
+    assert!(
+        restored.messages.is_empty(),
+        "{name}: the restored-settings fold must not re-materialize the transcript"
+    );
+}
+
+#[test]
+fn windowed_restored_settings_match_the_full_open_without_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resumed.jsonl");
+    let mut file = SessionFile::create("/tmp", None, 0);
+    file.set_path(path.clone());
+    file.append_entry(
+        "model_change",
+        json!({"provider":"old","modelId":"superseded"}),
+    );
+    file.append_entry("thinking_level_change", json!({"thinkingLevel":"high"}));
+    file.append_entry("service_tier_change", json!({"serviceTier":null}));
+    file.append_message(&json!({
+        "role":"assistant","provider":"old","model":"superseded","api":"openai-responses",
+        "content":[{"type":"text","text":"hello"}],"stopReason":"stop","timestamp":0
+    }));
+    let kept = file.append_message(&json!({"role":"user","content":"kept","timestamp":1}));
+    file.append_entry(
+        "compaction",
+        json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":100}),
+    );
+    file.append_entry(
+        "model_change",
+        json!({"provider":"new","modelId":"current"}),
+    );
+    file.append_entry("thinking_level_change", json!({"thinkingLevel":"low"}));
+    file.append_entry("service_tier_change", json!({"serviceTier":"priority"}));
+    file.rewrite().unwrap();
+    assert_windowed_restored_settings_match_the_full_open("changes around the boundary", &path);
+
+    let path = dir.path().join("never-compacted.jsonl");
+    let mut file = SessionFile::create("/tmp", None, 0);
+    file.set_path(path.clone());
+    file.append_entry("model_change", json!({"provider":"p","modelId":"m"}));
+    file.append_entry("thinking_level_change", json!({"thinkingLevel":"medium"}));
+    file.append_entry("service_tier_change", json!({"serviceTier":"flex"}));
+    file.append_message(&json!({"role":"user","content":"hello","timestamp":0}));
+    file.rewrite().unwrap();
+    assert_windowed_restored_settings_match_the_full_open("whole-file window", &path);
+}
