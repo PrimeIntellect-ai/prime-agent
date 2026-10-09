@@ -1920,15 +1920,15 @@ mod tests {
         std::fs::write(std::path::Path::new(&sidecar).with_file_name("warmup"), b"").ok();
         // Plant a FIFO at the sidecar path: an ordinary write-open
         // blocks forever; the hardened open must fail closed fast.
-        let fifo_name = std::ffi::CString::new(
-            sidecar
-                .as_os_str()
-                .to_string_lossy()
-                .into_owned()
-                .as_bytes(),
-        )
-        .unwrap();
-        unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+        let fifo_name =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(sidecar.as_os_str()))
+                .unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) },
+            0,
+            "the FIFO fixture must exist: {}",
+            std::io::Error::last_os_error()
+        );
         let started = std::time::Instant::now();
         let guard = try_reclaim_guard(&file, Duration::from_millis(200));
         assert!(guard.is_none(), "a planted sidecar fails closed");
