@@ -499,10 +499,12 @@ pub fn shutdown_admission_generation(registry_dir: &Path) -> u64 {
 /// only). A write failure FAILS THE ACQUISITION: the concurrent-stop
 /// detection would silently miss a raced shutdown and the caller would
 /// spawn behind the user's completed stop.
-fn bump_shutdown_admission_generation(registry_dir: &Path) -> Result<()> {
-    let next = shutdown_admission_generation(registry_dir) + 1;
+fn bump_shutdown_admission_generation(registry_dir: &Path) -> Result<u64> {
+    let observed = shutdown_admission_generation(registry_dir);
     let path = shutdown_admission_generation_path(registry_dir);
-    std::fs::write(&path, next.to_string()).with_context(|| format!("write {}", path.display()))
+    std::fs::write(&path, (observed + 1).to_string())
+        .with_context(|| format!("write {}", path.display()))?;
+    Ok(observed)
 }
 
 /// Read a startup-fence record; `Ok(None)` when absent (TS
@@ -723,6 +725,10 @@ struct AdmissionState {
     process_start_id: Option<String>,
     stopped: AtomicBool,
     lost: AtomicBool,
+    /// The stop-window generation THIS acquisition observed under the
+    /// guard (before its own bump): a caller holding a pre-acquire
+    /// baseline can detect a foreign stop that raced in between.
+    observed_generation: std::sync::atomic::AtomicU64,
 }
 
 impl ShutdownAdmission {
@@ -780,6 +786,7 @@ impl ShutdownAdmission {
             process_start_id: crate::lease::get_process_start_id(std::process::id()),
             stopped: AtomicBool::new(false),
             lost: AtomicBool::new(false),
+            observed_generation: std::sync::atomic::AtomicU64::new(0),
         });
         loop {
             let acquired = with_registry_guard(&registry_dir, || {
@@ -800,7 +807,10 @@ impl ShutdownAdmission {
                     ),
                 };
                 write_record(&path, &record)?;
-                bump_shutdown_admission_generation(&registry_dir)?;
+                let observed = bump_shutdown_admission_generation(&registry_dir)?;
+                state
+                    .observed_generation
+                    .store(observed, std::sync::atomic::Ordering::SeqCst);
                 Ok(Some(()))
             });
             // A failed generation bump leaves the record orphaned on disk
@@ -943,6 +953,17 @@ impl ShutdownAdmission {
     /// to its own lease expiry (5 s) and the crash-oracle.
     pub fn release(&mut self) {
         let _ = self.try_release();
+    }
+
+    /// The stop-window generation THIS admission observed at its acquire
+    /// (under the guard, before its own bump): compared against a
+    /// pre-acquire baseline, more than the caller's own single increment
+    /// means a foreign stop raced in between.
+    #[must_use]
+    pub fn observed_generation(&self) -> u64 {
+        self.state
+            .observed_generation
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
