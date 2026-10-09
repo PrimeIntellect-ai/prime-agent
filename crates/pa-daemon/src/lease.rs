@@ -148,6 +148,10 @@ fn owner_alive(owner: &LeaseOwner) -> bool {
     }
 }
 
+fn lease_reclaimable(owner: Option<&LeaseOwner>) -> bool {
+    owner.is_none_or(|owner| !owner_alive(owner))
+}
+
 /// Whether a failed candidate-onto-lease-directory rename means the lease
 /// directory already exists (TS `isRenameTargetContention`): POSIX raises
 /// EEXIST/ENOTEMPTY; Windows surfaces the same race as EPERM/EACCES, so
@@ -506,36 +510,66 @@ pub fn acquire_runtime_session_lease(
                         continue;
                     }
                     if is_rename_target_contention(&directory, &error, cfg!(windows)) {
-                        match read_owner(&directory)? {
-                            Some(existing) if owner_alive(&existing) => {
-                                return Err(SessionAlreadyActiveError::for_owner(
-                                    &canonical.to_string_lossy(),
-                                    Some(&existing),
-                                )
-                                .into());
-                            }
-                            _ => {
-                                reclaim_stale(&directory);
-                                continue;
-                            }
+                        let existing = read_owner(&directory)?;
+                        if !lease_reclaimable(existing.as_ref()) {
+                            return Err(SessionAlreadyActiveError::for_owner(
+                                &canonical.to_string_lossy(),
+                                existing.as_ref(),
+                            )
+                            .into());
                         }
+                        reclaim_stale(&directory);
+                        continue;
                     }
                     return Err(error.into());
                 }
             }
         }
-        match read_owner(&directory)? {
-            Some(owner) if owner_alive(&owner) => Err(SessionAlreadyActiveError::for_owner(
+        let existing = read_owner(&directory)?;
+        if !lease_reclaimable(existing.as_ref()) {
+            return Err(SessionAlreadyActiveError::for_owner(
                 &canonical.to_string_lossy(),
-                Some(&owner),
+                existing.as_ref(),
             )
-            .into()),
-            _ => Err(anyhow!(
-                "Could not acquire session lease: {}",
-                canonical.display()
-            )),
+            .into());
         }
+        Err(anyhow!(
+            "Could not acquire session lease: {}",
+            canonical.display()
+        ))
     })
+}
+
+pub(crate) fn reclaim_dead_owner_leases(agent_dir: &Path) -> usize {
+    let root = agent_dir.join("session-leases");
+    let Ok(entries) = fs::read_dir(&root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if std::path::Path::new(name)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("lock"))
+        {
+            let reclaimed = with_lease_guard(&path, GuardWait::Fast, || {
+                let existing = read_owner(&path)?;
+                Ok(lease_reclaimable(existing.as_ref()) && reclaim_stale(&path))
+            });
+            if reclaimed.unwrap_or(false) {
+                removed += 1;
+            }
+        } else if name.contains(".lock.stale-") && fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -587,6 +621,63 @@ mod tests {
         second.release();
         std::env::remove_var(SESSION_LEASES_ENABLED_ENV);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_dead_owner_sweep_spares_live_and_unreadable_leases() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path();
+        let live_path = agent_dir.join("live.jsonl");
+        std::fs::write(&live_path, "{}\n").unwrap();
+        let live = acquire_runtime_session_lease(&live_path, agent_dir).unwrap();
+        let dead_directory = {
+            let dead_path = agent_dir.join("dead.jsonl");
+            std::fs::write(&dead_path, "{}\n").unwrap();
+            let directory = lease_directory(agent_dir, &canonical_session_path(&dead_path));
+            fs::create_dir_all(&directory).unwrap();
+            let owner = LeaseOwner {
+                version: 1,
+                token: "dead-holder".to_owned(),
+                pid: 0,
+                process_start_id: get_process_start_id(0),
+                active_session_id: None,
+                session_path: canonical_session_path(&dead_path)
+                    .to_string_lossy()
+                    .to_string(),
+                created_at: crate::util::now_iso(),
+            };
+            fs::write(
+                directory.join("owner.json"),
+                serde_json::to_string_pretty(&owner).unwrap() + "\n",
+            )
+            .unwrap();
+            directory
+        };
+        let stale_leftover = dead_directory.with_extension("lock.stale-1-abc");
+        fs::create_dir_all(&stale_leftover).unwrap();
+        let corrupt_directory = {
+            let corrupt_path = agent_dir.join("corrupt.jsonl");
+            std::fs::write(&corrupt_path, "{}\n").unwrap();
+            let directory = lease_directory(agent_dir, &canonical_session_path(&corrupt_path));
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(directory.join("owner.json"), "not json").unwrap();
+            directory
+        };
+
+        assert_eq!(
+            reclaim_dead_owner_leases(agent_dir),
+            2,
+            "the dead owner and the stale leftover are the only removals"
+        );
+        assert!(!dead_directory.exists());
+        assert!(!stale_leftover.exists());
+        assert!(
+            corrupt_directory.exists(),
+            "an unreadable owner keeps its lease, like the acquire path"
+        );
+        live.append(&live_path, b"row\n")
+            .expect("the live lease still owns its append");
+        live.release();
     }
 
     /// A kill -9 mid-mutation leaves a dead owner plus a brand-new guard
