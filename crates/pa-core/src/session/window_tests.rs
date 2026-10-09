@@ -969,3 +969,35 @@ async fn boundary_window_snapshot_keeps_the_historical_read() {
         "the pre-window row must stay served through the historical read"
     );
 }
+
+/// The append-only reopen's belt (the keeper review's torn-tail finding): a
+/// crashed append's unterminated final row - one the repair failed to
+/// re-terminate, its errors swallowed - must not merge with the first
+/// appended row: both would be lost to the index. The append boundary
+/// guard writes one newline first, so the appended row parses on its own
+/// line and the torn row alone stays skipped.
+#[test]
+fn append_cached_bounds_an_unterminated_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("torn.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"}\n{\"type\":\"message\",\"id\":\"torn\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"",
+    )
+    .unwrap();
+    let appended =
+        b"{\"type\":\"message\",\"id\":\"after\",\"timestamp\":\"2026-10-08T00:00:00.000Z\"}\n";
+    append_cached(&path, appended, AppendOwnership::Unleased).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut parsed = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if serde_json::from_str::<serde_json::Value>(line).is_ok() {
+            parsed.push(index);
+        }
+    }
+    assert_eq!(
+        parsed,
+        vec![0, 2],
+        "the header and the appended row parse on their own lines; the torn row alone stays skipped:\n{text}"
+    );
+}
