@@ -613,6 +613,10 @@ impl SessionUi {
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
+        // Retry countdowns belong to the previous event stream. The fresh
+        // snapshot's activity flags own this attachment; only a new retry
+        // event can establish a countdown for it.
+        view.retry = None;
         let snapshot = self.pending_snapshot.take().unwrap_or_default();
         self.replace_transcript(snapshot, view);
         if let Some(message) = self.pending_model_fallback_message.take() {

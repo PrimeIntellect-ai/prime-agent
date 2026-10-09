@@ -29,21 +29,21 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use harness::{
-    ChildSpec, DifferentialHarness, PtyReader, Termios, child_options, find_subsequence,
-    harness_lock, quiet_child_epilogue, spawn_child, view_options,
+    child_options, find_subsequence, harness_lock, quiet_child_epilogue, spawn_child, view_options,
+    ChildSpec, DifferentialHarness, PtyReader, Termios,
 };
 use ledger::ModeLedger;
 
-use nix::pty::{Winsize, openpty};
-use nix::sys::signal::{Signal, kill};
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::pty::{openpty, Winsize};
+use nix::sys::signal::{kill, Signal};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
 
 use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::config_selector::{
-    ConfigSelector, ConfigSelectorOptions, SelectorRow, run_config_selector,
+    run_config_selector, ConfigSelector, ConfigSelectorOptions, SelectorRow,
 };
-use pa_tui::interactive::{UiMode, run_interactive};
+use pa_tui::interactive::{run_interactive, UiMode};
 
 /// The kitty flags push (`1|2|4`, the TS `ProcessTerminal` set): the arm
 /// proof every mounted surface must show.
@@ -290,7 +290,7 @@ fn program_status_reports_the_run_and_its_settles() {
 }
 
 /// A provider retry remains working even after the failed attempt's
-/// turn_end and agent_end. Observe the rendered countdown before checking
+/// `turn_end` and `agent_end`. Observe the rendered countdown before checking
 /// the last report, so an earlier transient working report cannot pass.
 #[test]
 fn program_status_stays_working_during_provider_retry() {
@@ -320,8 +320,22 @@ fn program_status_stays_working_during_provider_retry() {
     );
 
     let mark = harness.mark();
-    harness.write(b"\x1b[27u");
-    harness.wait_from(mark, STATUS_IDLE, "the cancelled retry reports idle");
+    harness.write(b"resume\r");
+    harness.wait_from(mark, STATUS_DONE, "the resumed retry completed");
+
+    // Switch while another retry is still pending, without an end event.
+    // The old countdown must not keep the newly attached idle session working.
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(mark, b"status-retry-sentinel", "another retry is pending");
+    harness.wait_from(mark, STATUS_WORKING, "the second retry reports working");
+    let mark = harness.mark();
+    harness.write(b"/new\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the new session drops the previous retry",
+    );
     harness.write(b"/exit\r");
     harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
     assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
