@@ -140,37 +140,63 @@ impl ContinuousTraceUpload {
         (settings, consent)
     }
 
-    /// Bind a replacement session without parsing settings or awaiting delivery.
-    /// A cwd change starts with consent off until the background reader verifies it.
-    #[must_use]
-    pub fn rebind(&self, cwd: &Path, path: &Path) -> Option<Arc<Self>> {
+    fn consent_for(&self, cwd: &Path) -> TraceConsentSnapshot {
         let Ok(consent) = self.consent.lock() else {
-            return Self::install(
-                cwd,
-                &self.agent_dir,
-                Some(path),
-                TraceConsentSnapshot {
-                    enabled: false,
-                    generation: ConsentGeneration::read(cwd, &self.agent_dir),
-                },
-            );
+            return TraceConsentSnapshot {
+                enabled: false,
+                generation: ConsentGeneration::read(cwd, &self.agent_dir),
+            };
         };
-        let snapshot = TraceConsentSnapshot {
+        TraceConsentSnapshot {
             enabled: cwd == self.cwd && consent.0,
             generation: if cwd == self.cwd {
                 consent.1.clone()
             } else {
                 ConsentGeneration::read(cwd, &self.agent_dir)
             },
-        };
-        drop(consent);
-        Self::install(cwd, &self.agent_dir, Some(path), snapshot)
+        }
     }
 
-    /// Fork within this installation's effective working directory.
+    /// Retire this installation and bind its registry slot to a replacement.
+    /// A cwd change starts with consent off until background verification.
+    #[must_use]
+    pub fn rebind(&self, cwd: &Path, path: &Path) -> Option<Arc<Self>> {
+        let controller =
+            Self::unregistered(cwd, &self.agent_dir, Some(path), self.consent_for(cwd));
+        if service().replace(self, &controller) {
+            Some(controller)
+        } else {
+            tracing::warn!("trace replacement rejected: source registration unavailable");
+            None
+        }
+    }
+
+    /// Fork within this installation's cwd, admitting a distinct installation.
     #[must_use]
     pub fn forked(&self, path: &Path) -> Option<Arc<Self>> {
-        self.rebind(&self.cwd, path)
+        Self::install(
+            &self.cwd,
+            &self.agent_dir,
+            Some(path),
+            self.consent_for(&self.cwd),
+        )
+    }
+
+    fn unregistered(
+        cwd: &Path,
+        agent_dir: &Path,
+        session_file: Option<&Path>,
+        consent: TraceConsentSnapshot,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            cwd: cwd.to_path_buf(),
+            agent_dir: Arc::new(agent_dir.to_path_buf()),
+            consent: Mutex::new((consent.enabled, consent.generation)),
+            pending: Mutex::new(session_file.map(|p| (p.to_path_buf(), Schedule::default()))),
+            wake: Arc::new(tokio::sync::Notify::new()),
+            cancel: TraceUploadCancel::new(),
+            started: AtomicBool::new(false),
+        })
     }
 
     /// Install without scanning the outbox or waiting for networking. Consent
@@ -184,15 +210,7 @@ impl ContinuousTraceUpload {
         session_file: Option<&Path>,
         consent: TraceConsentSnapshot,
     ) -> Option<Arc<Self>> {
-        let controller = Arc::new(Self {
-            cwd: cwd.to_path_buf(),
-            agent_dir: Arc::new(agent_dir.to_path_buf()),
-            consent: Mutex::new((consent.enabled, consent.generation)),
-            pending: Mutex::new(session_file.map(|p| (p.to_path_buf(), Schedule::default()))),
-            wake: Arc::new(tokio::sync::Notify::new()),
-            cancel: TraceUploadCancel::new(),
-            started: AtomicBool::new(false),
-        });
+        let controller = Self::unregistered(cwd, agent_dir, session_file, consent);
         let service = service();
         if service.register(&controller) {
             Some(controller)
@@ -206,7 +224,7 @@ impl ContinuousTraceUpload {
     /// transcript read, settings parse, directory scan or network. Only the small
     /// pending record is serialized synchronously.
     pub fn persisted(&self, session_file: &Path) {
-        if session_file.as_os_str().is_empty() {
+        if session_file.as_os_str().is_empty() || self.cancel.is_cancelled() {
             return;
         }
         let Ok(consent) = self.consent.lock() else {
@@ -336,6 +354,7 @@ fn delivery_lease(agent_dir: &Path, path: &Path) -> Option<std::fs::File> {
 struct Registration {
     controller: Weak<ContinuousTraceUpload>,
     agent_dir: Arc<PathBuf>,
+    retired_predecessor: bool,
 }
 
 impl Registration {
@@ -343,6 +362,7 @@ impl Registration {
         Self {
             controller: Arc::downgrade(controller),
             agent_dir: controller.agent_dir.clone(),
+            retired_predecessor: false,
         }
     }
 }
@@ -363,6 +383,30 @@ impl Service {
             return false;
         }
         registrations.push(Registration::of(controller));
+        self.wake.notify_one();
+        true
+    }
+
+    fn replace(
+        &self,
+        source: &ContinuousTraceUpload,
+        controller: &Arc<ContinuousTraceUpload>,
+    ) -> bool {
+        let Ok(mut registrations) = self.controllers.lock() else {
+            return false;
+        };
+        let Some(slot) = registrations
+            .iter_mut()
+            .find(|registration| std::ptr::eq(registration.controller.as_ptr(), source))
+        else {
+            return false;
+        };
+        // Reuse exactly one slot. The flag retains retirement even when neither
+        // predecessor nor replacement survives until the next service tick.
+        *slot = Registration::of(controller);
+        slot.retired_predecessor = true;
+        source.cancel.cancel();
+        source.wake.notify_one();
         self.wake.notify_one();
         true
     }
@@ -432,6 +476,9 @@ fn retain_live_recoveries(
     let mut retired_directories = std::collections::HashSet::new();
     let mut retired = Vec::new();
     for registration in registrations {
+        if registration.retired_predecessor {
+            retired_directories.insert(registration.agent_dir.as_ref().clone());
+        }
         if let Some(controller) = registration.controller.upgrade() {
             live.entry(controller.agent_dir.as_ref().clone())
                 .or_default()
@@ -472,6 +519,20 @@ fn acknowledge_retired_registrations(
         .retain(|registration| !identities.contains(&(registration.controller.as_ptr() as usize)));
 }
 
+fn acknowledge_replacements(registrations: &mut [Registration], snapshot: &[Registration]) {
+    let identities: std::collections::HashSet<_> = snapshot
+        .iter()
+        .filter(|registration| registration.retired_predecessor)
+        .map(|registration| registration.controller.as_ptr() as usize)
+        .collect();
+    // Snapshot Weak handles pin identity; a later replacement keeps its flag.
+    for registration in registrations {
+        if identities.contains(&(registration.controller.as_ptr() as usize)) {
+            registration.retired_predecessor = false;
+        }
+    }
+}
+
 fn rearm_retired_recovery(run: &RecoveryRun) {
     if run.replay_needed.load(Ordering::Acquire)
         && run
@@ -496,7 +557,11 @@ async fn run_service() {
     loop {
         let registrations = service.controllers.lock().unwrap().clone();
         let retired = retain_live_recoveries(&mut recovered, &registrations);
-        acknowledge_retired_registrations(&mut service.controllers.lock().unwrap(), &retired);
+        {
+            let mut current = service.controllers.lock().unwrap();
+            acknowledge_retired_registrations(&mut current, &retired);
+            acknowledge_replacements(&mut current, &registrations);
+        }
         for registration in registrations {
             let weak = registration.controller;
             if let Some(controller) = weak.upgrade() {

@@ -89,7 +89,10 @@ use `forked`. The installation never drains on drop. A detached process-wide run
 owns all transcript reads, scans, settings reloads, networking and retries; a maximum
 of 256 registered controllers and four deliveries bounds resident work. Admission
 returns `None` at capacity and logs rejection; hosts attach no hook in that case.
-Retired descriptors free capacity only after background recovery acknowledges them. The synchronous
+Retired descriptors free capacity only after background recovery acknowledges them.
+Session replacement transfers its existing slot and cancels the predecessor; forks
+require a distinct slot. Replacement retains a bounded retirement flag until the
+background recovery snapshot acknowledges its exact controller identity. The synchronous
 persist seam performs two settings-generation metadata checks and an exists/create
 pending-marker write; it does not fsync the marker (matching TS v0.9.8 process-crash
 recovery rather than promising power-loss durability). A short nonblocking mutation lease prevents cursor/prune races; contention

@@ -845,6 +845,108 @@ fn oversized_cursor_records_fail_closed_with_bounded_reads() {
 }
 
 #[tokio::test(start_paused = true)]
+// Credential lookup must stay stable while synthetic background workers run.
+#[allow(clippy::await_holding_lock)]
+async fn replacement_at_capacity_reuses_a_slot_and_preserves_late_retirement() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
+    let fixture = Fixture::new();
+    enable_synthetic_fixture(&fixture);
+    let original_path = fixture.write_session("original.jsonl", "original");
+    let replacement_path = fixture.write_session("replacement.jsonl", "replacement");
+    let source = controller(&fixture, &original_path, true);
+    source.persisted(&original_path);
+    let service = Service {
+        controllers: Mutex::new(Vec::new()),
+        wake: tokio::sync::Notify::new(),
+    };
+    assert!(service.register(&source));
+    let mut hosts = vec![source.clone()];
+    for n in 1..MAX_CONTROLLERS {
+        let host = controller(
+            &fixture,
+            &fixture.session_dir.join(format!("host-{n}.jsonl")),
+            false,
+        );
+        assert!(service.register(&host));
+        hosts.push(host);
+    }
+    let old_sink = Arc::new(ScriptedTraceHttp::new(Vec::new()));
+    let old_task = tokio::spawn(run_controller(
+        Arc::downgrade(&source),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        old_sink.clone(),
+        Some("http://synthetic.invalid".into()),
+    ));
+    let first = controller(&fixture, &replacement_path, true);
+    assert!(service.replace(&source, &first));
+    assert!(source.cancel.is_cancelled());
+    old_task.await.unwrap();
+    assert_eq!(old_sink.request_count(), 0);
+    first.persisted(&replacement_path);
+    let mut recovered = RecoveryRuns::new();
+    let run = RecoveryRun::new(hosts.iter().map(Arc::downgrade).collect());
+    run.state.store(2, Ordering::Release);
+    recovered.insert(fixture.agent_dir.clone(), run);
+    let snapshot = service.controllers.lock().unwrap().clone();
+    retain_live_recoveries(&mut recovered, &snapshot);
+    assert!(recovered[&fixture.agent_dir]
+        .replay_needed
+        .load(Ordering::Acquire));
+    let latest = controller(&fixture, &replacement_path, true);
+    assert!(service.replace(&first, &latest));
+    assert!(first.cancel.is_cancelled());
+    acknowledge_replacements(&mut service.controllers.lock().unwrap(), &snapshot);
+    assert!(service
+        .controllers
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|registration| {
+            registration.controller.ptr_eq(&Arc::downgrade(&latest))
+                && registration.retired_predecessor
+        }));
+    let current = service.controllers.lock().unwrap().clone();
+    retain_live_recoveries(&mut recovered, &current);
+    acknowledge_replacements(&mut service.controllers.lock().unwrap(), &current);
+    assert_eq!(service.controllers.lock().unwrap().len(), MAX_CONTROLLERS);
+    let sink = Arc::new(ScriptedTraceHttp::new(vec![Ok(response(200, "{}"))]));
+    let (complete, _) = recover_with_backoff(
+        fixture.cwd.clone(),
+        fixture.agent_dir.clone(),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        sink.clone(),
+        Some("http://synthetic.invalid".into()),
+        TraceUploadCancel::new(),
+        Some(vec![Arc::downgrade(&latest)]),
+    )
+    .await;
+    assert!(!complete); // Replacement owns its marker; the predecessor was recovered.
+    assert_eq!(sink.request_count(), 1);
+    assert_eq!(
+        read_agent_trace_outbox_entry(&fixture.agent_dir, &original_path),
+        TraceUploadSignature::of(&original_path)
+    );
+    let (requests, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::spawn(run_controller(
+        Arc::downgrade(&latest),
+        Arc::new(tokio::sync::Semaphore::new(1)),
+        Arc::new(ObservedSink {
+            requests,
+            cancelled: Arc::new(tokio::sync::Notify::new()),
+        }),
+        Some("http://synthetic.invalid".into()),
+    ));
+    let (_body, reply) = tokio::time::timeout(MIN_INTERVAL, observed.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    reply.send(response(200, "{}")).unwrap();
+    drop(latest);
+    task.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_busy_delivery_lease_leaves_recovery_incomplete_until_release() {
     let fixture = Fixture::new();
     enable_synthetic_fixture(&fixture);
