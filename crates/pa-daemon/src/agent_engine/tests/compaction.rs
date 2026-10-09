@@ -1438,3 +1438,66 @@ fn a_finished_background_summary_commits_at_the_next_boundary() {
     );
     registration.unregister();
 }
+
+/// A summarizer error in the background flight never blocks the band: the
+/// boundaries stay silent and the summarize keeps retrying in the
+/// background — the blocking fresh compact stays reserved for the
+/// reserve crossing.
+#[test]
+fn a_failed_background_summarize_never_blocks_the_watermark_band() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    // Every turn answers; every summarize request errors: the summarize
+    // context carries no tools, the session turns do.
+    let route = |context: &pa_types::ai::Context,
+                 _: Option<&pa_ai::types::StreamOptions>,
+                 _: u64,
+                 _: &pa_types::ai::Model| {
+        if context.tools.is_none() {
+            Err("summarizer down".to_string())
+        } else {
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "turn reply",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }
+    };
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(route)
+        );
+        12
+    ]);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    wait_for_calls(&registration, 3);
+    let mut follow_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a small follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    admit(
+        &engine,
+        "another follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    assert_eq!(
+        assistant_texts(&follow_events),
+        vec!["turn reply".to_string(), "turn reply".to_string()],
+        "the band's turns answer while the summarizer keeps failing"
+    );
+    assert!(
+        no_compaction_events(&follow_events),
+        "a failed background summarize never blocks the watermark band"
+    );
+    registration.unregister();
+}

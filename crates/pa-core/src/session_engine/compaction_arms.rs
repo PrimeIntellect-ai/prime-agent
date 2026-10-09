@@ -1,8 +1,8 @@
 use super::compact_session::CompactOutcome;
 use super::{
     compaction, compaction_trace, ipython_state, provider_adapter, rebuilt_loop_messages, refine,
-    session_message_to_loop, standard_message, AgentMessage, AgentSession, FileEntry,
-    SessionAgentMessage, TrailingAssistantFilter,
+    session_message_to_loop, standard_message, AgentMessage, AgentSession, BackgroundFlight,
+    FileEntry, SessionAgentMessage, TrailingAssistantFilter,
 };
 
 impl AgentSession {
@@ -58,11 +58,24 @@ impl AgentSession {
         match self.context_pressure(run_model).await {
             compaction::ContextPressure::Reserve => true,
             compaction::ContextPressure::Background => {
-                let finished = self.compaction_flight.try_lock().is_ok_and(|slot| {
-                    slot.as_ref()
-                        .is_some_and(tokio_util::task::AbortOnDropHandle::is_finished)
-                });
-                if finished {
+                // A finished flight is due only when its summarize
+                // succeeded; a failed one is dropped — the restart below
+                // retries in the background, never blocking the band.
+                let due = match self.compaction_flight.try_lock() {
+                    Ok(mut slot) => {
+                        if slot.as_ref().is_some_and(|flight| {
+                            flight.handle.is_finished()
+                                && flight.failed.load(std::sync::atomic::Ordering::SeqCst)
+                        }) {
+                            *slot = None;
+                        }
+                        slot.as_ref()
+                            .is_some_and(|flight| flight.handle.is_finished())
+                    }
+                    // A compact holds the flight: not due.
+                    Err(_) => false,
+                };
+                if due {
                     true
                 } else {
                     self.start_background_compaction(summarizer_model, api_key)
@@ -111,6 +124,8 @@ impl AgentSession {
         let model = model.clone();
         let auxiliary = self.auxiliary_model.clone();
         let started_at = std::time::Instant::now();
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_failed = std::sync::Arc::clone(&failed);
         let task = tokio::spawn(async move {
             let options = crate::session_engine::compact_session::CompactOptions {
                 model,
@@ -124,15 +139,27 @@ impl AgentSession {
                 semantic_edges,
             };
             let prepared =
-                crate::session_engine::compact_session::summarize_attempt(&attempt, &options)
-                    .await?;
+                match crate::session_engine::compact_session::summarize_attempt(&attempt, &options)
+                    .await
+                {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        // The watermark band retries in the background instead
+                        // of blocking the next boundary.
+                        task_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        return Err(error);
+                    }
+                };
             Ok(crate::session_engine::compact_session::BackgroundSummary {
                 attempt,
                 prepared,
                 summarize_ms: started_at.elapsed().as_millis() as u64,
             })
         });
-        *slot = Some(tokio_util::task::AbortOnDropHandle::new(task));
+        *slot = Some(BackgroundFlight {
+            handle: tokio_util::task::AbortOnDropHandle::new(task),
+            failed,
+        });
     }
 
     /// Remove the trailing assistant message from the loop context, so a
@@ -287,7 +314,10 @@ impl AgentSession {
         // interleave with the replace: it would duplicate in the rebuilt
         // view or vanish under it while staying durable either way.
         let mut flight = self.compaction_flight.lock().await;
-        let background = flight.take().filter(|_| custom_instructions.is_none());
+        let background = flight
+            .take()
+            .map(|flight| flight.handle)
+            .filter(|_| custom_instructions.is_none());
         let mut outcome = self
             .compaction_attempts(&options, started_at, background)
             .await?;

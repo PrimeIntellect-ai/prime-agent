@@ -115,6 +115,16 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
     Some(message)
 }
 
+/// The background summarize flight: the summarizer task plus its
+/// per-flight failure bit, set when the summarize errored. The watermark
+/// band drops a failed flight and retries in the background instead of
+/// blocking the boundary on a dead summary.
+pub(crate) struct BackgroundFlight {
+    pub(crate) handle:
+        tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,
+    pub(crate) failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// The session-bound agent: admission rules + persistence over the loop.
 pub struct AgentSession {
     agent: Arc<Agent>,
@@ -162,11 +172,7 @@ pub struct AgentSession {
     /// in-flight run and prepares against its result; reads and writes
     /// keep using the session lock meanwhile; its slot holds the
     /// background summarize.
-    compaction_flight: tokio::sync::Mutex<
-        Option<
-            tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,
-        >,
-    >,
+    compaction_flight: tokio::sync::Mutex<Option<BackgroundFlight>>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
