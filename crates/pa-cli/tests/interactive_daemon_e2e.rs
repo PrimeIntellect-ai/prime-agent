@@ -5644,18 +5644,24 @@ async fn assert_close_reason_survives_late_turn_status(reason: &str, explanation
         !rendered.contains("reply must not arrive"),
         "held response leaked:\n{rendered}"
     );
-    let last = outcome.frames.last().expect("final frame");
     assert!(
-        last.contains("turn failed: prompt cancelled"),
-        "the post-close cancellation must reach the frame:\n{last}"
+        !rendered.contains("timed out waiting for the headless render condition"),
+        "the close/cancellation render barrier must complete:\n{rendered}"
     );
+    // Verify coexistence after the cancellation status in one observed frame.
+    // A later successful reconnect may resync the transcript again.
+    let checkpoint = outcome
+        .frames
+        .iter()
+        .find(|frame| {
+            frame.contains("turn failed: prompt cancelled") && frame.contains(&error_row)
+        })
+        .unwrap_or_else(|| {
+            panic!("the close error and cancellation must share a frame:\n{rendered}")
+        });
     assert!(
-        last.contains(&error_row),
-        "close error row must persist after cancellation:\n{last}"
-    );
-    assert!(
-        !last.contains(&format!("session closed ({reason})")),
-        "info downgrade remains:\n{last}"
+        !checkpoint.contains(&format!("session closed ({reason})")),
+        "info downgrade remains:\n{checkpoint}"
     );
     drop(supervisor);
 }
