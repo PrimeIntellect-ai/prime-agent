@@ -546,26 +546,27 @@ fn release_lock_dir_identity(lock_path: &Path, identity: &SocketIdentity) {
         // The exchange: the public path holds the placeholder while the
         // incumbent sits at the private name.
         if pa_core::platform::exchange_paths(lock_path, &placeholder).is_err() {
-            // The exchange failed: the public path was never displaced
-            // (an unpublished placeholder), so clean it and its live
-            // owner record. A missing public path means the lease
-            // directory vanished - the release is complete. An
-            // unsupported-rename mount means this choreography cannot
-            // run here at all - return without retrying; the artifact
+            // The exchange errored - but an error does NOT prove the
+            // public path was never displaced: the swap may have
+            // completed with the incumbent (or a racing successor) at
+            // the private name. The cleanup runs ONLY on a positive
+            // identity match with this process's created placeholder -
+            // both stats must succeed and agree - so an ambiguous
+            // result preserves the displaced lock. A missing public
+            // path means the lease directory vanished - the release is
+            // complete. An unsupported-rename mount means this
+            // choreography cannot run here at all - the artifact
             // expires through the stale window, the documented floor.
-            // The cleanup is identity-proved first: an ambiguous error
-            // may have completed the swap with the incumbent (or a
-            // racing successor) at the private name, and deleting that
-            // would destroy a live lock - fail closed on any doubt.
-            let is_created_placeholder =
+            let identity_proved = placeholder_identity.is_some_and(|expected| {
                 std::fs::symlink_metadata(&placeholder)
                     .ok()
                     .map(|metadata| {
                         use std::os::unix::fs::MetadataExt;
                         (metadata.dev(), metadata.ino())
                     })
-                    == placeholder_identity;
-            if is_created_placeholder {
+                    == Some(expected)
+            });
+            if identity_proved {
                 let _ = std::fs::remove_file(placeholder.join("owner"));
                 let _ = std::fs::remove_dir(&placeholder);
             }
