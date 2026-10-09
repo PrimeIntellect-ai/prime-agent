@@ -802,7 +802,28 @@ impl ShutdownAdmission {
                 write_record(&path, &record)?;
                 bump_shutdown_admission_generation(&registry_dir)?;
                 Ok(Some(()))
-            })?;
+            });
+            // A failed generation bump leaves the record orphaned on disk
+            // (the acquisition never returns a handle whose Drop would
+            // release it): remove it under the same guard before the error
+            // surfaces - a leftover live lease would refuse every later
+            // boot and stop while the caller believes the acquire failed.
+            let acquired = match acquired {
+                Ok(acquired) => acquired,
+                Err(error) => {
+                    let registry_dir = &registry_dir;
+                    let _ = with_registry_guard(registry_dir, || {
+                        let path = shutdown_admission_path(registry_dir);
+                        if read_shutdown_admission(&path)?
+                            .is_some_and(|current| current.token == state.token)
+                        {
+                            std::fs::remove_file(&path)?;
+                        }
+                        Ok(())
+                    });
+                    return Err(error);
+                }
+            };
             if acquired.is_some() {
                 break;
             }

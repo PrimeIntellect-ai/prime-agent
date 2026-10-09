@@ -199,6 +199,17 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // reported success by now - the rollback refuses to spawn a
             // daemon behind it.
             if generation_now > generation_before + 1 {
+                // The rejected successor this update spawned is retired the
+                // same way finish_failure retires it (best-effort
+                // identity-pinned crash kill): left alive beside the
+                // user's completed shutdown, it could boot after the stop
+                // and restart the daemon behind the Failed verdict.
+                if let Some(rejected) = &failure.rejected {
+                    let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+                        u32::try_from(rejected.pid).unwrap_or(0),
+                        rejected.process_start_id.as_deref(),
+                    );
+                }
                 {
                     let mut status = writer.lock().await;
                     let _ = status.set_state(UpdateState::Rollback);
