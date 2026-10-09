@@ -3,6 +3,9 @@
 
 import argparse
 import json
+import shutil
+import subprocess
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +81,36 @@ class NativeCompatibilityTests(unittest.TestCase):
         validate_compatibility_archive(archive)
         self.assertTrue((staging / "prime-agent.exe").is_file())
         self.assertFalse((staging / "photon_rs_bg.wasm").exists())
+
+    def test_promotion_validates_native_archives_beside_source_distribution(self):
+        _, archive, _ = self.assemble()
+        repo = Path(__file__).resolve().parents[2]
+        workflow = (repo / ".github/workflows/release.yml").read_text()
+        step = workflow.split(
+            "      - name: Verify historical native updater compatibility\n", 1
+        )[1].split("      - name:", 1)[0]
+        script = "\n".join(
+            line[10:] for line in step.split("        run: |\n", 1)[1].splitlines()
+        )
+        native = self.root / "incoming/artifacts-native"
+        source = self.root / "incoming/artifacts-source"
+        native.mkdir(parents=True)
+        source.mkdir()
+        shutil.copyfile(archive, native / "prime-agent-1.0.0-darwin-arm64.tar.gz")
+        source_archive = source / "prime-agent-1.0.0-src.tar.gz"
+        with tarfile.open(source_archive, "w:gz") as tar:
+            tar.add(self.root / "README.md", arcname="README.md")
+        with self.assertRaisesRegex(ValueError, "missing regular compatibility asset"):
+            validate_compatibility_archive(source_archive)
+        verification = self.root / "verification-source/scripts"
+        verification.mkdir(parents=True)
+        (verification / "release").symlink_to(repo / "scripts/release", target_is_directory=True)
+        result = subprocess.run(
+            ["bash", "-c", script], cwd=self.root, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Native compatibility verified:", result.stdout)
+        self.assertNotIn("src.tar.gz", result.stdout)
 
 
 if __name__ == "__main__":
