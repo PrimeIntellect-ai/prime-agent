@@ -132,6 +132,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                             "finishing (see that job's log)")
     if problems:
         return problems, failed_units
+    incomplete = []
     for shard, manifest in sorted(manifests.items()):
         if not isinstance(manifest.get("all_unit_ids"), list) or not isinstance(manifest.get("units"), list):
             problems.append(f"shard {shard}: missing enumeration or unit results")
@@ -145,7 +146,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                 or any(not isinstance(uid, str) for uid in manifest["selected_unit_ids"])):
             problems.append(f"shard {shard}: malformed selected unit ids")
         if manifest.get("complete") is not True:
-            problems.append(f"shard {shard} is incomplete: complete must be literal true")
+            incomplete.append(f"shard {shard} is incomplete: complete must be literal true")
         scope = manifest.get("scope", {"kind": "all"})
         if (not isinstance(scope, dict) or scope.get("kind") not in ("all", "crates")
                 or (scope.get("kind") == "all" and "crates" in scope)
@@ -154,7 +155,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
                      any(not isinstance(crate, str) for crate in scope["crates"])))):
             problems.append(f"shard {shard}: invalid selection scope")
     if problems:
-        return problems, failed_units
+        return problems + incomplete, failed_units
 
     identities = {(m.get("run_id"), m.get("commit_sha")) for m in manifests.values()}
     if (len(identities) != 1 or any(not run_id or not sha for run_id, sha in identities)
@@ -163,13 +164,13 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
             or (os.environ.get("GITHUB_SHA") and
                 any(sha != os.environ["GITHUB_SHA"] for _, sha in identities))):
         problems.append("selected shards have mismatched or missing run/commit identity")
-        return problems, failed_units
+        return problems + incomplete, failed_units
 
     id_lists = {tuple(m["all_unit_ids"]) for m in manifests.values()}
     if len(id_lists) != 1:
         problems.append("shards enumerated different unit sets — the merge "
                         "ref changed mid-run or a manifest is stale; rerun CI")
-        return problems, failed_units
+        return problems + incomplete, failed_units
     all_ids = manifests[1]["all_unit_ids"]
     if len(all_ids) != len(set(all_ids)):
         problems.append("enumeration contains duplicate unit ids")
@@ -178,7 +179,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         if manifest.get("digest") != expected_digest:
             problems.append(f"shard {shard}: enumeration digest mismatch")
     if problems:
-        return problems, failed_units
+        return problems + incomplete, failed_units
 
     kind, crates = run_scope(manifests)
     if kind == "MIXED":
@@ -187,7 +188,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         problems.append("shards recorded different selection scopes — a "
                         "mixed-scope wave is a broken partition: " +
                         ", ".join(described))
-        return problems, failed_units
+        return problems + incomplete, failed_units
     selection = selected_ids(manifests[1], crates)
     selection_set = set(selection)
     expected_selection = [uid for uid in all_ids if crates is None or _unit_package(uid) in set(crates)]
@@ -195,7 +196,7 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         if selected_ids(manifest, crates) != expected_selection:
             problems.append(f"shard {shard}: selected unit ids disagree with scope/enumeration")
     if problems:
-        return problems, failed_units
+        return problems + incomplete, failed_units
 
     executed: dict[str, str] = {}  # unit id -> shard that ran it
     for shard, manifest in sorted(manifests.items()):
@@ -225,12 +226,12 @@ def audit(manifests: dict, total: int) -> tuple[list[str], set[str]]:
         problems.append(f"assigned outside the enumeration: {outside}")
 
     for shard, manifest in sorted(manifests.items()):
-        if not manifest.get("complete", False):
+        if manifest.get("complete") is not True:
             assigned = [i for i in selection if shard_of(i, total) == shard - 1]
             unfinished = sorted(set(assigned) - {u["id"] for u in manifest["units"]})
             problems.append(f"shard {shard} is incomplete; units it never "
                             f"reported: {unfinished}")
-    return problems, failed_units
+    return problems + incomplete, failed_units
 
 
 def merged_report(manifests: dict, total: int, problems: list[str],

@@ -84,6 +84,16 @@ class AttemptAudit(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("shard 1 is incomplete", result.stdout)
 
+    def test_incomplete_latest_attempt_still_reports_mixed_scope(self):
+        self.write(1, 1)
+        self.write(2, 1)
+        path = self.write(1, 2, complete=False)
+        self.rewrite(path, lambda data: data.update(scope={"kind": "crates", "crates": ["pkg"]}))
+        result = self.run_summary()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("different selection scopes", result.stdout)
+        self.assertIn("shard 1 is incomplete", result.stdout)
+
     def test_duplicate_same_attempt_is_ambiguous(self):
         self.write(1, 1, legacy=True)
         self.write(1, 1)
