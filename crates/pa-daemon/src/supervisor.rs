@@ -50,7 +50,9 @@ pub(crate) use clients::client_command_payload;
 
 // The routing consts and refusal string keep their crate::supervisor::* paths stable
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
-pub(crate) use routing::{client_route_timeout, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
+pub(crate) use routing::{
+    client_route_timeout, ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS, WORKER_NOT_CONNECTED,
+};
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
 #[allow(unused_imports)]
@@ -456,6 +458,27 @@ impl Supervisor {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
                 crate::session_archive::archive_sweep_loop(&supervisor).await;
+            });
+        }
+
+        // Journals without verifiable ownership and flat TS update status
+        // records stay intact: a missing descriptor or a dead coordinator
+        // does not prove that no worker or waiting caller still needs them.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || {
+                let leases = crate::lease::reclaim_dead_owner_leases(&supervisor.options.agent_dir);
+                let logs = crate::worker_stderr::prune_socket_logs(
+                    &supervisor.options.agent_dir,
+                    &supervisor.options.socket_path,
+                );
+                let leftovers =
+                    crate::ts_era::sweep_ts_era_leftovers(&supervisor.options.agent_dir);
+                if leases + logs + leftovers > 0 {
+                    supervisor.log_line(&format!(
+                        "boot cleanup: removed {leases} dead-owner lease dir(s), {logs} old socket log(s), {leftovers} TS-era leftover(s)"
+                    ));
+                }
             });
         }
 

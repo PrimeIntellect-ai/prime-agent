@@ -1,7 +1,5 @@
-//! Append-only recovery journals: the command journal makes supervisor
-//! mutations exactly-once (a received record is durable before dispatch; a
-//! missing result after a crash is uncertain, never replayed); the worker
-//! journal records the latest busy/operation state and queue snapshots.
+//! Append-only recovery journals: the worker journal records the latest
+//! busy/operation state and queue snapshots.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -11,7 +9,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-const COMPACT_AFTER_RECORDS: usize = 4096;
+pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
 
 pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -25,7 +23,7 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     let mut line = serde_json::to_string(record)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
@@ -51,17 +49,13 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
         lines.push(b'\n');
     }
     file.write_all(&lines)?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
-/// How the temp journal lands on its path, and whether its data rides a
-/// full sync before the swap.
+/// Whether the temp journal's data rides a full sync before the swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
-    /// Rename through `rename_onto` (the bounded win32 destination-busy
-    /// retry), temp synced before the swap.
-    RetryBusy,
     /// Bare rename, temp synced before the swap: every failure surfaces
     /// immediately.
     Synced,
@@ -85,222 +79,9 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.get_ref().sync_all()?;
         }
     }
-    let rename = match finalize {
-        Finalize::RetryBusy => pa_core::platform::rename_onto(&temp, path),
-        Finalize::Synced | Finalize::Bare => fs::rename(&temp, path),
-    };
+    let rename = fs::rename(&temp, path);
     rename.with_context(|| format!("persist {}", path.display()))?;
     Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandJournalEntry {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response: Option<Value>,
-}
-
-pub struct CommandRecoveryJournal {
-    path: std::path::PathBuf,
-    entries: HashMap<String, CommandJournalEntry>,
-    record_count: usize,
-}
-
-impl CommandRecoveryJournal {
-    /// Open the journal at `path`, creating the parent directory as needed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the parent directory cannot be created; a
-    /// missing journal loads as empty, and the record load never errors.
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut journal = CommandRecoveryJournal {
-            path: path.to_path_buf(),
-            entries: HashMap::new(),
-            record_count: 0,
-        };
-        journal.load()?;
-        Ok(journal)
-    }
-
-    fn key(client_id: &str, command_id: &str) -> String {
-        serde_json::json!([client_id, command_id]).to_string()
-    }
-
-    #[must_use]
-    pub fn lookup(&self, client_id: &str, command_id: &str) -> Option<CommandJournalEntry> {
-        self.entries.get(&Self::key(client_id, command_id)).cloned()
-    }
-
-    /// Record durable receipt before dispatch. Returns the prior state when the
-    /// command was already journaled.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the receipt record cannot be appended.
-    pub fn begin(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        command_type: &str,
-    ) -> Result<Option<CommandJournalEntry>> {
-        if let Some(existing) = self.lookup(client_id, command_id) {
-            return Ok(Some(existing));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "received",
-            "key": Self::key(client_id, command_id),
-            "clientId": client_id,
-            "commandId": command_id,
-            "commandType": command_type,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            Self::key(client_id, command_id),
-            CommandJournalEntry {
-                status: "pending".to_string(),
-                response: None,
-            },
-        );
-        Ok(None)
-    }
-
-    /// Record the settled command result; a later replay of the command
-    /// answers from it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no receipt was journaled, the result record
-    /// cannot be appended, or the post-append compaction fails.
-    pub fn record_result(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        response: &Value,
-    ) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Err(anyhow::anyhow!(
-                "Cannot record a result before command receipt: {key}"
-            ));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "result",
-            "key": key,
-            "response": response,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            key,
-            CommandJournalEntry {
-                status: "complete".to_string(),
-                response: Some(response.clone()),
-            },
-        );
-        if self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    /// Acknowledge the command: the durable receipt is no longer needed.
-    /// Acknowledging an unknown command is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the acknowledgment record cannot be appended
-    /// or the post-acknowledge compaction fails.
-    pub fn acknowledge(&mut self, client_id: &str, command_id: &str) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Ok(());
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "acknowledged",
-            "key": key,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.entries.remove(&key);
-        if self.entries.is_empty() || self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    fn compact(&mut self) -> Result<()> {
-        let mut records = Vec::new();
-        for (key, entry) in &self.entries {
-            let mut received = serde_json::json!({
-                "version": 1,
-                "type": "received",
-                "key": key,
-            });
-            if let Some(response) = &entry.response {
-                received["response"] = response.clone();
-            }
-            records.push(received);
-        }
-        rewrite_records(&self.path, &records, Finalize::RetryBusy)?;
-        self.record_count = records.len();
-        Ok(())
-    }
-
-    fn load(&mut self) -> Result<()> {
-        let Ok(content) = fs::read_to_string(&self.path) else {
-            return Ok(());
-        };
-        for line in content.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                // A crash may leave only the final append truncated.
-                continue;
-            };
-            if record.get("version").and_then(Value::as_u64) != Some(1) {
-                continue;
-            }
-            self.record_count += 1;
-            let key = record
-                .get("key")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match record.get("type").and_then(Value::as_str) {
-                Some("received") => {
-                    self.entries.insert(
-                        key,
-                        CommandJournalEntry {
-                            status: "pending".to_string(),
-                            response: None,
-                        },
-                    );
-                }
-                Some("acknowledged") => {
-                    self.entries.remove(&key);
-                }
-                Some("result") => {
-                    if let Some(entry) = self.entries.get_mut(&key) {
-                        entry.status = "complete".to_string();
-                        entry.response = record.get("response").cloned();
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -730,27 +511,6 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-daemon-journal-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir.join(name)
-    }
-
-    #[test]
-    fn command_journal_survives_restart_with_uncertainty() {
-        let path = temp_path("command-journal.jsonl");
-        let mut journal = CommandRecoveryJournal::open(&path).unwrap();
-        assert!(journal.begin("client", "c1", "create").unwrap().is_none());
-        let response =
-            serde_json::json!({"type": "response", "command": "create", "success": true});
-        journal.record_result("client", "c1", &response).unwrap();
-
-        let mut reloaded = CommandRecoveryJournal::open(&path).unwrap();
-        let entry = reloaded.lookup("client", "c1").unwrap();
-        assert_eq!(entry.status, "complete");
-        assert_eq!(entry.response, Some(response));
-
-        // Pending (received, no result) is reported but not replayed.
-        reloaded.begin("client", "c2", "kill").unwrap();
-        let reloaded2 = CommandRecoveryJournal::open(&path).unwrap();
-        assert_eq!(reloaded2.lookup("client", "c2").unwrap().status, "pending");
-        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

@@ -36,11 +36,11 @@ mod create;
 mod turn;
 
 use create::{active_session_id_of, worker_server_capabilities};
-// session_summary serves the in-crate test modules only, so allow the unused import.
+// session_summary/SummaryInputs serve the in-crate test modules only, so allow the unused import.
 #[allow(unused_imports)]
 pub(crate) use summary::{
     compact_action_label, emit_worker_event_with, persist_custom_row, push_roster_delta,
-    session_snapshot, session_summary, RosterPushContext,
+    session_snapshot, session_summary, RosterPushContext, SummaryInputs,
 };
 use turn::TurnRunner;
 
@@ -127,8 +127,9 @@ pub struct Worker {
     /// The concrete agent engine behind `engine` for the create command's
     /// eager session build (the kernel prewarm).
     pub(crate) agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
-    /// The monotonic roster-delta counter shared with the roster push
-    /// queue: per-request links deliver pushes unordered.
+    /// The monotonic roster-delta counter the roster pushes stamp and the
+    /// authoritative pulls embed: a push can race a fresher pull, so the
+    /// supervisor's gate drops the stale snapshot.
     roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
     pub(crate) work_notify: Arc<Notify>,
     pub(crate) idle_notify: Arc<Notify>,
@@ -347,7 +348,6 @@ impl Worker {
         ));
         let worker_token = std::env::var(WORKER_TOKEN_ENV).unwrap_or_default();
         let roster_delta_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let roster_push_order = std::sync::Arc::new(std::sync::Mutex::new(()));
         let input_pauses = crate::session_input_pause::InputPauseTable::new();
         // The shared pane-reporter slot: the worker binds it at create and
         // the turn runner reads it at every boundary (a slot, not a
@@ -640,7 +640,6 @@ impl Worker {
                     worker_token: worker_token.clone(),
                     worker_instance_id: config.worker_instance_id.clone(),
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
-                    roster_push_order: std::sync::Arc::clone(&roster_push_order),
                 });
             crate::roster_activity::spawn_roster_activity_watch(&events, roster_pushes.clone());
             if let Some(children) = agent_engine

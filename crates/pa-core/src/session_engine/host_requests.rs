@@ -306,7 +306,7 @@ pub fn handle_rlm_heartbeat_host_request(
             let Some(id) = record.get("id").and_then(Value::as_str) else {
                 anyhow::bail!("rlm_heartbeat.delete id must be a string");
             };
-            let heartbeat = store.delete_rlm_heartbeat(active_session_id, id, now);
+            let heartbeat = store.delete_rlm_heartbeat(active_session_id, id, now)?;
             Ok(RlmHeartbeatHostOutcome {
                 response: json!({
                     "heartbeat": heartbeat

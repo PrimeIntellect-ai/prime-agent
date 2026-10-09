@@ -127,7 +127,7 @@ impl RosterPushQueue {
                 consumer
                     .pending
                     .store(false, std::sync::atomic::Ordering::SeqCst);
-                crate::worker::push_roster_delta(&context);
+                crate::worker::push_roster_delta(&context).await;
             }
         });
         Self { inner: Some(state) }
@@ -188,6 +188,8 @@ mod tests {
     // non-unix targets.
     #[cfg(unix)]
     use crate::supervisor_link::SupervisorLink;
+    #[cfg(unix)]
+    use crate::worker::SessionCore;
     use serde_json::json;
     #[cfg(unix)]
     use serde_json::Value;
@@ -195,6 +197,8 @@ mod tests {
     use std::sync::Mutex;
     #[cfg(unix)]
     use std::time::Duration;
+    #[cfg(unix)]
+    use tokio::io::AsyncWriteExt;
 
     fn session_event_frame(event: &serde_json::Value) -> OutboundFrame {
         let payload = json!({
@@ -341,7 +345,6 @@ mod tests {
             worker_token: "token".to_string(),
             worker_instance_id: "instance".to_string(),
             roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            roster_push_order: Arc::new(Mutex::new(())),
         });
         for _ in 0..50 {
             queue.push();
@@ -361,6 +364,99 @@ mod tests {
             summaries.last().cloned().unwrap_or(Value::Null)["activity"],
             json!("idle"),
             "the flush composed a stale or wrong state: {summaries:?}"
+        );
+        server.abort();
+    }
+
+    /// One in-flight request at most: the consumer awaits each push, so a
+    /// wedged supervisor holds one connection, and the requests that land
+    /// meanwhile collapse into the pending flag — one follow-up flush once
+    /// the first request is answered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_wedged_supervisor_holds_one_in_flight_roster_push() {
+        type StubArrival = (Value, tokio::net::unix::OwnedWriteHalf);
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("sup.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        // Every request line reaches the test with its writer half: the
+        // supervisor stays wedged on the request until the test answers it.
+        let (requests_tx, mut requests_rx) = tokio::sync::mpsc::unbounded_channel::<StubArrival>();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let requests_tx = requests_tx.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                    let (reader, mut writer) = stream.into_split();
+                    writer
+                        .write_all(b"{\"type\":\"daemon_hello\"}\n")
+                        .await
+                        .unwrap();
+                    let mut line = String::new();
+                    if BufReader::new(reader)
+                        .read_line(&mut line)
+                        .await
+                        .unwrap_or(0)
+                        == 0
+                    {
+                        return;
+                    }
+                    let Ok(request) = serde_json::from_str::<Value>(line.trim()) else {
+                        return;
+                    };
+                    requests_tx.send((request, writer)).unwrap();
+                });
+            }
+        });
+        let queue = RosterPushQueue::spawn(crate::worker::RosterPushContext {
+            core: Arc::new(Mutex::new(SessionCore::test_core(None, "/tmp".to_string()))),
+            engine: Arc::new(crate::engine::ScriptedEngine::default()),
+            user_bash: Arc::new(crate::user_bash::UserBash::new()),
+            roster_link: Arc::new(SupervisorLink::new(socket)),
+            worker_token: "token".to_string(),
+            worker_instance_id: "instance".to_string(),
+            roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        });
+        for _ in 0..5 {
+            queue.push();
+        }
+        let (first, mut first_writer) = requests_rx.recv().await.expect("first flush");
+        assert_eq!(first["command"]["sequence"], json!(1));
+        // The supervisor holds the first request open: the pushes that land
+        // now must not open a second connection.
+        for _ in 0..5 {
+            queue.push();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), requests_rx.recv())
+                .await
+                .is_err(),
+            "a second roster request was in flight while the supervisor held the first open",
+        );
+        // Answering the first request releases the burst as exactly one
+        // follow-up flush.
+        let response = serde_json::to_string(&crate::protocol::response_line(
+            &crate::protocol::response_success(first["id"].as_str(), "worker_roster_delta", None),
+        ))
+        .unwrap();
+        first_writer
+            .write_all(format!("{response}\n").as_bytes())
+            .await
+            .unwrap();
+        let follow_up = requests_rx.recv().await.expect("follow-up flush");
+        assert_eq!(
+            follow_up.0["command"]["sequence"],
+            json!(2),
+            "the burst behind the wedged request must collapse into one follow-up"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), requests_rx.recv())
+                .await
+                .is_err(),
+            "the collapsed burst flushed more than one follow-up",
         );
         server.abort();
     }
