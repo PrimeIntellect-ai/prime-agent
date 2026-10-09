@@ -415,11 +415,16 @@ pub fn try_reclaim_guard(path: &Path, budget: Duration) -> Option<fs::File> {
 /// documented floor for a hostile sidecar.
 #[cfg(target_os = "linux")]
 fn open_sidecar(path: &Path) -> Option<fs::File> {
+    // The sidecar path's RAW bytes: `to_string_lossy` would replace
+    // every non-UTF-8 byte with U+FFFD and open a path that generally
+    // does not exist, wedging every guard acquisition for valid Unix
+    // lock directories. The old OpenOptions::open used the path's own
+    // bytes; this keeps that exact behavior under the hardened flags.
+    let raw_path =
+        std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).ok()?;
     let fd = unsafe {
         libc::open(
-            std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes())
-                .ok()?
-                .as_ptr(),
+            raw_path.as_ptr(),
             libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
             0o600,
         )
@@ -436,9 +441,7 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
         if errno.raw_os_error() == Some(libc::EACCES) || errno.raw_os_error() == Some(libc::EROFS) {
             let ro = unsafe {
                 libc::open(
-                    std::ffi::CString::new(path.as_os_str().to_string_lossy().as_bytes())
-                        .ok()?
-                        .as_ptr(),
+                    raw_path.as_ptr(),
                     libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW,
                 )
             };
@@ -1953,15 +1956,29 @@ mod tests {
             .open(&sidecar)
             .unwrap();
         std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o400)).unwrap();
-        // The first acquisition repairs the mode through the descriptor
-        // and takes the flock; the second contends; the third (after the
-        // repair) opens read-write normally.
-        drop(try_reclaim_guard(&file, Duration::from_millis(200)));
-        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        // The first acquisition opens through the read-only fallback,
+        // takes the flock, and repairs the mode through its descriptor.
+        let held = try_reclaim_guard(&file, Duration::from_millis(200));
         assert!(
-            guard.is_some(),
-            "the umask-tightened sidecar still serializes"
+            held.is_some(),
+            "the umask-tightened sidecar opens through the read-only fallback"
         );
+        // A second acquisition contends while the first holds the flock.
+        let contended = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(
+            contended.is_none(),
+            "a held guard serializes the second acquisition"
+        );
+        drop(held);
+        // The repair landed: the next open is an ordinary read-write one
+        // on a 0600 regular file.
+        assert_eq!(
+            std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the mode was repaired through the descriptor"
+        );
+        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(guard.is_some(), "the repaired sidecar serializes normally");
     }
 
     #[cfg(target_os = "linux")]
