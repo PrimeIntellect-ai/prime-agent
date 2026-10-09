@@ -367,11 +367,13 @@ fn create_private_dir_guarded(path: &Path) -> io::Result<()> {
 
 /// Set up a freshly created private directory through a no-follow
 /// handle: the handle is pinned before any mutation, the directory
-/// must be EMPTY (a swapped non-empty victim is refused; a swapped
-/// empty directory cannot be corrupted - only empty-dir writes land
-/// in it), the mode is fixed through the handle, and the owner record
-/// is written fd-relative. A symlink on the pathname fails the
-/// no-follow open outright.
+/// must be EMPTY (a successfully-read non-empty victim is refused),
+/// the mode is fixed through the handle, and the owner record is
+/// written fd-relative. A symlink on the pathname is refused by the
+/// TYPE check (`O_PATH | O_NOFOLLOW` opens a symlink itself on
+/// Linux; the second open's ELOOP is the no-follow refusal) - the
+/// ACCEPTED RISK ruling at the call sites covers the pre-created
+/// empty-directory swap no user-space witness can exclude.
 #[cfg(target_os = "linux")]
 fn setup_private_dir(
     path: &Path,
