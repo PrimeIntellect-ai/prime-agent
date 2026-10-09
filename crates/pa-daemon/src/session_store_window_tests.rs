@@ -470,9 +470,6 @@ fn walk_pins_the_compaction_boundary_sequences() {
     assert_eq!(messages[4]["content"], "u3");
 }
 
-/// The restored-settings fold on a windowed open must answer the full open's
-/// scalars: the window walk already resolved model/thinking/tier across the
-/// active ancestry, and only rows appended past the loaded window join the fold.
 fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std::path::Path) {
     let windowed = SessionFile::open_windowed(path).unwrap();
     assert!(
@@ -482,16 +479,17 @@ fn assert_windowed_restored_settings_match_the_full_open(name: &str, path: &std:
     let restored = windowed.restored_settings();
     let reference = SessionFile::open(path).unwrap().restored_settings();
     assert_eq!(
-        restored.model, reference.model,
-        "{name}: the restored model must match the full open"
-    );
-    assert_eq!(
-        restored.thinking_level, reference.thinking_level,
-        "{name}: the restored thinking level must match the full open"
-    );
-    assert_eq!(
-        restored.service_tier, reference.service_tier,
-        "{name}: the restored service tier must match the full open"
+        (
+            restored.model,
+            restored.thinking_level,
+            restored.service_tier
+        ),
+        (
+            reference.model,
+            reference.thinking_level,
+            reference.service_tier
+        ),
+        "{name}"
     );
 }
 
