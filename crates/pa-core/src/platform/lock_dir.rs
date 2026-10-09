@@ -484,7 +484,25 @@ fn open_sidecar(path: &Path) -> Option<fs::File> {
                 continue;
             }
             if let Some(file) = regular_or_close(ro) {
+                // Legacy authentication, strict: the protocol's own
+                // sidecars are O_EXCL creations with exactly two
+                // umask-bitten modes (0200 from umask 0477, 0400 from
+                // 0277) and are never hardlinked. A foreign file planted
+                // at the sidecar path with a restrictive mode does NOT
+                // get repaired: nlink > 1 (the hardlink case) or any
+                // other mode fails closed - `None`, contention, the
+                // documented floor for a hostile sidecar - instead of
+                // chmod'ing another owner's inode.
                 use std::os::fd::AsRawFd;
+                let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+                let statted =
+                    unsafe { libc::fstat(file.as_raw_fd(), std::ptr::addr_of_mut!(stat)) } == 0;
+                let mode = stat.st_mode & 0o777;
+                let authenticated =
+                    statted && stat.st_nlink == 1 && (mode == 0o200 || mode == 0o400);
+                if !authenticated {
+                    return None;
+                }
                 unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
                 let rw = unsafe {
                     libc::open(
@@ -2061,6 +2079,30 @@ mod tests {
             std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
             0o600,
             "the mode was repaired for future acquisitions"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restrictive_mode_hardlink_at_the_sidecar_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        // A foreign owner-owned config hardlinked to the sidecar path
+        // with a restrictive mode (the reviewer's plant): O_EXCL yields
+        // EEXIST, O_RDWR EACCES, and the fallback must NOT repair the
+        // foreign inode - the guard fails closed instead.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let sidecar = reclaim_guard_path(&file);
+        let config = dir.path().join("owner-config.json");
+        std::fs::write(&config, b"{}").unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o400)).unwrap();
+        std::fs::hard_link(&config, &sidecar).unwrap();
+        let guard = try_reclaim_guard(&file, Duration::from_millis(200));
+        assert!(guard.is_none(), "a restrictive-mode hardlink fails closed");
+        assert_eq!(
+            std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o400,
+            "the foreign inode was never chmod'ed"
         );
     }
 
