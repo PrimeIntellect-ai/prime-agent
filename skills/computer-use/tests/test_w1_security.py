@@ -1229,6 +1229,29 @@ class RestoreAfterSettleTests(AppTestCase):
         self.assertIn("concurrent copy", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
+    async def test_a_silent_no_op_restore_is_not_claimed_as_restored(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        with mock.patch.object(computer_use, "_restore_clipboard", lambda saved: False):
+            status = await app.paste("payload")
+        self.assertIn("could not be restored", status)
+        self.assertNotIn("was restored", status)
+
+    async def test_an_unverified_paste_that_keeps_a_copy_says_copy_not_payload(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        env.paste_baselines = [(env.paste_focus_before, "unchanged value")]
+        real_settle = app._settle
+
+        def copying_during_settle() -> None:
+            env.pasteboard_holds_payload = False  # a user copy lands mid-paste
+            real_settle()
+
+        with mock.patch.object(app, "_settle", copying_during_settle):
+            status = await app.paste("payload")
+        self.assertIn("concurrent copy", status)
+        self.assertNotIn("payload remains", status)
+
 
 if __name__ == "__main__":
     unittest.main()

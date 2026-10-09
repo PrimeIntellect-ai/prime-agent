@@ -307,15 +307,16 @@ def _write_clipboard(text: str, format: str) -> None:
     pasteboard.setString_forType_(text, cocoa.NSPasteboardTypeString)
 
 
-def _restore_clipboard(saved: dict[str, Any] | None) -> None:
-    """Restore every saved pasteboard type, best-effort.
+def _restore_clipboard(saved: dict[str, Any] | None) -> bool:
+    """Restore every saved pasteboard type, returning whether it landed.
 
     None never touches the pasteboard: it is a failed snapshot, and clearing
     on it would erase the user's clipboard. Each type is restored on its own
-    so one unreadable format never blocks the rest.
+    so one unreadable format never blocks the rest; the restore reports
+    success only when the saved text reads back.
     """
     if saved is None:
-        return
+        return False
     try:
         cocoa = _require_mac().cocoa
         pasteboard = cocoa.NSPasteboard.generalPasteboard()
@@ -326,8 +327,10 @@ def _restore_clipboard(saved: dict[str, Any] | None) -> None:
                 pasteboard.setData_forType_(payload, type_name)
             except Exception:
                 continue
+        restored_text = pasteboard.dataForType_(cocoa.NSPasteboardTypeString)
+        return bytes(restored_text) == saved.get(cocoa.NSPasteboardTypeString, b"")
     except Exception:
-        return
+        return False
 
 
 def _clipboard_still_holds_payload(text: str) -> bool:
@@ -791,12 +794,12 @@ class App:
 
         posted = False
         consumed = False
-        restored = False
+        outcome = "restore-failed"
 
         def dispatch() -> None:
             from . import inject
 
-            nonlocal posted, consumed, restored
+            nonlocal posted, consumed, outcome
             with _PASTE_LOCK:
                 self._refuse_secure_focus()
                 saved = _save_clipboard()
@@ -867,25 +870,30 @@ class App:
                     # unconsumed paste keeps the payload in place - a busy
                     # app must never read the user's prior clipboard.
                     if wrote and not _clipboard_unchanged(change_count):
-                        pass
+                        # a copy made during the paste window wins over
+                        # the restore
+                        outcome = "copy-kept"
                     elif posted and not consumed:
-                        pass
+                        outcome = "payload-kept"
+                    elif _restore_clipboard(saved):
+                        outcome = "restored"
                     else:
-                        _restore_clipboard(saved)
-                        restored = True
+                        outcome = "restore-failed"
 
         await self._action("paste", dispatch, settle=False)
-        if posted and not consumed:
+        if outcome == "copy-kept":
+            return (
+                "pasted; a concurrent copy was preserved (the user's prior "
+                "clipboard content was not restored)"
+            )
+        if outcome == "payload-kept":
             return (
                 "pasted, but the app's consumption could not be verified; the "
                 "payload remains on the clipboard (the user's prior clipboard "
                 "content was not restored)"
             )
-        if not restored:
-            return (
-                "pasted; a concurrent copy was preserved (the user's prior "
-                "clipboard content was not restored)"
-            )
+        if outcome == "restore-failed":
+            return "pasted; the user's prior clipboard content could not be restored"
         return "pasted; the user's clipboard was restored"
 
     async def _refresh(self, diff_on: bool = True) -> str:
