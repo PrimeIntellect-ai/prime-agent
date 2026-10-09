@@ -1,0 +1,71 @@
+# Proposal only: this file is outside .github/workflows and is not active.
+# Requires approval to publish to the single temporary branch below.
+name: trace-e2e-artifact
+on:
+  push:
+    branches: [trace-e2e-artifact-6d04c098]
+permissions:
+  contents: read
+concurrency:
+  group: trace-e2e-artifact-6d04c098
+  cancel-in-progress: false
+jobs:
+  artifact:
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: '0'
+      COPYFILE_DISABLE: '1'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 6d04c0989632b379480b3daf9ea48d348c23a8da
+          persist-credentials: false
+      - name: Assert exact source
+        run: test "$(git rev-parse HEAD)" = 6d04c0989632b379480b3daf9ea48d348c23a8da
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          key: aarch64-apple-darwin
+          save-if: 'false'
+      - name: Build the two functional verification binaries
+        run: cargo build --locked --target aarch64-apple-darwin -p pa-cli -p pa-daemon --bins -j 4
+      - name: Assemble source-matching payload and provenance
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/bundle_catalog.py generate --fixture --out target/aarch64-apple-darwin/catalog-assets
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          test -n "$version"
+          python3 scripts/release/assemble_artifacts.py \
+            --repo-root . --version "$version" --target aarch64-apple-darwin \
+            --sha 6d04c0989632b379480b3daf9ea48d348c23a8da \
+            --binary target/aarch64-apple-darwin/debug/prime-agent \
+            --catalog-assets target/aarch64-apple-darwin/catalog-assets \
+            --out-dir target/aarch64-apple-darwin/dist
+          python3 scripts/release/verify_release.py \
+            --dist-dir target/aarch64-apple-darwin/dist --version "$version" \
+            --target aarch64-apple-darwin --sha 6d04c0989632b379480b3daf9ea48d348c23a8da
+          cp target/aarch64-apple-darwin/debug/pa-daemon target/aarch64-apple-darwin/dist/pa-daemon
+          shasum -a 256 target/aarch64-apple-darwin/dist/pa-daemon > target/aarch64-apple-darwin/dist/PA_DAEMON_SHA256
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          Path('target/aarch64-apple-darwin/dist/e2e-provenance.json').write_text(json.dumps({
+              'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'workflow_sha': os.environ['WORKFLOW_SHA'],
+              'target': 'aarch64-apple-darwin',
+              'profile': 'debug',
+              'compiler': subprocess.check_output(['rustc', '--version'], text=True).strip(),
+              'purpose': 'synthetic functional verification; not release performance evidence',
+          }, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: trace-e2e-aarch64-apple-darwin-6d04c098
+          path: target/aarch64-apple-darwin/dist/
+          retention-days: 1
+          if-no-files-found: error
