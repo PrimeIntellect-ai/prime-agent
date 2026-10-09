@@ -121,6 +121,16 @@ fn resolve_layer_files(
                 continue;
             }
             let user_file = agent_dir.join(name);
+            // The lexical check cannot see symlinks; the resolved target must
+            // stay inside the agent dir.
+            if let (Ok(dir), Ok(file)) = (agent_dir.canonicalize(), user_file.canonicalize()) {
+                if !file.starts_with(&dir) {
+                    errors.push(format!(
+                        "{source}: file {name:?} resolves outside the agent directory"
+                    ));
+                    continue;
+                }
+            }
             match std::fs::read_to_string(&user_file) {
                 Ok(content) => {
                     contents.insert(name.clone(), content);
@@ -468,5 +478,39 @@ files = ["shared.md", "user-only.md"]
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_file_entries_must_resolve_inside_the_agent_dir() {
+        let root = tempfile::tempdir().unwrap();
+        write_file(root.path(), "outside.md", "OUTSIDE");
+        let agent_dir = root.path().join("agent");
+        std::fs::create_dir(&agent_dir).unwrap();
+        write_file(&agent_dir, "inside.md", "INSIDE");
+        std::os::unix::fs::symlink(root.path().join("outside.md"), agent_dir.join("escape.md"))
+            .unwrap();
+        std::os::unix::fs::symlink("inside.md", agent_dir.join("alias.md")).unwrap();
+
+        write_file(
+            &agent_dir,
+            USER_MODEL_PROMPTS_TOML,
+            "[[rule]]\nmatch = [\"glm-5.3\"]\nfiles = [\"escape.md\"]\n",
+        );
+        let resolution = resolve_model_prompts(Some("z-ai/glm-5.3"), "", &[], &agent_dir);
+        assert!(resolution.extras.is_none());
+        assert!(resolution
+            .errors
+            .iter()
+            .any(|error| error.contains("escape.md") && error.contains("resolves outside")));
+
+        write_file(
+            &agent_dir,
+            USER_MODEL_PROMPTS_TOML,
+            "[[rule]]\nmatch = [\"glm-5.3\"]\nfiles = [\"alias.md\"]\n",
+        );
+        let resolution = resolve_model_prompts(Some("z-ai/glm-5.3"), "", &[], &agent_dir);
+        assert!(resolution.errors.is_empty());
+        assert_eq!(resolution.extras.as_deref(), Some("INSIDE"));
     }
 }
