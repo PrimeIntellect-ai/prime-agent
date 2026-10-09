@@ -222,6 +222,9 @@ async fn drive_onboarding_pane(
                 // The headless plan completed while the pane owned the channel: mark the run loop's
                 // flag (the pane keeps driving until the channel closes or a decision ends it).
                 UiInput::HeadlessDone => *drive.headless_done = true,
+                UiInput::Timestamp(_) => {
+                    anyhow::bail!("headless timing markers require an attached session");
+                }
                 // The plan's render barriers (pane-scoped): a condition that already holds pops
                 // immediately; a pending one arms and holds the input batch behind it until a later
                 // frame satisfies it or the deadline pops (the timeout proceeds silently — the

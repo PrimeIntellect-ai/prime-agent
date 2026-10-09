@@ -63,6 +63,9 @@ pub enum HeadlessStep {
     /// A raw mouse sequence: decoded by the same parser the terminal's SGR reports flow
     /// through, so the verifier drives the wheel dispatch with byte-identical sequences.
     Mouse(String),
+    /// Record when the UI consumes this step, after the preceding headless step's frame.
+    /// Bracket input sequences without including attach, initial rendering, or teardown.
+    Timestamp(std::sync::mpsc::Sender<std::time::Instant>),
     /// One raw key event: the verifier's window into the selector/picker surfaces (arrows, escape),
     /// which typed text cannot express.
     Key(crossterm::event::KeyEvent),
