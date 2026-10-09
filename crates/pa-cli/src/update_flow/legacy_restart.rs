@@ -412,7 +412,11 @@ async fn boot_roster(
     {
         let mut value = status.lock().await;
         value["phase"] = json!("restoring");
-        value["successor"] = json!(successor);
+        // The status record carries the validated IDENTITY (pid, start id,
+        // generation, owner token) - the shape the main flow's record and
+        // the legacy readers expect - never the raw hello frame.
+        let identity = identity_from_hello(&successor);
+        value["successor"] = json!(identity);
         persist(status_path, &value)?;
     }
     let (counts, failures) = super::phases::restore_report(socket, budget).await;
