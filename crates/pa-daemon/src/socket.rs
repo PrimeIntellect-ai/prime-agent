@@ -919,25 +919,23 @@ async fn unlink_stale_socket_with_lease(
                 // is surfaced - a live endpoint must never silently
                 // vanish.
                 Some(_) => {
-                    // RESTORE with a NO-REPLACE move: a plain rename
-                    // would unlink a newer holder that bound the vacated
-                    // path - the exact violation this fence exists to
-                    // prevent. A failed restoration (the path is
-                    // occupied, or the move errored) fails closed: the
-                    // claimed file stays put and the error surfaces.
-                    let restored = pa_core::platform::move_without_replacing(&claim, path).is_ok();
-                    if !restored {
-                        return Err(anyhow!(
-                            "Displaced socket could not be restored after a racing claim: {}",
-                            path.display()
-                        ));
-                    }
+                    restore_displaced_claim(&claim, path)?;
                     Err(anyhow!(
                         "Daemon socket changed ownership between the re-verify and the claim: {}",
                         path.display()
                     ))
                 }
-                None => Ok(()),
+                // The claim vacated the public path, so an
+                // unstattable claim is NEVER a silent success: a stat
+                // fault here hides a displaced endpoint. Attempt the
+                // no-replace restoration and surface the outcome.
+                None => {
+                    restore_displaced_claim(&claim, path)?;
+                    Err(anyhow!(
+                        "Claimed socket inode could not be re-checked after the claim: {}",
+                        path.display()
+                    ))
+                }
             }
         }
         Some(_) => Err(anyhow!(
@@ -945,6 +943,36 @@ async fn unlink_stale_socket_with_lease(
             path.display()
         )),
     }
+}
+
+/// Restore a claim that landed on a foreign inode: a NO-REPLACE move
+/// back to the public path, so a newer holder that bound the vacated
+/// path is never unlinked (a plain rename would clobber it - the exact
+/// violation this fence exists to prevent). A failed restoration
+/// fails closed: the claimed file stays put and the error surfaces.
+/// Non-Linux unix has no no-replace rename: the restoration is
+/// unattempted there and the error surfaces directly (the claimed
+/// file stays preserved - never clobbered, never silently dropped).
+#[cfg(all(unix, target_os = "linux"))]
+fn restore_displaced_claim(claim: &Path, path: &Path) -> Result<()> {
+    if pa_core::platform::move_without_replacing(claim, path).is_err() {
+        Err(anyhow!(
+            "Displaced socket could not be restored after a racing claim: {}",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Non-Linux unix cannot attempt the restoration (no no-replace
+/// rename): the claimed file stays preserved and the error surfaces.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn restore_displaced_claim(_claim: &Path, path: &Path) -> Result<()> {
+    Err(anyhow!(
+        "Displaced socket could not be restored after a racing claim: {}",
+        path.display()
+    ))
 }
 
 /// Claim the socket file at `path` under a private name with a
@@ -1258,17 +1286,20 @@ mod tests {
             .expect("the claim succeeds");
         assert_eq!(
             socket_identity(&claim),
-            Some(replacement_identity),
+            Some(replacement_identity.clone()),
             "the claim holds the racing replacement's inode"
         );
         // A newer holder binds the vacated public path before the
         // restoration: the restore must NEVER unlink it.
         std::fs::write(&socket, b"newer-holder").unwrap();
-        // The restore semantics: attempt a no-replace restore onto the
-        // occupied public path - it must refuse.
-        let restored = pa_core::platform::move_without_replacing(&claim, &socket).is_ok();
+        // The PRODUCTION restore path (restore_displaced_claim - the
+        // branch the fenced unlink routes through): an occupied public
+        // path refuses the no-replace restore, the newer holder
+        // survives, and the error surfaces (the claimed file is
+        // preserved on the private name).
+        let restore = restore_displaced_claim(&claim, &socket);
         assert!(
-            !restored,
+            restore.is_err(),
             "the no-replace restore refuses the occupied public path"
         );
         assert!(
@@ -1276,6 +1307,16 @@ mod tests {
                 .unwrap()
                 .contains("newer-holder"),
             "the newer holder's socket survives the restoration"
+        );
+        // The vacant-path restore succeeds through the same helper: the
+        // displaced file returns home, the public path names it again.
+        std::fs::remove_file(&socket).unwrap();
+        let restored = restore_displaced_claim(&claim, &socket);
+        assert!(restored.is_ok(), "the vacant path admits the restore");
+        assert_eq!(
+            socket_identity(&socket),
+            Some(replacement_identity),
+            "the displaced inode returned to the public path"
         );
     }
 
