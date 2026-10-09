@@ -627,6 +627,26 @@ pub(crate) fn parse_csi_special_key_code(buffer: &[u8]) -> io::Result<Option<Int
     // This CSI sequence can be a list of semicolon-separated numbers.
     let first = next_parsed::<u8>(&mut split)?;
 
+    // Ghostty emits modifyOtherKeys for modified control keys when Kitty is inactive.
+    if first == 27 {
+        let modifiers = parse_modifiers(next_parsed::<u8>(&mut split)?);
+        let codepoint = next_parsed::<u32>(&mut split)?;
+        if split.next().is_some() {
+            return Err(could_not_parse_event_error());
+        }
+        let keycode = match char::from_u32(codepoint).ok_or_else(could_not_parse_event_error)? {
+            '\r' => KeyCode::Enter,
+            '\x1b' => KeyCode::Esc,
+            '\t' if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+            '\t' => KeyCode::Tab,
+            '\x7f' => KeyCode::Backspace,
+            c => KeyCode::Char(c),
+        };
+        return Ok(Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+            keycode, modifiers,
+        )))));
+    }
+
     let (modifiers, kind, state) =
         if let Ok((modifier_mask, kind_code)) = modifier_and_kind_parsed(&mut split) {
             (
@@ -1462,6 +1482,33 @@ mod tests {
                 KeyModifiers::ALT,
             )))),
         );
+    }
+
+    #[test]
+    fn test_parse_modify_other_keys() {
+        for (sequence, code, modifiers) in [
+            ("\x1b[27;2;13~", KeyCode::Enter, KeyModifiers::SHIFT),
+            ("\x1b[27;5;13~", KeyCode::Enter, KeyModifiers::CONTROL),
+            ("\x1b[27;3;27~", KeyCode::Esc, KeyModifiers::ALT),
+            ("\x1b[27;2;9~", KeyCode::BackTab, KeyModifiers::SHIFT),
+            ("\x1b[27;5;9~", KeyCode::Tab, KeyModifiers::CONTROL),
+            ("\x1b[27;3;127~", KeyCode::Backspace, KeyModifiers::ALT),
+            ("\x1b[27;5;97~", KeyCode::Char('a'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                parse_event(sequence.as_bytes(), false).unwrap(),
+                Some(InternalEvent::Event(Event::Key(KeyEvent::new(
+                    code, modifiers
+                )))),
+                "{sequence:?}"
+            );
+        }
+        for sequence in ["\x1b[27;2~", "\x1b[27;2;13;13~", "\x1b[27;2;1114112~"] {
+            assert!(
+                parse_event(sequence.as_bytes(), false).is_err(),
+                "{sequence:?}"
+            );
+        }
     }
 
     #[test]

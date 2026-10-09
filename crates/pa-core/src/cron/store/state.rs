@@ -39,7 +39,7 @@ impl AgentCronJobStore {
     pub(crate) fn mutate_states(
         &self,
         mut mutator: impl FnMut(&mut CronJobsState) -> Vec<AgentCronDispatch>,
-    ) -> Vec<AgentCronDispatch> {
+    ) -> anyhow::Result<Vec<AgentCronDispatch>> {
         let paths: Vec<PathBuf> = if self.session_artifact_mode {
             self.session_artifact_files
                 .lock()
@@ -59,31 +59,34 @@ impl AgentCronJobStore {
                 let before = serde_json::to_string(&state).unwrap_or_default();
                 dispatches.extend(mutator(&mut state));
                 if serde_json::to_string(&state).unwrap_or_default() != before {
-                    write_jobs_state(path, &state);
+                    write_jobs_state(path, &state)?;
                     changed = true;
                 }
             }
-            dispatches
-        });
+            Ok::<_, anyhow::Error>(dispatches)
+        })
+        .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))??;
         if changed && Self::heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
-        dispatches
+        Ok(dispatches)
     }
 
-    pub(crate) fn write_jobs(&self, jobs: &[AgentCronJob]) {
+    pub(crate) fn write_jobs(&self, jobs: &[AgentCronJob]) -> anyhow::Result<()> {
         let previous_heartbeats = Self::heartbeat_catalog_signature(&self.read_jobs());
         if self.session_artifact_mode {
-            self.write_jobs_session_artifacts(jobs);
+            self.write_jobs_session_artifacts(jobs)?;
         } else {
             let path = self.require_file_path();
             with_state_locks(std::slice::from_ref(&path), || {
-                write_jobs_file(&path, jobs, true);
-            });
+                write_jobs_file(&path, jobs, true)
+            })
+            .ok_or_else(|| anyhow::anyhow!("cron jobs state lock not acquired; skipped"))??;
         }
         if Self::heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
+        Ok(())
     }
 
     pub(crate) fn require_file_path(&self) -> PathBuf {
@@ -257,7 +260,7 @@ pub(crate) fn recover_interrupted_in_state(
 }
 
 /// Cross-process state locks: lockfile with stale takeover, sorted by path.
-pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T) -> T {
+pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T) -> Option<T> {
     let mut unique: Vec<PathBuf> = paths.to_vec();
     unique.sort();
     unique.dedup();
@@ -269,41 +272,26 @@ pub(crate) fn with_state_locks<T>(paths: &[PathBuf], action: impl FnOnce() -> T)
         // TS `withCronJobsStateLocks`: proper-lockfile, 100 attempts x
         // 10ms, 30s staleness takeover.
         let stale = std::time::Duration::from_millis(LOCK_STALE_MS);
-        let mut acquired = false;
-        let mut failure: Option<std::io::Error> = None;
-        for _ in 0..100 {
-            match crate::platform::lock_dir::LockDir::acquire(path, stale) {
-                Ok(guard) => {
-                    guards.push(guard);
-                    acquired = true;
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Err(error) => {
-                    failure = Some(error);
-                    break;
-                }
+        match crate::platform::lock_dir::LockDir::acquire_retrying(
+            path,
+            stale,
+            100,
+            std::time::Duration::from_millis(10),
+        ) {
+            Ok(guard) => guards.push(guard),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    path = %path.display(),
+                    "cron jobs state lock not acquired; skipped"
+                );
+                return None;
             }
-        }
-        if !acquired {
-            // TS throws when the lock is not acquired; the action still runs, but never silently: a
-            // concurrent writer may be mutating the file.
-            tracing::warn!(
-                error = failure.as_ref().map_or_else(
-                    || "lock still held after retries".to_string(),
-                    ToString::to_string,
-                ),
-                path = %path.display(),
-                "cron jobs state lock not acquired; running unlocked"
-            );
-            break;
         }
     }
     let result = action();
     drop(guards);
-    result
+    Some(result)
 }
 
 pub(crate) fn read_jobs_state(path: &Path) -> CronJobsState {
@@ -338,7 +326,7 @@ pub(crate) fn read_jobs_state(path: &Path) -> CronJobsState {
     }
 }
 
-fn write_jobs_file(path: &Path, jobs: &[AgentCronJob], merge_current: bool) {
+fn write_jobs_file(path: &Path, jobs: &[AgentCronJob], merge_current: bool) -> anyhow::Result<()> {
     let current = read_jobs_state(path);
     let jobs = if merge_current {
         merge_fresh_jobs(current.jobs, jobs.to_vec())
@@ -351,26 +339,34 @@ fn write_jobs_file(path: &Path, jobs: &[AgentCronJob], merge_current: bool) {
             jobs,
             dispatches: current.dispatches,
         },
-    );
+    )
 }
 
-pub(crate) fn write_jobs_state(path: &Path, state: &CronJobsState) {
+pub(crate) fn write_jobs_state(path: &Path, state: &CronJobsState) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        std::fs::create_dir_all(parent)?;
     }
-    let serialized = serde_json::to_string_pretty(state).unwrap_or_default();
-    // The one opt-in fsync: losing the atomic rename rolls back to the previous valid file, which
-    // cron recovery tolerates (TS `writeJobsState` passes `{ mode: 0o600, fsync: true }`).
-    let _ = crate::settings::storage::atomic_write_with(
+    let serialized = serde_json::to_string_pretty(state)?;
+    // Cron state opts into the shared durable write (TS `writeJobsState`
+    // passes `{ mode: 0o600, fsync: true }`).
+    crate::settings::storage::atomic_write_with(
         path,
         &format!("{serialized}\n"),
         crate::settings::storage::AtomicWriteOptions { fsync: true },
-    );
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobs_state_write_propagates_physical_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jobs.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(write_jobs_state(&path, &CronJobsState::default()).is_err());
+    }
 
     /// The cron state write opts in (the TS test pins `{ fsync: true, mode: 0o600 }`)
     /// `to_string_pretty(state) + "\n"` bytes.
@@ -381,7 +377,7 @@ mod tests {
         let state = CronJobsState::default();
         let expected = format!("{}\n", serde_json::to_string_pretty(&state).unwrap());
         let before = crate::settings::storage::opt_in_fsync_calls();
-        write_jobs_state(&path, &state);
+        write_jobs_state(&path, &state).unwrap();
         assert_eq!(
             crate::settings::storage::opt_in_fsync_calls(),
             before + 1,

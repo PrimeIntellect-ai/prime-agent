@@ -1,0 +1,1 @@
+- The `/` and `@` autocomplete dropdowns now open, and drag auto-scroll keeps scrolling, while a reply streams, instead of waiting for the stream to pause.

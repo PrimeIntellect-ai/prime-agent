@@ -50,7 +50,9 @@ pub(crate) use clients::client_command_payload;
 
 // The routing consts and refusal string keep their crate::supervisor::* paths stable
 // (external callers: supervisor_parent_death, create_reuse, prompt_admission, update_restore).
-pub(crate) use routing::{client_route_timeout, ROUTE_TIMEOUT_MS, WORKER_NOT_CONNECTED};
+pub(crate) use routing::{
+    client_route_timeout, ROUTE_TIMEOUT_MS, SUMMARY_TIMEOUT_MS, WORKER_NOT_CONNECTED,
+};
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
 #[allow(unused_imports)]

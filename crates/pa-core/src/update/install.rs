@@ -204,18 +204,7 @@ pub fn install_source_is_valid(source: &str) -> bool {
     protocol == "https" || protocol == "http"
 }
 
-/// fsync a directory so its entries survive a crash (staged releases and
-/// the launcher repoint must never reference an unwritten inode; a
-/// directory fd opened read-only accepts `sync_all` on POSIX platforms).
-///
-/// # Errors
-///
-/// Returns an error when the directory cannot be opened or its `sync_all` fails.
-pub fn sync_directory(path: &Path) -> Result<()> {
-    let dir = std::fs::File::open(path)?;
-    dir.sync_all()
-        .with_context(|| format!("fsync {}", path.display()))
-}
+pub use crate::platform::fs::sync_directory;
 
 /// The parsed shape of a launcher link target.
 struct ReleaseLink {

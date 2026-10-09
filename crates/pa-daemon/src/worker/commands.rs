@@ -404,8 +404,8 @@ impl Worker {
         if let Err(response) = self.require_created("get_state") {
             return response;
         }
-        let core = self.core.lock().unwrap();
-        let summary = self.summary_locked(&core);
+        let (core, inputs) = self.summary_inputs();
+        let summary = self.summary_locked(&core, inputs);
         response_success(
             None,
             "get_state",
@@ -567,10 +567,13 @@ impl Worker {
         // cron jobs but cancels the subagent's RLM heartbeats; `shutdown` keeps them
         // all. The store cancel is durable, so the stopped session's own heartbeats
         // can never revive it.
-        match reason {
+        let cancel_result = match reason {
             KillCloseReason::Killed => self.cancel_session_scheduled_jobs().await,
             KillCloseReason::Replaced => self.cancel_session_rlm_heartbeats().await,
-            KillCloseReason::Shutdown => {}
+            KillCloseReason::Shutdown => Ok(()),
+        };
+        if let Err(error) = cancel_result {
+            return response_failure(None, "kill", &error.to_string(), None);
         }
         // The close cascades to the resident children with the SAME reason before
         // the session's own archive and dispose; a close failure is swallowed.
@@ -676,7 +679,7 @@ impl Worker {
         if name.trim().is_empty() {
             return response_failure(None, command, "Session name cannot be empty", None);
         }
-        let mut core = self.core.lock().unwrap();
+        let (mut core, inputs) = self.summary_inputs();
         let previous = core
             .store
             .as_ref()
@@ -686,7 +689,7 @@ impl Worker {
                 return response_failure(None, command, &error.to_string(), None);
             }
         }
-        let summary = self.summary_locked(&core);
+        let summary = self.summary_locked(&core, inputs);
         // TS #2529 `applyStateSessionName`: a rename that changed an
         // existing name leaves the renamed session a displayed transcript
         // notice (" by parent" when the rename arrived from the parent
