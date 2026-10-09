@@ -92,7 +92,11 @@ impl AgentSessionEngine {
                 // OAuth token and is a re-login by construction.
                 let replaced = match &credential {
                     pa_core::auth::AuthCredential::ApiKey { key, .. } => {
-                        Some(key.as_str()) != served_key.as_deref()
+                        // Stored keys resolve (!command, env names)
+                        // before they are served: compare the resolved
+                        // key against the served one, never the raw
+                        // stored string.
+                        !pa_core::auth::stored_api_key_matches_served(key, served_key.as_deref())
                     }
                     _ => true,
                 };

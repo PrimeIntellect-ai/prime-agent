@@ -25,6 +25,15 @@ pub fn resolve_config_value_uncached(config: &str) -> Option<String> {
     resolve_env_or_literal(config)
 }
 
+/// Whether a stored API key resolves to the value a failed request
+/// served: stored keys run through the config resolver (`!command` and
+/// env-var names) before they become request keys, so the raw stored
+/// string must never be compared to the resolved served key.
+#[must_use]
+pub fn stored_api_key_matches_served(key: &str, served: Option<&str>) -> bool {
+    resolve_config_value(key).as_deref() == served
+}
+
 /// Unset env var falls back to the literal string; set-but-empty is a missing
 /// credential (never the variable name).
 fn resolve_env_or_literal(config: &str) -> Option<String> {
@@ -115,6 +124,34 @@ fn hidden_spawn(_command: &str) -> Result<Option<std::process::Output>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stored-key comparison resolves before comparing: a `!command`
+    /// or env-var name matches the value it served; the raw string never
+    /// leaks into the comparison.
+    #[test]
+    fn a_stored_key_matches_only_its_resolved_served_value() {
+        assert!(
+            stored_api_key_matches_served("sk-literal", Some("sk-literal")),
+            "a literal key matches the same served literal"
+        );
+        assert!(
+            !stored_api_key_matches_served("sk-literal", Some("sk-other")),
+            "a differing literal never matches"
+        );
+        assert!(
+            stored_api_key_matches_served("!echo sk-resolved", Some("sk-resolved")),
+            "a command key matches the value it resolves to"
+        );
+        assert!(
+            !stored_api_key_matches_served("!echo sk-resolved", Some("!echo sk-resolved")),
+            "the raw command string never matches the resolved served value"
+        );
+        std::env::set_var("TEST_RESOLVE_KEY_SERVED", "sk-env");
+        assert!(
+            stored_api_key_matches_served("TEST_RESOLVE_KEY_SERVED", Some("sk-env")),
+            "an env-var name matches the value it resolved to"
+        );
+    }
 
     #[test]
     fn env_or_literal_semantics() {

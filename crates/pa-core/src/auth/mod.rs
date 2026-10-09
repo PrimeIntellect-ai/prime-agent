@@ -30,6 +30,7 @@ pub use provider_oauth::{
     ProviderOAuth, ANTHROPIC_PROVIDER_ID, GITHUB_COPILOT_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID,
     XAI_PROVIDER_ID,
 };
+pub use resolve_config_value::stored_api_key_matches_served;
 pub use storage::{
     parse_storage_data, AuthStorageBackend, FileAuthStorageBackend, InMemoryAuthStorageBackend,
 };
