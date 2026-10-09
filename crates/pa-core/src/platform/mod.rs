@@ -10,7 +10,7 @@ pub mod process;
 pub mod shell;
 
 pub use fs::fsync;
-pub use lock_dir::LockDir;
+pub use lock_dir::{lock_exclusive, try_lock_exclusive, LockDir};
 pub use perms::{
     file_mode, is_executable, is_readable_writable, restrict_dir, restrict_file, set_private_mode,
 };
