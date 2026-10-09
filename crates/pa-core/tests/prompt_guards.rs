@@ -574,3 +574,36 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
         .assembled
         .contains("await mcp.list_tools(\"notion\")"));
 }
+
+// Text-only turns
+
+/// The assembled prompt sanctions ending a turn with text alone and forbids placeholder/no-op tool
+/// calls. Observed gap: agents repeatedly ended acknowledgment turns with a bare `pass` Python
+/// cell; the done-state rule alone never covered the ack frame (acknowledgments, confirmations,
+/// idle waits), so the model invented a minimal tool call to end the turn.
+#[test]
+fn usage_layer_sanctions_text_only_turns_and_forbids_noop_tool_calls() {
+    let options = BuildSystemPromptOptions {
+        cwd: "/w".to_string(),
+        messages_path: Some("/w/sessions/fixture-session.jsonl".to_string()),
+        model: Some("mock/mock-1"),
+        skills: sorted_bundled_skills(),
+        selected_tools: Some(vec!["ipython"]),
+        ..Default::default()
+    };
+    let breakdown = system_prompt_breakdown(&options);
+    assert!(
+        breakdown
+            .assembled
+            .contains("A turn may end with a text-only response."),
+        "acknowledgments must be sanctioned as text-only turns: the done-state rule alone \
+         never covered the ack frame"
+    );
+    assert!(
+        breakdown
+            .assembled
+            .contains("Never emit a placeholder or no-op tool call"),
+        "placeholder or no-op tool calls (e.g. a `pass`-only cell) must be forbidden \
+         explicitly"
+    );
+}
