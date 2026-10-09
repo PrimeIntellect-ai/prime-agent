@@ -423,15 +423,15 @@ impl LockDir {
     /// incumbent was removed (or vanished) and acquisition may be retried;
     /// surfaces `WouldBlock` while a live or not-yet-stale lock holds it.
     /// Restore a directory this judge parked aside but never observed
-    /// stale. The path's current occupant is itself short-lived (a live
-    /// lock): retry the restore while it releases; if restoration stays
-    /// impossible, the parked directory stays put as residue — a live
-    /// lock is never deleted. The restored lock keeps its owner file, so
-    /// its holder releases normally, and a later judge re-judges it on
-    /// its own merits.
+    /// stale. The restore never overwrites an occupant: on Unix a rename
+    /// onto an existing empty directory replaces it, so the path must be
+    /// absent before the restore. The path's current occupant is itself
+    /// short-lived (a live lock): retry while it releases; if
+    /// restoration stays impossible, the parked directory stays put as
+    /// residue — a live lock is never deleted and never displaced onto.
     fn restore_or_park(aside: &Path, path: &Path) {
         for _ in 0..25 {
-            if fs::rename(aside, path).is_ok() {
+            if !path.exists() && fs::rename(aside, path).is_ok() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -632,6 +632,40 @@ mod tests {
 
     fn lock_of(file: &Path) -> PathBuf {
         LockDir::path_for(file)
+    }
+
+    /// The restore never overwrites an occupant: a Unix rename onto an
+    /// existing empty directory would replace the live lock at the
+    /// canonical path — `restore_or_park` restores only into an absent
+    /// path.
+    #[test]
+    fn a_restore_never_overwrites_the_live_occupant() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = lock_of(&dir.path().join("auth.json"));
+        let aside = path.with_extension("stale-parked");
+        // The parked directory this judge must restore.
+        std::fs::create_dir(&aside).unwrap();
+        std::fs::write(aside.join("owner"), "999999 tok").unwrap();
+        // A live occupant holds the canonical path.
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("owner"), "1 tok").unwrap();
+        LockDir::restore_or_park(&aside, &path);
+        assert!(
+            fs::read_to_string(path.join("owner")).is_ok_and(|owner| owner == "1 tok"),
+            "the occupant's lock is never overwritten"
+        );
+        assert!(
+            aside.join("owner").exists(),
+            "the parked directory stays parked while the path is occupied"
+        );
+        // The occupant releases: the restore lands without overwriting.
+        std::fs::remove_file(path.join("owner")).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        LockDir::restore_or_park(&aside, &path);
+        assert!(
+            fs::read_to_string(path.join("owner")).is_ok_and(|owner| owner == "999999 tok"),
+            "the parked directory restores once the path is free"
+        );
     }
 
     /// A displaced guard never releases a successor's lock: a judge
