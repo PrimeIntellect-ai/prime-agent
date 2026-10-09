@@ -444,6 +444,9 @@ impl Drop for SocketLease {
 /// a persistent displacement (a suspended dance's placeholder, or a
 /// real takeover) is a compromise.
 #[cfg(unix)]
+// The tick's failure path threads the lease's own task state (the
+// pinned handle, path, identity, and the two compromise channels) -
+// a context struct would add state-splitting without serving clarity.
 #[allow(clippy::too_many_arguments)]
 fn handle_refresh_failure(
     lost: bool,
