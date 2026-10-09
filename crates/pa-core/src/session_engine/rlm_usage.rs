@@ -836,4 +836,128 @@ mod tests {
         assert_eq!(attributed.len(), 1, "the retry persisted the batch once");
         assert_eq!(attributed[0]["aggregateUsage"]["input"], 1_010);
     }
+
+    enum FailurePoint {
+        BeforeSecondAppend,
+        AfterFirstAppend,
+    }
+
+    /// Fail one chosen store acknowledgment while retaining real transcript writes.
+    struct InterruptedAppendStore {
+        store: SessionUsageStore,
+        calls: std::sync::atomic::AtomicUsize,
+        point: FailurePoint,
+    }
+
+    impl RlmChildUsageStore for InterruptedAppendStore {
+        fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>> {
+            self.store.last_assistant()
+        }
+
+        fn append_attribution(
+            &self,
+            target_id: &str,
+            child_usage: Usage,
+            aggregate_usage: Usage,
+            origin: Option<ChildUsageOrigin>,
+        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+            Box::pin(async move {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if matches!(self.point, FailurePoint::BeforeSecondAppend) && call == 1 {
+                    return Err(std::io::Error::other("injected second append failure"));
+                }
+                self.store
+                    .append_attribution(target_id, child_usage, aggregate_usage, origin)
+                    .await?;
+                if matches!(self.point, FailurePoint::AfterFirstAppend) && call == 0 {
+                    return Err(std::io::Error::other("injected lost append acknowledgment"));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Acknowledged origins must not be folded again when a later origin fails.
+    #[tokio::test]
+    async fn a_partially_persisted_report_is_counted_once_on_retry() {
+        let (_tmp, manager) = manager_with_assistant(usage_block(1_000, 0, 0, 0, 4_096, 0.0));
+        let producer =
+            RlmChildUsageAttributions::new(std::sync::Arc::new(InterruptedAppendStore {
+                store: SessionUsageStore(manager.clone()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                point: FailurePoint::BeforeSecondAppend,
+            }));
+        producer.register_spawn("sub-partial").await;
+        let report = RlmChildUsageReport {
+            rlm_child_id: "sub-partial".to_string(),
+            batches: vec![
+                (
+                    ChildUsageOrigin::SpawnTask,
+                    usage_block(10, 0, 0, 0, 10, 0.01),
+                ),
+                (
+                    ChildUsageOrigin::AgentMessage,
+                    usage_block(20, 0, 0, 0, 20, 0.02),
+                ),
+            ],
+        };
+        assert!(!producer.record_child_usage(report.clone()).await);
+        assert!(producer.record_child_usage(report).await);
+        let rows = file_rows(&manager).await;
+        let attributions: Vec<_> = rows
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .map(|row| {
+                serde_json::json!({
+                    "origin": row["origin"],
+                    "childInput": row["childUsage"]["input"],
+                    "aggregateInput": row["aggregateUsage"]["input"],
+                })
+            })
+            .collect();
+        assert_eq!(
+            attributions,
+            vec![
+                serde_json::json!({"origin": "spawn_task", "childInput": 10, "aggregateInput": 1010}),
+                serde_json::json!({"origin": "agent_message", "childInput": 20, "aggregateInput": 1030}),
+            ]
+        );
+    }
+
+    /// An error after a complete real append cannot safely mean nothing persisted.
+    #[tokio::test]
+    async fn a_persisted_report_with_lost_acknowledgment_is_not_appended_twice() {
+        let (_tmp, manager) = manager_with_assistant(usage_block(1_000, 0, 0, 0, 4_096, 0.0));
+        let producer =
+            RlmChildUsageAttributions::new(std::sync::Arc::new(InterruptedAppendStore {
+                store: SessionUsageStore(manager.clone()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                point: FailurePoint::AfterFirstAppend,
+            }));
+        producer.register_spawn("sub-uncertain").await;
+        let report = RlmChildUsageReport {
+            rlm_child_id: "sub-uncertain".to_string(),
+            batches: vec![(
+                ChildUsageOrigin::SpawnTask,
+                usage_block(10, 0, 0, 0, 10, 0.01),
+            )],
+        };
+        assert!(!producer.record_child_usage(report.clone()).await);
+        let rows = file_rows(&manager).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == "child_usage_attributed")
+                .count(),
+            1
+        );
+        assert!(producer.record_child_usage(report).await);
+        let rows = file_rows(&manager).await;
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["type"] == "child_usage_attributed")
+                .count(),
+            1,
+            "the complete disk row survives the failed acknowledgment and must be reused"
+        );
+    }
 }
