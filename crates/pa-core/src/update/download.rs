@@ -300,6 +300,9 @@ pub async fn stage_local_payload(
 /// The recorded install origin of a reused release follows the operator's
 /// current `--source` (future channel updates resolve from it).
 fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()> {
+    if !super::install::install_source_is_valid(install_source) {
+        anyhow::bail!("the install source {install_source:?} is not an http(s) URL");
+    }
     let path = release_dir.join(".install-source");
     let current = std::fs::read_to_string(&path).unwrap_or_default();
     if current.trim() == install_source.trim() {
@@ -605,6 +608,9 @@ mod tests {
         let mirrored =
             stage_archive(&archive, &sha, &root, "0.2.0", "https://mirror.example.com").unwrap();
         assert_eq!(mirrored, release_dir);
+        for invalid_source in ["", "file:///invalid"] {
+            assert!(stage_archive(&archive, &sha, &root, "0.2.0", invalid_source).is_err());
+        }
         assert_eq!(
             std::fs::read_to_string(release_dir.join(".install-source")).unwrap(),
             "https://mirror.example.com"
