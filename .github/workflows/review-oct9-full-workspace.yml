@@ -1,0 +1,64 @@
+# Disposable review evidence only. Close this PR after validation; never merge.
+name: review exact heads full workspace
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths: [.github/workflows/review-oct9-full-workspace.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-oct9-full-workspace-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  exact-head-tests:
+    # Only this dedicated same-repository validation branch may run these jobs.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'verify/review-oct9-full-workspace' && !github.event.pull_request.draft
+    name: full workspace PR ${{ matrix.pr }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 3425
+            sha: f4cbb02dc83d05cc50aaf5875ebb219e9c1de3e1
+          - pr: 3430
+            sha: 0510564e286ae53de6ee4444f010e26257764a2e
+          - pr: 3432
+            sha: 7eaa52e0ea8d73e9f833a66b229a89ecbe2861f4
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Verify and record the original reviewed head
+        env:
+          EXPECTED_HEAD: ${{ matrix.sha }}
+          REVIEWED_PR: ${{ matrix.pr }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          echo "PR $REVIEWED_PR: $EXPECTED_HEAD" >> "$GITHUB_STEP_SUMMARY"
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: test-shards
+          save-if: false
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build workspace binaries for integration tests
+        run: cargo build --locked --workspace --bins
+      - name: Bootstrap kernel environment before tests
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
+      - name: Test the entire workspace
+        run: cargo test --locked --workspace
