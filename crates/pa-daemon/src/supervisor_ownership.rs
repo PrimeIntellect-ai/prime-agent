@@ -693,31 +693,38 @@ impl ShutdownAdmission {
         Self::acquire_in(&registry_dir()?)
     }
 
-    /// A BOUNDED acquire (the rollback re-close): the unbounded acquire
-    /// waits out a concurrent stop window and the caller would then spawn
-    /// a daemon right after that shutdown finished - undoing it. The
-    /// rollback instead aborts after `max_wait`: a window still busy that
-    /// long is a real concurrent shutdown (its convergence runs to tens of
-    /// seconds), never transient contention.
+    /// A SINGLE-ATTEMPT acquire (the rollback re-close): the caller
+    /// released its own window microseconds ago, so the record is either
+    /// free NOW or a genuinely concurrent stop holds it - and the caller
+    /// must abort beside that stop, never queue behind it (even a fast
+    /// shutdown of an already-stopped machine finishes inside any grace
+    /// window, and a retry loop would then take over right after the
+    /// user's stop). One guarded attempt, no retry.
     ///
     /// # Errors
     ///
     /// Returns an error when the registry record cannot be written, the
-    /// renewal thread cannot be spawned, or `max_wait` elapses behind
-    /// another active stop window.
-    pub fn acquire_bounded(max_wait: Duration) -> Result<Self> {
-        Self::acquire_in_bounded(&registry_dir()?, max_wait)
+    /// renewal thread cannot be spawned, or another active stop window
+    /// holds the record.
+    pub fn acquire_once() -> Result<Self> {
+        Self::acquire_in_once(&registry_dir()?)
     }
 
     /// [`ShutdownAdmission::acquire`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
     fn acquire_in(registry_dir: &Path) -> Result<Self> {
-        Self::acquire_in_bounded(registry_dir, Duration::MAX)
+        Self::acquire_in_impl(registry_dir, false)
     }
 
-    /// The acquire loop with a deadline (`Duration::MAX` = the unbounded
-    /// TS acquire).
-    fn acquire_in_bounded(registry_dir: &Path, max_wait: Duration) -> Result<Self> {
+    /// [`ShutdownAdmission::acquire_once`] against an explicit registry
+    /// directory (the seam the unit tests isolate on).
+    fn acquire_in_once(registry_dir: &Path) -> Result<Self> {
+        Self::acquire_in_impl(registry_dir, true)
+    }
+
+    /// The acquire loop; `once` runs exactly one guarded attempt (the
+    /// rollback re-close), otherwise the unbounded TS retry.
+    fn acquire_in_impl(registry_dir: &Path, once: bool) -> Result<Self> {
         let registry_dir = registry_dir.to_path_buf();
         let state = Arc::new(AdmissionState {
             registry_dir: registry_dir.clone(),
@@ -727,7 +734,6 @@ impl ShutdownAdmission {
             stopped: AtomicBool::new(false),
             lost: AtomicBool::new(false),
         });
-        let deadline = std::time::Instant::now().checked_add(max_wait);
         loop {
             let acquired = with_registry_guard(&registry_dir, || {
                 let path = shutdown_admission_path(&registry_dir);
@@ -752,7 +758,7 @@ impl ShutdownAdmission {
             if acquired.is_some() {
                 break;
             }
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            if once {
                 anyhow::bail!("another stop window holds the socket");
             }
             std::thread::sleep(SHUTDOWN_ADMISSION_WAIT_MS);
@@ -1286,26 +1292,24 @@ mod tests {
         );
     }
 
-    /// A held stop window makes the bounded acquire give up after its
-    /// deadline - the rollback re-close never sits out a concurrent
-    /// shutdown and spawns behind it - while the window's holder still
-    /// owns the record.
+    /// A held stop window makes the single-attempt acquire give up at
+    /// once - the rollback re-close never queues behind a concurrent
+    /// shutdown (however fast it finishes) and never spawns behind it -
+    /// while the freed window acquires again.
     #[test]
-    fn the_bounded_acquire_gives_up_behind_a_held_window() {
+    fn the_once_acquire_never_queues_behind_a_held_window() {
         let registry = tempfile::tempdir().expect("registry root");
         let admission = ShutdownAdmission::acquire_in(registry.path()).expect("hold the window");
         assert!(
-            ShutdownAdmission::acquire_in_bounded(registry.path(), Duration::from_millis(1))
-                .is_err()
+            ShutdownAdmission::acquire_in_once(registry.path()).is_err(),
+            "a held window is refused at once, never queued"
         );
         drop(admission);
-        // The vacated window acquires boundedly again.
         assert!(
-            ShutdownAdmission::acquire_in_bounded(registry.path(), Duration::from_secs(5)).is_ok(),
-            "the freed window acquires"
+            ShutdownAdmission::acquire_in_once(registry.path()).is_ok(),
+            "the freed window acquires at once"
         );
     }
-
     #[test]
     fn the_fence_identity_gate_requires_a_fixed_hello_for_this_socket() {
         let registry = tempfile::tempdir().expect("registry root");
