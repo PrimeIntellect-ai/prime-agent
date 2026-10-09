@@ -78,6 +78,8 @@ fn run_app_surface(
     // A panic anywhere between the mount below and the deliberate teardown must still hand
     // the terminal back whole (the same unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    // Enable Windows VT processing before raw ANSI mode writes.
+    pa_types::platform::console_init();
     // The raw-mode bracket's `cfmakeraw` write clears IXON, the kernel's one trigger for
     // lifting a pending Ctrl+S stop (see the flow e2e's launch route).
     terminal::enable_raw_mode()?;
@@ -249,7 +251,8 @@ pub(crate) fn draw(
     // The mount sequences (the alt-screen adopt/enter, the queued clear, the cursor hide) ride
     // THIS draw's single flush: the first paint is the mount, and a mid-gap flush can never
     // carry the clear out early over it.
-    if crate::altscreen::take_first_draw_mount() {
+    let mounting = crate::altscreen::take_first_draw_mount();
+    if mounting {
         let mut out = std::io::stdout();
         crate::altscreen::enter_queued(&mut out)?;
         crossterm::queue!(
@@ -309,7 +312,12 @@ pub(crate) fn draw(
     // Always release the terminal's pending update, including on paint errors.
     crossterm::execute!(stdout(), terminal::EndSynchronizedUpdate)?;
     painted?;
-    markers
+    markers?;
+    if mounting {
+        // Mode setup flushes stdout, so it must follow the completed first paint.
+        crate::enhanced_keys::enable(&mut stdout())?;
+    }
+    Ok(())
 }
 
 /// Write OSC 133 zone-marker sequences at their frame rows. The sequences are zero-width: only
