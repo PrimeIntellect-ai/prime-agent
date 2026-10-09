@@ -271,7 +271,10 @@ fn timed_drag(messages: usize) -> (Vec<String>, Vec<String>, Duration) {
     let [started, finished]: [std::time::Instant; 2] = timestamps
         .try_into()
         .expect("the rendered drag burst records both timing boundaries");
-    (frames, copies, finished.duration_since(started))
+    let elapsed = finished
+        .checked_duration_since(started)
+        .expect("timing markers arrive in monotonic order");
+    (frames, copies, elapsed)
 }
 
 #[test]
