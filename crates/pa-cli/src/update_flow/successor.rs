@@ -104,19 +104,14 @@ pub async fn wait_for_hello(socket_path: &Path, budget_ms: u64) -> Option<Update
 pub async fn wait_for_exit(identity: &UpdateProcessIdentity, budget_ms: u64) -> bool {
     let deadline = Instant::now() + Duration::from_millis(budget_ms.max(1));
     loop {
-        let Ok(alive) = pa_daemon::lease::is_process_alive(identity.pid as u32) else {
-            return true;
+        let Ok(pid) = u32::try_from(identity.pid) else {
+            return false;
         };
-        let start_id_matches = match &identity.process_start_id {
-            None => true,
-            Some(expected) => {
-                matches!(
-                    pa_daemon::lease::get_process_start_id(identity.pid as u32),
-                    Some(observed) if &observed == expected
-                )
-            }
-        };
-        if !alive || !start_id_matches {
+        if process_exit_observed(
+            pa_daemon::lease::is_process_alive(pid).ok(),
+            identity.process_start_id.as_deref(),
+            pa_daemon::lease::get_process_start_id(pid).as_deref(),
+        ) {
             return true;
         }
         if Instant::now() + BOOT_POLL >= deadline {
@@ -126,12 +121,40 @@ pub async fn wait_for_exit(identity: &UpdateProcessIdentity, budget_ms: u64) -> 
     }
 }
 
+/// Only a known-dead PID or an observed different birth identity proves exit.
+fn process_exit_observed(
+    alive: Option<bool>,
+    expected: Option<&str>,
+    observed: Option<&str>,
+) -> bool {
+    alive == Some(false)
+        || matches!((alive, expected, observed), (Some(true), Some(expected), Some(observed)) if expected != observed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unknown_process_probes_do_not_prove_predecessor_exit() {
+        assert!(!process_exit_observed(None, Some("birth"), None));
+        assert!(!process_exit_observed(Some(true), Some("birth"), None));
+        assert!(!process_exit_observed(Some(true), None, Some("birth")));
+        assert!(!process_exit_observed(
+            Some(true),
+            Some("birth"),
+            Some("birth")
+        ));
+        assert!(process_exit_observed(Some(false), Some("birth"), None));
+        assert!(process_exit_observed(
+            Some(true),
+            Some("birth"),
+            Some("new-birth")
+        ));
+    }
 
     #[test]
     fn identity_maps_the_hello_frame_fields() {
