@@ -325,6 +325,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
                         | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
+                        | crate::prompts::model_prompts::MODEL_PROMPT_ERROR_CUSTOM_TYPE
                 ) {
                     continue;
                 }
@@ -465,6 +466,14 @@ mod tests {
             converted.is_empty(),
             "outcome row must not convert to LLM context"
         );
+    }
+
+    #[test]
+    fn model_prompt_error_row_is_never_context() {
+        let message = crate::prompts::model_prompts::model_prompt_error_message(&[
+            "/x/model-prompts.toml: bad TOML".to_string(),
+        ]);
+        assert!(convert_to_llm(&[AgentMessage::Custom(message)]).is_empty());
     }
 
     #[test]
