@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: review-oct9-full-workspace-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
