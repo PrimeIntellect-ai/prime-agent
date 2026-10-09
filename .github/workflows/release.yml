@@ -697,7 +697,13 @@ jobs:
       - name: Verify historical native updater compatibility
         run: |
           set -euo pipefail
-          python3 verification-source/scripts/release/native_compat.py incoming/*/prime-agent-*.tar.gz
+          archives=()
+          for archive in incoming/*/prime-agent-*.tar.gz; do
+            # Source distributions are build inputs, not runnable payloads.
+            case "$archive" in *-src.tar.gz) continue ;; esac
+            archives+=("$archive")
+          done
+          python3 verification-source/scripts/release/native_compat.py "${archives[@]}"
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
           set -euo pipefail
