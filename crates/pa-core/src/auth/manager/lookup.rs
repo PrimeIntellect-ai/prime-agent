@@ -351,9 +351,15 @@ impl AuthStorage {
                 "the credential store could not be re-read".to_string(),
             ));
         };
-        let peer = parse_storage_data(content.as_deref())
-            .ok()
-            .and_then(|data| data.credential(provider_id));
+        // A malformed document is not a removal: the ordinary retry
+        // ladder stands, as the initial read's parse failure does.
+        let Ok(data) = parse_storage_data(content.as_deref()) else {
+            self.reload();
+            return Err(ForcedRefreshFailure::NotExchanged(
+                "the credential store could not be parsed".to_string(),
+            ));
+        };
+        let peer = data.credential(provider_id);
         // Any changed credential stands — a fresher OAuth grant from the
         // expiry-gated path, an API-key replacement, a re-login to a
         // different grant: none spends this attempt's refresh token.
