@@ -593,8 +593,15 @@ pub fn mark_released_through(dir: &fs::File) {
 }
 
 /// True when a lock directory carries this guard's release marker.
+/// The marker must be a REGULAR FILE and is checked with lstat
+/// semantics: a planted FIFO, device, or symlink to another owner's
+/// file reads FALSE - `exists()` follows symlinks and reports any entry,
+/// which a hostile marker must never benefit from. The marker's writer
+/// (`mark_released_through`) creates exactly a regular file, so this
+/// matches every genuine marker.
 fn released_marker(path: &Path) -> bool {
-    path.join("released").exists()
+    std::fs::symlink_metadata(path.join("released"))
+        .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
 /// The outcome of the Linux inode-anchored release pass.
@@ -2128,6 +2135,54 @@ mod tests {
             std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
             0o600,
             "the mode was repaired for future acquisitions"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn planted_fifo_or_symlink_marker_outranks_nothing() {
+        // A hostile `released` entry (FIFO or symlink) must read as NO
+        // marker: the dance's released-first branch would otherwise
+        // consume a live holder's directory, and the judge's stale
+        // check would reclaim a live-owned lock.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("state.json");
+        let path = LockDir::path_for(&file);
+        std::fs::create_dir(&path).unwrap();
+        // A live owner record with THIS process's pid: the judge must
+        // refuse reclaim regardless of the hostile marker.
+        std::fs::write(
+            path.join("owner"),
+            format!("{} live-token\n", std::process::id()),
+        )
+        .unwrap();
+        std::fs::write(path.join("released"), b"").unwrap();
+        // A real regular marker reads TRUE first, then plant the FIFO.
+        assert!(released_marker(&path));
+        std::fs::remove_file(path.join("released")).unwrap();
+        let fifo_name = std::ffi::CString::new(
+            path.join("released")
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) },
+            0,
+            "the FIFO fixture must exist"
+        );
+        assert!(
+            !released_marker(&path),
+            "a planted FIFO marker reads as no marker"
+        );
+        // A symlink to a regular file also reads FALSE.
+        std::fs::remove_file(path.join("released")).unwrap();
+        std::os::unix::fs::symlink("owner", path.join("released")).unwrap();
+        assert!(
+            !released_marker(&path),
+            "a planted symlink marker reads as no marker"
         );
     }
 
