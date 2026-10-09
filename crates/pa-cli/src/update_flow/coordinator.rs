@@ -508,6 +508,39 @@ async fn finish_failure(
             return Ok(());
         }
     };
+    // The successor this coordinator spawned - rejected or adopted - still
+    // running from the failed spawn and is stopped HERE, FIRST in the
+    // rollback (before any later abort return can leave it running beside a
+    // restored launcher): an identity-verified DIRECT SIGKILL of the pid
+    // this coordinator spawned - never an RPC to the socket, and never a
+    // SIGTERM: both the graceful Shutdown and the TERM signal drain
+    // persist worker stop tombstones (a durable stop that kills the
+    // sessions), while the direct kill is the crash path the protocol
+    // already trusts - the adopted workers die with the supervisor, their
+    // recovery journals persist, and the roster'd rollback boot below
+    // re-adopts them while the socket frees for the rollback. The
+    // start-id check means a reused pid is never signaled, and a
+    // competing daemon that answered the socket is never touched - a live
+    // competitor keeps the rollback's honest Failed.
+    if let Some(rejected) = &failure.rejected {
+        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
+            u32::try_from(rejected.pid).unwrap_or(0),
+            rejected.process_start_id.as_deref(),
+        );
+        if !confirmed_dead {
+            // An UNCONFIRMED death never proceeds - not to the launcher
+            // restore, not to the spawn: the refused daemon could still
+            // own the socket, and a Failed rollback beside a serving new
+            // binary is the honest terminal state (the crash kill itself
+            // reports the conservative outcome - a liveness probe error
+            // counts as alive).
+            fail_hard(format!(
+                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            ))
+            .await;
+            return Ok(());
+        }
+    }
     let root = match super::activation_root() {
         Ok(root) => root,
         Err(error) => {
@@ -568,38 +601,6 @@ async fn finish_failure(
         .await;
         return Ok(());
     }
-    // The successor this coordinator spawned - rejected or adopted - still
-    // running from the failed spawn and is stopped HERE by an
-    // identity-verified DIRECT SIGKILL of the pid this coordinator
-    // spawned - never an RPC to the socket, and never a
-    // SIGTERM: both the graceful Shutdown and the TERM signal drain
-    // persist worker stop tombstones (a durable stop that kills the
-    // sessions), while the direct kill is the crash path the protocol
-    // already trusts - the adopted workers die with the supervisor, their
-    // recovery journals persist, and the roster'd rollback boot below
-    // re-adopts them while the socket frees for the rollback. The
-    // start-id check means a reused pid is never signaled, and a
-    // competing daemon that answered the socket is never touched - a live
-    // competitor keeps the rollback's honest Failed.
-    if let Some(rejected) = &failure.rejected {
-        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
-            u32::try_from(rejected.pid).unwrap_or(0),
-            rejected.process_start_id.as_deref(),
-        );
-        if !confirmed_dead {
-            // An UNCONFIRMED death never spawns the rollback against a
-            // possibly-live successor: the refused daemon could still own
-            // the socket, and a Failed rollback beside a serving new
-            // binary is the honest terminal state (the crash kill itself
-            // reports the conservative outcome - a liveness probe error
-            // counts as alive).
-            fail_hard(format!(
-                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-            ))
-            .await;
-            return Ok(());
-        }
-    }
     // Close the stop window right before the rollback child spawns,
     // exactly like the happy path's release-to-spawn choreography: the
     // child's own boot refuses while an admission is active, and the
@@ -641,6 +642,18 @@ async fn finish_failure(
     // (`drive` pinned it there from the verified predecessor hello before
     // the stop), and the spawn pin binds the hello to the rollback child.
     let predecessor = writer.lock().await.current().predecessor.clone();
+    // A rollback child that fails its boot or validation is killed the
+    // same way the main flow's rejected successor is: this coordinator
+    // spawned it, and a Failed rollback must not leave it owning the
+    // socket or leaking unbound (the crash kill is best-effort here - the
+    // terminal Failed state is already recorded, and an unconfirmed death
+    // leaves the same honest status as before).
+    let retire_rollback_child = |spawned: &super::successor::SpawnedSuccessor| {
+        let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+            u32::try_from(spawned.pid).unwrap_or(0),
+            spawned.process_start_id.as_deref(),
+        );
+    };
     if let Some(hello) =
         wait_for_hello(&options.socket_path, options.budget.boot_ms, &spawned).await
     {
@@ -668,6 +681,7 @@ async fn finish_failure(
                 Ok(())
             }
             Err(error) => {
+                retire_rollback_child(&spawned);
                 writer.lock().await.set_state(UpdateState::Failed)?;
                 writer.lock().await.set_message(Some(format!(
                     "The rollback supervisor failed validation ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
@@ -676,6 +690,7 @@ async fn finish_failure(
             }
         }
     } else {
+        retire_rollback_child(&spawned);
         writer.lock().await.set_state(UpdateState::Failed)?;
         writer.lock().await.set_message(Some(format!(
             "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
