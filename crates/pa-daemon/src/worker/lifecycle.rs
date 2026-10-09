@@ -48,6 +48,17 @@ impl Worker {
         response_success(None, "update_snapshot", Some(core_data))
     }
 
+    pub(crate) fn release_session_lease(&self) {
+        let lease = self
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_mut()
+            .and_then(|store| store.lease.take());
+        drop(lease);
+    }
+
     /// Graceful stop: the connection loop exits the process after
     /// replying. The session's telemetry finalizes first.
     pub(crate) async fn handle_shutdown(&self, payload: &Value) -> DaemonResponse {
@@ -121,14 +132,7 @@ impl Worker {
             agent_engine.dispose_kernel().await;
         }
         self.engine.end_telemetry().await;
-        let lease = self
-            .core
-            .lock()
-            .unwrap()
-            .store
-            .as_mut()
-            .and_then(|store| store.lease.take());
-        drop(lease);
+        self.release_session_lease();
         // The worker's quit (TS `session_shutdown` reason `quit`): the
         // pane reporter releases its pane as the last write on the wire
         // — awaited here so the release lands before this reply unlocks
