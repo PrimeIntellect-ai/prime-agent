@@ -340,41 +340,107 @@ fn process_owner_record() -> String {
     format!("{} {token}\n", std::process::id())
 }
 
-/// Set up a freshly created private directory through a
-/// no-follow, identity-verified handle: `fchmod` the directory to the
-/// given mode and write the owner record fd-relative (`write_owner_through`).
-/// A symlink swapped onto the pathname before this runs cannot redirect
-/// either operation - the handle pins the inode this call created (the
-/// caller's identity witness), and a no-follow open of a symlink fails
-/// outright.
+/// True when a private-dir setup error means a parent-writer swapped
+/// an entry onto the fresh name (or the freshly created name was taken
+/// mid-setup): the no-follow open's ELOOP refusal, the emptiness
+/// sentinel, the pin/write-handle mismatch sentinel, and a plain name
+/// collision are all fresh-name regeneration conditions; every other
+/// error is real and must propagate.
+#[cfg(target_os = "linux")]
+fn is_fresh_name_swap(error: &io::Error) -> bool {
+    matches!(error.kind(), io::ErrorKind::AlreadyExists)
+        || matches!(error.raw_os_error(), Some(libc::ELOOP))
+}
+
+/// The process-wide serialization for private-directory creations:
+/// the umask is shared process state (`CLONE_FS`), so the create-with-
+/// umask-0077 window must exclude every other private creation in this
+/// module - an interleaved save/restore pair would leave the daemon's
+/// umask permanently changed. The mutex makes the toggle atomic across
+/// this module's users; unrelated code never toggles the umask.
+#[cfg(target_os = "linux")]
+static PRIVATE_UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Create a fresh private directory with mode 0700 AT CREATION,
+/// serialized under the module umask lock: the temporary umask 0077
+/// cannot interleave with another private creation's save/restore.
+#[cfg(target_os = "linux")]
+fn create_private_dir_guarded(path: &Path) -> io::Result<()> {
+    let _guard = PRIVATE_UMASK_LOCK.lock();
+    let prior_umask = unsafe { libc::umask(0o077) };
+    let create = fs::create_dir(path);
+    unsafe { libc::umask(prior_umask) };
+    create
+}
+
+/// Set up a freshly created private directory through a no-follow
+/// handle: the handle is pinned before any mutation, the directory
+/// must be EMPTY (a swapped non-empty victim is refused; a swapped
+/// empty directory cannot be corrupted - only empty-dir writes land
+/// in it), the mode is fixed through the handle, and the owner record
+/// is written fd-relative. A symlink on the pathname fails the
+/// no-follow open outright.
 #[cfg(target_os = "linux")]
 fn setup_private_dir(
     path: &Path,
-    witness: Option<(u64, u64)>,
     mode: u32,
     owner: Option<&str>,
-) -> io::Result<fs::File> {
+    claimed_at: Option<&str>,
+) -> io::Result<(fs::File, (u64, u64))> {
     use std::os::fd::FromRawFd;
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
     let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
         .map_err(|_| io::Error::other("non-null-free private path"))?;
+    // O_PATH opens regardless of the directory's own mode (a fresh
+    // 0300 creation from a restrictive umask still pins), and
+    // O_NOFOLLOW refuses a swapped symlink outright (ELOOP). The
+    // identity and the EMPTINESS are read through the pinned handle -
+    // a swapped NON-empty victim directory is refused; a swapped empty
+    // one cannot be corrupted by anything this protocol writes into
+    // it (its contents are empty, and only fresh notes land inside).
     let fd = unsafe {
         libc::open(
             raw_path.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    let dir = unsafe { fs::File::from_raw_fd(fd) };
-    let metadata = dir.metadata()?;
+    let pin = unsafe { fs::File::from_raw_fd(fd) };
+    let metadata = pin.metadata()?;
+    if !metadata.is_dir() {
+        return Err(io::Error::other("private name is not a directory"));
+    }
+    let empty = std::fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none());
+    if !empty {
+        return Err(io::Error::other(format!(
+            "Private directory {} is not the fresh empty creation",
+            path.display()
+        )));
+    }
+    let identity = (metadata.dev(), metadata.ino());
+    // The mode fix and every write go through a SECOND no-follow open
+    // with read access: the umask-guaranteed 0700 creation admits it,
+    // and the write handle re-verifies the identity so the two opens
+    // cannot straddle a parent-writer's swap without detection.
+    let wfd = unsafe {
+        libc::open(
+            raw_path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if wfd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let dir = unsafe { fs::File::from_raw_fd(wfd) };
     {
-        use std::os::unix::fs::MetadataExt;
-        let identity = (metadata.dev(), metadata.ino());
-        if witness != Some(identity) {
+        let wmeta = dir.metadata()?;
+        let widentity = (wmeta.dev(), wmeta.ino());
+        if widentity != identity {
             return Err(io::Error::other(format!(
-                "Private directory {} no longer names the created inode",
+                "Private directory {} changed hands between the pin and the write handle",
                 path.display()
             )));
         }
@@ -385,7 +451,46 @@ fn setup_private_dir(
     if let Some(owner) = owner {
         write_owner_through(&dir, format!("{owner}\n").as_bytes())?;
     }
-    Ok(dir)
+    if let Some(claimed_at) = claimed_at {
+        write_claimed_at_through(&dir, claimed_at.as_bytes())?;
+    }
+    Ok((dir, identity))
+}
+
+/// Write the `claimed-at` note fd-relative through the pinned private
+/// directory handle - never through the replaceable public pathname.
+#[cfg(target_os = "linux")]
+fn write_claimed_at_through(dir: &fs::File, note: &[u8]) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let name = c"claimed-at";
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fchmod(fd, 0o600) } != 0 {
+        let error = io::Error::last_os_error();
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+    let mut written = 0;
+    while written < note.len() {
+        let n = unsafe { libc::write(fd, note[written..].as_ptr().cast(), note.len() - written) };
+        if n <= 0 {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(fd) };
+            return Err(error);
+        }
+        written += n as usize;
+    }
+    unsafe { libc::close(fd) };
+    Ok(())
 }
 
 /// Mark the residue at `location` (this process's own leftover
@@ -980,14 +1085,7 @@ impl LockDir {
         let mut collision: Option<io::Error> = None;
         for attempt in 0..8 {
             let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
-            #[cfg(unix)]
-            let prior_umask = unsafe { libc::umask(0o077) };
-            let create = fs::create_dir(&candidate);
-            #[cfg(unix)]
-            unsafe {
-                libc::umask(prior_umask)
-            };
-            match create {
+            match create_private_dir_guarded(&candidate) {
                 // The temporary umask guarantees the fresh directory's
                 // mode is exactly 0700 AT CREATION (a hostile umask like
                 // 0477 would otherwise strip the owner bits and every
@@ -1015,18 +1113,22 @@ impl LockDir {
     #[cfg(target_os = "linux")]
     fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         let candidate = Self::claim_candidate_name(path)?;
-        // The candidate's setup runs through the no-follow,
-        // identity-verified handle (0700, owner written fd-relative):
-        // a symlink swapped onto the fresh private name cannot redirect
-        // the chmod or the owner write into a victim, and the no-follow
-        // open fails on symlinks outright. The returned handle IS the
-        // created inode (witness-verified inside).
-        let dir = match setup_private_dir(&candidate, identity_at(&candidate), 0o700, owner) {
-            Ok(dir) => dir,
+        // The candidate's setup runs through the no-follow, emptiness-
+        // and identity-disciplined handle (0700, owner written
+        // fd-relative): a symlink swapped onto the fresh private name
+        // fails the no-follow open outright (ELOOP is re-raised, never
+        // cleaned - remove_candidate_dir would traverse the symlink
+        // into a victim); a swapped non-empty directory fails the
+        // emptiness check; the returned handle IS the pinned inode
+        // (identity + emptiness witnessed inside).
+        let dir = match setup_private_dir(&candidate, 0o700, owner, None) {
+            Ok((dir, _identity)) => dir,
             Err(error) => {
-                // Never leave the private candidate behind a failed
-                // setup - nothing else ever removes that private name.
-                let _ = remove_candidate_dir(&candidate);
+                // Fail closed: no blind remove. A swapped entry at the
+                // private name (ELOOP, a mismatched or non-empty
+                // directory) is preserved untouched - remove_candidate_dir
+                // would traverse a symlink and unlink a victim's notes.
+                // The worst case is an inert leaked dotname.
                 return Err(error);
             }
         };
@@ -1130,54 +1232,41 @@ impl LockDir {
         let pid = std::process::id();
         for attempt in 0..8 {
             let placeholder = parent.join(format!(".j{pid:x}{nanos:x}{attempt:x}"));
-            #[cfg(unix)]
-            let prior_umask = unsafe { libc::umask(0o077) };
-            let create = fs::create_dir(&placeholder);
-            #[cfg(unix)]
-            unsafe {
-                libc::umask(prior_umask)
-            };
-            if let Err(error) = create {
+            if let Err(error) = create_private_dir_guarded(&placeholder) {
                 if error.kind() == io::ErrorKind::AlreadyExists {
                     continue;
                 }
                 return Err(error);
             }
             // The placeholder carries a live owner record for the whole
-            // exchange/restore interval: if this process is suspended
-            // mid-dance, the placeholder sitting at the public lock path
-            // is a stale-dated but LIVE-OWNED lock - another acquirer's
-            // judge refuses to reclaim it, exactly like the suspension
-            // scenario the owner record exists for. The `claimed-at`
-            // note lets a displaced holder's release find and complete
-            // itself at the private location.
-            // The placeholder's records are private, set through a
-            // no-follow identity-verified handle (the setup_private_dir
-            // helper): an actor who swaps a symlink onto the fresh name
-            // cannot redirect the chmod or the owner write into a
-            // victim - the no-follow open fails on symlinks, and the
-            // handle's inode must equal the mkdir's fresh witness.
-            let fresh_witness = identity_at(&placeholder);
+            // exchange/restore interval (a suspended dance leaves a
+            // stale-dated but LIVE-OWNED lock at the public path - the
+            // suspension scenario the owner record exists for) and the
+            // `claimed-at` note a displaced holder's release finds to
+            // complete itself at the private location. BOTH notes are
+            // written fd-relative through the pinned no-follow handle;
+            // nothing touches the pathname again.
+            let note = placeholder
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
             match setup_private_dir(
                 &placeholder,
-                fresh_witness,
                 0o700,
                 Some(&process_owner_record()),
+                Some(&note),
             ) {
-                Ok(_dir) => {
-                    // The handle is held only for the setup; the exchange
-                    // operates on pathnames (renameat2), and an open fd on
-                    // the placeholder is safe to hold or drop here.
+                Ok(_handle) => {
+                    // Setup complete: the notes live inside the pinned
+                    // inode; the exchange operates on pathnames.
                 }
-                Err(error)
-                    if error.kind() == io::ErrorKind::AlreadyExists
-                        || error.kind() == io::ErrorKind::Other =>
-                {
-                    // A name collision or a swapped entry at the fresh
-                    // name (the no-follow open refuses a symlink, a
-                    // mismatched directory fails the witness): regenerate
-                    // a fresh private name.
-                    let _ = remove_candidate_dir(&placeholder);
+                Err(error) if is_fresh_name_swap(&error) => {
+                    // A swapped entry at the fresh private name (ELOOP
+                    // from the no-follow refusal, the emptiness or the
+                    // write-handle mismatch sentinel): PRESERVE it
+                    // untouched (a blind remove could traverse a
+                    // symlink into a victim) and regenerate a fresh
+                    // private name.
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -1891,48 +1980,26 @@ impl LockDir {
                     continue;
                 }
                 let placeholder = location.with_file_name(format!(".b{pid:x}{nanos:x}{attempt:x}"));
-                #[cfg(unix)]
-                let prior_umask = unsafe { libc::umask(0o077) };
-                let create = fs::create_dir(&placeholder);
-                #[cfg(unix)]
-                unsafe {
-                    libc::umask(prior_umask)
-                };
-                if let Err(error) = create {
+                if let Err(error) = create_private_dir_guarded(&placeholder) {
                     if error.kind() == io::ErrorKind::AlreadyExists {
                         continue;
                     }
                     return InodeRelease::Failed;
                 }
-                // The created placeholder's identity - the witness the
-                // mkdir's umask guarantee and the no-follow setup path
-                // defend - pins the residue for a possible
-                // mark_released_at after a failed removal.
-                #[cfg(unix)]
-                let placeholder_identity = identity_at(&placeholder);
-                // The placeholder is token-protected and private-moded for
-                // the whole interval it may sit at the location.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if fs::set_permissions(&placeholder, fs::Permissions::from_mode(0o700)).is_err()
-                    {
-                        let _ = remove_candidate_dir(&placeholder);
-                        return InodeRelease::Failed;
-                    }
-                }
-                if fs::write(placeholder.join("owner"), process_owner_record()).is_err() {
-                    let _ = remove_candidate_dir(&placeholder);
-                    return InodeRelease::Failed;
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(
-                        placeholder.join("owner"),
-                        fs::Permissions::from_mode(0o600),
-                    );
-                }
+                // // The placeholder's owner record is written through the pinned
+                // no-follow, emptiness-disciplined handle (fd-relative) -
+                // no pathname chmod or write remains; the helper's
+                // returned identity is the positive witness a possible
+                // residue mark_released_at requires.
+                let placeholder_identity = match setup_private_dir(
+                    &placeholder,
+                    0o700,
+                    Some(&process_owner_record()),
+                    None,
+                ) {
+                    Ok((_handle, identity)) => Some(identity),
+                    Err(_) => return InodeRelease::Failed,
+                };
                 match rename_noreplace::exchange(&location, &placeholder) {
                     Ok(()) => {
                         if identity_at(&placeholder) == Some(*pinned) {
