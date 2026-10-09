@@ -221,6 +221,7 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
 
 /// Replay a whole transcript, folding `toolResult` messages onto their
 /// pending cards; one id-to-index map keeps the fold linear.
+#[must_use]
 pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     transcript_with_backfill_seam(messages).0
 }
