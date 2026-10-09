@@ -331,7 +331,7 @@ fn process_owner_record() -> String {
 /// staleness protocol of its own, no judge recursion.
 #[cfg(target_os = "linux")]
 #[must_use]
-pub fn reclaim_guard_path(path: &Path) -> PathBuf {
+fn reclaim_guard_path(path: &Path) -> PathBuf {
     // A component-independent short name: the sidecar must not overflow
     // the filesystem's component limit for a near-limit lock name, so
     // the guard is derived from a stable FNV-1a hash of the lock's
@@ -1247,6 +1247,15 @@ impl LockDir {
                 }
                 #[cfg(not(unix))]
                 {
+                    // Owned locks on these platforms still write the
+                    // owner file: remove it before the directory, or
+                    // a crashed holder's owned lock cannot be taken over
+                    // (the plain remove_dir fails ENOTEMPTY).
+                    match fs::remove_file(path.join("owner")) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error),
+                    }
                     match fs::remove_dir(path) {
                         Ok(()) => return Ok(()),
                         // A racing holder released it first.

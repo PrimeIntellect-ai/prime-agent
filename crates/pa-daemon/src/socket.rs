@@ -156,15 +156,22 @@ impl SocketLease {
                 let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
                 if lost || write_error || !lock_identity_matches(&task_path, &task_identity) {
                     if write_error && !lost {
-                        // A persistent mtime-refresh failure (EIO, a
-                        // read-only filesystem) is a compromise on its
-                        // own: the lock ages past the stale threshold
-                        // while the supervisor keeps serving. It is
-                        // distinct from a transient displacement and is
-                        // reported immediately, exactly as before.
-                        task_compromised.store(true, std::sync::atomic::Ordering::Release);
-                        task_tx.send_replace(true);
-                        break;
+                        // Retry the mtime write after the grace: a
+                        // transient failure passes (the lease stays
+                        // held and Drop releases it normally); a
+                        // repeated failure (persistent EIO, a
+                        // read-only filesystem) is a compromise, never
+                        // letting the lock age silently past the stale
+                        // threshold while the supervisor keeps serving.
+                        std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+                        if task_dir.set_modified(std::time::SystemTime::now()).is_err()
+                            || !lock_identity_matches(&task_path, &task_identity)
+                        {
+                            task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                            task_tx.send_replace(true);
+                            break;
+                        }
+                        continue;
                     }
                     // A stale-reclaim dance may hold this lease's
                     // directory displaced for the microseconds of its
