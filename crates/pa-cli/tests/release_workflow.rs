@@ -44,8 +44,8 @@ use sha2::{Digest, Sha256};
 /// The fixture version the assembled artifacts carry.
 const VERSION: &str = "0.9.9";
 
-/// The promote step that refuses archives a TS 0.9.8 updater would install.
-const TS_GUARD_STEP: &str = "Refuse archives the TypeScript updater would install";
+/// The promote step that validates the archive contract of shipped TS updaters.
+const NATIVE_COMPAT_STEP: &str = "Verify historical native updater compatibility";
 
 /// The current build matrix (release.yml's `build-gnu` + `build-darwin` +
 /// `build-windows` jobs): the five standalone targets. The single-artifact
@@ -167,6 +167,15 @@ fn python3_binary(min_version: (u8, u8)) -> Option<PathBuf> {
 
 /// Run one workflow step script (its committed `run:` text) in `cwd`.
 fn run_step(cwd: &Path, step: &Step) -> Output {
+    if step.name.as_deref() == Some(NATIVE_COMPAT_STEP) {
+        let scripts = cwd.join("verification-source/scripts/release");
+        fs::create_dir_all(&scripts).expect("create verification source directory");
+        fs::copy(
+            repo_root().join("scripts/release/native_compat.py"),
+            scripts.join("native_compat.py"),
+        )
+        .expect("copy the compatibility verifier from the checked-out release source");
+    }
     let script = step.run.as_deref().expect("the step carries a run script");
     Command::new("bash")
         .arg("-c")
@@ -202,16 +211,57 @@ fn sha256_file(path: &Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// One real (extractable) tar.gz archive: the staged payload binary
-/// (`prime-agent` — or `prime-agent.exe` on the MSVC target) with
-/// deterministic member metadata, the `assemble_artifacts.py` shape, plus
-/// any `extra_members`.
-fn write_fixture_tarball(out_path: &Path, payload_name: &str, extra_members: &[&str]) {
+/// An extractable release archive with authentic historical installer assets.
+/// `omitted_members` allows a regression case to remove a required file.
+fn write_fixture_tarball(
+    out_path: &Path,
+    payload_name: &str,
+    version: &str,
+    omitted_members: &[&str],
+) {
     let file = fs::File::create(out_path).expect("create the fixture archive");
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);
-    let payload = VERSION.as_bytes().to_vec();
-    for name in std::iter::once(payload_name).chain(extra_members.iter().copied()) {
+    let mut members = vec![
+        (payload_name, version.as_bytes().to_vec()),
+        (
+            "package.json",
+            serde_json::to_vec(&serde_json::json!({"name": "prime-agent", "version": version}))
+                .expect("serialize package metadata"),
+        ),
+    ];
+    if payload_name != "prime-agent.exe" {
+        members.extend([
+            (
+                "install.sh",
+                fs::read(repo_root().join("install-rust.sh")).expect("read the repair installer"),
+            ),
+            (
+                "prime-agent-runtime/pyproject.toml",
+                b"[project]\n".to_vec(),
+            ),
+            (
+                "prime-agent-runtime/src/rlm/repl.py",
+                b"# fixture runtime\n".to_vec(),
+            ),
+        ]);
+        for name in [
+            "theme/prime.json",
+            "export-html/template.html",
+            "photon_rs_bg.wasm",
+            "PHOTON-LICENSE.md",
+        ] {
+            members.push((
+                name,
+                fs::read(repo_root().join("scripts/release/native-compat").join(name))
+                    .expect("read the historical compatibility asset"),
+            ));
+        }
+    }
+    for (name, payload) in members {
+        if omitted_members.contains(&name) {
+            continue;
+        }
         let mut header = tar::Header::new_gnu();
         header.set_size(payload.len() as u64);
         header.set_mode(0o755);
@@ -249,12 +299,17 @@ fn run_step_with_env(cwd: &Path, step: &Step, env: &[(&str, &str)]) -> Output {
     command.output().expect("bash executes the step script")
 }
 
-fn write_artifact_with(dir: &Path, target: &str, extra_members: &[&str]) -> serde_json::Value {
+fn write_artifact_with(dir: &Path, target: &str, omitted_members: &[&str]) -> serde_json::Value {
     fs::create_dir_all(dir).expect("create the artifact directory");
     // The archive name the channel contract requires: the PLATFORM ALIAS,
     // never the target triple (the update reader drops a triple-named row).
     let archive_name = format!("prime-agent-{VERSION}-{}.tar.gz", platform_alias(target));
-    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), extra_members);
+    write_fixture_tarball(
+        &dir.join(&archive_name),
+        binary_name(target),
+        VERSION,
+        omitted_members,
+    );
     let sha256 = sha256_file(&dir.join(&archive_name));
     fs::write(
         dir.join("SHA256SUMS"),
@@ -289,7 +344,7 @@ fn write_artifact_version(dir: &Path, target: &str, version: &str) -> serde_json
     // The archive name the channel contract requires: the PLATFORM ALIAS,
     // never the target triple (the update reader drops a triple-named row).
     let archive_name = format!("prime-agent-{version}-{}.tar.gz", platform_alias(target));
-    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), &[]);
+    write_fixture_tarball(&dir.join(&archive_name), binary_name(target), version, &[]);
     let sha256 = sha256_file(&dir.join(&archive_name));
     fs::write(
         dir.join("SHA256SUMS"),
@@ -351,7 +406,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         steps,
         "Verify hash continuity (artifacts match build-job manifests)",
     )];
-    let ts_guard = &steps[step_position(steps, TS_GUARD_STEP)];
+    let ts_guard = &steps[step_position(steps, NATIVE_COMPAT_STEP)];
     let merge = &steps[step_position(steps, "Merge per-target manifests + SHA256SUMS")];
 
     let normalize_stdout = assert_success(&run_step(cwd, normalize), "normalize download layout");
@@ -360,7 +415,7 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
         verify_stdout.contains("hash continuity verified for all archives"),
         "hash continuity must report verifying the archives"
     );
-    assert_success(&run_step(cwd, ts_guard), TS_GUARD_STEP);
+    assert_success(&run_step(cwd, ts_guard), NATIVE_COMPAT_STEP);
     assert_success(&run_step(cwd, merge), "merge per-target manifests");
 
     let merged: serde_json::Value = serde_json::from_str(
@@ -369,6 +424,39 @@ fn run_promote_gates(cwd: &Path, steps: &[Step]) -> (String, serde_json::Value) 
     )
     .expect("parse the merged manifest");
     (normalize_stdout, merged)
+}
+
+/// Native release jobs must exercise the current channel installer as well
+/// as the retained TypeScript updater before their artifacts reach promotion.
+#[test]
+fn native_release_jobs_gate_fresh_and_legacy_installation() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("read release.yml");
+    let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
+    for job_name in ["build-gnu", "build-darwin"] {
+        let steps = &workflow.jobs.get(job_name).expect("native build job").steps;
+        let fresh = step_position(steps, "Verify fresh channel install and reinstall");
+        let legacy = step_position(steps, "Verify the shipped TypeScript update command");
+        let upload = steps
+            .iter()
+            .position(|step| {
+                step.uses
+                    .as_deref()
+                    .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+            })
+            .expect("artifact upload step");
+        assert!(
+            fresh < upload && legacy < upload,
+            "installation gates precede artifact upload"
+        );
+        let run = steps[fresh]
+            .run
+            .as_deref()
+            .expect("fresh installation script");
+        assert!(run.contains("scripts/release/test_channel_install.py"));
+        assert!(run.contains("--installer install-rust.sh"));
+        assert!(run.contains("--archive") && run.contains("channel-install.json"));
+    }
 }
 
 /// The Windows build job's structural contract: the MSVC target builds on
@@ -581,55 +669,42 @@ fn promote_download_layout_contract() {
         download < normalize && normalize < verify && verify < merge,
         "the layout must be normalized between the download and the per-artifact gates"
     );
-    let ts_guard = step_position(&steps, TS_GUARD_STEP);
+    let ts_guard = step_position(&steps, NATIVE_COMPAT_STEP);
     assert!(
         normalize < ts_guard && ts_guard < merge,
         "the TS-updater gate must check every archive before anything is merged or published"
     );
 }
 
-/// A TS 0.9.8 updater installs any archive that carries install.sh (plus
-/// three other files the Rust archive lacks) into the TS layout. The promote
-/// gate must refuse an archive with a root-level install.sh, and only that
-/// root-level file: the same name deeper in the tree is not what TS reads.
+/// The promote gate accepts a usable historical installer layout and rejects
+/// an archive missing a required asset before any release is published.
 #[test]
-fn an_archive_with_a_root_install_sh_fails_the_ts_updater_gate() {
-    let Some(_python3) = python3_binary((3, 0)) else {
+fn historical_native_updater_gate_requires_the_compatibility_assets() {
+    let Some(_python3) = python3_binary((3, 9)) else {
         return;
     };
     let steps = promote_steps();
-    let ts_guard = &steps[step_position(&steps, TS_GUARD_STEP)];
-
+    let compat = &steps[step_position(&steps, NATIVE_COMPAT_STEP)];
     let cwd = tempfile::tempdir().expect("scratch dir");
     let incoming = cwd.path().join("incoming");
-    write_artifact(
-        &incoming.join(format!("artifacts-{}", TARGETS[0])),
-        TARGETS[0],
+    for target in TARGETS {
+        write_artifact(&incoming.join(format!("artifacts-{target}")), target);
+    }
+    let output = assert_success(&run_step(cwd.path(), compat), NATIVE_COMPAT_STEP);
+    assert_eq!(
+        output.matches("Native compatibility verified:").count(),
+        TARGETS.len()
     );
-    write_artifact_with(
-        &incoming.join(format!("artifacts-{}", TARGETS[1])),
-        TARGETS[1],
-        &["skills/install.sh"],
-    );
-    let output = assert_success(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
-    assert!(output.contains("no archive carries the TypeScript installer layout"));
 
     write_artifact_with(
         &incoming.join(format!("artifacts-{}", TARGETS[2])),
         TARGETS[2],
-        &["install.sh"],
+        &["theme/prime.json"],
     );
-    let output = assert_failure(&run_step(cwd.path(), ts_guard), TS_GUARD_STEP);
+    let output = assert_failure(&run_step(cwd.path(), compat), NATIVE_COMPAT_STEP);
     assert!(
-        output.contains(&format!(
-            "prime-agent-{VERSION}-{}.tar.gz: contains a root-level install.sh",
-            platform_alias(TARGETS[2])
-        )),
-        "the gate must name the offending archive\n{output}"
-    );
-    assert!(
-        !output.contains(platform_alias(TARGETS[1])),
-        "a nested install.sh must not trip the gate\n{output}"
+        output.contains("missing regular compatibility asset: theme/prime.json"),
+        "the gate must name the missing compatibility asset\n{output}"
     );
 }
 
@@ -752,10 +827,10 @@ fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
     );
 }
 
-/// The publish's beta route serves install.ps1 (the stable render — the
-/// Windows entry point) and never overwrites install.sh (stable-only).
+/// Production installer updates require a stable release on both platforms;
+/// beta releases publish only the explicitly selected beta installer pair.
 #[test]
-fn the_beta_route_publishes_the_windows_entry_point() {
+fn production_installers_are_published_only_by_stable_releases() {
     let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
         .expect("read release.yml");
     let workflow: Workflow = serde_yaml::from_str(&text).expect("release.yml parses as YAML");
@@ -786,27 +861,22 @@ fn the_beta_route_publishes_the_windows_entry_point() {
     let beta_block = &publish[beta_start..stable_start];
     let stable_block = &publish[stable_start..];
     assert!(
-        beta_block.contains("render_installer_ps1 stable"),
-        "the beta route must render the stable-channel Windows installer"
-    );
-    assert!(
-        beta_block.contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
-        "the beta route must upload install.ps1 to the bucket root"
-    );
-    assert!(
         beta_block.contains("render_installer beta")
             && beta_block.contains("aws s3 cp /tmp/install-beta.ps1")
             && beta_block.contains("aws s3 cp /tmp/install-beta.sh"),
         "the beta route keeps its own installer pair"
     );
     assert!(
-        !beta_block.contains("aws s3 cp /tmp/install-stable.sh"),
-        "a beta cut must never overwrite install.sh - the TS 0.9.8 funnel bootstraps through it"
+        !beta_block.contains("aws s3 cp /tmp/install-stable.sh")
+            && !beta_block.contains("aws s3 cp /tmp/install-stable.ps1"),
+        "beta releases must preserve both production installers"
     );
     assert!(
         stable_block
-            .contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#),
-        "the stable route keeps its install.ps1 upload"
+            .contains(r#"aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1""#)
+            && stable_block
+                .contains(r#"aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh""#),
+        "stable releases publish both production installers"
     );
 }
 
@@ -867,6 +937,11 @@ fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
     )
     .expect("parse the emitted beta.json");
     assert_eq!(document["version"], "v0.9.9-beta.7");
+    assert_eq!(document["package"], "prime-agent");
+    assert_eq!(
+        document["tarball"],
+        "releases/v0.9.9-beta.7/prime-agent-0.9.9-beta.7.tgz"
+    );
     let v2 = document["binaries_v2"]
         .as_array()
         .expect("binaries_v2 rows");
@@ -936,6 +1011,11 @@ fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
     )
     .expect("parse the emitted latest.json");
     assert_eq!(document["version"], stable_tag.as_str());
+    assert_eq!(document["package"], "prime-agent");
+    assert_eq!(
+        document["tarball"],
+        format!("releases/v{VERSION}/prime-agent-{VERSION}.tgz")
+    );
     assert!(
         document["binaries_v2"]
             .as_array()

@@ -205,6 +205,22 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  migration-packaging:
+    name: historical upgrade packaging
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify native and npm compatibility packaging
+        run: |
+          python3 scripts/release/test_native_compat.py
+          python3 scripts/release/test_npm_bridge.py
+          python3 scripts/release/test_restamp.py
+
   clippy-test:
     name: check + clippy (workspace)
     needs: trust
@@ -314,15 +330,57 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
-      - name: Run this shard's test subset
+      # The targeted lifecycle comparisons use the recognized, pinned TS release
+      # and only synthetic loopback providers/state. One leg avoids 8 downloads.
+      - name: Compare the lifecycle binaries (pinned TS reference)
+        id: lifecycle_parity
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
+          set -euo pipefail
+          reference="${RUNNER_TEMP}/lifecycle-ts-reference"
+          mkdir -p "${reference}"
+          gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
+            --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "${reference}"
+          archive="${reference}/prime-agent-0.9.8-linux-x64.tar.gz"
+          echo "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2  ${archive}" | sha256sum --check
+          mkdir -p "${reference}/package"
+          tar -xzf "${archive}" -C "${reference}/package"
+          export PA_TS_ARCHIVE="${archive}"
+          export PA_TS_BINARY="${reference}/package/prime-agent"
+          export PA_RUST_BINARY="${GITHUB_WORKSPACE}/target/debug/prime-agent"
+          export PI_PACKAGE_DIR="${reference}/package"
+          export PRIME_AGENT_KERNEL_PYTHON="${HOME}/.prime/agent/kernel-venv/bin/python"
+          export PA_E2E_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON}"
+          export PYTHONPATH="${reference}/package/skills/goal/src"
+          test -x "${PRIME_AGENT_KERNEL_PYTHON}"
+          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
+          comparison_status=0
+          for scenario in graceful_shutdown goal_backoff draft_disconnect; do
+            verifier="scripts/review_${scenario}_parity.py"
+            if [ -f "${verifier}" ]; then
+              python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
+            fi
+          done
+          exit "${comparison_status}"
+      - name: Upload the binary comparison receipts
+        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+          if-no-files-found: error
+      - name: Run this shard's test subset
+        if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
+        run: |
+          python3 scripts/ci_test_shard.py --shard ${{ matrix.shard }} --total ${{ env.SHARD_COUNT }}             --crates "${{ needs.changes.outputs.crates }}"             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json"
       - name: Upload the shard manifest (always — the summary audits it)
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: shard-manifest-${{ matrix.shard }}
-          path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}.json
+          name: shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json
 
   # The aggregate: audits the partition (same enumeration everywhere,
   # disjoint shards, every assigned unit executed — coverage can never
@@ -344,7 +402,11 @@ jobs:
           merge-multiple: true
           path: manifests
       - name: Audit the shards and merge their failure reports
-        run: python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
+        run: |
+          python3 scripts/test_ci_test_shard.py
+          python3 scripts/test_ci_pr_crates.py
+          python3 scripts/test_ci_test_shard_summary.py
+          python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
   # The Windows job set + the supply-chain deny gate:
   #
@@ -403,11 +465,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Dependency audit (cargo-deny advisories + licenses)
-        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check
-          arguments: --all-features --workspace
-          command-arguments: advisories licenses
+        uses: ./.github/actions/dependency-audit
 
   # The trust gate's own failure made visible: a vouch-step error (the
   # action's setup, the runner) would otherwise leave every dependent job
