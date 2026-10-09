@@ -24,10 +24,7 @@ fn opener(url: &str) -> (String, Vec<String>) {
         .join("rundll32.exe");
     (
         rundll32.to_string_lossy().into_owned(),
-        vec![
-            "url.dll,FileProtocolHandler".to_string(),
-            url.to_string(),
-        ],
+        vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
     )
 }
 
