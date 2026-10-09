@@ -202,7 +202,7 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     pa_core::platform::process::set_new_session(&mut command);
     #[cfg(not(unix))]
     pa_core::platform::process::set_new_process_group(&mut command);
-    let child = command.spawn().with_context(|| {
+    let mut child = command.spawn().with_context(|| {
         format!(
             "spawn the update coordinator at {}",
             coordinator_exe.display()
@@ -215,15 +215,20 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         u64::from(child.id()),
         &status_path,
     )?;
-    drop(child);
-
-    let status = tail_status_with(&status_path, &mut |observed, _fresh| {
+    let status = tail_status_with(&status_path, Some(&mut child), &mut |observed, _fresh| {
         phases.phase(observed);
         if let Some(line) = phase_status_line(observed.state) {
             println!("{line}");
         }
     })
     .await;
+    // Reap even when a terminal status arrives before process teardown. A
+    // plain thread does not hold the async runtime open for a detached child.
+    std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+            eprintln!("Warning: could not reap the update coordinator: {error}");
+        }
+    });
     phases.finish().await;
     track_update_completed(&status).await;
     print_terminal(&status);
@@ -269,13 +274,14 @@ async fn plan_direct(
 /// Tail the coordinator's status file to a terminal state: progress, liveness, and the holder's
 /// process lifetime all bound the wait.
 async fn tail_status(status_path: &std::path::Path) -> UpdateStatus {
-    tail_status_with(status_path, &mut |_, _| {}).await
+    tail_status_with(status_path, /*coordinator*/ None, &mut |_, _| {}).await
 }
 
 /// The tail with per-transition observers (§11: the CLI status line and the
 /// `update_<phase>` telemetry derive from the same status-file transitions).
 async fn tail_status_with(
     status_path: &std::path::Path,
+    mut coordinator: Option<&mut std::process::Child>,
     observe: &mut dyn FnMut(&UpdateStatus, bool),
 ) -> UpdateStatus {
     let started = std::time::Instant::now();
@@ -307,6 +313,31 @@ async fn tail_status_with(
         } else if missing_since.is_none() && last_epoch.is_some() {
             missing_since = Some(std::time::Instant::now());
         }
+        if let Some(child) = coordinator.as_deref_mut() {
+            match child.try_wait() {
+                Ok(Some(exit)) => {
+                    // A final write can race the status read immediately above.
+                    if let Some(status) =
+                        read_status(status_path).filter(|status| status.state.is_terminal())
+                    {
+                        return status;
+                    }
+                    return unreported(
+                        status_path,
+                        &format!(
+                            "the update coordinator exited with {exit} before reporting completion"
+                        ),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return unreported(
+                        status_path,
+                        &format!("could not check the update coordinator: {error}"),
+                    );
+                }
+            }
+        }
         let swept = missing_since
             .is_some_and(|seen| (seen.elapsed().as_millis() as u64) < TAIL_SWEEP_GRACE_MS);
         if !swept && last_liveness.elapsed().as_millis() as u64 >= TAIL_LIVENESS_TIMEOUT_MS {
@@ -323,7 +354,7 @@ async fn tail_status_with(
 }
 
 fn unreported(status_path: &std::path::Path, message: &str) -> UpdateStatus {
-    read_status(status_path).unwrap_or_else(|| UpdateStatus {
+    let mut status = read_status(status_path).unwrap_or_else(|| UpdateStatus {
         version: 1,
         update_id: pa_types::daemon::update_flow::UpdateId::from(String::new()),
         socket_path: String::new(),
@@ -339,7 +370,10 @@ fn unreported(status_path: &std::path::Path, message: &str) -> UpdateStatus {
         updated_at: String::new(),
         heartbeat_at: None,
         rest: serde_json::Map::default(),
-    })
+    });
+    status.state = UpdateState::Failed;
+    status.message = Some(message.to_string());
+    status
 }
 
 fn print_terminal(status: &UpdateStatus) {
@@ -589,7 +623,11 @@ async fn track_update_completed(status: &UpdateStatus) {
 /// # Errors
 /// Returns an error when adoption or a status write fails; an invalid
 /// invocation is reported on stderr and returns `Ok(1)`.
-pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) -> Result<i32> {
+pub async fn run_coordinator_mode(
+    socket_path: PathBuf,
+    status_path: PathBuf,
+    origin: Option<&str>,
+) -> Result<i32> {
     let agent_dir = crate::config::get_agent_dir();
     // TS parity: the status file belongs under the agent dir's `update-restarts/` - the coordinator
     // never writes status elsewhere.
@@ -597,6 +635,21 @@ pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) ->
     if !status_path.starts_with(&restarts_dir) {
         eprintln!("Invalid daemon update restart coordinator invocation.");
         return Ok(1);
+    }
+    let legacy_handoff = match std::fs::read(&status_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+        Ok(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            value.get("state").is_none()
+                && value
+                    .get("requestId")
+                    .is_some_and(serde_json::Value::is_string)
+                && value.get("phase").and_then(serde_json::Value::as_str) == Some("starting")
+        }
+    };
+    if legacy_handoff {
+        return super::legacy_restart::run(&socket_path, &status_path, &agent_dir, origin).await;
     }
     let options = super::coordinator::CoordinatorOptions {
         agent_dir,
@@ -607,4 +660,37 @@ pub async fn run_coordinator_mode(socket_path: PathBuf, status_path: PathBuf) ->
     let status = super::coordinator::run(&options).await?;
     print_terminal(&status);
     Ok(i32::from(status.state != UpdateState::Complete))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_exited_coordinator_fails_without_waiting_for_the_heartbeat_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let id = pa_types::daemon::update_flow::UpdateId::from("exited-child".to_string());
+        let mut writer = StatusWriter::new(&path, &id, "/tmp/unused-update.sock").unwrap();
+        writer.set_state(UpdateState::Planning).unwrap();
+        writer.set_state(UpdateState::Downloading).unwrap();
+        writer.set_state(UpdateState::Staged).unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tail_status_with(&path, Some(&mut child), &mut |_, _| {}),
+        )
+        .await
+        .expect("an exited child must not consume the 180-second liveness budget");
+        let exit = child.wait().unwrap();
+        let mut expected = writer.current().clone();
+        expected.state = UpdateState::Failed;
+        expected.message = Some(format!(
+            "the update coordinator exited with {exit} before reporting completion"
+        ));
+        assert_eq!(observed, expected);
+    }
 }
