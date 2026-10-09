@@ -1154,6 +1154,96 @@ fn a_persistent_write_failure_reports_the_dead_grant() {
 }
 
 #[test]
+fn an_expiry_refresh_never_overwrites_a_landing_login() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: None,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-login",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-expiry-login",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let _ = auth.get_api_key("x-expiry-login");
+    writer.join().expect("the writer settles");
+    let stored = auth.get_all().credential("x-expiry-login");
+    assert!(
+        matches!(&stored, Some(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"),
+        "the landing login stands over the expiry fetch's write: {stored:?}"
+    );
+}
+
+/// A logout landing while the expiry refresh exchanges is never
+/// resurrected: the write-back writes nothing over the removal.
+#[test]
+fn an_expiry_refresh_never_resurrects_a_landing_logout() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: None,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-logout",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let removed = AuthStorageData::default();
+        let content = serde_json::to_string_pretty(&removed.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let _ = auth.get_api_key("x-expiry-logout");
+    writer.join().expect("the writer settles");
+    assert!(
+        auth.get_all().credential("x-expiry-logout").is_none(),
+        "the landing logout stays removed over the expiry fetch's write"
+    );
+}
+
+#[test]
 fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
     // A peer refreshed against the same rejection while this fetch ran:
     // the locked write keeps the peer's fresher credential. The fetch
@@ -1233,7 +1323,14 @@ impl OAuthIntegration for SignaledOAuth {
     }
 
     fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
-        None
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fetch_started_tx.send(()).expect("the writer waits");
+        self.writer_done_rx
+            .lock()
+            .expect("writer-done lock")
+            .recv()
+            .expect("the writer reports its write");
+        Some(CountingOAuth::fetched_credential())
     }
 
     fn refresh_forced(

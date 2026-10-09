@@ -206,6 +206,11 @@ impl AuthStorage {
             self.reload();
             return Some(credential);
         }
+        // The loaded credential itself, for the re-check and write-guard
+        // comparisons: any credential that differs from it — a peer's
+        // refresh, an API-key login, a re-login, a logout — landed while
+        // this attempt waits and stands over this attempt's exchange.
+        let loaded = credential.clone();
         // FETCH + WRITE behind the per-provider flight: a waiter that
         // acquires the flight after this fetch sees this attempt's write
         // land before spending the same single-use refresh token (the
@@ -223,17 +228,15 @@ impl AuthStorage {
         };
         let fetched = {
             // The gate may have just released a flight that wrote a fresh
-            // credential; re-check before spending a refresh token.
+            // credential; re-check before spending a refresh token. Any
+            // credential that differs from the loaded one stands — a
+            // peer's refresh, an API-key login, a re-login — and serves
+            // without a fetch.
             let content = self.storage.read().unwrap_or_default();
             if let Some(credential) = parse_storage_data(content.as_deref())
                 .ok()
                 .and_then(|data| data.credential(provider_id))
-                .filter(|credential| {
-                    matches!(
-                        credential,
-                        AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                    )
-                })
+                .filter(|credential| Some(credential) != Some(&loaded))
             {
                 self.reload();
                 return Some(credential);
@@ -250,15 +253,20 @@ impl AuthStorage {
         let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
-            if let Some(credential) = data.credential(provider_id).filter(|credential| {
-                matches!(
-                    credential,
-                    AuthCredential::Oauth { expires, .. } if now_epoch_ms() < *expires
-                )
-            }) {
-                // A peer refreshed while this fetch ran: its fresher
-                // credential stands and this attempt writes nothing.
+            if let Some(credential) = data
+                .credential(provider_id)
+                .filter(|credential| Some(credential) != Some(&loaded))
+            {
+                // Any credential that differs from the one this attempt
+                // loaded — a peer's refresh, an API-key login, a
+                // re-login — stands over this fetch's write.
                 refreshed = Some(credential);
+                return Ok(((), None));
+            }
+            // A concurrent logout: nothing to serve — this attempt never
+            // resurrects a removed credential.
+            if data.credential(provider_id).is_none() {
+                refreshed = None;
                 return Ok(((), None));
             }
             data.insert(provider_id, &new_credential);
