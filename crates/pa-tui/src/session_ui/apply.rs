@@ -271,6 +271,7 @@ impl SessionUi {
             } => {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
+                    self.run_open = false;
                     view.working = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
@@ -391,7 +392,8 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
-                self.goal_terminal = None;
+                self.run_open = true;
+                self.settled = None;
                 self.turn_error_shown = false;
                 // A new turn also settles leftovers from a lost turn-end frame.
                 crate::snapshot::settle_pending_tool_cards(
@@ -488,11 +490,16 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error } => {
+            TurnUpdate::TurnEnded { error, run_failed } => {
                 // One LLM turn ended; the run, and with it the busy state, lasts until
                 // `agent_end`.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
+                // A step's settle leaves the run open; an aborted or
+                // failed one ends the run without a done report.
+                if run_failed {
+                    self.run_open = false;
+                }
                 view.retry = None;
                 crate::snapshot::settle_pending_tool_cards(
                     view,
@@ -622,7 +629,17 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => self.end_run(view),
+            TurnUpdate::Idle => {
+                self.end_run(view);
+                // The run's normal end settles the report's done: an
+                // aborted run already closed itself at its failed
+                // settle, and a goal's terminal outcome is kept.
+                if self.run_open {
+                    self.run_open = false;
+                    self.settled
+                        .get_or_insert(crate::program_status::Status::Done);
+                }
+            }
             TurnUpdate::GoalUpdate(goal) => {
                 self.apply_goal_update(goal, view);
             }

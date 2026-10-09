@@ -211,42 +211,65 @@ fn write_replay_fixture() -> String {
     path.display().to_string()
 }
 
-/// OSC 7501 (program status): the chat surface reports working while a
-/// scripted turn runs, done when the turn settled on a completed goal,
-/// idle when a later ordinary turn settles (a stale done never carries),
-/// and the exit clears the terminal's record. One Esc and one Ctrl+C:
-/// each interrupt key fires once, outside the Esc repeat and the Ctrl+C
-/// pair windows, so the aborts stay deterministic.
+/// OSC 7501 (program status): the chat surface reports working for the
+/// whole run, done at the run's normal end, idle after an aborted run,
+/// and idle again when a later aborted run settles (the stale done
+/// never carries). The exit clears the terminal's record. One Esc and
+/// one Ctrl+C: each interrupt key fires once, outside the Esc repeat
+/// and the Ctrl+C pair windows, so the aborts stay deterministic.
 #[test]
-fn program_status_reports_the_turn_and_the_goal_outcome() {
+fn program_status_reports_the_run_and_its_settles() {
     let _lock = harness_lock();
     let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
     harness.answer_kitty_query();
     harness.wait_from_start(b"row 0", "the attach snapshot rendered");
     harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
 
-    let mark = harness.mark();
-    harness.write(b"finish\r");
-    harness.wait_from(
-        mark,
-        STATUS_WORKING,
-        "the working report once the turn started",
-    );
-
-    let mark = harness.mark();
-    harness.write(b"\x1b[27u");
-    harness.wait_from(
-        mark,
-        STATUS_DONE,
-        "the done report once the goal's turn settled",
-    );
-
+    // A multi-step run opens: working spans its step boundary.
     let mark = harness.mark();
     harness.write(b"hi\r");
     harness.wait_from(
         mark,
         STATUS_WORKING,
-        "the working report once the next turn started",
+        "the working report once the run opened",
+    );
+
+    // An Esc abort settles the run (an aborted turn_end + agent_end):
+    // idle, not done.
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the aborted run settled",
+    );
+
+    // A finish run: the goal completes mid-run, then the next prompt
+    // settles it normally — done at the run's end.
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the finish run opened",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the run settled normally",
+    );
+
+    // The next run clears the remembered done: its aborted settle
+    // reports idle, never the stale done.
+    let mark = harness.mark();
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the next run opened",
     );
 
     let mark = harness.mark();
@@ -254,7 +277,7 @@ fn program_status_reports_the_turn_and_the_goal_outcome() {
     harness.wait_from(
         mark,
         STATUS_IDLE,
-        "the idle report after the later ordinary turn settled",
+        "the idle report after the later run aborted: the stale done never carried",
     );
 
     let mark = harness.mark();
@@ -281,15 +304,15 @@ fn program_status_a_new_session_drops_the_completed_goal() {
     harness.wait_from(
         mark,
         STATUS_WORKING,
-        "the working report once the turn started",
+        "the working report once the finish run opened",
     );
 
     let mark = harness.mark();
-    harness.write(b"\x03");
+    harness.write(b"finish\r");
     harness.wait_from(
         mark,
         STATUS_DONE,
-        "the done report once the goal's turn settled",
+        "the done report once the goal's run settled normally",
     );
 
     let mark = harness.mark();
@@ -307,6 +330,46 @@ fn program_status_a_new_session_drops_the_completed_goal() {
     assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
 
     harness.assert_terminal_state_restored("the program-status new-session route");
+}
+
+/// OSC 7501: a run resting between steps (a step's `turn_end` settled,
+/// the next turn not yet started) reports nothing new — the run stays
+/// `working` across the boundary, and only its settle reports `done`.
+#[test]
+fn program_status_reports_no_idle_between_steps() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"step\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the run opened",
+    );
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the resting run settled normally",
+    );
+    let stream = harness.output();
+    let done_at = mark + find_subsequence(&stream[mark..], STATUS_DONE).expect("the done report");
+    assert!(
+        find_subsequence(&stream[mark..done_at], STATUS_IDLE).is_none(),
+        "the run's between-steps rest reported no idle before its normal end"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status between-steps route");
 }
 
 /// OSC 7501: the force-quit watchdog's restore carries the exit clear — the
