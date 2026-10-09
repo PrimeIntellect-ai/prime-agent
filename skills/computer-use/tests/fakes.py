@@ -481,6 +481,12 @@ class AppEnvironment:
         self.presses_at_write = 0  # cmd+v presses seen when the payload was written
         self.preexisting_value_head: str | None = ""  # the focused value before any paste
         self.paste_consumed = True  # the default app consumes pastes into the focused value
+        self.paste_baselines: list[Any] | None = None  # queued paste-baseline reads, cycling
+        self.baseline_reads = 0
+        self.paste_focus_before: Any = object()  # the focused element before the paste
+        self.paste_focus_after: Any = object()  # the focused element after a focus move
+        self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
+        self.paste_value_after_move: str | None = "payload"  # the new focus's preexisting value
         self.clipboard_change_count: int | None = 3  # _clipboard_change_count reading
         self.window_id: int | None = 4321
         self.drift = False  # when True, live fingerprints mismatch the snapshot (stale refs)
@@ -535,6 +541,23 @@ class AppEnvironment:
     def _cmd_v_presses(self) -> int:
         return sum(1 for name, args in self.recorder.calls if name == "press_key" and args.get("key") == "cmd+v")
 
+    def _paste_baseline(self, pid: int) -> Any:
+        """Serve the paste-baseline reads: (focused ref, value head) or None.
+
+        Queued values cycle; the default model serves the stable focus with
+        the preexisting head before the press and the payload head after it,
+        and the focus-move oracle serves the new focus's preexisting value."""
+        self.baseline_reads += 1
+        if self.paste_baselines is not None:
+            return self.paste_baselines[(self.baseline_reads - 1) % len(self.paste_baselines)]
+        if not self.pasted_text:
+            return None  # no paste in flight: the baseline stays unreadable
+        if self._cmd_v_presses() > self.presses_at_write:
+            if self.paste_focus_moved:
+                return (self.paste_focus_after, self.paste_value_after_move)
+            return (self.paste_focus_before, self.pasted_text[:200])
+        return (self.paste_focus_before, self.preexisting_value_head)
+
     def _running_apps(self) -> list[Any]:
         if self.running_error is not None:
             raise self.running_error
@@ -586,6 +609,7 @@ class AppEnvironment:
         patch(ax, "_focused_is_secure", lambda pid: self.secure_focus)
         patch(ax, "_live_is_secure", lambda ref: self.live_secure_ref)
         patch(ax, "_window_fingerprint", self._window_fingerprint)
+        patch(ax, "_paste_baseline", self._paste_baseline)
         patch(ax, "_perform_action", lambda ref, action: self.ax_calls.append(("perform_action", ref, action)))
         patch(ax, "_is_settable", lambda ref, attribute: self.settable)
         patch(ax, "_current_value", lambda ref: (ref.get("value") if isinstance(ref, dict) else None))

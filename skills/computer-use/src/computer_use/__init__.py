@@ -837,7 +837,7 @@ class App:
                                 "the clipboard changed during the paste; the payload was not pasted",
                                 {},
                             )
-                        baseline = ax._window_fingerprint(self._pid)
+                        baseline = ax._paste_baseline(self._pid)
                         inject._press_key(self._pid, "cmd+v")
                         posted = True
                         time.sleep(_PASTE_SETTLE_SECONDS)
@@ -953,23 +953,32 @@ class App:
     def _paste_consumed(self, text: str, baseline: Any) -> bool:
         """Report whether an attributable transition shows the paste landed.
 
-        The one signal macOS exposes: the focused element's value CHANGES to
-        carry the payload. The pre-paste fingerprint is the baseline - a
-        value that already carried the payload proves nothing, an unchanged
-        or unreadable value proves nothing, and an empty payload can never
-        show in a value: unverifiable means the clipboard must be preserved
-        rather than restored.
+        The one signal macOS exposes: the SAME focused element's value
+        CHANGES to carry the payload. The pre-press baseline pins the
+        focused ref and its value head; a value that already carried the
+        payload proves nothing, an unreadable baseline or value proves
+        nothing, a focus move proves nothing, and an empty payload can
+        never show in a value: unverifiable means the clipboard must be
+        preserved rather than restored.
         """
-        before_head = baseline[4] if baseline is not None else None
-        if not text or before_head is None:
-            # no readable value head grounds the comparison - whether the
-            # whole fingerprint or only its value is missing: unverifiable
+        if not text or baseline is None:
+            # no readable baseline grounds the comparison: unverifiable
             return False
-        fingerprint = ax._window_fingerprint(self._pid)
-        if fingerprint is None:
+        focused_before, before_head = baseline
+        current = ax._paste_baseline(self._pid)
+        if current is None:
             return False
-        after_head = fingerprint[4]
-        return bool(after_head) and after_head != before_head and text[: ax._FINGERPRINT_VALUE_CHARS] in after_head
+        focused_after, after_head = current
+        # the SAME focused element must show the transition: a focus move
+        # lands the verdict on a different element whose preexisting value
+        # proves nothing about this paste
+        same_element = focused_after is focused_before or focused_after == focused_before
+        return (
+            same_element
+            and bool(after_head)
+            and after_head != before_head
+            and text[: ax._FINGERPRINT_VALUE_CHARS] in after_head
+        )
 
     def _settle(self) -> None:
         """Wait for the app to process injected input, bounded by the poll interval and cap.

@@ -271,6 +271,25 @@ def _budget_spent(deadline: float) -> bool:
     return time.monotonic() >= deadline
 
 
+def _paste_baseline(pid: int) -> tuple[Any, str] | None:
+    """The focused element ref and its value head, grounding a paste verdict.
+
+    The focused ref pins the element whose value must show the paste; the
+    value head is the compared signal. An unreadable fingerprint, a missing
+    value head, or an unreadable focused element leaves the paste
+    unverifiable rather than guessed.
+    """
+    fingerprint = _window_fingerprint(pid)
+    if fingerprint is None or fingerprint[4] is None:
+        return None
+    app_services = _require_mac().app_services
+    app_element = app_services.AXUIElementCreateApplication(pid)
+    focused = _copy_value(app_services, app_element, "AXFocusedUIElement")
+    if focused is None:
+        return None
+    return (focused, fingerprint[4])
+
+
 def _window_fingerprint(pid: int, timeout_seconds: float | None = None) -> tuple[Any, ...] | None:
     """Read a cheap live identity of the focused window and its focused element.
 

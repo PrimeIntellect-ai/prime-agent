@@ -1107,8 +1107,8 @@ class RestoreAfterSettleTests(AppTestCase):
     async def test_an_unconsumed_paste_preserves_the_payload_and_says_so(self) -> None:
         env = self.make_env()
         app = await env.get_app()
-        # a busy app: the fingerprint never changes, so no consumption signal exists
-        env.fingerprint_values = [("Main", 1, "AXTextField", None, "unchanged value")]
+        # a busy app: the focused value never changes, so no consumption signal exists
+        env.paste_baselines = [(env.paste_focus_before, "unchanged value")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertIn(("write", ("text", "payload")), env.clipboard_calls)
@@ -1129,16 +1129,15 @@ class RestoreAfterSettleTests(AppTestCase):
         app = await env.get_app()
         # the focused field already carried the payload before the paste, and
         # a busy app's consumption is still pending: no attributable transition
-        env.fingerprint_values = [("Main", 1, "AXTextField", None, "payload")]
+        env.paste_baselines = [(env.paste_focus_before, "payload")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
 
-    async def test_an_unreadable_baseline_proves_nothing_about_consumption(self) -> None:
+    async def test_an_unreadable_baseline_read_proves_nothing_about_consumption(self) -> None:
         env = self.make_env()
         app = await env.get_app()
-        constant = ("Main", 1, "AXTextField", None, "payload")
-        env.fingerprint_values = [None, constant, constant, constant]
+        env.paste_baselines = [None, (env.paste_focus_before, "payload")]
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
@@ -1146,10 +1145,19 @@ class RestoreAfterSettleTests(AppTestCase):
     async def test_a_valueless_baseline_proves_nothing_about_consumption(self) -> None:
         env = self.make_env()
         app = await env.get_app()
-        # the baseline fingerprint is readable but its value head is not
-        valueless = ("Main", 1, "AXTextField", None, None)
-        constant = ("Main", 1, "AXTextField", None, "payload")
-        env.fingerprint_values = [valueless, constant, constant, constant]
+        # the baseline read is unreadable, and the app stays busy afterwards
+        env.paste_baselines = [None, (env.paste_focus_before, "payload")]
+        status = await app.paste("payload")
+        self.assertIn("could not be verified", status)
+        self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)
+
+    async def test_a_focus_move_proves_nothing_about_consumption(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        # focus A holds "draft"; while cmd+v is queued the focus moves to B,
+        # whose preexisting value already carries the payload - a false transition
+        env.paste_focus_moved = True
+        env.paste_value_after_move = "payload"
         status = await app.paste("payload")
         self.assertIn("could not be verified", status)
         self.assertNotIn(("restore", {"string": "saved"}), env.clipboard_calls)

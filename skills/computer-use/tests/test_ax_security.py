@@ -739,5 +739,61 @@ class UnreadableRoleWithAbsentSubroleTests(unittest.TestCase):
         self.assertIsNone(described["value"])
 
 
+class PasteBaselineTests(unittest.TestCase):
+    def test_an_unreadable_fingerprint_yields_no_baseline(self) -> None:
+        with mock.patch.object(ax, "_window_fingerprint", lambda pid, timeout_seconds=None: None), mock.patch.object(
+            ax, "_require_mac", side_effect=AssertionError("must not touch the frameworks without a fingerprint")
+        ):
+            self.assertIsNone(ax._paste_baseline(4242))
+
+    def test_a_missing_value_head_yields_no_baseline(self) -> None:
+        with mock.patch.object(
+            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, None)
+        ), mock.patch.object(ax, "_require_mac", side_effect=AssertionError("must not touch the frameworks without a head")):
+            self.assertIsNone(ax._paste_baseline(4242))
+
+    def test_an_unreadable_focused_element_yields_no_baseline(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedUIElement":
+                    return (self.kAXErrorSuccess, None)
+                raise AssertionError(f"unexpected attribute {attribute}")
+
+        services = Services()
+        with mock.patch.object(
+            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, "draft")
+        ), mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertIsNone(ax._paste_baseline(4242))
+
+    def test_a_readable_baseline_pins_the_focus_and_its_value_head(self) -> None:
+        class Services:
+            kAXErrorSuccess = 0
+
+            def AXUIElementCreateApplication(self, pid: int) -> "Services":
+                return self
+
+            def AXUIElementSetMessagingTimeout(self, element: Any, seconds: Any) -> None:
+                pass
+
+            def AXUIElementCopyAttributeValue(self, element: Any, attribute: str, unused: Any) -> Any:
+                if attribute == "AXFocusedUIElement":
+                    return (self.kAXErrorSuccess, "focused")
+                raise AssertionError(f"unexpected attribute {attribute}")
+
+        services = Services()
+        with mock.patch.object(
+            ax, "_window_fingerprint", lambda pid, timeout_seconds=None: ("Main", 1, "AXTextField", None, "draft")
+        ), mock.patch.object(ax, "_require_mac", lambda: types.SimpleNamespace(app_services=services)):
+            self.assertEqual(ax._paste_baseline(4242), ("focused", "draft"))
+
+
 if __name__ == "__main__":
     unittest.main()
