@@ -140,9 +140,10 @@ impl SocketLease {
                 // acquisition is removed, and a displaced successor is
                 // restored, never unlinked.
                 #[cfg(target_os = "linux")]
-                release_lock_dir_identity(&lock_path, &identity, &lock_dir);
+                let release_result = release_lock_dir_identity(&lock_path, &identity, &lock_dir);
                 #[cfg(not(target_os = "linux"))]
-                let _ = (&lock_path, &identity);
+                let release_result = Ok(());
+                let _ = release_result;
                 return Err(error.into());
             }
         };
@@ -564,7 +565,10 @@ fn handle_refresh_failure(
 impl SocketLease {
     #[cfg(target_os = "linux")]
     fn release_lock_dir(&self) {
-        release_lock_dir_identity(&self.lock_path, &self.identity, &self.lock_dir);
+        // The choreography's real I/O errors are already marked-and-
+        //surfaced inside; at Drop there is no caller left to surface
+        // to, so the result is intentionally discarded.
+        let _ = release_lock_dir_identity(&self.lock_path, &self.identity, &self.lock_dir);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -589,7 +593,7 @@ fn release_lock_dir_identity(
     lock_path: &Path,
     identity: &SocketIdentity,
     lock_dir: &std::fs::File,
-) {
+) -> std::io::Result<()> {
     // Serialize with any concurrent stale-reclaim dance (the sidecar's
     // flock): the lease's release choreography and the dance's
     // exchanges must never interleave on the same lock directory. The
@@ -609,11 +613,11 @@ fn release_lock_dir_identity(
         // swapped back onto the public lock path and the next daemon
         // would wait out a full stale window on a lock nobody holds.
         pa_core::platform::mark_released_through(lock_dir);
-        return;
+        return Ok(());
     };
     let Some(parent) = lock_path.parent() else {
         drop(guarded);
-        return;
+        return Ok(());
     };
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -621,8 +625,23 @@ fn release_lock_dir_identity(
     let pid = std::process::id();
     for attempt in 0..8 {
         let placeholder = parent.join(format!(".l{pid:x}{nanos:x}{attempt:x}"));
-        if let Err(_error) = std::fs::create_dir(&placeholder) {
-            continue;
+        match std::fs::create_dir(&placeholder) {
+            Ok(()) => {}
+            // Only a plain name collision regenerates the suffix; a
+            // real I/O error (EACCES, ENOSPC, EIO) must not burn
+            // eight silent retries and then leak the lease behind a
+            // clean exit - the guard drops and the artifact stays
+            // looking live. On the FIRST non-collision error, mark
+            // the lease directory released through the pinned fd (the
+            // dance consumes it; the judged floor is the stale
+            // window) and surface the error to the caller.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
+            Err(error) => {
+                pa_core::platform::mark_released_through(lock_dir);
+                return Err(error);
+            }
         }
         // A restrictive umask strips the owner-write bit from the fresh
         // directory and the owner write below would fail, leaking the
@@ -635,7 +654,7 @@ fn release_lock_dir_identity(
             {
                 let _ = std::fs::remove_dir(&placeholder);
                 drop(guarded);
-                return;
+                return Ok(());
             }
         }
         // The placeholder carries this process's live owner record for
@@ -649,7 +668,7 @@ fn release_lock_dir_identity(
         if std::fs::write(placeholder.join("owner"), owner_record).is_err() {
             let _ = std::fs::remove_dir(&placeholder);
             drop(guarded);
-            return;
+            return Ok(());
         }
         // The created placeholder's identity: on an AMBIGUOUS exchange
         // error the swap may have completed with the incumbent (or a
@@ -691,7 +710,7 @@ fn release_lock_dir_identity(
                 let _ = std::fs::remove_dir(&placeholder);
             }
             drop(guarded);
-            return;
+            return Ok(());
         }
         {
             {
@@ -717,11 +736,12 @@ fn release_lock_dir_identity(
                     }
                 }
                 drop(guarded);
-                return;
+                return Ok(());
             }
         }
     }
     drop(guarded);
+    Ok(())
 }
 
 #[cfg(unix)]
