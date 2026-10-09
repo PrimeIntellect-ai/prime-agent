@@ -215,6 +215,7 @@ class Supervisor:
         self.commands, self.prompts, self.prompt_envelopes = [], [], []
         self.accepted_prompts, self.result_acks = [], []
         self.journal, self.settled = {}, set()
+        self.messages = []
         self.attaches = 0
         self.closed = False
         self.rebound = False
@@ -225,12 +226,8 @@ class Supervisor:
     def send(self, sock, data):
         sock.sendall((json.dumps(data) + "\n").encode())
 
-    def settle(self, sock, active, key, index):
-        with self.lock:
-            if key in self.settled:
-                return
-            self.settled.add(key)
-        # The held original synthetic turn finishes once; cached result replay
+    def settle(self, sock, active, key, index, emit=True):
+        # Each admitted synthetic turn finishes once; cached result replay
         # does not execute another turn. No real provider is called.
         marker = f"Fixture settled {index}"
         message = {"role": "assistant", "stopReason": "stop",
@@ -239,10 +236,19 @@ class Supervisor:
                    "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
                    "content": [{"type": "text", "text": marker}]}
+        with self.lock:
+            if key in self.settled:
+                return
+            self.settled.add(key)
+            prompt = self.prompts[index - 1]
+            self.messages.extend([{"role": "user", "content": [{"type": "text", "text": prompt["message"]}],
+                                   "timestamp": 1750000000000}, message])
+        if not emit:
+            return  # Completed history survives lost events and is delivered by attach.
         for event in ({"type": "turn_start"},
                       {"type": "message_start", "message": message},
                       {"type": "message_end", "message": message},
-                      {"type": "turn_end"}):
+                      {"type": "turn_end", "message": message, "toolResults": []}):
             self.send(sock, {"type": "session_event", "activeSessionId": active, "event": event})
 
     def accept(self):
@@ -294,9 +300,12 @@ class Supervisor:
                             "sessionId": "fixture-durable", "sessionFile": str(self.root / "agent/sessions/fixture.jsonl")}
                     elif name == "attach":
                         state = fixture_state(self.root, active)
+                        with self.lock:
+                            messages = list(self.messages)
+                        state["messageCount"] = len(messages)
                         response["data"] = {"protocol": hello["protocol"], "activeSessionId": active,
                             "snapshot": {"activeSessionId": active, "summary": {"id": active, "cwd": str(self.root)},
-                                         "state": state, "messages": [], "lastEventSequence": 0, "lastEventCursor": None},
+                                         "state": state, "messages": messages, "lastEventSequence": 0, "lastEventCursor": None},
                             "client": {"id": "draft-fixture", "capabilities": []},
                             "lastEventSequence": 0, "lastEventCursor": None}
                         with self.lock:
@@ -332,10 +341,12 @@ class Supervisor:
                                 self.accepted_prompts.append({"id": request_id, "clientId": client_id,
                                                               "command": command})
                         if first and self.scenario == "rebind_close":
+                            self.settle(sock, active, key, index, emit=False)
                             self.rebound = True
                             self.send(sock, {"type": "session_binding", "previousActiveSessionId": "s1", "activeSessionId": "s2"})
                             continue
                         if first and self.scenario == "queued_close":
+                            self.settle(sock, active, key, index, emit=False)
                             self.closed = True
                             return  # Admission/result cached; reply intentionally lost.
                     elif name == "detach" and self.scenario == "rebind_close" and self.rebound and not self.closed:
@@ -356,6 +367,10 @@ class Supervisor:
                                             "assistantMessages": 0, "toolCalls": 0, "toolResults": 0,
                                             "totalMessages": 0, "cost": 0, "tokens": {
                                             "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}
+                        with self.lock:
+                            response["data"].update(userMessages=len(self.messages) // 2,
+                                                    assistantMessages=len(self.messages) // 2,
+                                                    totalMessages=len(self.messages))
                     elif name == "get_context_tree":
                         # Pinned AgentSession.getContextTree / ContextTreeNode and
                         # usage.emptyUsage: an empty session is a single active root.
@@ -370,6 +385,8 @@ class Supervisor:
                     elif name == "factory_activity": response["data"] = {"activity": [], "jobs": []}
                     elif name in ("get_state", "get_connection_state"):
                         response["data"] = fixture_state(self.root, active)
+                        with self.lock:
+                            response["data"]["messageCount"] = len(self.messages)
                     elif name == "get_mcp_connections": response["data"] = {"connections": []}
                     elif name == "detach": response["data"] = {}
                     else:
@@ -450,8 +467,9 @@ def scenario(kind, binary, root, hello, name):
                           and PROMPT in terminal.screen.text(), server)
         else:
             terminal.wait("reconnected attach and visible reconnect result", lambda: server.post_close_attached
-                          and any(phrase in terminal.screen.text().lower() for phrase in
-                                  ("daemon reconnected", "daemon restarted (v0.9.8) - reconnected")), server)
+                          and ("Fixture settled 1" in terminal.screen.text()
+                               or any(phrase in terminal.screen.text().lower() for phrase in
+                                      ("daemon reconnected", "daemon restarted (v0.9.8) - reconnected"))), server)
         result["screens"]["before_resubmit"] = terminal.screen.text()
         before = len(server.prompts)
         terminal.send("\r")
@@ -496,6 +514,7 @@ def scenario(kind, binary, root, hello, name):
                       prompt_envelopes=server.prompt_envelopes,
                       accepted_logical_prompts=server.accepted_prompts,
                       accepted_logical_messages=accepted, result_acks=server.result_acks,
+                      persisted_messages=server.messages,
                       expected_prompts=expected, fixture_errors=server.errors,
                       draft_restored=name == "refusal" and messages == expected,
                       draft_consumed=name != "refusal" and messages == expected,
