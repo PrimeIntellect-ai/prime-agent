@@ -84,10 +84,22 @@ impl AgentSessionEngine {
                 access, refresh, ..
             } = &credential
             else {
-                // A non-OAuth replacement (an API-key re-login) outran
-                // the stale target slot: rebinding serves it without an
-                // exchange, exactly as the storage layer would.
-                return StoreOutcome::Fresher;
+                // A non-OAuth replacement outran the stale target slot
+                // only when its key differs from the one the failed
+                // request served: an unchanged rejected key is no
+                // re-login, and the ordinary ladder stands over its
+                // doomed resend. Any other kind was never the served
+                // OAuth token and is a re-login by construction.
+                let replaced = match &credential {
+                    pa_core::auth::AuthCredential::ApiKey { key, .. } => {
+                        Some(key.as_str()) != served_key.as_deref()
+                    }
+                    _ => true,
+                };
+                if replaced {
+                    return StoreOutcome::Fresher;
+                }
+                return StoreOutcome::NotApplicable;
             };
             // A store that already outgrew the served key is a re-login,
             // not a dead session: rebinding to the stored credential
@@ -401,6 +413,34 @@ mod tests {
             slot.api_key.as_deref(),
             Some("fresh-access"),
             "the retry re-issues against the stored re-login"
+        );
+    }
+
+    /// An unchanged rejected API key is no re-login: the ordinary
+    /// ladder stands, and the beyond-budget retry grant is never spent
+    /// on a doomed resend of the same key.
+    #[tokio::test]
+    async fn an_unchanged_rejected_api_key_keeps_the_ordinary_ladder() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            serde_json::json!({
+                "faux": {
+                    "type": "api_key",
+                    "key": "sk-same"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let engine = engine_over(dir.path());
+        *engine.provider_target.write().unwrap() = Some(target("faux", "faux-1", Some("sk-same")));
+        assert_eq!(
+            engine.recover_provider_auth("faux".to_string()).await,
+            AuthRecoveryOutcome::Continue,
+            "the unchanged rejected key never earns the fresh-credential grant"
         );
     }
 
