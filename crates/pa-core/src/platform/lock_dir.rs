@@ -1503,7 +1503,7 @@ impl LockDir {
     /// release classifies through its exchange-based protocol instead.
     #[cfg(target_os = "linux")]
     #[must_use]
-    fn rename_noreplace_unsupported(error: &io::Error) -> bool {
+    pub fn rename_noreplace_unsupported(error: &io::Error) -> bool {
         matches!(
             error.raw_os_error(),
             Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)

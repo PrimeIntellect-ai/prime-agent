@@ -891,15 +891,50 @@ async fn unlink_stale_socket_with_lease(
                     path.display()
                 ));
             }
-            let Some(claim) = claim_socket_file_for_removal(path) else {
-                // A racing actor already claimed or removed it: there
-                // is nothing of ours left to unlink.
-                return Ok(());
+            let claim = match claim_socket_file_for_removal(path) {
+                Ok(Some(claim)) => claim,
+                // The source vanished mid-claim: a racing reclaimer took
+                // it (ENOENT) - there is nothing of ours left to unlink.
+                Ok(None) => return Ok(()),
+                // The claim failed for a real reason (no
+                // RENAME_NOREPLACE on this mount, a permission denial,
+                // a read-only parent): the stale socket REMAINS at the
+                // public path, so reporting success would be a lie -
+                // surface the error and let the caller fail its bind
+                // honestly.
+                Err(error) => return Err(anyhow::Error::from(error)),
             };
-            if socket_identity(&claim) == Some(expected) {
-                std::fs::remove_file(&claim)?;
+            match socket_identity(&claim) {
+                Some(claimed) if claimed == expected => {
+                    // The probed stale inode, held on the private name:
+                    // the unlink can only ever touch this file.
+                    std::fs::remove_file(&claim)?;
+                    Ok(())
+                }
+                // The claimed file is NOT the probed stale inode: a
+                // replacement landed between the re-verify and the
+                // claim, and the claim displaced it out of the public
+                // namespace. RESTORE it (no-replace, so a newer
+                // occupant is never clobbered); a failed restoration
+                // is surfaced - a live endpoint must never silently
+                // vanish.
+                Some(_) => {
+                    let restored = std::fs::rename(&claim, path).is_ok()
+                        || std::fs::symlink_metadata(path)
+                            .is_ok_and(|metadata| metadata.file_type().is_file());
+                    if !restored {
+                        return Err(anyhow!(
+                            "Displaced socket could not be restored after a racing claim: {}",
+                            path.display()
+                        ));
+                    }
+                    Err(anyhow!(
+                        "Daemon socket changed ownership between the re-verify and the claim: {}",
+                        path.display()
+                    ))
+                }
+                None => Ok(()),
             }
-            Ok(())
         }
         Some(_) => Err(anyhow!(
             "Daemon socket changed ownership while waiting for cleanup: {}",
@@ -917,27 +952,52 @@ async fn unlink_stale_socket_with_lease(
 /// the callers' re-verification narrows the window, and the removal
 /// falls back to the pathname there.
 #[cfg(unix)]
-fn claim_socket_file_for_removal(path: &Path) -> Option<std::path::PathBuf> {
+fn claim_socket_file_for_removal(path: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
     #[cfg(not(target_os = "linux"))]
     {
         // No no-replace rename exists here: the re-verified pathname
         // remove is the documented floor.
-        Some(path.to_path_buf())
+        Ok(Some(path.to_path_buf()))
     }
     #[cfg(target_os = "linux")]
     {
-        let parent = path.parent()?;
+        let Some(parent) = path.parent() else {
+            return Err(std::io::Error::other("socket path has no parent"));
+        };
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |age| age.as_nanos());
         let pid = std::process::id();
+        let mut claim_error: Option<std::io::Error> = None;
         for attempt in 0..8 {
             let claim = parent.join(format!(".s{pid:x}{nanos:x}{attempt:x}"));
-            if pa_core::platform::move_without_replacing(path, &claim).is_ok() {
-                return Some(claim);
+            match pa_core::platform::move_without_replacing(path, &claim) {
+                Ok(()) => return Ok(Some(claim)),
+                // The source vanished (a racing reclaimer took it):
+                // nothing of ours is left.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                // The claim NAME is taken: regenerate the suffix.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // A filesystem without RENAME_NOREPLACE (EOPNOTSUPP on
+                // NFS/FUSE, EINVAL/ENOSYS without renameat2) is a REAL
+                // claim failure - a truthful unsupported-mount outcome:
+                // the stale socket stays at the public path and the
+                // caller must not report success.
+                Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
+                    return Err(std::io::Error::other(format!(
+                        "Stale socket cleanup needs a no-replace rename this filesystem does not provide: {}",
+                        path.display()
+                    )));
+                }
+                Err(error) => {
+                    claim_error = claim_error.or(Some(error));
+                }
             }
         }
-        None
+        Err(claim_error
+            .unwrap_or_else(|| std::io::Error::other("all stale-socket claim names are taken")))
     }
 }
 
@@ -1163,10 +1223,11 @@ mod tests {
         // public namespace, atomically proving the path named it.
         std::fs::write(&socket, b"stale").unwrap();
         let stale_identity = socket_identity(&socket).unwrap();
-        let claim = claim_socket_file_for_removal(&socket);
-        assert!(claim.is_some(), "the claim succeeds on the unowned file");
+        let claim = claim_socket_file_for_removal(&socket).unwrap();
+        let Some(claim) = claim else {
+            panic!("the claim succeeds on the unowned file");
+        };
         assert!(!socket.exists(), "the claim vacated the public path");
-        let claim = claim.unwrap();
         assert_eq!(
             socket_identity(&claim),
             Some(stale_identity),
