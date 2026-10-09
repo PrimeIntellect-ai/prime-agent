@@ -27,9 +27,10 @@ where the binary name is `prime-agent.exe` for the Windows MSVC target and
 `prime-agent` everywhere else (`binary_name_for_target`).
 `--runtime-dir` defaults to `<repo>/prime-agent-runtime` (the vendored sidecar
 from the kernel-packaging lane).
+Every archive includes a `package.json` version manifest beside the binary
+(TS installer parity: it is one of NATIVE_RELEASE_ASSETS).
 `--sha` (the continuous-build stamp): a full 40-char git commit SHA. When
-given, a `package.json` version manifest is staged beside the binary (TS
-installer parity: it is one of NATIVE_RELEASE_ASSETS) whose `version` is
+given, that manifest's `version` is
 `<version>-continuous.<sha>`, so the shipped binary reports the exact commit it
 was built from via `--version`; the manifest records the commit too. The
 archive name keeps the bare `<version>` so rolling releases overwrite assets.
@@ -60,6 +61,7 @@ from pathlib import Path
 
 # The bundled-catalog validation gate (same release-scripts directory).
 from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir
+from native_compat import stage_native_compat
 
 # Tarball-root payload order mirrors the TS `binaryAssets` list so the
 # installer lane can extract both distributions identically. The binary
@@ -271,10 +273,9 @@ def copy_runtime_tree(source: Path, target: Path) -> None:
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
 
-    `stamped_version` is the continuous-build version stamp (None for plain
-    releases); when set, a `package.json` manifest is staged beside the binary
-    so `--version` reports it at runtime (the same exe-adjacent manifest the
-    TS binaryAssets carry — the Rust binary resolves it from `current_exe()`).
+    `stamped_version` overrides the plain release version in the always-staged
+    `package.json`. The binary reports it at runtime (the same exe-adjacent
+    manifest TS binaryAssets carry; Rust resolves it from `current_exe()`).
 
     The runtime entry ships the curated content (see
     RUNTIME_EXCLUDED_*); every other entry is a
@@ -334,17 +335,19 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         shutil.copyfile(catalog_assets / name, staging / name)
     payload = [binary_name if entry == BINARY_PLACEHOLDER else entry
                for entry in STAGED_ENTRIES]
+    manifest = {
+        "name": "prime-agent",
+        "version": stamped_version or args.version,
+        "description": "Prime Agent: the RLM coding agent (Rust build)",
+        "bin": {"prime-agent": binary_name},
+        "piConfig": {"name": "prime-agent", "configDir": ".prime/agent"},
+    }
     if stamped_version is not None:
-        manifest = {
-            "name": "prime-agent",
-            "version": stamped_version,
-            "description": "Prime Agent: the RLM coding agent (Rust build)",
-            "bin": {"prime-agent": binary_name},
-            "piConfig": {"name": "prime-agent", "configDir": ".prime/agent"},
-            "commit": args.sha,
-        }
-        (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        payload.append("package.json")
+        manifest["commit"] = args.sha
+    (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    payload.append("package.json")
+    if "-windows-" not in args.target:
+        payload.extend(stage_native_compat(staging))
     # The payload guard runs on the staged tree BEFORE packing: a decoder
     # sidecar staged by a later change fails here, not in the field.
     fail_if_decoder_in_tree(staging)
