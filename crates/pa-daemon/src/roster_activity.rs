@@ -17,6 +17,9 @@ pub(crate) const ROSTER_PUSH_DISABLE_ENV: &str = "PA_WORKER_DISABLE_ROSTER_PUSH"
 pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
     "turn_start",
     "turn_end",
+    // The run's end and the accepted note itself change summary fields.
+    "agent_end",
+    "rlm_progress_note",
     "bash_start",
     "bash_end",
     "compaction_start",
@@ -227,7 +230,6 @@ mod tests {
             "message_update",
             "tool_execution_update",
             "agent_start",
-            "agent_end",
             "goal_update",
             "ipython_sent_agent_message",
         ] {

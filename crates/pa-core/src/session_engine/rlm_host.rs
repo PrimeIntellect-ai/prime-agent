@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
 
 use crate::kernel::rlm_runtime::{
     find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_subagent_model,
@@ -268,11 +267,11 @@ pub struct RlmProgressNoteResult {
     pub retry_after_ms: Option<u64>,
 }
 
-/// Latest-note store with the 10-second throttle. The daemon roster reads
-/// `latest_note` so a child snapshot surfaces the note to its parent.
+/// Latest-note store with the 10-second throttle; the sync roster-summary
+/// composer reads it, so the lock is a std mutex.
 #[derive(Debug, Default)]
 pub struct RlmProgressNotes {
-    state: Mutex<RlmProgressNoteState>,
+    state: std::sync::Mutex<RlmProgressNoteState>,
 }
 
 #[derive(Debug, Default)]
@@ -283,8 +282,11 @@ struct RlmProgressNoteState {
 
 impl RlmProgressNotes {
     /// Accept or throttle one note. The message is already validated.
-    pub async fn note(&self, message: &str, now_ms: u64) -> RlmProgressNoteResult {
-        let mut state = self.state.lock().await;
+    pub fn note(&self, message: &str, now_ms: u64) -> RlmProgressNoteResult {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(last_at) = state.last_at {
             let elapsed_ms = last_at.elapsed().as_millis() as u64;
             if elapsed_ms < RLM_PROGRESS_NOTE_MIN_INTERVAL_MS {
@@ -303,10 +305,26 @@ impl RlmProgressNotes {
     }
 
     /// The newest accepted note with its wall-clock timestamp.
-    pub async fn latest_note(&self) -> Option<(String, u64)> {
-        self.state.lock().await.latest.clone()
+    pub fn latest_note(&self) -> Option<(String, u64)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest
+            .clone()
+    }
+
+    /// Drops the stored note at a run boundary; the throttle clock stays.
+    pub fn clear(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest = None;
     }
 }
+
+/// Announces one accepted note (message, wall-clock ms) as the
+/// `rlm_progress_note` session event.
+pub type RlmProgressNoteEmit = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 /// Message length in UTF-16 code units, matching the host-side bound.
 pub fn utf16_length(message: &str) -> usize {
@@ -328,6 +346,8 @@ pub(crate) struct SemanticSpawnAnchor {
 pub struct RlmHostBridge {
     registry: Arc<ModelRegistry>,
     pub notes: Arc<RlmProgressNotes>,
+    /// Fires on every accepted note; `None` keeps the store the only surface.
+    note_emit: Option<RlmProgressNoteEmit>,
     host: Arc<dyn RlmSubagentHost>,
     /// The child-usage attribution producer `rlm.spawn` registers into
     /// and the daemon's child observation drives.
@@ -345,10 +365,12 @@ impl RlmHostBridge {
         registry: Arc<ModelRegistry>,
         host: Arc<dyn RlmSubagentHost>,
         usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+        note_emit: Option<RlmProgressNoteEmit>,
     ) -> Self {
         Self {
             registry,
             notes: Arc::new(RlmProgressNotes::default()),
+            note_emit,
             host,
             usage,
             semantic_spawn: std::sync::OnceLock::new(),
@@ -412,10 +434,12 @@ fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHost
 
 fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
     let notes = Arc::clone(&bridge.notes);
+    let note_emit = bridge.note_emit.clone();
     handlers.register(
         "rlm.progress.note",
         host_handler(move |payload| {
             let notes = Arc::clone(&notes);
+            let note_emit = note_emit.clone();
             Box::pin(async move {
                 let Some(raw) = payload.data.get("message").and_then(Value::as_str) else {
                     anyhow::bail!("rlm.progress.note message must be a non-empty string");
@@ -433,7 +457,10 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis() as u64)
                     .unwrap_or_default();
-                let outcome = notes.note(message, now_ms).await;
+                let outcome = notes.note(message, now_ms);
+                if let (true, Some(emit)) = (outcome.accepted, note_emit.as_deref()) {
+                    emit(message, now_ms);
+                }
                 Ok(match outcome.retry_after_ms {
                     None => json!({ "accepted": true }),
                     Some(retry_after_ms) => json!({
@@ -740,6 +767,7 @@ mod tests {
     use crate::kernel::shared::HostRequestPayload;
     use crate::session::manager::SessionManager;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     /// A host recording every call, answering with fixed handles.
     /// One recorded collect call: its targets and timeout.
@@ -942,6 +970,7 @@ mod tests {
             crate::session_engine::runtime_wiring::RlmWiring {
                 model_registry: Some(Arc::clone(&registry)),
                 subagent_host: host,
+                progress_note_emit: None,
             },
             None,
             None,
@@ -1061,8 +1090,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(accepted, json!({ "accepted": true }));
-        let (latest, _) = wiring.rlm.notes.latest_note().await.unwrap();
+        let (latest, _) = wiring.rlm.notes.latest_note().unwrap();
         assert_eq!(latest, "making progress");
+        wiring.rlm.notes.clear();
+        assert!(wiring.rlm.notes.latest_note().is_none());
+        let still_throttled = call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "too soon" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(still_throttled["accepted"], false);
         let throttled = call(
             &wiring,
             "rlm.progress.note",
@@ -1089,6 +1128,56 @@ mod tests {
             error.to_string(),
             "rlm.progress.note message must be at most 512 characters"
         );
+    }
+
+    /// The accepted note announces with its message and wall-clock
+    /// timestamp; a throttled note announces nothing.
+    #[tokio::test]
+    async fn accepted_note_announces_throttled_note_stays_silent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = persisted_session(dir.path());
+        let announced: Arc<std::sync::Mutex<Vec<(String, u64)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&announced);
+        let wiring = crate::session_engine::runtime_wiring::wire_session_runtime(
+            session,
+            dir.path(),
+            crate::session_engine::runtime_wiring::RlmWiring {
+                model_registry: None,
+                subagent_host: None,
+                progress_note_emit: Some(Arc::new(move |message, timestamp| {
+                    sink.lock().unwrap().push((message.to_string(), timestamp));
+                })),
+            },
+            None,
+            None,
+        );
+        call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "halfway" }),
+        )
+        .await
+        .unwrap();
+        let seen = announced.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the accepted note announced: {seen:?}");
+        assert_eq!(seen[0].0, "halfway");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(
+            seen[0].1.abs_diff(now_ms) < 5_000,
+            "the announcement carries the note's wall-clock timestamp"
+        );
+        call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "again" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(announced.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

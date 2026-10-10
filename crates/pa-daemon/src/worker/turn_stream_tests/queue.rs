@@ -765,3 +765,236 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[derive(Default)]
+struct NoteWitnessEngine {
+    note: Mutex<Option<String>>,
+    note_at_notice_turn: Mutex<Option<String>>,
+    turns: std::sync::atomic::AtomicUsize,
+}
+
+impl SessionEngine for NoteWitnessEngine {
+    fn clear_progress_note(&self) {
+        *self.note.lock().unwrap() = None;
+    }
+
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        _request: PromptRequest,
+        _aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        emit(EngineEvent::AgentStart);
+        if self.turns.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            // Turn one: the mid-run note acceptance (the model's
+            // `rlm.progress_note`).
+            *self.note.lock().unwrap() = Some("halfway through the review".to_string());
+        } else {
+            *self.note_at_notice_turn.lock().unwrap() = self.note.lock().unwrap().clone();
+        }
+        emit(EngineEvent::AgentEnd {
+            messages: Vec::new(),
+        });
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The queued async bash completion's delivery keeps the note its cut run
+/// accepted mid-flight; the note clears only at the run's true end.
+#[tokio::test]
+async fn the_async_completion_notice_delivery_keeps_the_live_note() {
+    let engine = Arc::new(NoteWitnessEngine::default());
+    let runner = burst_runner(engine.clone());
+    // The busy-session row `admit_bash_completion_notice` queues.
+    runner
+        .core
+        .lock()
+        .unwrap()
+        .steering
+        .push_back(queued_prompt(
+            "[bash-done pid:4321 exit:137]",
+            TurnPolicy::Queued,
+        ));
+    // Turn one's end is the steering cut; the runner then hands the queued
+    // notice its own turn.
+    runner
+        .run_turn(
+            engine.clone(),
+            vec![queued_prompt("review the installer", TurnPolicy::Queued)],
+        )
+        .await;
+    assert_eq!(
+        engine.note.lock().unwrap().as_deref(),
+        Some("halfway through the review"),
+        "the steering-cut run end must keep the live note"
+    );
+    let notice = runner.core.lock().unwrap().steering.pop_front();
+    runner
+        .run_turn(engine.clone(), vec![notice.expect("the queued notice row")])
+        .await;
+    assert_eq!(
+        engine.note_at_notice_turn.lock().unwrap().as_deref(),
+        Some("halfway through the review"),
+        "the notice's turn must still see the live note"
+    );
+    assert!(
+        engine.note.lock().unwrap().is_none(),
+        "the lanes-empty run end cleared the note"
+    );
+}
+
+/// An engine whose run parks mid-flight until the worker aborts, then
+/// ends with the abort gate armed and no `agent_end` of its own: the
+/// user stop that cuts the run at the source.
+#[derive(Default)]
+struct AbortSwallowedEngine {
+    note: Mutex<Option<String>>,
+}
+
+impl SessionEngine for AbortSwallowedEngine {
+    fn progress_note(&self) -> Option<String> {
+        self.note.lock().unwrap().clone()
+    }
+
+    fn clear_progress_note(&self) {
+        *self.note.lock().unwrap() = None;
+    }
+
+    fn run_prompt(
+        &self,
+        _prompt_index: usize,
+        _request: PromptRequest,
+        aborted: &dyn Fn() -> bool,
+        emit: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+        emit(EngineEvent::AgentStart);
+        // The mid-run note acceptance (the model's `rlm.progress_note`).
+        *self.note.lock().unwrap() = Some("halfway through the review".to_string());
+        // Park until the user's stop lands mid-flight.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !aborted() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the test never aborted the run"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // The stop cuts the next event before it settles: the abort gate
+        // arms on the sighting and the run ends with NO `agent_end`.
+        emit(EngineEvent::AgentStart);
+    }
+
+    fn run_side_question(
+        &self,
+        _request: SideQuestionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+        _sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> SideQuestionOutcome {
+        SideQuestionOutcome::Failed {
+            answer: String::new(),
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn run_compaction(
+        &self,
+        _request: CompactionRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> CompactionOutcome {
+        CompactionOutcome::Skipped {
+            message: "nothing to compact".to_string(),
+        }
+    }
+
+    fn run_branch_summary(
+        &self,
+        _request: crate::engine::BranchSummaryRequest,
+        _signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        crate::engine::BranchSummaryOutcome::Failed {
+            error: "unsupported".to_string(),
+        }
+    }
+
+    fn rebuild_session_context(
+        &self,
+        _branch_entries: Vec<pa_types::session::FileEntry>,
+        _goal_reload: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// The abort gate swallows the stopped run's `agent_end`, but the pane
+/// still settles idle at the same settle: the note — the roster
+/// summary's `progressNote` source — must not survive that idle settle.
+#[tokio::test]
+async fn an_aborted_run_clears_the_note_at_its_idle_settle() {
+    let engine = Arc::new(AbortSwallowedEngine::default());
+    let runner = burst_runner(engine.clone());
+    let core = std::sync::Arc::clone(&runner.core);
+    let engine_for_turn = std::sync::Arc::clone(&engine);
+    let turn = tokio::spawn(async move {
+        runner
+            .run_turn(
+                engine_for_turn,
+                vec![queued_prompt("review the gate", TurnPolicy::Queued)],
+            )
+            .await;
+    });
+    // The run parks mid-flight: wait for the note, then stop the run.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while engine.progress_note().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never set its note"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    core.lock().unwrap().abort_requested = true;
+    let _ = turn.await;
+    assert!(
+        engine.note.lock().unwrap().is_none(),
+        "the aborted run's idle settle must clear the note"
+    );
+}

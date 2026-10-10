@@ -374,6 +374,7 @@ impl TurnRunner {
         // Own engine clone, fenced on the session identity it serviced:
         // a branch move or replacement swaps the store mid-review.
         let review_engine = std::sync::Arc::clone(&engine);
+        let settle_engine = std::sync::Arc::clone(&engine);
         let review_session_id = {
             let core = self.core.lock().unwrap();
             core.store
@@ -476,6 +477,19 @@ impl TurnRunner {
                         | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
+                // The run's TRUE end — an `agent_end` with no queued work
+                // taking the next turn — keys both the note clear here and
+                // the pane's idle debounce below. An internal boundary that
+                // hands the next turn to queued work (the async bash
+                // completion that cut this run) keeps the note for the work
+                // continuing in the next delivery. Clear before the frame:
+                // its roster flush must not publish the stale note.
+                let agent_end = matches!(event, EngineEvent::AgentEnd { .. });
+                let more_queued =
+                    agent_end && (!core.steering.is_empty() || !core.follow_up.is_empty());
+                if agent_end && !more_queued {
+                    engine.clear_progress_note();
+                }
                 if core.abort_requested {
                     // The sighting arms the fallback's silence only when
                     // load-bearing: a sighting on a run that completed on its own
@@ -509,7 +523,6 @@ impl TurnRunner {
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                     EngineEvent::AgentEnd { messages } => {
-                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
                         herdr
                             .lock()
                             .unwrap()
@@ -1027,6 +1040,21 @@ impl TurnRunner {
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
         let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        // One read of the queued-work state keys both the fallback note
+        // clear and the pane's `run_ended` below.
+        let more_queued = {
+            let core = self.core.lock().unwrap();
+            !core.steering.is_empty() || !core.follow_up.is_empty()
+        };
+        // The note clear rides the same lanes-empty idle settle as the
+        // pane's `run_ended` below, not the fallback's emission: a run whose
+        // `agent_end` the abort gate swallowed still settles the pane idle,
+        // so the same true-end key must clear the note (the engine's own
+        // `agent_end` clear above already ran for a run that reported its
+        // end — one clear rule for both fallback shapes).
+        if !engine_reported_run_end && !more_queued {
+            settle_engine.clear_progress_note();
+        }
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }
@@ -1046,13 +1074,7 @@ impl TurnRunner {
             // `core.busy` flipped to false above; queued lanes still
             // holding items keep the settle debounced so the next pickup
             // cancels the idle flip.
-            let (error_hold, more_queued) = {
-                let core = self.core.lock().unwrap();
-                (
-                    herdr_settle_error.lock().unwrap().take(),
-                    !core.steering.is_empty() || !core.follow_up.is_empty(),
-                )
-            };
+            let error_hold = herdr_settle_error.lock().unwrap().take();
             if !herdr_run_end.load(std::sync::atomic::Ordering::SeqCst) {
                 self.herdr
                     .lock()

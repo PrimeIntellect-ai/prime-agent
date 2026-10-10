@@ -362,6 +362,16 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
+    /// The session's newest accepted progress note; engines without a note
+    /// store report `None`.
+    fn progress_note(&self) -> Option<String> {
+        None
+    }
+
+    /// Clears the stored note at the run boundary; engines without a note
+    /// store do nothing.
+    fn clear_progress_note(&self) {}
+
     /// The session's autonomous-run status snapshot (the accounting lock
     /// is async-held, hence the boxed future). The scripted harness reports `None`.
     fn autonomous_status(

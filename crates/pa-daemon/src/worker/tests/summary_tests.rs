@@ -9,6 +9,7 @@ fn inputs() -> SummaryInputs {
         bash_running: false,
         quota_parked: false,
         subagents_running: false,
+        progress_note: None,
     }
 }
 
@@ -262,4 +263,79 @@ fn display_ids_are_twelve_hex() {
     let id = crate::util::new_display_id();
     assert_eq!(id.len(), 12);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// The summary carries the live note, and the next run's boundaries clear it.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+#[tokio::test]
+async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("pa-worker-note-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: std::path::PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "note-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": ["first reply", "second reply"],
+        })),
+        decision_child: false,
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "note" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let first = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "note-session", "message": "hello" }),
+        )
+        .await;
+    assert!(first.success, "the first turn failed: {first:?}");
+    let engine = worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux worker runs the real engine");
+    let notes = engine
+        .progress_notes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the built session mirrored its note store");
+    assert!(
+        notes.note("running tests", 0).accepted,
+        "the fresh store accepts the injected note"
+    );
+    let state = worker.dispatch("get_state", &json!({})).await;
+    assert!(state.success, "get_state failed: {state:?}");
+    assert_eq!(
+        state.data.as_ref().unwrap_or(&Value::Null)["progressNote"],
+        json!("running tests"),
+        "the summary carries the live note: {state:?}"
+    );
+    let second = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "note-session", "message": "again" }),
+        )
+        .await;
+    assert!(second.success, "the second turn failed: {second:?}");
+    let state = worker.dispatch("get_state", &json!({})).await;
+    let summary = state.data.unwrap_or(Value::Null);
+    assert!(
+        summary.get("progressNote").is_none(),
+        "the run boundary cleared the note: {summary:?}"
+    );
 }

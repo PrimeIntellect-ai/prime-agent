@@ -663,6 +663,22 @@ impl Worker {
                         );
                     });
                     concrete.set_bash_notice_sinks(completion, consumed);
+                    // The accepted note frames as a session event on the pump.
+                    let note_core = Arc::clone(&core);
+                    let note_events = events.clone();
+                    let note_emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit =
+                        Arc::new(move |message, timestamp| {
+                            emit_worker_event_with(
+                                &note_core,
+                                &note_events,
+                                json!({
+                                    "type": "rlm_progress_note",
+                                    "message": message,
+                                    "timestamp": timestamp,
+                                }),
+                            );
+                        });
+                    concrete.set_progress_note_emit(note_emit);
                 }
                 // The live roster activity feed (TS `observeRosterEvent`): busy
                 // flips and trigger events coalesce into `worker_roster_delta`

@@ -1,0 +1,1 @@
+- Agents view: the selected agent's row now expands to show its latest `rlm.progress_note` (live child progress) while it runs.

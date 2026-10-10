@@ -412,6 +412,7 @@ pub(crate) struct SummaryInputs {
     pub(crate) bash_running: bool,
     pub(crate) quota_parked: bool,
     pub(crate) subagents_running: bool,
+    pub(crate) progress_note: Option<String>,
 }
 
 impl SummaryInputs {
@@ -447,6 +448,7 @@ impl SummaryInputs {
             bash_running: user_bash.is_running(),
             quota_parked: engine.is_quota_parked(),
             subagents_running: engine.has_running_subagents(),
+            progress_note: engine.progress_note(),
         }
     }
 }
@@ -577,6 +579,7 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         created: store.map(|s| s.header.timestamp.clone()),
         modified,
         first_message: store.and_then(crate::session_store::SessionFile::first_message),
+        progress_note: inputs.progress_note,
         parent_session_path: store.and_then(|store| store.header.parent_session.clone()),
         parent_active_session_id: core.parent_active_session_id.clone(),
         parent_session_id: core.parent_session_id.clone(),

@@ -258,6 +258,9 @@ impl AgentsViewMode {
             Spacer,
             Heading(Section),
             Row(usize, &'a AgentsViewRow),
+            /// One note line of the selected row's expansion; one item per
+            /// line so the viewport clips at line granularity.
+            Detail(Line),
         }
         // The click surface records this render's visible rows; the early exits below leave it
         // empty.
@@ -274,6 +277,11 @@ impl AgentsViewMode {
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
         }
         let layout = build_layout(&self.rows, width);
+        let mut note_details = self
+            .rows
+            .get(self.selected)
+            .map(|row| self.render_note_details(row, width))
+            .filter(|details| !details.is_empty());
         // Each non-empty section contributes a spacer (when not first), its heading, then its rows.
         let counts: Vec<(Section, usize)> = [Section::Running, Section::Idle, Section::Inactive]
             .into_iter()
@@ -306,16 +314,23 @@ impl AgentsViewMode {
                     }
                     if include {
                         display.push(DisplayItem::Row(index, row));
+                        if index == self.selected {
+                            if let Some(details) = note_details.take() {
+                                display.extend(details.into_iter().map(DisplayItem::Detail));
+                            }
+                        }
                     }
                 }
             }
         } else {
-            display.extend(
-                self.rows
-                    .iter()
-                    .enumerate()
-                    .map(|(index, row)| DisplayItem::Row(index, row)),
-            );
+            for (index, row) in self.rows.iter().enumerate() {
+                display.push(DisplayItem::Row(index, row));
+                if index == self.selected {
+                    if let Some(details) = note_details.take() {
+                        display.extend(details.into_iter().map(DisplayItem::Detail));
+                    }
+                }
+            }
         }
         // The viewport: reserve the column header and its spacer, center the slice on the
         // selected row, clip the overflow — a re-sorting rebuild keeps the selection on-screen.
@@ -331,18 +346,46 @@ impl AgentsViewMode {
                 |item| matches!(item, DisplayItem::Row(_, row) if Some(row.identity.as_str()) == selected_identity),
             )
             .map_or(-1, |index| index as isize);
+        let detail_count = display
+            .iter()
+            .filter(|item| matches!(item, DisplayItem::Detail(_)))
+            .count() as isize;
+        let block_end = selected_display_index + detail_count;
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
-        let show_leading = start > 0 && visible_rows > 1;
-        let show_trailing = start + visible_rows < display.len() && visible_rows > 2;
-        let content_rows = visible_rows - usize::from(show_leading) - usize::from(show_trailing);
-        let slice_start = if selected_display_index >= start as isize + content_rows as isize {
-            (selected_display_index + 1 - content_rows as isize) as usize
-        } else {
-            start
-        };
-        let slice_end = (slice_start + content_rows).min(display.len());
+        // The clip markers read the FINAL slice: the shift below can move
+        // the slice past the section heading of a top selection, and a
+        // hidden side must always paint its `...`. The markers' rows fold
+        // out of the row budget before the slice is placed, so the reserved
+        // rows and the painted `...` agree with what the slice actually
+        // hides — the markers only turn on as the budget shrinks, so the
+        // fold settles in a pass or two.
+        let mut show_leading = start > 0 && visible_rows > 1;
+        let mut show_trailing = start + visible_rows < display.len() && visible_rows > 2;
+        let mut content_rows =
+            visible_rows - usize::from(show_leading) - usize::from(show_trailing);
+        let mut slice_start;
+        let mut slice_end;
+        loop {
+            // Shift the window forward when the selected row's note block
+            // is taller than the anchored window: pin the block's tail to
+            // the window's bottom edge, never past the selected row.
+            slice_start = if block_end >= start as isize + content_rows as isize {
+                (block_end + 1 - content_rows as isize).min(selected_display_index) as usize
+            } else {
+                start
+            };
+            slice_end = (slice_start + content_rows).min(display.len());
+            let leading = slice_start > 0 && visible_rows > 1;
+            let trailing = slice_end < display.len() && visible_rows > 2;
+            if (leading, trailing) == (show_leading, show_trailing) {
+                break;
+            }
+            show_leading = leading;
+            show_trailing = trailing;
+            content_rows = visible_rows - usize::from(leading) - usize::from(trailing);
+        }
         // The viewport's front rows shift the session rows down — the click rows and the hover
         // band carry the shift.
         let shift = header_rows + usize::from(show_leading);
@@ -373,6 +416,9 @@ impl AgentsViewMode {
                     if row.selectable() {
                         click_rows.push((local, *index));
                     }
+                }
+                DisplayItem::Detail(detail) => {
+                    lines.push(detail.clone());
                 }
             }
         }
@@ -563,6 +609,36 @@ impl AgentsViewMode {
             .unwrap_or_default();
         line.push(theme.fg(ThemeColor::Dim, details));
         finish_session_row(theme, line, selected, hovered, width)
+    }
+
+    /// The selected agent/subagent row's progress note: wrapped,
+    /// indented to the title column, dim; other row kinds render nothing.
+    pub(super) fn render_note_details(&self, row: &AgentsViewRow, width: usize) -> Vec<Line> {
+        if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
+            return Vec::new();
+        }
+        let Some(note) = row
+            .summary
+            .get("progressNote")
+            .and_then(Value::as_str)
+            .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|text| !text.is_empty())
+        else {
+            return Vec::new();
+        };
+        let indent = format!("{}  ", "  ".repeat(row.depth));
+        let dim = self.theme.fg_style(ThemeColor::Dim);
+        let wrap_width = width.saturating_sub(str_width(&indent)).max(1);
+        crate::width::wrap_text(&note, wrap_width)
+            .into_iter()
+            .map(|mut wrapped| {
+                let mut out: Line = vec![crate::Span::styled(indent.clone(), dim)];
+                for span in wrapped.drain(..) {
+                    out.push(crate::Span::styled(span.content, dim));
+                }
+                out
+            })
+            .collect()
     }
 
     /// The bottom hint/status line. `status_override` carries the
