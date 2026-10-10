@@ -73,16 +73,32 @@ impl Supervisor {
         pid: u64,
     ) {
         let supervisor = Arc::clone(self);
+        let monitor_epoch = resident.monitor_epoch.fetch_add(1, Ordering::SeqCst) + 1;
         tokio::spawn(async move {
-            supervisor.watch_worker(resident, child, pid).await;
+            supervisor
+                .watch_worker_owned(resident, child, pid, monitor_epoch)
+                .await;
         });
     }
 
+    #[cfg(test)]
     pub(super) async fn watch_worker(
+        self: Arc<Self>,
+        resident: Arc<ResidentWorker>,
+        child: Option<Child>,
+        adopted_pid: u64,
+    ) {
+        let monitor_epoch = resident.monitor_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.watch_worker_owned(resident, child, adopted_pid, monitor_epoch)
+            .await;
+    }
+
+    async fn watch_worker_owned(
         self: Arc<Self>,
         resident: Arc<ResidentWorker>,
         mut child: Option<Child>,
         mut adopted_pid: u64,
+        monitor_epoch: u64,
     ) {
         let mut watched_identity = {
             let descriptor = resident.descriptor.lock().await;
@@ -137,9 +153,7 @@ impl Supervisor {
                 }
                 // A relaunch elsewhere (update abandon, retry) took over the
                 // resident with a new process.
-                if self.is_stopping(&resident)
-                    || resident.descriptor.lock().await.pid != adopted_pid
-                {
+                if self.is_stopping(&resident) {
                     return;
                 }
             }
@@ -150,11 +164,23 @@ impl Supervisor {
             let crash_guard = self.registry.adoption_guard(&resident.worker_id).await;
             let replacement_registered = {
                 let descriptor = resident.descriptor.lock().await;
-                descriptor.pid != watched_pid
-                    || descriptor.worker_instance_id != watched_generation
+                descriptor.pid != watched_pid || descriptor.worker_instance_id != watched_generation
             };
-            if replacement_registered || self.is_stopping(&resident) {
+            if self.is_stopping(&resident)
+                || resident.monitor_epoch.load(Ordering::SeqCst) != monitor_epoch
+            {
                 return;
+            }
+            if replacement_registered {
+                // Keep the one monitor owner, but watch the registrant's process
+                // before attributing any exit or failure to its generation.
+                let descriptor = resident.descriptor.lock().await;
+                adopted_pid = descriptor.pid;
+                watched_identity = (descriptor.pid, descriptor.worker_instance_id.clone());
+                // An external registration has no observed spawn time. Do not
+                // award it the predecessor's stable-lifetime counter reset.
+                resident.spawned_at_ms.store(0, Ordering::SeqCst);
+                continue;
             }
             self.note_daemon_event("worker_exited", Some("crash"));
             // A hard-killed parent bypasses every worker-side close (#246): close the
@@ -231,11 +257,23 @@ impl Supervisor {
             let _registration_guard = self.registry.adoption_guard(&resident.worker_id).await;
             let replacement_registered = {
                 let descriptor = resident.descriptor.lock().await;
-                descriptor.pid != watched_pid
-                    || descriptor.worker_instance_id != watched_generation
+                descriptor.pid != watched_pid || descriptor.worker_instance_id != watched_generation
             };
-            if replacement_registered || self.is_stopping(&resident) {
+            if self.is_stopping(&resident)
+                || resident.monitor_epoch.load(Ordering::SeqCst) != monitor_epoch
+            {
                 return;
+            }
+            if replacement_registered {
+                // Keep the one monitor owner, but watch the registrant's process
+                // before attributing any exit or failure to its generation.
+                let descriptor = resident.descriptor.lock().await;
+                adopted_pid = descriptor.pid;
+                watched_identity = (descriptor.pid, descriptor.worker_instance_id.clone());
+                // An external registration has no observed spawn time. Do not
+                // award it the predecessor's stable-lifetime counter reset.
+                resident.spawned_at_ms.store(0, Ordering::SeqCst);
+                continue;
             }
             match self.relaunch_worker(&resident).await {
                 Ok(new_child) => {
@@ -246,7 +284,7 @@ impl Supervisor {
                     watched_identity = {
                         let descriptor = resident.descriptor.lock().await;
                         (
-                            new_child.id().map(u64::from).unwrap_or(descriptor.pid),
+                            new_child.id().map_or(descriptor.pid, u64::from),
                             descriptor.worker_instance_id.clone(),
                         )
                     };
@@ -473,6 +511,7 @@ impl Supervisor {
     ) -> Result<Child> {
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
+        let instance_id = uuid::Uuid::new_v4().to_string();
         let (worker_socket, cwd, launch_env) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -487,7 +526,7 @@ impl Supervisor {
                 crate::descriptor::worker_launch_env(
                     &self.options.agent_dir,
                     &self.options.socket_path.to_string_lossy(),
-                    &uuid::Uuid::new_v4().to_string(),
+                    &instance_id,
                     &descriptor,
                 ),
             )
@@ -522,12 +561,15 @@ impl Supervisor {
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
         }
-        {
+        let spawn_record = {
             let mut descriptor = resident.descriptor.lock().await;
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
             let child_pid = child.id().unwrap_or(0);
             descriptor.pid = u64::from(child_pid);
+            // Registration can wait behind the relaunch guard. The launch
+            // identity must already name the child whose lifetime we watch.
+            descriptor.worker_instance_id = Some(instance_id);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             // The spawn record's durability is per launch class
@@ -543,7 +585,12 @@ impl Supervisor {
             // lose the descriptor's whole payload — the recovery journal
             // pointer and the durable create command the next boot's
             // revival replays.
-            let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
+            persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync)
+        };
+        if let Err(error) = spawn_record {
+            let mut child = child;
+            let _ = child.kill().await;
+            return Err(error).context("persist spawned worker identity");
         }
 
         // A worker that never comes up inside the connect budget is killed here, so a

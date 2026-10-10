@@ -260,7 +260,10 @@ async fn run_self_registered_replacement(created_session: bool) {
         }
     }
     let response = registration.await.expect("registration task");
-    assert_eq!(response.success, created_session, "registration proof: {response:?}");
+    assert_eq!(
+        response.success, created_session,
+        "registration proof: {response:?}"
+    );
     let resident = supervisor
         .registry
         .get("w-adopt-replacement")
@@ -268,11 +271,19 @@ async fn run_self_registered_replacement(created_session: bool) {
         .expect("adopted resident");
     assert_eq!(resident.route_state().session_ready, created_session);
     assert_eq!(
-        resident.descriptor.lock().await.worker_instance_id.as_deref(),
+        resident
+            .descriptor
+            .lock()
+            .await
+            .worker_instance_id
+            .as_deref(),
         Some("new-instance")
     );
     if !created_session {
-        assert_eq!(resident.registration_handoff().as_deref(), Some("new-instance"));
+        assert_eq!(
+            resident.registration_handoff().as_deref(),
+            Some("new-instance")
+        );
         return;
     }
     let routed = {
@@ -294,7 +305,13 @@ async fn run_self_registered_replacement(created_session: bool) {
     assert_eq!(frame.header["commandType"], json!("get_state"));
     let request_id = frame.header["requestId"].as_str().expect("request id");
     answer_supervisor_frame(&mut fake, request_id, "get_state").await;
-    assert!(routed.await.expect("route task").expect("ready route").success);
+    assert!(
+        routed
+            .await
+            .expect("route task")
+            .expect("ready route")
+            .success
+    );
 }
 
 #[tokio::test]
@@ -384,7 +401,10 @@ async fn known_resident_replacement_reopens_only_on_authenticated_channel() {
     .expect("reject first auth");
     assert!(!registration.await.expect("first registration task").success);
     assert!(!resident.route_state().session_ready);
-    assert_eq!(resident.registration_handoff().as_deref(), Some("new-instance"));
+    assert_eq!(
+        resident.registration_handoff().as_deref(),
+        Some("new-instance")
+    );
     let retry = {
         let supervisor = Arc::clone(&supervisor);
         tokio::spawn(async move {
@@ -393,7 +413,11 @@ async fn known_resident_replacement_reopens_only_on_authenticated_channel() {
                 .await
         })
     };
-    let stream = fake.listener.accept().await.expect("retry worker connection");
+    let stream = fake
+        .listener
+        .accept()
+        .await
+        .expect("retry worker connection");
     let (read_half, write_half) = stream.split();
     fake.read_half = read_half;
     fake.write_half = write_half;
@@ -463,7 +487,13 @@ async fn known_resident_replacement_reopens_only_on_authenticated_channel() {
         "get_state",
     )
     .await;
-    assert!(routed.await.expect("route task").expect("ready route").success);
+    assert!(
+        routed
+            .await
+            .expect("route task")
+            .expect("ready route")
+            .success
+    );
 }
 
 #[tokio::test]
@@ -527,9 +557,16 @@ async fn session_created_registration_during_replay_preserves_the_create_reply()
                 .await
         })
     };
-    let request = cmd_rx.recv().await.expect("existing channel handles state pull");
+    let request = cmd_rx
+        .recv()
+        .await
+        .expect("existing channel handles state pull");
     assert_eq!(request.command_type, "get_state");
-    assert!(resident.pending.lock().await.contains_key("create-in-flight"));
+    assert!(resident
+        .pending
+        .lock()
+        .await
+        .contains_key("create-in-flight"));
     let reply = resident
         .pending
         .lock()
@@ -551,7 +588,11 @@ async fn session_created_registration_during_replay_preserves_the_create_reply()
         )))
         .is_ok());
     assert!(registration.await.expect("registration task").success);
-    assert!(resident.pending.lock().await.contains_key("create-in-flight"));
+    assert!(resident
+        .pending
+        .lock()
+        .await
+        .contains_key("create-in-flight"));
     assert!(!resident.route_state().session_ready);
 }
 

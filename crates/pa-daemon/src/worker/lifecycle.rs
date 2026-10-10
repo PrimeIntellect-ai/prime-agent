@@ -17,12 +17,12 @@ pub(crate) fn durable_input_ids(
 ) -> Result<HashSet<String>> {
     let uncertain: HashSet<&str> = inputs
         .iter()
-        .filter(|input| input.attempted && !input.committed)
+        .filter(|input| !input.cancelled && input.attempted && !input.committed)
         .map(|input| input.row_id.as_str())
         .collect();
     let mut found: HashSet<String> = inputs
         .iter()
-        .filter(|input| input.committed)
+        .filter(|input| !input.cancelled && input.committed)
         .map(|input| input.row_id.clone())
         .collect();
     if uncertain.is_empty() {
@@ -464,11 +464,11 @@ impl Worker {
 
     /// Clear the queued-input suspension and wake the turn runner so parked
     /// lanes drain; an owed continuation re-evaluates here too.
-    pub(crate) fn resume_queued_input(&self) {
+    pub(crate) fn resume_queued_input(&self) -> bool {
         {
             let mut core = self.core.lock().unwrap();
             if core.shutdown_requested || core.recovery_hold {
-                return;
+                return false;
             }
             if core.queued_input_suspended {
                 core.queued_input_suspended = false;
@@ -478,6 +478,7 @@ impl Worker {
         if let Some(engine) = self.agent_engine.as_ref() {
             engine.retry_owed_goal_continuation();
         }
+        true
     }
 
     /// Run one compaction and answer with the TS `CompactionResult` wire shape;

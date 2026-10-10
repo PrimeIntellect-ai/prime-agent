@@ -522,7 +522,10 @@ async fn failed_shutdown_retry_keeps_original_interrupted_turn_decision() {
     )
     .await
     .expect("first shutdown did not settle");
-    assert!(!first.success, "blocked journal cannot acknowledge shutdown");
+    assert!(
+        !first.success,
+        "blocked journal cannot acknowledge shutdown"
+    );
     settle.await.unwrap();
     *worker.recovery.lock().unwrap() =
         Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
@@ -851,8 +854,99 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
 }
 
 #[tokio::test]
-async fn slash_prefix_echo_does_not_commit_current_unaccepted_input() {
+async fn ordinary_resume_preserves_recovery_hold_established_during_checkpoint() {
     let worker = created_worker_with_journal().await;
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let entered = Arc::new(Notify::new());
+    *worker.resume_checkpoint_gate.lock().unwrap() =
+        Some(Arc::new(crate::queue_commands::ResumeCheckpointGate {
+            entered: Arc::clone(&entered),
+            release: std::sync::Mutex::new(release_rx),
+        }));
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.queued_input_suspended = true;
+        core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "waiting behind failed input".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+        let input = super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "uncertain-row".to_string(),
+            item: queue_item_record(core.follow_up.front().unwrap()),
+            attempted: false,
+            committed: false,
+            cancelled: false,
+        };
+        core.in_flight_input.push(input);
+    }
+    let resuming = Arc::clone(&worker);
+    let resume = tokio::task::spawn_blocking(move || {
+        resuming.handle_resume_queue(&json!({ "resumeQueueAttemptId": "ordinary-resume" }))
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("resume never reached checkpoint after reading an unheld core");
+    {
+        let mut core = worker.core.lock().unwrap();
+        assert!(!core.recovery_hold);
+        // The same core-locked transition used by a failed input append;
+        // it does not acquire the recovery mutex held by resume's fsync.
+        core.in_flight_input[0].attempted = true;
+        core.recovery_hold = true;
+    }
+    release_tx.send(()).expect("release resume checkpoint");
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), resume)
+        .await
+        .expect("resume did not settle")
+        .expect("resume task panicked");
+    assert!(!response.success, "a newly held input cannot report resumed");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(core.recovery_hold && core.queued_input_suspended);
+        assert_eq!(core.in_flight_input.len(), 1);
+        assert_eq!(core.in_flight_input[0].row_id, "uncertain-row");
+        assert!(!core.in_flight_input[0].committed);
+        assert_eq!(core.follow_up.len(), 1);
+        assert_eq!(core.follow_up[0].message, "waiting behind failed input");
+    }
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn slash_prefix_echo_does_not_commit_current_unaccepted_input() {
+    let worker = worker_with_journal();
+    // No create/wakeup is sent to the ordinary runner. Let its initial
+    // empty pass park before installing work for our separately notified runner.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if worker.core.lock().unwrap().last_activity_ms != 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ordinary runner never parked");
+    let mut store = SessionFile::create("/tmp", None, 0);
+    store.set_path(
+        worker
+            .config
+            .socket_path
+            .parent()
+            .unwrap()
+            .join("session.jsonl"),
+    );
     let echo = json!({
         "role": "custom", "customType": "session_slash_command",
         "content": "/goal status", "display": true,
@@ -860,6 +954,8 @@ async fn slash_prefix_echo_does_not_commit_current_unaccepted_input() {
     });
     {
         let mut core = worker.core.lock().unwrap();
+        core.created = true;
+        core.store = Some(store);
         core.pending_next_turn.push(echo.clone());
         core.steering.push_back(QueuedItem {
             priority: QueuePriority::Human,
@@ -1140,9 +1236,10 @@ async fn cancelled_picked_input_is_not_requeued_when_pickup_checkpoint_fails() {
     })
     .await
     .expect("failed pickup never rolled back");
-    let core = worker.core.lock().unwrap();
-    assert!(core.steering.is_empty() && core.follow_up.is_empty());
-    drop(core);
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    }
     assert_eq!(worker.prompt_admissions.cancel("cancelled-pickup"), None);
     let settled = tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
         .await
@@ -1425,7 +1522,7 @@ async fn shutdown_gate_cannot_unpark_aborted_queue() {
         core.queued_input_suspended = true;
         core.shutdown_requested = true;
     }
-    worker.resume_queued_input();
+    assert!(!worker.resume_queued_input());
     assert!(worker.core.lock().unwrap().queued_input_suspended);
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
@@ -1550,4 +1647,98 @@ async fn all_cancel_handoffs_must_finish_before_next_pickup() {
         .expect("runner did not pick after final handoff");
     running.abort();
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn abort_and_send_rejects_a_held_queue_without_arming_it() {
+    let worker = created_worker_with_journal().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.recovery_hold = true;
+        core.queued_input_suspended = true;
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "held original".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    }
+    let result = worker.abort_and_send_queued();
+    assert!(result.is_err(), "held recovery cannot promise delivery");
+    let core = worker.core.lock().unwrap();
+    assert!(core.recovery_hold && core.queued_input_suspended);
+    assert_eq!(core.steering.len(), 1);
+    assert!(!core.forced_all_steering && !core.steering[0].forced_batch);
+    drop(core);
+    assert!(!worker.resume_queued_input());
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn cancelled_uncertain_input_needs_no_missing_session_file_at_shutdown() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let missing = fixture_dir.join("never-created-session.jsonl");
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "failed append then cancelled".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.store.as_mut().unwrap().set_path(missing.clone());
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "failed-append-id".to_string(),
+            item: queue_item_record(&item),
+            attempted: true,
+            committed: false,
+            cancelled: false,
+        });
+    }
+    let missing_path = missing.to_str().unwrap();
+    let before = worker.core.lock().unwrap().in_flight_input.clone();
+    assert!(
+        super::lifecycle::durable_input_ids(Some(missing_path), &before).is_err(),
+        "uncancelled uncertain input must fail closed on a missing file"
+    );
+    worker.core.lock().unwrap().in_flight_input[0].cancelled = true;
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        worker.handle_shutdown(&json!({
+            "daemonShutdown": true,
+            "shutdownAttemptId": "cancelled-missing-file-attempt",
+        })),
+    )
+    .await
+    .expect("shutdown never settled");
+    assert!(reply.success, "cancelled input should settle: {reply:?}");
+    assert_eq!(
+        WorkerRecoveryJournal::read_shutdown_checkpoint(
+            &worker.config.recovery_journal_path,
+            "cancelled-missing-file-attempt",
+            &worker.config.worker_instance_id,
+        )
+        .unwrap(),
+        Some(crate::journal::ShutdownVerdict::Idle)
+    );
+    assert!(!missing.exists());
+    let _ = std::fs::remove_dir_all(fixture_dir);
 }

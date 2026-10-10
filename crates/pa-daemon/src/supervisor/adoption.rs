@@ -519,9 +519,8 @@ impl Supervisor {
                 // replacement, then authenticate the replacement below.
                 if !newly_adopted && resident.route_state().session_ready {
                     resident.note_session_replaying();
-                    resident.mark_registration_handoff(
-                        worker_instance_id.clone().unwrap_or_default(),
-                    );
+                    resident
+                        .mark_registration_handoff(worker_instance_id.clone().unwrap_or_default());
                 }
                 let replacement = worker_instance_id.clone().unwrap_or_default();
                 let mut roster = self.roster.lock().unwrap();
@@ -574,7 +573,10 @@ impl Supervisor {
             };
             durable_session_id
         };
-        let record = self.registry.record_registration(registration.clone()).await;
+        let record = self
+            .registry
+            .record_registration(registration.clone())
+            .await;
         // A restore pass that owns this session's roster row can settle it now (spec §10.4).
         // The settle lands after the registration is recorded, so a woken waiter's
         // re-resolve cannot miss it.
@@ -675,11 +677,14 @@ impl Supervisor {
         }
         if (newly_adopted || authenticate_handoff) && live_proof {
             let expected_instance = worker_instance_id.clone().unwrap_or_default();
-            let same_generation = resident.descriptor.lock().await.worker_instance_id.as_deref()
+            let same_generation = resident
+                .descriptor
+                .lock()
+                .await
+                .worker_instance_id
+                .as_deref()
                 == worker_instance_id.as_deref();
-            if !same_generation
-                || !resident.finish_registration_handoff(&expected_instance)
-            {
+            if !same_generation || !resident.finish_registration_handoff(&expected_instance) {
                 return fail("Session worker replacement generation changed");
             }
         }
@@ -797,9 +802,8 @@ impl Supervisor {
                 "session worker {worker_id}: the registration reconciliation pull failed; the resident is quarantined from routing until the live state lands"
             ));
         }
-        resident.mark_registration_handoff(
-            registration.worker_instance_id.clone().unwrap_or_default(),
-        );
+        resident
+            .mark_registration_handoff(registration.worker_instance_id.clone().unwrap_or_default());
         // Keep the new resident unready until handle_worker_register has
         // updated its generation from this registrant. Publishing it ready
         // here would briefly pair the new authenticated channel with the

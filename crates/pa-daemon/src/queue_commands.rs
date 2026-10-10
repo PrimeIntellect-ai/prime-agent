@@ -228,18 +228,21 @@ impl Worker {
                     anyhow::ensure!(
                         core.active_session_id == active_session_id
                             && core.generation == generation
-                            && core.store.as_ref().map(|store| store.session_id())
+                            && core
+                                .store
+                                .as_ref()
+                                .map(crate::session_store::SessionFile::session_id)
                                 == Some(session_id.as_str())
-                            && core.store.as_ref().map(|store| store.path.to_string_lossy().to_string())
+                            && core
+                                .store
+                                .as_ref()
+                                .map(|store| store.path.to_string_lossy().to_string())
                                 == session_file,
                         "held input session changed while reconciling"
                     );
                     // Only picked ownership is reconstructed. Existing live
                     // queue items keep their edits and completion senders.
-                    for input in std::mem::take(&mut core.in_flight_input)
-                        .into_iter()
-                        .rev()
-                    {
+                    for input in std::mem::take(&mut core.in_flight_input).into_iter().rev() {
                         if input.cancelled || landed.contains(&input.row_id) {
                             continue;
                         }
@@ -257,6 +260,17 @@ impl Worker {
                     let core = self.core.lock().unwrap();
                     crate::worker::queue_lanes(&core)
                 };
+                #[cfg(test)]
+                {
+                    let gate = self.resume_checkpoint_gate.lock().unwrap().clone();
+                    if let Some(gate) = gate {
+                        gate.entered.notify_one();
+                        anyhow::ensure!(
+                            gate.release.lock().unwrap().recv().is_ok(),
+                            "resume checkpoint test gate closed"
+                        );
+                    }
+                }
                 journal.record_resume_checkpoint(
                     &active_session_id,
                     &session_id,
@@ -270,11 +284,29 @@ impl Worker {
             if let Err(error) = result {
                 return response_failure(None, "resume_queue", &error.to_string(), None);
             }
-            self.core.lock().unwrap().recovery_hold = false;
+            if held {
+                let mut core = self.core.lock().unwrap();
+                if core.shutdown_requested {
+                    return response_failure(
+                        None,
+                        "resume_queue",
+                        "Session is shutting down",
+                        None,
+                    );
+                }
+                core.recovery_hold = false;
+            }
         }
         // The suspension clears first, so `resume_queue` is a resume
         // site even when it answers "No queued work to resume".
-        self.resume_queued_input();
+        if !self.resume_queued_input() {
+            return response_failure(
+                None,
+                "resume_queue",
+                "Session recovery is required or shutdown is in progress",
+                None,
+            );
+        }
         let has_queued_work = {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
@@ -285,6 +317,12 @@ impl Worker {
         self.work_notify.notify_one();
         response_success(None, "resume_queue", None)
     }
+}
+
+#[cfg(test)]
+pub(crate) struct ResumeCheckpointGate {
+    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Apply one mutation to a lane; the caller owns the cross-lane move a

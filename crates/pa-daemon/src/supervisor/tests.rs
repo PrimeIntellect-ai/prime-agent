@@ -219,8 +219,14 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
 /// handoff before crash bookkeeping. The replacement is published while the
 /// registration guard is held, so the obsolete monitor cannot settle its
 /// journal, count a failure, or retire the new resident.
-#[tokio::test]
-async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
+enum MonitorReplacement {
+    Live,
+    Dead,
+    Superseded,
+    RearmedAfterFailure,
+}
+
+async fn check_monitor_replacement(replacement: MonitorReplacement) {
     let dir = tempfile::TempDir::new().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
@@ -262,20 +268,71 @@ async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
         .registry
         .adoption_guard(&resident.worker_id)
         .await;
-    let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
-        Arc::clone(&resident),
-        None,
-        0,
-    ));
+    let mut watch =
+        std::pin::pin!(Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0,));
     assert!(
         futures::poll!(watch.as_mut()).is_pending(),
         "the old monitor must wait at the registration guard before cleanup"
     );
-    resident.descriptor.lock().await.worker_instance_id = Some("new-instance".to_string());
+    {
+        let mut descriptor = resident.descriptor.lock().await;
+        descriptor.worker_instance_id = Some("new-instance".to_string());
+        descriptor.pid = match replacement {
+            MonitorReplacement::Live | MonitorReplacement::Superseded => {
+                u64::from(std::process::id())
+            }
+            MonitorReplacement::Dead | MonitorReplacement::RearmedAfterFailure => 0,
+        };
+    }
+    if matches!(
+        replacement,
+        MonitorReplacement::Superseded | MonitorReplacement::RearmedAfterFailure
+    ) {
+        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
+    }
     drop(registration_guard);
-    tokio::time::timeout(Duration::from_secs(1), watch)
+    match replacement {
+        MonitorReplacement::Live => assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "the monitor must transfer to the live replacement instead of returning"
+        ),
+        MonitorReplacement::Dead => {
+            tokio::time::timeout(Duration::from_secs(1), watch)
+                .await
+                .expect("the replacement's death reaches give-up");
+            assert_eq!(
+                resident.consecutive_failures.load(Ordering::SeqCst),
+                MAX_CONSECUTIVE_FAILURES + 1
+            );
+            assert_eq!(
+                resident.descriptor.lock().await.lifecycle,
+                DaemonWorkerLifecycle::Failed
+            );
+            assert!(supervisor.registry.get("w-monitor-replaced").await.is_none());
+            return;
+        }
+        MonitorReplacement::Superseded | MonitorReplacement::RearmedAfterFailure => {
+            tokio::time::timeout(Duration::from_secs(1), watch)
+                .await
+                .expect("a newer explicit monitor owns the replacement");
+        }
+    }
+
+    if matches!(replacement, MonitorReplacement::RearmedAfterFailure) {
+        supervisor.spawn_monitor(Arc::clone(&resident), None, 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !resident.route_state().retired {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .expect("the obsolete monitor returns after replacement registration");
+        .expect("the rearmed failed replacement reaches its failure budget");
+        assert_eq!(
+            resident.consecutive_failures.load(Ordering::SeqCst),
+            MAX_CONSECUTIVE_FAILURES + 1
+        );
+        return;
+    }
 
     assert_eq!(
         resident.consecutive_failures.load(Ordering::SeqCst),
@@ -286,9 +343,33 @@ async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
         DaemonWorkerLifecycle::Ready
     );
     assert!(
-        supervisor.registry.get("w-monitor-replaced").await.is_some(),
+        supervisor
+            .registry
+            .get("w-monitor-replaced")
+            .await
+            .is_some(),
         "the new generation remains owned"
     );
+}
+
+#[tokio::test]
+async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
+    check_monitor_replacement(MonitorReplacement::Live).await;
+}
+
+#[tokio::test]
+async fn an_obsolete_monitor_supervises_the_registered_replacements_next_death() {
+    check_monitor_replacement(MonitorReplacement::Dead).await;
+}
+
+#[tokio::test]
+async fn an_explicit_new_monitor_supersedes_an_old_watch_before_crash_bookkeeping() {
+    check_monitor_replacement(MonitorReplacement::Superseded).await;
+}
+
+#[tokio::test]
+async fn a_failed_explicit_replacement_rearms_supervision_after_superseding_the_old_watch() {
+    check_monitor_replacement(MonitorReplacement::RearmedAfterFailure).await;
 }
 
 /// An adopted worker's watch parks on the kernel's exit notification and
@@ -342,9 +423,8 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
         );
     }
     {
-        // A relaunch elsewhere took the resident: the pid no longer names
-        // the watched process, so the watch hands off instead of running
-        // the crash arm over the replacement.
+        // An explicit new monitor took the resident during relaunch. The
+        // old watch returns instead of duplicating replacement supervision.
         let mut worker = std::process::Command::new("sleep")
             .arg("600")
             .spawn()
@@ -361,6 +441,7 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             "a live adopted worker keeps the watch parked"
         );
         resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
@@ -1007,20 +1088,34 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
     let replacement = {
         let resident = Arc::clone(&resident);
         tokio::spawn(async move {
-            let request = new_rx.recv().await.expect("replacement channel remains open");
+            let request = new_rx
+                .recv()
+                .await
+                .expect("replacement channel remains open");
             let attempt = request.payload["resumeQueueAttemptId"]
                 .as_str()
                 .expect("private resume attempt")
                 .to_string();
-            let held: DaemonWorkerDescriptor =
+            let persisted_descriptor: DaemonWorkerDescriptor =
                 serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
-            let hold = crate::descriptor::shutdown_hold(&held).unwrap().unwrap();
-            assert_eq!(hold.resume_worker_instance_id.as_deref(), Some("new-instance"));
+            let hold = crate::descriptor::shutdown_hold(&persisted_descriptor)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                hold.resume_worker_instance_id.as_deref(),
+                Some("new-instance")
+            );
             assert_eq!(hold.resume_attempt_id.as_deref(), Some(attempt.as_str()));
             crate::journal::WorkerRecoveryJournal::open(&journal_path)
                 .unwrap()
                 .record_resume_checkpoint(
-                    "held-resume", "session-1", None, &attempt, "new-instance", &[], &[],
+                    "held-resume",
+                    "session-1",
+                    None,
+                    &attempt,
+                    "new-instance",
+                    &[],
+                    &[],
                 )
                 .unwrap();
             let reply = resident
@@ -1031,7 +1126,9 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
                 .expect("pending request");
             assert!(reply
                 .send(WorkerReply::Typed(crate::protocol::response_success(
-                    None, "resume_queue", None,
+                    None,
+                    "resume_queue",
+                    None,
                 )))
                 .is_ok());
         })
@@ -1252,6 +1349,26 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         assert_eq!(request.command_type, "shutdown");
         let _ = shutdown_routed_tx.send(());
         settle_release_rx.await.expect("the turn settles first");
+        let descriptor = pump_resident.descriptor.lock().await;
+        let attempt = request.payload["shutdownAttemptId"]
+            .as_str()
+            .expect("shutdown attempt");
+        crate::journal::WorkerRecoveryJournal::open(std::path::Path::new(
+            &descriptor.recovery_journal_path,
+        ))
+        .expect("isolated journal")
+        .record_shutdown_checkpoint(
+            "w-signal",
+            "signal-session",
+            None,
+            attempt,
+            "signal-instance",
+            crate::journal::ShutdownVerdict::Idle,
+            &[],
+            &[],
+        )
+        .expect("durable idle shutdown before ACK");
+        drop(descriptor);
         let _ = turn_settled_tx.send(());
         let reply = pump_resident
             .pending

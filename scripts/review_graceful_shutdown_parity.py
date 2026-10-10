@@ -425,13 +425,15 @@ def main():
     checks = ("busy_continued", "park_not_executed", "idle_not_executed",
               "park_queue_before_shutdown_matches", "listed_park",
               "park_queue_after_restart_preserved", "park_idle_after_restart",
-              "park_transcript_unchanged", "idle_transcript_unchanged", "listed_busy")
+              "park_transcript_only_expected_lifecycle_append",
+              "idle_transcript_unchanged", "listed_busy")
+    comparisons = checks + ("park_appended_lifecycle_status",)
     observed = [results.get(kind, {}).get("observed") for kind in ("ts", "rust")]
     receipt["parity"] = bool("preflight_error" not in receipt and
         all("error" not in results.get(kind, {}) for kind in ("ts", "rust")) and
         all(observed) and
         all(all(item.get(key) for key in checks) for item in observed) and
-        all(observed[0].get(key) == observed[1].get(key) for key in checks))
+        all(observed[0].get(key) == observed[1].get(key) for key in comparisons))
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print(json.dumps(receipt, indent=2, sort_keys=True))

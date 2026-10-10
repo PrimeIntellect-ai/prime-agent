@@ -108,6 +108,9 @@ pub(crate) struct ResidentWorker {
     /// Unix-millis spawn time of the current child (0 for an adopted pid): only a lifetime past the
     /// stable window earns a counter reset (spawn-dies-fast churn accumulates).
     pub(crate) spawned_at_ms: AtomicU64,
+    /// Explicit monitor launches supersede an older watch before it can
+    /// attribute an exit or relaunch over the new owner's process.
+    pub(crate) monitor_epoch: AtomicU64,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
     /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
@@ -125,7 +128,7 @@ pub(crate) struct ResidentWorker {
     /// A registration that replaced a ready resident still needs its own
     /// authenticated channel and created-session proof. Kept only in memory:
     /// normal relaunch already owns the replay gate and must not reconnect on
-    /// its SessionCreated registration.
+    /// its `SessionCreated` registration.
     registration_handoff: std::sync::Mutex<Option<String>>,
     /// The root-identity persist is unresolved (the descriptor moved but the durable write failed):
     /// the next roster write re-runs it before a restart replays the superseded session.
@@ -178,6 +181,7 @@ impl ResidentWorker {
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),
             spawned_at_ms: AtomicU64::new(0),
+            monitor_epoch: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),

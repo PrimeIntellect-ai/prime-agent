@@ -77,13 +77,7 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
 }
 
 /// The temp journal's data rides a full sync before the swap.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Finalize {
-    /// Sync the replacement before the rename.
-    Synced,
-}
-
-pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize) -> Result<()> {
+pub(crate) fn rewrite_records(path: &Path, records: &[Value]) -> Result<()> {
     let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
     {
         let file = File::create(&temp).with_context(|| format!("create {}", temp.display()))?;
@@ -94,7 +88,6 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.write_all(line.as_bytes())?;
         }
         writer.flush()?;
-        let _ = finalize;
         writer.get_ref().sync_all()?;
     }
     let rename = fs::rename(&temp, path);
@@ -709,7 +702,7 @@ impl WorkerRecoveryJournal {
         }
         // Any idle rewrite can replace a previously acknowledged cancel or
         // picked-input checkpoint. The replacement must be just as durable.
-        rewrite_records(&self.path, &records, Finalize::Synced)?;
+        rewrite_records(&self.path, &records)?;
         #[cfg(unix)]
         if let Some(parent) = self.path.parent() {
             File::open(parent)?.sync_all()?;

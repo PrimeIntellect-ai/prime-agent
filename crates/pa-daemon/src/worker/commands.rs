@@ -316,6 +316,10 @@ impl Worker {
     /// whenever nothing is armable; here the abort resumes. Returns whether
     /// the queue was resumed.
     pub(crate) fn abort_and_send_queued(&self) -> Result<bool> {
+        if self.core.lock().unwrap().recovery_hold {
+            self.request_abort()?;
+            anyhow::bail!("Session recovery is required before queued work can resume");
+        }
         // TS `canResume`: no admission pause held — the arm only
         // fires in the send arm.
         let can_resume =
@@ -337,7 +341,10 @@ impl Worker {
         if !queued_work {
             return Ok(false);
         }
-        self.resume_queued_input();
+        anyhow::ensure!(
+            self.resume_queued_input(),
+            "Session recovery is required before queued work can resume"
+        );
         Ok(true)
     }
 

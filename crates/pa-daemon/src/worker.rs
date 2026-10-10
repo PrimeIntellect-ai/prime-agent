@@ -31,10 +31,11 @@ pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
     checkpoint_owned_input, checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch,
-    parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_snapshot_reconciled,
-    restore_queue_records, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
-    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
-    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_records,
+    restore_queue_snapshot_reconciled, restored_turn_policy, withdraw_bash_completion_notice,
+    QueueCheckpoint, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -160,6 +161,8 @@ pub struct Worker {
     /// one refresh plus one queued re-arm per burst.
     pub(crate) model_catalog_refresh_gate: std::sync::Arc<crate::model_catalog::RefreshGate>,
     pub(crate) recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
+    #[cfg(test)]
+    pub(crate) resume_checkpoint_gate: Mutex<Option<Arc<crate::queue_commands::ResumeCheckpointGate>>>,
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
     pub(crate) peer_grants: PeerGrantStore,
@@ -750,6 +753,8 @@ impl Worker {
                 crate::model_catalog::RefreshGate::default(),
             ),
             recovery,
+            #[cfg(test)]
+            resume_checkpoint_gate: Mutex::new(None),
             side_questions,
             peer_grants: PeerGrantStore::new(),
             compaction,

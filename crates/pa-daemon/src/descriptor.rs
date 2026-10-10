@@ -265,9 +265,7 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
 }
 
 /// The temp file's durability posture before the rename: the port of TS
-/// `writeFileAtomicSync`'s per-call-site `fsync` option (the same
-/// per-site variance the worker journal's `Finalize` enum models for its
-/// own writes).
+/// `writeFileAtomicSync`'s per-call-site `fsync` option.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TempSync {
     /// `fsync: true` — sync the temp file before the rename (the durable

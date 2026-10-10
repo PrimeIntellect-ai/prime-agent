@@ -247,7 +247,9 @@ impl Supervisor {
         admission: RouteAdmission,
     ) -> Result<WorkerReply> {
         let channel = resident.cmd_tx.lock().await;
-        let cmd_tx = channel.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?;
+        let cmd_tx = channel
+            .clone()
+            .ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?;
         let mut descriptor = resident.descriptor.lock().await;
         let state = resident.route_state();
         if !state.connected || !state.session_ready || state.retired || self.is_stopping(resident) {
