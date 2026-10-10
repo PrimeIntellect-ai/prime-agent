@@ -328,10 +328,25 @@ fn drag_cost(messages: usize) -> (Duration, Vec<Duration>, String) {
         );
         assert_eq!(copies.len(), 1, "each drag burst copies once");
         let text = copies.concat();
+        // The fixed coordinates pin the expected copy: the press (row 3, col 3) anchors the
+        // selection in message 0's wrapped block ("row 0 lorem ipsum ..."), the drag rows
+        // extend it down through the block's wrapped rows, and the release never crosses
+        // into message 1 ("answer 1 ..."). A one-row copy, or one leaking the next message,
+        // means the drag never extended the selection — the run is not measuring a drag.
         assert!(
-            text.starts_with("row 0"),
-            "the copy reads the pressed row: {:?}",
+            text.starts_with("row 0 lorem"),
+            "the selection anchored at the pressed row: {:?}",
             &text[..text.len().min(40)]
+        );
+        assert!(
+            text.lines().count() > 1,
+            "the selection extended beyond the pressed row: {:?}",
+            &text[..text.len().min(80)]
+        );
+        assert!(
+            !text.contains("answer 1"),
+            "the drag stayed inside the pressed message's block: {:?}",
+            &text[..text.len().min(80)]
         );
         if run == 0 {
             extracted = text;
