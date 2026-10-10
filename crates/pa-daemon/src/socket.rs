@@ -210,6 +210,31 @@ impl SocketLease {
         })
     }
 
+    /// The awaited shutdown for async owners: sends the stop signal and
+    /// JOINS THE REFRESH THREAD OFF THE ASYNC WORKER (the thread may be
+    /// inside its 100ms reclaim-guard wait or the 250ms
+    /// displacement-grace retry sleep; joining that latency on a
+    /// Tokio worker stalls every task and timer on it - the plain
+    /// `Drop` keeps its join for non-async drop sites, so this is the
+    /// path async owners call before the lease leaves scope).
+    ///
+    /// # Errors
+    ///
+    /// Returns the join-handle error only if the blocking pool itself
+    /// fails (the refresh thread has no panic sites worth reporting -
+    /// a panicking heartbeat never wedges the release).
+    #[cfg(unix)]
+    pub async fn shutdown(mut self) -> Result<()> {
+        let _ = self.refresh_stop.send(());
+        if let Some(refresh) = self.refresh.take() {
+            let joined = tokio::task::spawn_blocking(move || refresh.join()).await;
+            if let Err(join_error) = joined {
+                return Err(anyhow::Error::from(join_error));
+            }
+        }
+        Ok(())
+    }
+
     /// Whether the lock path still names this lease's pinned inode.
     fn path_lost(&self) -> bool {
         !lock_identity_matches(&self.lock_path, &self.identity)

@@ -640,6 +640,11 @@ impl Supervisor {
         socket_lease.cleanup_socket_path(&self.options.socket_path, expected_identity);
         #[cfg(not(unix))]
         socket::cleanup_socket_path_after_close(&self.options.socket_path, expected_identity);
+        // The lease's awaited shutdown: the refresh thread's join (and
+        // its up-to-350ms in-thread waits) runs off the async worker
+        // instead of stalling every task and timer on it at drop time.
+        #[cfg(unix)]
+        socket_lease.shutdown().await?;
         self.flush_telemetry_on_exit().await;
         serving
     }
