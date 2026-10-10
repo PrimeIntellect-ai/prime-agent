@@ -185,6 +185,17 @@ impl SessionFile {
         Ok(file)
     }
 
+    /// Whether the in-memory index covers every durable file row: a full
+    /// open always does; a windowed open does while the walk retained the
+    /// whole file, while a compacted window omits the discarded prefix
+    /// (complete-history consumers must read the file itself).
+    #[must_use]
+    pub fn index_covers_whole_file(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_none_or(|window| window.retained_whole_file)
+    }
+
     /// Load the verified compacted context without decoding old message bodies.
     ///
     /// # Errors
@@ -251,6 +262,7 @@ impl SessionFile {
             boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
+            retained_whole_file: window.retained_whole_file(),
             // The retained rows joined the store verbatim above, so their ids are
             // exactly the trailing `raw_count` store ids — no third parse pass.
             retained_ids: file.entries[file.entries.len() - raw_count..]

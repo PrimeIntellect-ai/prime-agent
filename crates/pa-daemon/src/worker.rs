@@ -1027,14 +1027,14 @@ fn watch_notice_sink(
     engine: std::sync::Weak<crate::agent_engine::AgentSessionEngine>,
     digest: Arc<AgentMessageDigest>,
 ) -> crate::agent_inbox_host::WatchNoticeSink {
-    std::sync::Arc::new(move |watch, content| {
+    std::sync::Arc::new(move |watch, target, content| {
         let Some(engine) = engine.upgrade() else {
             return;
         };
         if engine.session_is_closed() {
             return;
         }
-        digest.emit_watch_notice(watch, content);
+        digest.emit_watch_notice(watch, target, content);
     })
 }
 

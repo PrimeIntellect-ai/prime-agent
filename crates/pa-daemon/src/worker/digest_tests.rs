@@ -430,6 +430,7 @@ async fn watch_notice_on_the_push_lane_injects_the_quiet_row() {
     park_runner(&worker).await;
     worker.agent_digest.emit_watch_notice(
         "job",
+        "99",
         "[watch-job pid:99] output +400 bytes (0..400) command: tail -f",
     );
     assert_eq!(
@@ -454,9 +455,11 @@ async fn watch_notice_on_the_digest_lane_lands_an_inbox_entry() {
     let worker = created_worker().await;
     park_runner(&worker).await;
     worker.agent_digest.configure_pin("digest").unwrap();
-    worker
-        .agent_digest
-        .emit_watch_notice("agent", "[watch-agent child:c1] messages 3..7 (+4)");
+    worker.agent_digest.emit_watch_notice(
+        "agent",
+        "c1",
+        "[watch-agent child:c1] messages 3..7 (+4)",
+    );
     let snapshot = worker.agent_digest.inbox_snapshot();
     assert_eq!(snapshot["unread"], json!(1));
     assert_eq!(snapshot["entries"][0]["kind"], json!("watch"));
@@ -558,9 +561,11 @@ async fn watch_events_respect_the_inbox_admission_cap() {
     let total = worker.agent_digest.inbox_snapshot()["total"]
         .as_u64()
         .unwrap();
-    worker
-        .agent_digest
-        .emit_watch_notice("agent", "[watch-agent child:c1] messages 3..7 (+4)");
+    worker.agent_digest.emit_watch_notice(
+        "agent",
+        "c1",
+        "[watch-agent child:c1] messages 3..7 (+4)",
+    );
     let snapshot = worker.agent_digest.inbox_snapshot();
     assert_eq!(
         snapshot["total"],
@@ -834,15 +839,16 @@ async fn a_busy_session_holds_one_pending_watch_notice_per_watch() {
     for index in 0..3 {
         worker.agent_digest.emit_watch_notice(
             "agent",
+            "c1",
             &format!("[watch-agent child:c1] messages {index}..{}", index + 1),
         );
     }
     worker
         .agent_digest
-        .emit_watch_notice("job", "[watch-job pid:1] output +10 bytes (0..10)");
+        .emit_watch_notice("job", "1", "[watch-job pid:1] output +10 bytes (0..10)");
     worker
         .agent_digest
-        .emit_watch_notice("job", "[watch-job pid:1] output +20 bytes (0..20)");
+        .emit_watch_notice("job", "1", "[watch-job pid:1] output +20 bytes (0..20)");
     let texts = {
         let core = worker.core.lock().unwrap();
         core_lane_items(&core, Lane::Steering)
@@ -857,7 +863,7 @@ async fn a_busy_session_holds_one_pending_watch_notice_per_watch() {
             "[watch-agent child:c1] messages 2..3".to_string(),
             "[watch-job pid:1] output +20 bytes (0..20)".to_string(),
         ],
-        "one pending notice per watch, superseded by the newest: {texts:?}"
+        "one pending notice per watch target, superseded by the newest: {texts:?}"
     );
     assert_eq!(
         types,
@@ -866,6 +872,40 @@ async fn a_busy_session_holds_one_pending_watch_notice_per_watch() {
             "agent_watch_notice".to_string()
         ],
         "{types:?}"
+    );
+
+    // Distinct targets never share a pending row: a poll pass that
+    // emits for several children (or two growing jobs) keeps every
+    // target's own range — one row per coarse watch kind would drop
+    // every target's notice except the last one emitted.
+    worker
+        .agent_digest
+        .emit_watch_notice("agent", "c2", "[watch-agent child:c2] messages 0..2");
+    worker.agent_digest.emit_watch_notice(
+        "agent",
+        "c3",
+        "[watch-agent child:c3] status: idle -> running",
+    );
+    worker
+        .agent_digest
+        .emit_watch_notice("job", "7", "[watch-job pid:7] output +5 bytes (0..5)");
+    let texts = {
+        let core = worker.core.lock().unwrap();
+        core_lane_items(&core, Lane::Steering)
+            .iter()
+            .map(|item| item.message.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        texts,
+        vec![
+            "[watch-agent child:c1] messages 2..3".to_string(),
+            "[watch-job pid:1] output +20 bytes (0..20)".to_string(),
+            "[watch-agent child:c2] messages 0..2".to_string(),
+            "[watch-agent child:c3] status: idle -> running".to_string(),
+            "[watch-job pid:7] output +5 bytes (0..5)".to_string(),
+        ],
+        "one pending notice per watched target: {texts:?}"
     );
 }
 
@@ -909,14 +949,14 @@ async fn the_watch_sink_never_admits_once_the_engine_is_dropped() {
     let sink = watch_notice_sink(weak.clone(), Arc::clone(&digest));
 
     // Live session: the push lane gains the quiet steering row. Each
-    // arm uses its own watch key so a wrongly-admitted notice appends
-    // a fresh row instead of coalescing into the pending one.
-    sink("job-live", "[watch-job pid:1] output +10 bytes (0..10)");
+    // arm uses its own target so a wrongly-admitted notice appends a
+    // fresh row instead of coalescing into the pending one.
+    sink("job", "1", "[watch-job pid:1] output +10 bytes (0..10)");
     assert_eq!(core.lock().unwrap().steering.len(), 1);
 
     // Closed session: the gate refuses the notice.
     engine.mark_session_closed();
-    sink("job-closed", "[watch-job pid:1] output +10 bytes (10..20)");
+    sink("job", "2", "[watch-job pid:2] output +10 bytes (10..20)");
     assert_eq!(core.lock().unwrap().steering.len(), 1);
 
     // Disposed engine (a late kernel notice racing the teardown): the
@@ -924,7 +964,7 @@ async fn the_watch_sink_never_admits_once_the_engine_is_dropped() {
     engine.clear_session_closed();
     drop(engine);
     assert!(weak.upgrade().is_none(), "the engine Arc did not drop");
-    sink("job-dropped", "[watch-job pid:1] output +20 bytes (20..40)");
+    sink("job", "3", "[watch-job pid:3] output +20 bytes (20..40)");
     assert_eq!(
         core.lock().unwrap().steering.len(),
         1,

@@ -45,8 +45,12 @@ pub struct DigestInboxSeams {
 }
 
 /// The worker-installed watch routing: one watch event (agent or job)
-/// routed through the digest-aware notice pipeline.
-pub type WatchNoticeSink = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// routed through the digest-aware notice pipeline. The arguments are
+/// the watch kind ("agent" | "job"), the TARGET the event is about (the
+/// child's name for agent watches, the job's pid for job watches), and
+/// the formatted notice content. The target is the push-lane coalescing
+/// key: distinct children and distinct jobs keep their own pending row.
+pub type WatchNoticeSink = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 /// The watch registration's engine-side state (swarm PR E): the
 /// subscription registry plus the one-shared-poll arming flag. The poller
@@ -81,7 +85,7 @@ impl AgentWatchHostState {
         generation: u64,
         subscriptions: &[crate::agent_watch::AgentWatchSubscription],
         snapshots: &HashMap<String, AgentWatchSnapshot>,
-        events: &mut Vec<String>,
+        events: &mut Vec<(String, String)>,
     ) -> bool {
         if self.generation != generation {
             return false;
@@ -108,7 +112,13 @@ impl AgentWatchHostState {
             .poll(&mut crate::agent_watch::AgentWatchState {
                 message_count: &|child_id: &str| current.get(child_id).cloned(),
                 on_event: &mut |event| {
-                    events.push(crate::agent_watch::format_agent_watch_notice(&event));
+                    // The target (the child's name) rides with the
+                    // formatted notice: the delivery keys the push-lane
+                    // coalescing on it.
+                    events.push((
+                        event.child_name.clone(),
+                        crate::agent_watch::format_agent_watch_notice(&event),
+                    ));
                 },
             });
         true
@@ -242,6 +252,7 @@ impl AgentSessionEngine {
                     if to_bytes > from_bytes {
                         sink(
                             "job",
+                            &pid.to_string(),
                             &crate::agent_watch::format_job_watch_notice(
                                 pid, from_bytes, to_bytes, command,
                             ),
@@ -500,7 +511,7 @@ impl AgentSessionEngine {
         snapshots: &HashMap<String, AgentWatchSnapshot>,
         sink: &WatchNoticeSink,
     ) {
-        let mut events: Vec<String> = Vec::new();
+        let mut events: Vec<(String, String)> = Vec::new();
         let mut state = self.watch_host_state();
         if !state.poll_if_current(generation, subscriptions, snapshots, &mut events) {
             // The pass snapshotted the retired session's registry:
@@ -509,8 +520,8 @@ impl AgentSessionEngine {
             // re-snapshots fresh.
             return;
         }
-        for content in &events {
-            sink("agent", content);
+        for (target, content) in &events {
+            sink("agent", target, content);
         }
     }
 

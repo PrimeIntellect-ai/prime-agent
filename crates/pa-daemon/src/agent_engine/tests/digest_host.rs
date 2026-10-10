@@ -17,7 +17,7 @@ struct Harness {
     /// weakly); the `call` guard reads it.
     engine: std::sync::Arc<AgentSessionEngine>,
     handlers: HostRequestHandlers,
-    sink_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    sink_calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
     read_state: std::sync::Arc<std::sync::Mutex<Vec<Option<Vec<String>>>>>,
     configure_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
@@ -52,11 +52,12 @@ impl Harness {
         });
         let sink_calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink_for_engine = std::sync::Arc::clone(&sink_calls);
-        engine.set_watch_notice_sink(std::sync::Arc::new(move |watch, content| {
-            sink_for_engine
-                .lock()
-                .unwrap()
-                .push((watch.to_string(), content.to_string()));
+        engine.set_watch_notice_sink(std::sync::Arc::new(move |watch, target, content| {
+            sink_for_engine.lock().unwrap().push((
+                watch.to_string(),
+                target.to_string(),
+                content.to_string(),
+            ));
         }));
         let mut handlers = HostRequestHandlers::default();
         engine.register_digest_inbox_host_handlers(&mut handlers);
@@ -175,9 +176,10 @@ async fn bash_progress_validates_and_no_growth_is_silent() {
     let calls = harness.sink_calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "job");
+    assert_eq!(calls[0].1, "99", "the sink call is (kind, target, content)");
     assert!(
         calls[0]
-            .1
+            .2
             .contains("[watch-job pid:99] output +400 bytes (0..400)"),
         "{calls:?}"
     );
@@ -272,7 +274,7 @@ fn an_in_flight_poll_pass_dies_with_the_replaced_session() {
             status: "idle".to_string(),
         },
     );
-    let mut events: Vec<String> = Vec::new();
+    let mut events: Vec<(String, String)> = Vec::new();
     let polled = engine.watch_host_state().poll_if_current(
         generation,
         &subscriptions,
@@ -294,7 +296,7 @@ fn an_in_flight_poll_pass_dies_with_the_replaced_session() {
     // watch emits from its own baseline.
     let generation = engine.watch_host_state().generation;
     let subscriptions = engine.watch_host_state().registry.list();
-    let mut events: Vec<String> = Vec::new();
+    let mut events: Vec<(String, String)> = Vec::new();
     let polled = engine.watch_host_state().poll_if_current(
         generation,
         &subscriptions,
@@ -356,7 +358,7 @@ fn a_stale_snapshot_never_moves_a_re_registered_baseline_backwards() {
     // ...so the pass must drop its stale snapshot for the re-registered
     // subscription: no event, and the baseline holds at 11 (a poll that
     // accepted the stale 10 as compaction would re-baseline to 10).
-    let mut events: Vec<String> = Vec::new();
+    let mut events: Vec<(String, String)> = Vec::new();
     let polled = engine.watch_host_state().poll_if_current(
         generation,
         &subscriptions,
@@ -387,13 +389,17 @@ fn a_stale_snapshot_never_moves_a_re_registered_baseline_backwards() {
             status: "idle".to_string(),
         },
     );
-    let mut events: Vec<String> = Vec::new();
+    let mut events: Vec<(String, String)> = Vec::new();
     engine
         .watch_host_state()
         .poll_if_current(generation, &subscriptions, &snapshots, &mut events);
     assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].0, "c1",
+        "the event carries its target: {events:?}"
+    );
     assert!(
-        events[0].contains("messages 11..12 (+1)"),
+        events[0].1.contains("messages 11..12 (+1)"),
         "the re-baselined range: {events:?}"
     );
 }
@@ -485,22 +491,24 @@ fn a_watch_pass_delivers_under_the_same_hold_it_validated_under() {
         let held = probing_engine.agent_watches.try_lock().is_err();
         verdict_tx.send(held).expect("the verdict channel");
     });
-    let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let delivered =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String, String)>::new()));
     let recorded = std::sync::Arc::clone(&delivered);
     let probe_tx = std::sync::Mutex::new(probe_tx);
     let verdict_rx = std::sync::Mutex::new(verdict_rx);
     let sink: crate::agent_inbox_host::WatchNoticeSink = std::sync::Arc::new(
-        move |watch, content| {
+        move |watch, target, content| {
             probe_tx.lock().unwrap().send(()).expect("the probe signal");
             let held = verdict_rx.lock().unwrap().recv().expect("the verdict");
             assert!(
                 held,
                 "the pass delivered outside the watch hold: a replacement could retire the session mid-delivery"
             );
-            recorded
-                .lock()
-                .unwrap()
-                .push((watch.to_string(), content.to_string()));
+            recorded.lock().unwrap().push((
+                watch.to_string(),
+                target.to_string(),
+                content.to_string(),
+            ));
         },
     );
     engine.deliver_watch_pass(generation, &subscriptions, &snapshots, &sink);
@@ -508,8 +516,9 @@ fn a_watch_pass_delivers_under_the_same_hold_it_validated_under() {
         let delivered = delivered.lock().unwrap();
         assert_eq!(delivered.len(), 1, "{delivered:?}");
         assert_eq!(delivered[0].0, "agent");
+        assert_eq!(delivered[0].1, "c1", "the event's target");
         assert_eq!(
-            delivered[0].1, "[watch-agent child:c1] messages 5..8 (+3)",
+            delivered[0].2, "[watch-agent child:c1] messages 5..8 (+3)",
             "the range event"
         );
     }

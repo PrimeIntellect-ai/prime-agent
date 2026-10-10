@@ -21,7 +21,8 @@
 //! is enabled (the config flag, the controller, or a pin).
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::io::BufRead;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
@@ -184,12 +185,33 @@ struct InboxState {
 
 impl InboxState {
     /// Load (or reload) the records from the store's durable entries: the
-    /// inbox rows in file order plus the read-marker message ids.
+    /// inbox rows in file order plus the read-marker message ids. A
+    /// compacted window's index omits the discarded prefix — an unread
+    /// inbox entry older than the boundary must not vanish from
+    /// `rlm.inbox.list()`/`read()` after a restart — so whenever the
+    /// index does not cover the whole file the records hydrate from the
+    /// complete durable history (the active file, which a windowed store
+    /// never rewrites).
     fn load_from(&mut self, store: &crate::session_store::SessionFile) {
         let key = (store.path.clone(), store.session_id().to_string());
         if self.loaded_key.as_ref() == Some(&key) {
             return;
         }
+        self.records = if store.index_covers_whole_file() {
+            Self::records_from_index(store)
+        } else {
+            // None only when the complete history cannot be read at all
+            // (the window open already proved the file readable, so this
+            // is a torn open): fall back to the retained window's rows.
+            Self::records_from_complete_history(&store.path)
+                .unwrap_or_else(|| Self::records_from_index(store))
+        };
+        self.loaded_key = Some(key);
+    }
+
+    /// The records from the in-memory index (the full open, or a window
+    /// that retained the whole file).
+    fn records_from_index(store: &crate::session_store::SessionFile) -> Vec<InboxRecord> {
         let mut read_message_ids = std::collections::HashSet::new();
         let mut pending: Vec<InboxRecord> = Vec::new();
         for entry in store.entries() {
@@ -228,8 +250,61 @@ impl InboxState {
         for record in &mut pending {
             record.read = read_message_ids.contains(&record.data.message_id);
         }
-        self.records = pending;
-        self.loaded_key = Some(key);
+        pending
+    }
+
+    /// The records from the complete durable history: every line of the
+    /// session file, in file order, filtered to the inbox rows and the
+    /// read markers. Malformed lines (a torn tail write) are skipped.
+    fn records_from_complete_history(path: &Path) -> Option<Vec<InboxRecord>> {
+        let file = std::fs::File::open(path).ok()?;
+        let reader = std::io::BufReader::new(file);
+        let mut read_message_ids = std::collections::HashSet::new();
+        let mut pending: Vec<InboxRecord> = Vec::new();
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            let Ok(row) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if row.get("type").and_then(Value::as_str) != Some("custom") {
+                continue;
+            }
+            let custom_type = row
+                .get("customType")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if custom_type == AGENT_MESSAGE_INBOX_READ_ENTRY_CUSTOM_TYPE {
+                if let Some(message_id) = row
+                    .get("data")
+                    .and_then(|data| data.get("messageId"))
+                    .and_then(Value::as_str)
+                {
+                    read_message_ids.insert(message_id.to_string());
+                }
+            } else if custom_type == AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE {
+                let Some(id) = row.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                if let Ok(data) = serde_json::from_value::<InboxEntryData>(
+                    row.get("data").cloned().unwrap_or(Value::Null),
+                ) {
+                    if data.message_id.is_empty() {
+                        continue;
+                    }
+                    pending.push(InboxRecord {
+                        id: id.to_string(),
+                        data,
+                        read: false,
+                    });
+                }
+            }
+        }
+        for record in &mut pending {
+            record.read = read_message_ids.contains(&record.data.message_id);
+        }
+        Some(pending)
     }
 }
 
@@ -1013,17 +1088,35 @@ impl AgentMessageDigest {
                     // The durable read marker writes BEFORE the record
                     // flips (a failed write answers an error instead of
                     // marking an unread entry read — a restart must never
-                    // silently redeliver it).
+                    // silently redeliver it). A failed write must also
+                    // never hide what the batch already marked: the call
+                    // answers the entries whose markers are durable, the
+                    // failing (and every later) record stays unread and
+                    // re-reads on the next pull, where the failure
+                    // surfaces again on an empty batch. Only a failure
+                    // with NOTHING marked stays loud as an error.
+                    let mut marker_failed = false;
                     if let Some(store) = core.store.as_mut() {
-                        store.persist_entry(
+                        if let Err(error) = store.persist_entry(
                             "custom",
                             json!({
                                 "customType": AGENT_MESSAGE_INBOX_READ_ENTRY_CUSTOM_TYPE,
                                 "data": { "messageId": record.data.message_id },
                             }),
-                        )?;
+                        ) {
+                            if entries.is_empty() {
+                                return Err(error);
+                            }
+                            marker_failed = true;
+                        } else {
+                            record.read = true;
+                        }
+                    } else {
+                        record.read = true;
                     }
-                    record.read = true;
+                    if marker_failed {
+                        break;
+                    }
                 }
                 entries.push(record.view());
             }
@@ -1156,7 +1249,7 @@ impl AgentMessageDigest {
     /// coalesced notice per batch); on the push lane it injects the same
     /// quiet notice the async-bash completions ride (queue-if-busy,
     /// resume-if-idle), never content beyond the range.
-    pub(crate) fn emit_watch_notice(&self, watch: &str, content: &str) {
+    pub(crate) fn emit_watch_notice(&self, watch: &str, target: &str, content: &str) {
         let digest = {
             let core = self
                 .core
@@ -1211,13 +1304,16 @@ impl AgentMessageDigest {
         // emit faster than the runner drains, and one queued notice per
         // event would pile onto the steering lane unbounded (up to 64
         // watches x 12 polls/minute for the busy turn's whole duration).
-        // One UNDELIVERED push-lane notice per watch: the newest event
-        // supersedes the pending row's content (the ranges are advisory;
-        // the newest one always reflects the child's latest state).
+        // One UNDELIVERED push-lane notice per watch TARGET: the newest
+        // event supersedes the pending row's content (the ranges are
+        // advisory; the newest one always reflects that target's latest
+        // state). Distinct children and distinct jobs keep their own row
+        // — one pending row per coarse watch kind would drop every
+        // target's range except the last one the pass emitted.
         if let Some(pending) = core
             .steering
             .iter_mut()
-            .find(|item| is_push_watch_notice_for(item, watch))
+            .find(|item| is_push_watch_notice_for(item, watch, target))
         {
             pending.message = content.to_string();
             if let Some(row) = pending.custom_message.as_mut() {
@@ -1231,7 +1327,7 @@ impl AgentMessageDigest {
             "customType": crate::agent_watch::AGENT_WATCH_NOTICE_CUSTOM_TYPE,
             "content": content,
             "display": false,
-            "details": { "watch": watch },
+            "details": { "watch": watch, "target": target },
             "timestamp": crate::util::now_ms(),
         });
         let (policy, queue_visible) = if core.busy {
@@ -1266,20 +1362,26 @@ impl AgentMessageDigest {
 }
 
 /// Whether one queued item is an UNDELIVERED push-lane watch notice for
-/// the given watch (the coalescing key: one pending row per watch).
-fn is_push_watch_notice_for(item: &QueuedItem, watch: &str) -> bool {
+/// the given watch and TARGET (the coalescing key: one pending row per
+/// watched target, never per coarse watch kind).
+fn is_push_watch_notice_for(item: &QueuedItem, watch: &str, target: &str) -> bool {
+    let details = item
+        .custom_message
+        .as_ref()
+        .and_then(|row| row.get("details"));
     item.custom_message
         .as_ref()
         .and_then(|row| row.get("customType"))
         .and_then(Value::as_str)
         == Some(crate::agent_watch::AGENT_WATCH_NOTICE_CUSTOM_TYPE)
-        && item
-            .custom_message
-            .as_ref()
-            .and_then(|row| row.get("details"))
+        && details
             .and_then(|details| details.get("watch"))
             .and_then(Value::as_str)
             == Some(watch)
+        && details
+            .and_then(|details| details.get("target"))
+            .and_then(Value::as_str)
+            == Some(target)
 }
 
 /// Whether one queued item is an undelivered digest notice.
@@ -1808,14 +1910,22 @@ mod tests {
     fn concurrent_watch_events_cannot_append_past_the_inbox_cap() {
         let (digest, _dir) = digest_over_store();
         for index in 0..INBOX_MAX_UNREAD - 1 {
-            digest.emit_watch_notice("agent", &format!("[watch-agent child:c{index}]"));
+            digest.emit_watch_notice(
+                "agent",
+                &format!("c{index}"),
+                &format!("[watch-agent child:c{index}]"),
+            );
         }
         let parked_inbox = digest.inbox.lock().unwrap();
         let mut watchers = Vec::new();
         for index in 0..8 {
             let digest = std::sync::Arc::clone(&digest);
             watchers.push(std::thread::spawn(move || {
-                digest.emit_watch_notice("agent", &format!("[watch-agent child:w{index}]"));
+                digest.emit_watch_notice(
+                    "agent",
+                    &format!("w{index}"),
+                    &format!("[watch-agent child:w{index}]"),
+                );
             }));
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2102,6 +2212,155 @@ mod tests {
         assert!(
             content.contains("row-postwrite"),
             "the rewrite erased the accepted durable row"
+        );
+    }
+
+    /// A marker-write failure mid-batch must never hide what the batch
+    /// already marked durably: the call answers every entry whose read
+    /// marker is durable, the failing (and every later) record stays
+    /// unread and re-reads on the next pull, and only a failure with
+    /// nothing marked stays loud as an error.
+    #[test]
+    fn a_failed_marker_write_mid_batch_returns_the_marked_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("session.jsonl");
+        let inbox_row = |row_id: &str, message_id: &str, content: &str| {
+            json!({
+                "type": "custom", "id": row_id, "timestamp": "2026-01-01T00:00:03.000Z",
+                "customType": AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE,
+                "data": {
+                    "messageId": message_id,
+                    "content": content,
+                    "from": { "activeSessionId": "sender", "sessionName": "sender" },
+                    "fromRelationship": "sibling",
+                    "target": { "activeSessionId": "target", "sessionId": "target" },
+                    "receivedAt": "2026-01-01T00:00:03.000Z",
+                    "kind": "agent_message",
+                },
+            })
+        };
+        let marker_row = json!({
+            "type": "custom", "id": "row-marker", "timestamp": "2026-01-01T00:00:04.000Z",
+            "customType": AGENT_MESSAGE_INBOX_READ_ENTRY_CUSTOM_TYPE,
+            "data": { "messageId": "msg-e1" },
+        });
+        let header = json!({
+            "type": "session", "version": 3, "id": "marker-batch",
+            "timestamp": "2026-01-01T00:00:00.000Z", "cwd": "/tmp",
+        });
+        std::fs::write(
+            &store_path,
+            format!(
+                "{header}\n{}\n{marker_row}\n{}\n",
+                inbox_row("row-e1", "msg-e1", "first marked earlier"),
+                inbox_row("row-e2", "msg-e2", "second must re-read"),
+            ),
+        )
+        .unwrap();
+        let mut store = crate::session_store::SessionFile::open(&store_path).unwrap();
+        // The append-proof path (a directory): every marker write fails
+        // while the loaded index keeps both inbox rows and the marker.
+        store.set_path(dir.path().to_path_buf());
+        let digest = AgentMessageDigest::new(
+            std::sync::Arc::new(std::sync::Mutex::new(SessionCore::test_core(
+                Some(store),
+                "/tmp".to_string(),
+            ))),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        );
+        digest.configure_pin("digest").unwrap();
+
+        // The loud arm: this batch marks nothing (e1 is already read,
+        // the ids-less pull meets only e2) — the failed write errors.
+        digest.read_inbox(None).unwrap_err();
+
+        // The partial arm: e1 is already durably marked, so its view
+        // must answer even though e2's marker write fails mid-batch.
+        let result = digest
+            .read_inbox(Some(vec!["row-e1".to_string(), "row-e2".to_string()]))
+            .unwrap();
+        assert_eq!(result["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(result["entries"][0]["id"], json!("row-e1"));
+        assert_eq!(
+            result["entries"][0]["content"],
+            json!("first marked earlier"),
+            "the durably-marked entry was lost: {result}"
+        );
+        assert_eq!(result["unread"], json!(1));
+
+        // e2 stays unread and re-readable: the failure hid nothing.
+        let snapshot = digest.inbox_snapshot();
+        assert_eq!(snapshot["unread"], json!(1));
+        assert_eq!(
+            snapshot["entries"][1]["content"],
+            json!("second must re-read"),
+            "{snapshot}"
+        );
+    }
+
+    /// A compacted window's index omits the discarded prefix: an unread
+    /// inbox entry older than the boundary must still hydrate from the
+    /// complete durable history (the active file, which a windowed store
+    /// never rewrites), so it stays listed, counted, and wake-capable
+    /// after a restart.
+    #[test]
+    fn a_windowed_reload_hydrates_inbox_rows_older_than_the_boundary() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store_path = dir.path().join("session.jsonl");
+        let inbox_row = json!({
+            "type": "custom", "id": "row-inbox-old", "timestamp": "2026-01-01T00:00:01.000Z",
+            "customType": AGENT_MESSAGE_INBOX_ENTRY_CUSTOM_TYPE,
+            "data": {
+                "messageId": "msg-old",
+                "content": "older than the window",
+                "from": { "activeSessionId": "sender", "sessionName": "sender" },
+                "fromRelationship": "sibling",
+                "target": { "activeSessionId": "target", "sessionId": "target" },
+                "receivedAt": "2026-01-01T00:00:01.000Z",
+                "kind": "agent_message",
+            },
+        });
+        let rows = [
+            json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+            json!({"type":"thinking_level_change","id":"settings","parentId":null,"timestamp":"2026-01-01T00:00:00.500Z","thinkingLevel":"high"}),
+            inbox_row,
+            json!({"type":"message","id":"u0","parentId":"settings","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"first","timestamp":1}}),
+            json!({"type":"message","id":"u1","parentId":"u0","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"user","content":"second","timestamp":2}}),
+            json!({"type":"compaction","id":"compact","parentId":"u1","timestamp":"2026-01-01T00:00:03.000Z","summary":"summary","firstKeptEntryId":"u1","tokensBefore":999}),
+            json!({"type":"message","id":"leaf","parentId":"compact","timestamp":"2026-01-01T00:00:04.000Z","message":{"role":"user","content":"latest","timestamp":3}}),
+        ];
+        let body: String = rows.iter().map(|row| row.to_string() + "\n").collect();
+        std::fs::write(&store_path, &body).unwrap();
+        let store = crate::session_store::SessionFile::open_windowed(&store_path).unwrap();
+        // The finding's premise: the windowed index omits the discarded
+        // prefix (the pre-boundary inbox row).
+        assert!(
+            store
+                .entries()
+                .iter()
+                .all(|entry| entry.id != "row-inbox-old"),
+            "the fixture's inbox row is inside the retained window: adjust the boundary"
+        );
+        assert!(
+            !store.index_covers_whole_file(),
+            "the fixture must exercise a compacted window"
+        );
+        let digest = AgentMessageDigest::new(
+            std::sync::Arc::new(std::sync::Mutex::new(SessionCore::test_core(
+                Some(store),
+                "/tmp".to_string(),
+            ))),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+        );
+        let snapshot = digest.inbox_snapshot();
+        assert_eq!(snapshot["total"], json!(1), "{snapshot}");
+        assert_eq!(snapshot["unread"], json!(1), "{snapshot}");
+        assert_eq!(
+            snapshot["entries"][0]["content"],
+            json!("older than the window"),
+            "the pre-boundary inbox entry vanished: {snapshot}"
         );
     }
 }
