@@ -50,10 +50,10 @@ pub fn set_parent_death_signal(command: &mut Command) {
                 return Err(std::io::Error::last_os_error());
             }
             if libc::getppid() != parent_pid {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "the parent died before the death signal was armed",
-                ));
+                // No allocation or format here: the hook runs between
+                // fork and exec and must stay async-signal-safe. ESRCH
+                // is the honest code - the parent no longer exists.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
             }
             Ok(())
         });

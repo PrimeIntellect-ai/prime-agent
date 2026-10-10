@@ -1287,14 +1287,6 @@ fn a_parent_death_kills_the_bootstrap_child() {
         *slot_for_thread.lock().unwrap() = Some(child);
     });
     handle.join().expect("the spawning thread ran");
-    // The pid is read before the waiter takes the child: the failure
-    // branch below needs it to clean up.
-    let child_pid = child_slot
-        .lock()
-        .unwrap()
-        .as_ref()
-        .expect("the spawned child")
-        .id() as i32;
     // A blocking wait turns the child's death into a message, and the
     // deadline bounds only the failure path: no polling, and the reaping
     // happens in the waiter as part of the wait.
@@ -1325,14 +1317,17 @@ fn a_parent_death_kills_the_bootstrap_child() {
             waiter.join().expect("the waiter thread ran");
             panic!("the child's wait failed: {err}");
         }
-        Err(_) => {
-            // The death signal never fired: kill the stray child - the
-            // waiter's blocking wait reaps it - before failing the test.
-            unsafe {
-                libc::kill(child_pid, libc::SIGKILL);
-            }
-            waiter.join().expect("the waiter thread ran");
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // The death signal never fired. The verdict below fails the
+            // test, and the child is self-bounded (`sleep 30`): the
+            // waiter's blocking wait still reaps it when it self-exits,
+            // so the failure path needs no kill - a kill by pid here
+            // could only reach a recycled pid, which is an unrelated
+            // process.
             panic!("the child outlived its spawning thread");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the waiter thread never reported the child's exit");
         }
     }
 }
