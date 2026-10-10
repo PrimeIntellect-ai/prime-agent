@@ -1,7 +1,7 @@
 //! Headless perf verifier for mouse drag-selection: the per-frame cost of a drag is independent of
 //! the session size (a drag frame restyles the visible cached rows' selection diff, never the
-//! transcript geometry). The budget compares a 100-drag burst vs. a no-drag baseline and a small
-//! session.
+//! transcript geometry). The budget measures a 100-drag burst after the initial viewport is
+//! rendered, excluding cold attach/setup and teardown on both session sizes.
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -223,16 +223,12 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-fn run_plan(
-    messages: usize,
-    steps: Vec<HeadlessStep>,
-) -> (Vec<String>, Vec<String>, std::time::Duration) {
+fn run_plan(messages: usize, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<String>) {
     let _guard = run_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
     let supervisor = MockSupervisor::bind(&socket);
     let handle = std::thread::spawn(move || supervisor.serve(messages));
-    let started = std::time::Instant::now();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -245,28 +241,47 @@ fn run_plan(
     let outcome = runtime
         .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
         .expect("interactive run");
-    let elapsed = started.elapsed();
     let _ = handle.join();
-    (outcome.frames, outcome.copies, elapsed)
+    (outcome.frames, outcome.copies)
 }
 
 /// The scroll-paused drag burst: mount the window at the transcript top, then press-drag-release
 /// across the first rows. The chat opens directly into content (the operator's 2026-09-26
 /// zero-shift directive), so the first user message's text row is row 3 (SGR 0-based 2).
-fn drag_burst() -> Vec<HeadlessStep> {
+fn drag_burst(timing: Option<std::sync::mpsc::Sender<std::time::Instant>>) -> Vec<HeadlessStep> {
     let mut steps = vec![HeadlessStep::ScrollTop];
+    if let Some(sender) = &timing {
+        steps.push(HeadlessStep::Timestamp(sender.clone()));
+    }
     steps.push(HeadlessStep::Mouse(press(3, 3)));
     for index in 0..100 {
         steps.push(HeadlessStep::Mouse(drag(3 + (index % 40), 3 + (index % 6))));
     }
     steps.push(HeadlessStep::Mouse(release(43, 8)));
+    if let Some(sender) = timing {
+        steps.push(HeadlessStep::Timestamp(sender));
+    }
     steps
 }
 
-/// One no-drag baseline of the same session shape: the drag burst's excess over this is the
-/// selection path's own cost.
-fn baseline() -> Vec<HeadlessStep> {
-    vec![HeadlessStep::ScrollTop]
+fn timed_drag(messages: usize) -> (Vec<String>, Vec<String>, Duration) {
+    let (timing_tx, timing_rx) = std::sync::mpsc::channel();
+    let (frames, copies) = run_plan(messages, drag_burst(Some(timing_tx)));
+    let timestamps: Vec<_> = timing_rx.try_iter().collect();
+    let [started, finished]: [std::time::Instant; 2] = timestamps
+        .try_into()
+        .expect("the rendered drag burst records both timing boundaries");
+    let elapsed = finished
+        .checked_duration_since(started)
+        .expect("timing markers arrive in monotonic order");
+    (frames, copies, elapsed)
+}
+
+#[test]
+fn timing_checkpoints_preserve_rendered_frames_and_copies() {
+    let expected = run_plan(40, drag_burst(None));
+    let (frames, copies, _) = timed_drag(40);
+    assert_eq!((frames, copies), expected);
 }
 
 #[test]
@@ -274,10 +289,8 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
     let small = 40usize;
     let large = 4000usize;
 
-    let (_, _, small_baseline) = run_plan(small, baseline());
-    let (_, copies_small, small_drag) = run_plan(small, drag_burst());
-    let (_, _, large_baseline) = run_plan(large, baseline());
-    let (frames_large_drag, copies_large, large_drag) = run_plan(large, drag_burst());
+    let (_, copies_small, small_drag) = timed_drag(small);
+    let (frames_large_drag, copies_large, large_drag) = timed_drag(large);
 
     // The copies are the same text both sizes: the drag extracts the spanned rows through the same
     // coordinates on either session.
@@ -292,18 +305,17 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
         &copies_large[0][..copies_large[0].len().min(40)]
     );
 
-    // The drag path's own cost (burst minus baseline) stays in the same band on either session: no
-    // per-frame geometry resolve scales it with the transcript.
-    let small_excess = small_drag.saturating_sub(small_baseline);
-    let large_excess = large_drag.saturating_sub(large_baseline);
+    // Both boundaries are consumed on the UI loop, after the preceding frame. The measured
+    // interval includes press, every drag frame, release/copy and its final frame, but excludes
+    // the separately variable cold attach/initial viewport work and teardown.
     assert!(
-        large_excess < small_excess + Duration::from_millis(250),
-        "the large session's drag excess ({large_excess:?}) must stay within \
-         250ms of the small session's ({small_excess:?})"
+        large_drag < small_drag + Duration::from_millis(250),
+        "the large session's drag cost ({large_drag:?}) must stay within \
+         250ms of the small session's ({small_drag:?})"
     );
     assert!(
-        large_excess < Duration::from_millis(500),
-        "100 drag frames on a ~40MB session cost {large_excess:?} — the \
+        large_drag < Duration::from_millis(500),
+        "100 drag frames on a ~40MB session cost {large_drag:?} — the \
          per-frame cost is not session-size independent (the pre-fix \
          release alone resolved the full geometry once per copy)"
     );

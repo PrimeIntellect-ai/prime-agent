@@ -972,6 +972,12 @@ async fn run_interactive_surface(
                     }
                 }
             } else if let Some(input) = pending.pop_front() {
+                // Timing markers observe the previous frame without dirtying the view or
+                // adding a select/render iteration to the measured input sequence.
+                if let UiInput::Timestamp(sender) = input {
+                    sender.send(Instant::now())?;
+                    continue;
+                }
                 session.dirty = true;
                 match input {
                     UiInput::Key(key) => {
@@ -1122,6 +1128,7 @@ async fn run_interactive_surface(
                             session.run_traces_login(&mut view);
                         }
                     }
+                    UiInput::Timestamp(_) => unreachable!("timing marker handled above"),
                     UiInput::HeadlessDone => headless_done = true,
                     UiInput::WaitRender { .. } | UiInput::WaitGone { .. } => {
                         unreachable!("render barrier handled above")

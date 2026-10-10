@@ -287,6 +287,11 @@ impl Renderer {
                                     }
                                 }
                             }
+                            HeadlessStep::Timestamp(sender) => {
+                                if ui_tx.send(UiInput::Timestamp(sender)).is_err() {
+                                    return;
+                                }
+                            }
                             HeadlessStep::Key(key) => {
                                 if ui_tx.send(UiInput::Key(key)).is_err() {
                                     return;
