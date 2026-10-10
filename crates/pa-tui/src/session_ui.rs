@@ -122,6 +122,33 @@ pub(crate) struct CommandCatalogUpdate {
     pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
+pub(crate) fn attach_capabilities() -> Vec<pa_types::daemon::DaemonClientCapability> {
+    vec![
+        "attach_snapshot".to_string(),
+        "event_sequence".to_string(),
+        "slim_attach".to_string(),
+        "elide_snapshot_images".to_string(),
+        "windowed_snapshot".to_string(),
+    ]
+}
+
+pub(crate) fn last_assistant_text_of(chat: &[ChatEntry]) -> Option<String> {
+    chat.iter().rev().find_map(|entry| match entry {
+        ChatEntry::Assistant(message) => {
+            message.blocks.iter().rev().find_map(|block| match block {
+                MessageBlock::Text(text) => Some(text.clone()),
+                MessageBlock::Thinking(_) => None,
+            })
+        }
+        _ => None,
+    })
+}
+
+pub(crate) struct TranscriptBackfillNote {
+    pub epoch: u64,
+    pub entries: std::result::Result<Vec<ChatEntry>, String>,
+}
+
 pub(crate) struct SessionUi {
     pub(crate) client: DaemonClient,
     pub(crate) active_session_id: String,
@@ -326,6 +353,15 @@ pub(crate) struct SessionUi {
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
     pub(crate) transcript_stale: bool,
+    transcript_epoch: u64,
+    /// Dropping or replacing the handle aborts an obsolete backfill task. An
+    /// already-running decode finishes on the blocking pool and its result is
+    /// discarded: the aborted task never sends it, and an already-queued note
+    /// is dropped by the epoch check.
+    pub(crate) transcript_backfill: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    pending_backfill: Option<usize>,
+    backfill_seam: crate::snapshot::BackfillSeam,
+    backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     /// Adoption telemetry (counted into `tui exit`); `None` drops events.
     pub(crate) telemetry: Option<std::sync::Arc<dyn crate::interactive::InteractionTelemetry>>,
     scroll_adoption_emitted: bool,

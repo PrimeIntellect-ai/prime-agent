@@ -1,7 +1,7 @@
 //! The loaded-session view: the branch walks, the window/settings reads, the
 //! compacted message fold and its scalars, and the wire-shape message helpers.
 
-use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value};
+use super::{json, MessageWindowScalars, SessionEntry, SessionFile, Value, WindowedTranscript};
 
 /// Entry types that represent user intent (vs daemon bookkeeping).
 const CONTENT_ENTRY_TYPES: &[&str] = &[
@@ -279,7 +279,23 @@ impl SessionFile {
     #[must_use]
     pub fn messages(&self) -> Vec<Value> {
         let mut messages = Vec::new();
-        self.walk_message_values(|message| messages.push(message.into_owned()));
+        self.walk_message_values(|_, message| {
+            messages.push(message.into_owned());
+            true
+        });
+        messages
+    }
+
+    #[must_use]
+    pub fn messages_before(&self, before: usize) -> Vec<Value> {
+        let mut messages = Vec::new();
+        self.walk_message_values(|index, message| {
+            if index >= before {
+                return false;
+            }
+            messages.push(message.into_owned());
+            true
+        });
         messages
     }
 
@@ -288,11 +304,12 @@ impl SessionFile {
     #[must_use]
     pub fn scan_message_scalars(&self) -> MessageWindowScalars {
         let mut scalars = MessageWindowScalars::default();
-        self.walk_message_values(|message| {
+        self.walk_message_values(|_, message| {
             scalars.message_count += 1;
             if let Some(timestamp) = crate::types::message_timestamp_ms(&message) {
                 scalars.last_timestamp_ms = Some(timestamp);
             }
+            true
         });
         scalars
     }
@@ -300,7 +317,10 @@ impl SessionFile {
     /// The windowed message sequence behind [`Self::messages`] (`custom_message`
     /// rows rejoin as their wire form, `role: "custom"`; a compaction window
     /// prepends its summary message). Every consumer derives from this one walk.
-    fn walk_message_values<'a>(&'a self, mut visit: impl FnMut(std::borrow::Cow<'a, Value>)) {
+    fn walk_message_values<'a>(
+        &'a self,
+        mut visit: impl FnMut(usize, std::borrow::Cow<'a, Value>) -> bool,
+    ) {
         let entry_message = |entry: &'a SessionEntry| -> Option<std::borrow::Cow<'a, Value>> {
             match entry.type_.as_str() {
                 "message" => entry.fields.get("message").map(std::borrow::Cow::Borrowed),
@@ -319,12 +339,16 @@ impl SessionFile {
             }
         };
         let branch = self.branch();
+        let mut index = 0usize;
         let Some(compaction_position) =
             branch.iter().rposition(|entry| entry.type_ == "compaction")
         else {
             for entry in &branch {
                 if let Some(message) = entry_message(entry) {
-                    visit(message);
+                    if !visit(index, message) {
+                        return;
+                    }
+                    index += 1;
                 }
             }
             return;
@@ -350,10 +374,12 @@ impl SessionFile {
                 retained_count += 1;
             }
         }
-        visit(std::borrow::Cow::Owned(compaction_summary_message(
-            compaction,
-            retained_count,
-        )));
+        let summary =
+            std::borrow::Cow::Owned(compaction_summary_message(compaction, retained_count));
+        if !visit(index, summary) {
+            return;
+        }
+        index += 1;
         let mut keeping = false;
         for entry in &branch[..compaction_position] {
             if !entry_bears_message(entry) {
@@ -364,14 +390,78 @@ impl SessionFile {
             }
             if keeping {
                 if let Some(message) = entry_message(entry) {
-                    visit(message);
+                    if !visit(index, message) {
+                        return;
+                    }
+                    index += 1;
                 }
             }
         }
         for entry in &branch[compaction_position + 1..] {
             if let Some(message) = entry_message(entry) {
-                visit(message);
+                if !visit(index, message) {
+                    return;
+                }
+                index += 1;
             }
+        }
+    }
+
+    #[must_use]
+    pub fn windowed_messages(&self, tail_budget: usize) -> WindowedTranscript {
+        let mut visited: Vec<std::borrow::Cow<'_, Value>> = Vec::new();
+        let mut last_user_prompt_ms = None;
+        self.walk_message_values(|_, message| {
+            if message.get("role").and_then(Value::as_str) == Some("user") {
+                // The prompt scalar mirrors the TUI's numeric/ISO timestamp
+                // contract without changing the roster's activity-time fold.
+                let prompt_timestamp_ms = match message.get("timestamp") {
+                    Some(Value::Number(number)) => number.as_u64().or_else(|| {
+                        number
+                            .as_f64()
+                            .filter(|value| value.is_finite())
+                            .map(|value| value.max(0.0) as u64)
+                    }),
+                    Some(Value::String(iso)) => pa_types::incident::timestamp_to_ms(iso)
+                        .filter(|ms| *ms > 0)
+                        .map(|ms| ms as u64),
+                    _ => None,
+                };
+                if let Some(timestamp) = prompt_timestamp_ms {
+                    last_user_prompt_ms = Some(timestamp);
+                }
+            }
+            visited.push(message);
+            true
+        });
+        let mut cut = visited.len().saturating_sub(tail_budget);
+        while cut > 0
+            && matches!(
+                visited[cut].get("role").and_then(Value::as_str),
+                Some("toolResult" | "custom")
+            )
+        {
+            cut -= 1;
+        }
+        if let Some(retained) = visited
+            .first()
+            .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
+            .and_then(|first| first.get("retainedMessageCount"))
+            .and_then(Value::as_u64)
+            .and_then(|retained| usize::try_from(retained).ok())
+        {
+            if cut > 0 && cut <= retained {
+                cut = 0;
+            }
+        }
+        let messages = visited.split_off(cut);
+        WindowedTranscript {
+            messages: messages
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect(),
+            omitted: cut,
+            last_user_prompt_ms,
         }
     }
 

@@ -2,13 +2,13 @@
 //! §10 reattach, the attach fold, and the transcript rebuild it feeds),
 //! the stats refresh, and the detach/exit request helpers.
 use super::{
-    attach_data_from_response, create_session, mpsc, reconstruct, resume_hint_from_stats,
-    ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote, Context, DaemonClient,
-    DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
-    Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
-    RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
-    ShareNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS,
-    UI_REQUEST_TIMEOUT_MS,
+    attach_capabilities, attach_data_from_response, create_session, last_assistant_text_of, mpsc,
+    reconstruct, resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry,
+    CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
+    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
+    PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
+    SessionSelection, SessionUi, ShareNote, TranscriptBackfillNote, UpdateNote, Value,
+    EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -27,6 +27,7 @@ impl SessionUi {
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
+        backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -168,6 +169,11 @@ impl SessionUi {
             input_submission_generation: 0,
             prompt_in_flight: 0,
             transcript_stale: false,
+            transcript_epoch: 0,
+            transcript_backfill: None,
+            pending_backfill: None,
+            backfill_seam: crate::snapshot::BackfillSeam::Preserve,
+            backfill_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
@@ -341,12 +347,7 @@ impl SessionUi {
             client_id: None,
             // `elide_snapshot_images`: the transcript arrives without the base64 image payloads, so
             // an image-heavy session's attach stops transferring megabytes.
-            capabilities: Some(vec![
-                "attach_snapshot".to_string(),
-                "event_sequence".to_string(),
-                "slim_attach".to_string(),
-                "elide_snapshot_images".to_string(),
-            ]),
+            capabilities: Some(attach_capabilities()),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
@@ -482,19 +483,7 @@ impl SessionUi {
         // or compaction settles): the rebuild below re-syncs it into the
         // chrome exactly like the other reconstructed session fields.
         self.context = reconstructed.context_usage;
-        self.last_assistant_text = reconstructed
-            .chat
-            .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                ChatEntry::Assistant(message) => {
-                    message.blocks.iter().rev().find_map(|block| match block {
-                        MessageBlock::Text(text) => Some(text.clone()),
-                        MessageBlock::Thinking(_) => None,
-                    })
-                }
-                _ => None,
-            });
+        self.last_assistant_text = last_assistant_text_of(&reconstructed.chat);
         self.pending_queue = Some(reconstructed.queued);
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
@@ -526,6 +515,11 @@ impl SessionUi {
         // The rebuild's first frame materializes the visible window; arm the
         // post-frame trim so its wrap/render churn returns too.
         self.trim_after_frame = true;
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        self.transcript_backfill = None;
+        self.backfill_seam = reconstructed.backfill_seam;
+        self.pending_backfill =
+            Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())
     }
 

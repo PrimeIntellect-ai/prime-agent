@@ -1,10 +1,10 @@
 //! The streamed-event pump: client events, turn updates, assistant/tool
 //! rows, compaction aborts, and the telemetry seams.
 use super::{
-    assistant_message_parts, event_to_update, pop_superseded_attempt_row, AgentView, ChatEntry,
-    CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand, Duration, Map,
-    MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView, TurnUpdate, Value,
-    UI_REQUEST_TIMEOUT_MS,
+    assistant_message_parts, event_to_update, last_assistant_text_of, pop_superseded_attempt_row,
+    AgentView, ChatEntry, CompactionReason, CompactionState, DaemonClientEvent, DaemonCommand,
+    Duration, Map, MessageBlock, Result, RetryState, SessionUi, StatusKind, ToolResultView,
+    TranscriptBackfillNote, TurnUpdate, Value, UI_REQUEST_TIMEOUT_MS,
 };
 
 /// One backgrounded compaction-abort outcome: a failed abort surfaces as
@@ -111,6 +111,9 @@ impl SessionUi {
     /// failed fetch keeps the pushed outcome row instead of an empty transcript.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
         self.transcript_stale = false;
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        self.transcript_backfill = None;
+        self.pending_backfill = None;
         self.last_status_index = None;
         self.pressed_click = None;
         let Ok(data) = self
@@ -119,6 +122,8 @@ impl SessionUi {
                 DaemonCommand::GetMessages {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
+                    before: None,
+                    capabilities: None,
                     rest: Map::default(),
                 },
             )
@@ -135,6 +140,92 @@ impl SessionUi {
             view.push_entry(entry);
         }
         view.follow();
+        self.dirty = true;
+    }
+
+    pub(crate) fn spawn_pending_backfill(&mut self) {
+        if let Some(before) = self.pending_backfill.take() {
+            self.spawn_transcript_backfill(before);
+        }
+    }
+
+    pub(crate) fn spawn_transcript_backfill(&mut self, before: usize) {
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let epoch = self.transcript_epoch;
+        let notes = self.backfill_notes.clone();
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            let entries: Result<Vec<ChatEntry>> = async {
+                let command = DaemonCommand::GetMessages {
+                    id: None,
+                    active_session_id,
+                    before: Some(before as u64),
+                    capabilities: Some(crate::session_ui::attach_capabilities()),
+                    rest: Map::default(),
+                };
+                // A read-only request can safely retry once on a live link. Keep
+                // the same cursor; a second failure must not masquerade as an empty page.
+                let mut data = match client.request_ok(command.clone()).await {
+                    Ok(data) => data,
+                    Err(error) if crate::daemon_client::is_daemon_timeout(&error) => {
+                        return Err(error)
+                    }
+                    Err(_) => client.request_ok(command).await?,
+                };
+                let Some(Value::Array(messages)) = data.get_mut("messages").map(Value::take) else {
+                    return Err(anyhow::anyhow!("missing messages in history response"));
+                };
+                Ok(tokio::task::spawn_blocking(move || {
+                    crate::snapshot::transcript_to_entries(&messages)
+                })
+                .await?)
+            }
+            .await;
+            let entries = entries.map_err(|error| error.to_string());
+            let _ = notes.send(TranscriptBackfillNote { epoch, entries });
+        }));
+        self.transcript_backfill = Some(task);
+    }
+
+    pub(crate) fn apply_transcript_backfill(
+        &mut self,
+        note: TranscriptBackfillNote,
+        view: &mut AgentView,
+    ) {
+        if note.epoch != self.transcript_epoch {
+            return;
+        }
+        self.transcript_backfill = None;
+        let mut entries = match note.entries {
+            Ok(entries) => entries,
+            Err(error) => {
+                view.push_entry(ChatEntry::Status {
+                    text: format!(
+                        "Older history could not be loaded: {error}. Reopen the session to retry."
+                    ),
+                    kind: StatusKind::Warning,
+                });
+                self.dirty = true;
+                return;
+            }
+        };
+        crate::snapshot::join_backfilled_entries(&mut entries, self.backfill_seam);
+        let count = entries.len();
+        if let Some(index) = self.last_status_index {
+            self.last_status_index = Some(index + count);
+        }
+        if let Some(index) = self.streaming_index {
+            self.streaming_index = Some(index + count);
+        }
+        if let Some(index) = self.goal_view.last_status_index {
+            self.goal_view.last_status_index = Some(index + count);
+        }
+        self.pressed_click = None;
+        if self.last_assistant_text.is_none() {
+            self.last_assistant_text = last_assistant_text_of(&entries);
+        }
+        view.prepend_entries(entries);
+        self.trim_after_frame = true;
         self.dirty = true;
     }
 
