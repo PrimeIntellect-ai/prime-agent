@@ -1473,6 +1473,22 @@ class RetinaScaleTests(AppTestCase):
         self.assertIn("take a fresh screenshot", caught.exception.message)
         self.assertEqual(env.recorder.calls_named("click"), [])
 
+    async def test_an_unreadable_live_frame_refuses_image_clicks(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()  # observed 400x300
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 800, "height": 600}
+        await app.get_screenshot(attach=False)
+        # the window may have resized since the capture, and the live bounds
+        # probe fails: the stale AX rect would match the shot and the click
+        # would land on a reflowed UI
+        env.live_bounds_unreadable = True
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.click((400.0, 300.0))
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("fresh screenshot", caught.exception.message)
+        self.assertEqual(env.recorder.calls_named("click"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

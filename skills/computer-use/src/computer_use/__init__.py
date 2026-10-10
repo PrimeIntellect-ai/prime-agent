@@ -1194,7 +1194,17 @@ class App:
             # image logicals and moves the origin, a resized one rejects -
             # at any pixel ratio, a 1x capture just scales by one
             live = capture._live_window_bounds(self._shot_window_id)
-            frame = live if live is not None else rect
+            if live is None:
+                # the stale AX rect cannot verify the window's current size,
+                # so an unreadable live frame fails closed: an unverifiable
+                # window never takes image-coordinate clicks
+                raise ComputerUseError(
+                    "TRANSPORT_ERROR",
+                    "the focused window's current bounds are unreadable; take a fresh screenshot "
+                    "before clicking image coordinates",
+                    {},
+                )
+            frame = live
             if (float(frame[2]), float(frame[3])) != (float(self._shot_rect[2]), float(self._shot_rect[3])):
                 # a resize reflows the UI: the stale image's points may stay
                 # in bounds yet target the wrong control, so only a same-size

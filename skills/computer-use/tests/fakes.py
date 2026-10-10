@@ -484,7 +484,8 @@ class AppEnvironment:
         self.paste_baseline_side_effect: Any = None  # runs mid-paste during the baseline read
         self.live_geometry_moved = False  # a control's live bounds moved off the snapshot
         self.live_geometry: Any = None  # an explicit live-geometry override
-        self.live_window_bounds: Any = None  # the window's live global bounds (None = unreadable)
+        self.live_window_bounds: Any = None  # an explicit live-bounds override
+        self.live_bounds_unreadable = False  # the Quartz bounds probe fails
         self.paste_focus_before: Any = object()  # the focused element before the paste
         self.paste_focus_after: Any = object()  # the focused element after a focus move
         self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
@@ -544,8 +545,16 @@ class AppEnvironment:
         return sum(1 for name, args in self.recorder.calls if name == "press_key" and args.get("key") == "cmd+v")
 
     def _live_window_bounds(self, window_id: int) -> Any:
-        """Serve the window's live global bounds, or None when unreadable."""
-        return self.live_window_bounds
+        """Serve the window's live global bounds, or None when unreadable.
+
+        A readable probe defaults to the current observation's rect - the
+        working Quartz read when nothing has moved - so shot clicks see a
+        consistent frame."""
+        if self.live_bounds_unreadable:
+            return None
+        if self.live_window_bounds is not None:
+            return self.live_window_bounds
+        return self.window_rect
 
     def _live_geometry(self, ref: Any) -> Any:
         """Serve one element's live bounds: the snapshot's geometry, or the moved oracle."""
