@@ -222,7 +222,20 @@ fn add_cert_path(
             cause: "no PEM certificates found".to_string(),
         });
     }
-    store.add_parsable_certificates(result.certs);
+    for certificate in result.certs {
+        // A PEM block the loader accepts but the store cannot use (invalid
+        // certificate DER, an unusable anchor) fails loud naming the source:
+        // `add_parsable_certificates` would skip it silently, the store would
+        // end up short, and the missing root would surface later as a
+        // misleading handshake error.
+        store
+            .add(certificate)
+            .map_err(|error| TlsTrustError::Source {
+                variable,
+                path: file.or(dir).unwrap_or(Path::new("")).to_path_buf(),
+                cause: error.to_string(),
+            })?;
+    }
     Ok(())
 }
 
@@ -636,6 +649,24 @@ V1BRFUaQ1qcqy2T5dC3Irw==
         };
         assert_eq!(*variable, SSL_CERT_FILE_ENV);
         assert_eq!(path, no_certs);
+
+        // A PEM block whose base64 payload is not a valid certificate DER
+        // fails loud too: the loader accepts the section, so only the
+        // store's own validation catches it — skipping it silently would
+        // leave the named source short (or empty) with a misleading
+        // handshake error later.
+        let invalid_der = fixture_file(
+            dir,
+            "invalid-der.pem",
+            "-----BEGIN CERTIFICATE-----\naGVsbG8gd29ybGQK\n-----END CERTIFICATE-----\n",
+        );
+        std::env::set_var(SSL_CERT_FILE_ENV, &invalid_der);
+        let error = extra_ca_store().expect_err("an invalid-der ssl cert file fails");
+        let TlsTrustError::Source { variable, path, .. } = &error else {
+            panic!("the error names its source: {error}");
+        };
+        assert_eq!(*variable, SSL_CERT_FILE_ENV);
+        assert_eq!(*path, invalid_der);
 
         // A directory that holds no certificates fails loud the same way.
         let empty_dir = dir.join("empty-dir");
