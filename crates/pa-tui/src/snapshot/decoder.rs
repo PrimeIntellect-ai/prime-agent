@@ -43,7 +43,13 @@ pub enum TurnUpdate {
         is_error: bool,
     },
     /// `turn_end`, with the turn error string when the turn failed.
-    TurnEnded { error: Option<String> },
+    /// `run_failed`: the settle ends the run without a deliverable
+    /// result (the daemon's fallback terminal frame, or the engine's
+    /// aborted/errored terminal message).
+    TurnEnded {
+        error: Option<String>,
+        run_failed: bool,
+    },
     /// A `custom`-role message the transcript renders (session-command
     /// echo/result rows, or the malformed-notice fallback).
     CustomRow(ChatEntry),
@@ -65,8 +71,10 @@ pub enum TurnUpdate {
         final_error: Option<String>,
         restored_model: Option<String>,
     },
-    /// `agent_end`: the prompt queue drained.
-    Idle,
+    /// `agent_end`: the prompt queue drained; `aborted` marks a run that
+    /// ended under an abort (the daemon's wire marker — absent when the
+    /// run settled on its own).
+    Idle { aborted: bool },
     /// `compaction_start`: a compaction run began.
     CompactionStart {
         /// Why the compaction runs (`manual`/`requested`/`overflow`/`threshold`).
@@ -208,13 +216,28 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .unwrap_or_default()
                 .to_string(),
         }),
-        "turn_end" => Some(TurnUpdate::TurnEnded {
-            error: event
+        "turn_end" => {
+            let error = event
                 .get("error")
                 .and_then(Value::as_str)
-                .map(str::to_string),
+                .map(str::to_string);
+            // The aborted/errored terminal message settles the run
+            // without a result; the fallback terminal frame's error does
+            // too.
+            let run_failed = error.is_some()
+                || event
+                    .get("message")
+                    .and_then(|message| message.get("stopReason"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason == "aborted" || reason == "error");
+            Some(TurnUpdate::TurnEnded { error, run_failed })
+        }
+        "agent_end" => Some(TurnUpdate::Idle {
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }),
-        "agent_end" => Some(TurnUpdate::Idle),
         "message_start" | "message_update" | "message_end" => {
             let message = event.get("message")?.clone();
             let event_type = event.get("type").and_then(Value::as_str);

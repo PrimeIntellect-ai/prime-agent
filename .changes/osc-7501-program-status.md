@@ -1,0 +1,1 @@
+- The Rust TUI now speaks OSC 7501 (the Program Status Protocol): a terminal such as Rex tracks a prime-agent chat as working for the whole agent run (not per model step), done at the run's normal end, idle at rest or after an aborted or failed run, error when the thread goal errored; the session picker reports the selected row's running status, and quitting clears the record.

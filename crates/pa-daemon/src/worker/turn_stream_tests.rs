@@ -258,6 +258,87 @@ async fn done_aborted_arms_the_fallback_silence() {
     );
 }
 
+/// An abort landing between the run's steps settles through the run's own
+/// terminal frames — the original `toolUse` `turn_end`, then an `agent_end`
+/// that carries the abort marker (the wire fact an attached client's
+/// idle-vs-done settle keys on).
+#[tokio::test]
+async fn an_abort_between_steps_marks_the_runs_agent_end() {
+    let tool_message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::ToolExecutionEnd {
+                tool_call_id: "t1".to_string(),
+                result: json!({ "text": "the tool settled" }),
+                is_error: false,
+            },
+            EngineEvent::TurnEnd {
+                message: tool_message.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                messages: vec![tool_message],
+            },
+        ],
+        true,
+        false,
+    )
+    .await;
+    let turn_ends = positions_of(&events, "turn_end");
+    assert_eq!(turn_ends.len(), 1, "the run's terminal frame: {events:?}");
+    assert_eq!(
+        events[turn_ends[0]]["message"]["stopReason"],
+        json!("toolUse"),
+        "the abort between steps keeps the original terminal frame: {events:?}"
+    );
+    let agent_ends = positions_of(&events, "agent_end");
+    assert_eq!(
+        agent_ends.len(),
+        1,
+        "the aborted run still ends: {events:?}"
+    );
+    assert_eq!(
+        events[agent_ends[0]]["aborted"],
+        json!(true),
+        "the aborted run's agent_end carries the marker: {events:?}"
+    );
+    assert!(
+        turn_ends[0] < agent_ends[0],
+        "the settle pair lands in order: {events:?}"
+    );
+}
+
+/// A run that settled on its own keeps the TS `agent_end` shape — the marker
+/// rides aborted runs only.
+#[tokio::test]
+async fn a_self_settled_runs_agent_end_carries_no_marker() {
+    let tool_message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: tool_message.clone(),
+                tool_results: Vec::new(),
+            },
+            EngineEvent::AgentEnd {
+                messages: vec![tool_message],
+            },
+        ],
+        false,
+        false,
+    )
+    .await;
+    let agent_ends = positions_of(&events, "agent_end");
+    assert_eq!(
+        agent_ends.len(),
+        1,
+        "the settled run's agent_end: {events:?}"
+    );
+    assert!(
+        events[agent_ends[0]].get("aborted").is_none(),
+        "the self-settled run keeps the TS frame shape: {events:?}"
+    );
+}
+
 /// A settle frame that would forward on a plain flag sighting drops when
 /// `suppress_aborted_row` is set.
 #[tokio::test]

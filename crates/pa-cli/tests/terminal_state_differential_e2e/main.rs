@@ -38,6 +38,7 @@ use nix::pty::{openpty, Winsize};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use serde_json::json;
 
 use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::config_selector::{
@@ -54,6 +55,12 @@ const KITTY_QUERY: &[u8] = b"\x1b[?u";
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The alt-screen leave: every route that ends the process writes it.
 const ALT_SCREEN_LEAVE: &[u8] = b"\x1b[?1049l";
+/// The OSC 7501 reports the chat surface writes while a turn runs and rests.
+const STATUS_WORKING: &[u8] = b"\x1b]7501;state=working:app=prime-agent\x1b\\";
+const STATUS_DONE: &[u8] = b"\x1b]7501;state=done:app=prime-agent\x1b\\";
+const STATUS_IDLE: &[u8] = b"\x1b]7501;state=idle:app=prime-agent\x1b\\";
+/// The OSC 7501 clear every exit route writes once a report was sent.
+const STATUS_CLEAR: &[u8] = b"\x1b]7501;state=clear\x1b\\";
 
 /// The child-mode env: which surface this re-executed binary runs.
 const CHILD_MODE_ENV: &str = "PA_DIFF_CHILD_MODE";
@@ -203,6 +210,385 @@ fn write_replay_fixture() -> String {
     // The child reads the file across the process boundary.
     std::mem::forget(dir);
     path.display().to_string()
+}
+
+/// OSC 7501 (program status): the chat surface reports working for the
+/// whole run, done at the run's normal end, idle after an aborted run,
+/// and idle again when a later aborted run settles (the stale done
+/// never carries). The exit clears the terminal's record. One Esc and
+/// one Ctrl+C: each interrupt key fires once, outside the Esc repeat
+/// and the Ctrl+C pair windows, so the aborts stay deterministic.
+#[test]
+fn program_status_reports_the_run_and_its_settles() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    // A multi-step run opens: working spans its step boundary.
+    let mark = harness.mark();
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the run opened",
+    );
+
+    // An Esc abort settles the run (an aborted turn_end + agent_end):
+    // idle, not done.
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the aborted run settled",
+    );
+
+    // A finish run: the goal completes mid-run, then the next prompt
+    // settles it normally — done at the run's end.
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the finish run opened",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the run settled normally",
+    );
+
+    // The next run clears the remembered done: its aborted settle
+    // reports idle, never the stale done.
+    let mark = harness.mark();
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the next run opened",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"\x03");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the later run aborted: the stale done never carried",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status reports and clear");
+}
+
+/// A provider retry remains working even after the failed attempt's
+/// `turn_end` and `agent_end`. Observe the rendered countdown before checking
+/// the last report, so an earlier transient working report cannot pass.
+#[test]
+fn program_status_stays_working_during_provider_retry() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(
+        mark,
+        b"status-retry-sentinel",
+        "the retry countdown rendered",
+    );
+    let stream = harness.output();
+    let last_working = stream
+        .windows(STATUS_WORKING.len())
+        .rposition(|w| w == STATUS_WORKING);
+    let last_idle = stream
+        .windows(STATUS_IDLE.len())
+        .rposition(|w| w == STATUS_IDLE);
+    assert!(
+        last_working > last_idle,
+        "the pending retry must report working after its failed attempt settled"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"resume\r");
+    harness.wait_from(mark, STATUS_DONE, "the resumed retry completed");
+
+    // Switch while another retry is still pending, without an end event.
+    // The old countdown must not keep the newly attached idle session working.
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(mark, b"status-retry-sentinel", "another retry is pending");
+    harness.wait_from(mark, STATUS_WORKING, "the second retry reports working");
+    let mark = harness.mark();
+    harness.write(b"/new\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the new session drops the previous retry",
+    );
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+    harness.assert_terminal_state_restored("the retry status route");
+}
+
+/// A closed session cannot keep a provider countdown working.
+#[test]
+fn program_status_session_close_drops_pending_retry() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"retry\r");
+    harness.wait_from(
+        mark,
+        b"status-retry-sentinel",
+        "the retry countdown rendered",
+    );
+    harness.wait_from(mark, STATUS_WORKING, "the pending retry reports working");
+    let mark = harness.mark();
+    harness.write(b"/copy\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the closed session drops its pending retry",
+    );
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+    harness.assert_terminal_state_restored("the closed-session retry status route");
+}
+
+/// OSC 7501: a completed goal's done does not survive the attach into a
+/// new session (`/new`), and the exit still clears the record.
+#[test]
+fn program_status_a_new_session_drops_the_completed_goal() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the finish run opened",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"finish\r");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the goal's run settled normally",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/new\r");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the new session reports idle, not the previous session's done",
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status new-session route");
+}
+
+/// OSC 7501: a run resting between steps (a step's `turn_end` settled,
+/// the next turn not yet started) reports nothing new — the run stays
+/// `working` across the boundary, and only its settle reports `done`.
+#[test]
+fn program_status_reports_no_idle_between_steps() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"step\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the run opened",
+    );
+    harness.write(b"hi\r");
+    harness.wait_from(
+        mark,
+        STATUS_DONE,
+        "the done report once the resting run settled normally",
+    );
+    let stream = harness.output();
+    let done_at = mark + find_subsequence(&stream[mark..], STATUS_DONE).expect("the done report");
+    assert!(
+        find_subsequence(&stream[mark..done_at], STATUS_IDLE).is_none(),
+        "the run's between-steps rest reported no idle before its normal end"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status between-steps route");
+}
+
+/// OSC 7501: an abort landing in a run's tool batch settles through the
+/// step's ORIGINAL `toolUse` `turn_end` (never an aborted row) and the run's
+/// `agent_end` carrying the abort marker — the report rests idle, not done.
+/// An Esc firing once outside the repeat window keeps the abort deterministic.
+#[test]
+fn program_status_aborts_during_a_tool_batch_settles_idle_not_done() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    // A run whose step ended on a still-running tool batch.
+    let mark = harness.mark();
+    harness.write(b"batch\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the tools run opened",
+    );
+
+    // The abort settles the run between tools: the original turn_end
+    // (stopReason toolUse) and the marker-carrying agent_end.
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the aborted run settled",
+    );
+    let stream = harness.output();
+    let idle_at = mark + find_subsequence(&stream[mark..], STATUS_IDLE).expect("the idle report");
+    assert!(
+        find_subsequence(&stream[mark..idle_at], STATUS_DONE).is_none(),
+        "the aborted run never reports done: the between-tools abort keeps the run's own turn_end"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status tool-batch abort route");
+}
+
+/// OSC 7501: an attach that catches an in-flight compaction reports idle —
+/// compaction is not run activity — and every compaction settle (success,
+/// cancelled, failed) leaves the surface at rest, never stuck working.
+#[test]
+fn program_status_attach_during_compaction_settles_idle() {
+    let _lock = harness_lock();
+    let compaction_ends = [
+        (
+            json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "result": { "summary": "compaction-settled-needle", "tokensBefore": 123 },
+            }),
+            &b"compaction-settled-needle"[..],
+            "the compacted summary row",
+        ),
+        (
+            json!({ "type": "compaction_end", "reason": "manual", "aborted": true }),
+            &b"Compaction cancelled"[..],
+            "the cancelled compaction row",
+        ),
+        (
+            json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "errorMessage": "compaction-error-needle",
+            }),
+            &b"compaction-error-needle"[..],
+            "the failed compaction row",
+        ),
+    ];
+    for (compaction_end, needle, what) in compaction_ends {
+        let spec = ChildSpec::new("chat").attach_compaction_end(compaction_end);
+        let mut harness = DifferentialHarness::start(&spec);
+        harness.answer_kitty_query();
+        harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+        harness.wait_from_start(
+            STATUS_IDLE,
+            "the compacting attach reports idle, not working",
+        );
+
+        // The in-flight compaction settles (its compaction_end).
+        let mark = harness.mark();
+        harness.write(b"/copy\r");
+        harness.wait_from(mark, needle, what);
+
+        let stream = harness.output();
+        assert!(
+            find_subsequence(&stream, STATUS_WORKING).is_none(),
+            "the attach's compaction never reports working"
+        );
+
+        let mark = harness.mark();
+        harness.write(b"/exit\r");
+        harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+        let exit = harness.wait_child_exit(Duration::from_secs(20));
+        assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+        harness.assert_terminal_state_restored("the compaction attach route");
+    }
+}
+
+/// OSC 7501: the force-quit watchdog's restore carries the exit clear — the
+/// abrupt exit path owes the terminal the same record removal.
+#[test]
+fn program_status_clear_reaches_the_force_quit_restore() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat").stall(&["list"]));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(
+        STATUS_IDLE,
+        "the resting surface's idle report armed the exit clear",
+    );
+
+    harness.write(b"/list\r");
+    harness.drain_until_quiet(4);
+    harness.write(b"\x03");
+    harness.write(b"\x03");
+    harness.wait_from_start(STATUS_CLEAR, "the force-quit restore wrote the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the watchdog force-quit exited the process cleanly"
+    );
+
+    harness.assert_terminal_state_restored("the force-quit watchdog's exit clear");
 }
 
 /// Route: the parity exit through the `/exit` slash command.

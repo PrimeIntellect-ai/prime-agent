@@ -1446,17 +1446,42 @@ fn decodes_streamed_events() {
         TurnUpdate::AssistantMessage { message, streaming: false, .. } if message["content"] == "done"
     ));
     let ended = event_to_update(&json!({ "type": "turn_end" })).unwrap();
-    assert_eq!(ended, TurnUpdate::TurnEnded { error: None });
+    assert_eq!(
+        ended,
+        TurnUpdate::TurnEnded {
+            error: None,
+            run_failed: false,
+        }
+    );
     let failed = event_to_update(&json!({ "type": "turn_end", "error": "boom" })).unwrap();
     assert_eq!(
         failed,
         TurnUpdate::TurnEnded {
-            error: Some("boom".to_string())
+            error: Some("boom".to_string()),
+            run_failed: true,
         }
     );
+    // The engine's own terminal message settles the run as failed too; a
+    // step's toolUse settle does not.
+    for (stop_reason, run_failed) in [("aborted", true), ("error", true), ("toolUse", false)] {
+        assert_eq!(
+            event_to_update(&json!({
+                "type": "turn_end",
+                "message": { "role": "assistant", "stopReason": stop_reason },
+            })),
+            Some(TurnUpdate::TurnEnded {
+                error: None,
+                run_failed,
+            })
+        );
+    }
     assert_eq!(
         event_to_update(&json!({ "type": "agent_end" })),
-        Some(TurnUpdate::Idle)
+        Some(TurnUpdate::Idle { aborted: false })
+    );
+    assert_eq!(
+        event_to_update(&json!({ "type": "agent_end", "aborted": true })),
+        Some(TurnUpdate::Idle { aborted: true })
     );
 }
 

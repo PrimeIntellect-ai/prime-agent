@@ -267,7 +267,9 @@ impl SessionUi {
             } => {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
+                    self.run_open = false;
                     view.working = None;
+                    view.retry = None;
                     match reason.as_str() {
                         "shutdown" => self.error_row(
                             "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
@@ -372,6 +374,8 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
+                self.run_open = true;
+                self.settled = None;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();
@@ -459,12 +463,17 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error } => {
+            TurnUpdate::TurnEnded { error, run_failed } => {
                 // Only the engine's own turn_end clears the busy state: trailing frames
                 // from the previous turn must not cancel a turn admitted in between.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
                 self.turn_active = false;
+                // A step's settle leaves the run open; an aborted or
+                // failed one ends the run without a done report.
+                if run_failed {
+                    self.run_open = false;
+                }
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
@@ -594,9 +603,21 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => {
+            TurnUpdate::Idle { aborted } => {
                 if !self.turn_active {
                     view.working = None;
+                }
+                // The run's normal end settles the report's done; an
+                // aborted one settles idle (a stream-time abort already
+                // closed the run at its failed turn_end, but one landing
+                // between steps and tools ends through the original
+                // toolUse settle), and a goal's terminal outcome is kept.
+                if self.run_open {
+                    self.run_open = false;
+                    if !aborted {
+                        self.settled
+                            .get_or_insert(crate::program_status::Status::Done);
+                    }
                 }
             }
             TurnUpdate::GoalUpdate(goal) => {

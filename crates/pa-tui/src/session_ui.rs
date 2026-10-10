@@ -217,6 +217,14 @@ pub(crate) struct SessionUi {
     context: Option<crate::chrome::ContextUsage>,
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// An agent run is in flight (`agent_start` .. `agent_end`): the OSC
+    /// 7501 report stays working across the run's per-step turn
+    /// boundaries.
+    pub(crate) run_open: bool,
+    /// The outcome the chat surface reports at rest (the OSC 7501
+    /// done/error input): the run's normal end or a terminal
+    /// `goal_update`, cleared at the next turn's start and at attach.
+    pub(crate) settled: Option<crate::program_status::Status>,
     /// Completed turns observed on this connection. A prompt ACK may arrive
     /// after its entire streamed turn; it must not restart the loader then.
     turn_ends_seen: u64,
@@ -444,6 +452,17 @@ impl SessionUi {
     /// Take the one-shot post-first-frame trim request.
     pub(crate) fn take_trim_after_frame(&mut self) -> bool {
         std::mem::take(&mut self.trim_after_frame)
+    }
+
+    /// The chat surface's OSC 7501 report: working while a turn or the
+    /// run it belongs to is in flight, including a pending provider retry,
+    /// else the remembered outcome or idle.
+    pub(crate) fn program_status(&self, view: &AgentView) -> crate::program_status::Status {
+        if self.turn_active || self.run_open || view.retry.is_some() {
+            crate::program_status::Status::Working
+        } else {
+            self.settled.unwrap_or(crate::program_status::Status::Idle)
+        }
     }
 
     /// Hand the keyboard focus to the compact dock on its selected group (operator ruling
