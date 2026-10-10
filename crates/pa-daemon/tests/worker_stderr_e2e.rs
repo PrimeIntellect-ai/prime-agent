@@ -292,3 +292,36 @@ fn never_ready_worker_failure_carries_the_captured_stderr_tail() {
         "the tail names the log it read: {message}"
     );
 }
+
+/// Nix on macOS can supply a valid TMPDIR where the supervisor endpoint
+/// fits but the longer worker endpoint does not. Exercise the real worker
+/// launch without a provider or kernel; Linux already handles deep socket
+/// paths through a directory descriptor in the transport layer.
+#[test]
+fn scripted_worker_starts_with_a_long_tmpdir() {
+    let dir = tempfile::Builder::new()
+        .prefix("pa-long-tmp-")
+        .tempdir_in("/tmp")
+        .expect("short isolated temp dir");
+    // Exactly 65 bytes reproduces the observed Nix TMPDIR shape. The
+    // generated worker filename adds enough bytes to cross the transport
+    // limit, while daemon.sock under the same root still fits.
+    let padding = 65 - dir.path().as_os_str().len() - 1;
+    let long_tmpdir = dir.path().join("t".repeat(padding));
+    std::fs::create_dir(&long_tmpdir).expect("valid long TMPDIR");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let _daemon = DaemonBuilder::new(&socket, &agent_dir)
+        .env("TMPDIR", &long_tmpdir)
+        .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "2000")
+        .spawn(&socket);
+
+    let script_path = write_script(dir.path(), &["ready without inference"]);
+    let create_config = json!({
+        "cwd": dir.path().to_string_lossy(),
+        "sessionDir": agent_dir.join("sessions").to_string_lossy(),
+        "script": script_path.to_string_lossy(),
+    });
+    let mut client = Client::connect(&socket);
+    create_session(&mut client, "long-tmp-create", &create_config);
+}
