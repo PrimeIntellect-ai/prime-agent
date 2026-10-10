@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 /// Reconcile a sync-uncertain accepted row by its stable session entry ID.
 /// A missing or unreadable file cannot justify automatic replay.
-fn durable_input_ids(
+pub(crate) fn durable_input_ids(
     session_file: Option<&str>,
     inputs: &[super::session_core::InFlightInput],
 ) -> Result<HashSet<String>> {
@@ -32,7 +32,7 @@ fn durable_input_ids(
     crate::journal::sync_regular_file(std::path::Path::new(path))
         .with_context(|| format!("sync session {path}"))?;
     let text = std::fs::read_to_string(path).with_context(|| format!("read session {path}"))?;
-    for line in text.lines() {
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let row: Value = serde_json::from_str(line).context("parse session row")?;
         if let Some(id) = row.get("id").and_then(Value::as_str) {
             if uncertain.contains(id) {
@@ -101,8 +101,7 @@ impl Worker {
             .get("shutdownAttemptId")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
         // The session is closing: the continuation mint sites and their
         // settle-hook retries bail, but unlike a kill the close KEEPS the
         // resume entry — the scheduled jobs survive for the later wake.
@@ -116,7 +115,9 @@ impl Worker {
             .await;
         let interrupted_turn = {
             let mut core = self.core.lock().unwrap();
-            let interrupted_turn = core.busy && !core.abort_requested;
+            let interrupted_turn =
+                core.shutdown_interrupted_turn || (core.busy && !core.abort_requested);
+            core.shutdown_interrupted_turn = interrupted_turn;
             // The shutdown gate closes FIRST: a racing execute_bash must see the
             // stop before the abort runs, or the fresh claim clears the abort and
             // spawns a child the exit leaves running.
@@ -466,6 +467,9 @@ impl Worker {
     pub(crate) fn resume_queued_input(&self) {
         {
             let mut core = self.core.lock().unwrap();
+            if core.shutdown_requested || core.recovery_hold {
+                return;
+            }
             if core.queued_input_suspended {
                 core.queued_input_suspended = false;
             }

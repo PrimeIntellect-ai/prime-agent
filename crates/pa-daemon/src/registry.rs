@@ -122,6 +122,11 @@ pub(crate) struct ResidentWorker {
     /// Route liveness, published to waiters through a watch channel
     /// (routes sleep until route-ready or retired).
     route_state_tx: tokio::sync::watch::Sender<WorkerRouteState>,
+    /// A registration that replaced a ready resident still needs its own
+    /// authenticated channel and created-session proof. Kept only in memory:
+    /// normal relaunch already owns the replay gate and must not reconnect on
+    /// its SessionCreated registration.
+    registration_handoff: std::sync::Mutex<Option<String>>,
     /// The root-identity persist is unresolved (the descriptor moved but the durable write failed):
     /// the next roster write re-runs it before a restart replays the superseded session.
     identity_persist_pending: AtomicBool,
@@ -178,6 +183,7 @@ impl ResidentWorker {
             cron_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
             route_state_tx,
+            registration_handoff: std::sync::Mutex::new(None),
             identity_persist_pending: AtomicBool::new(false),
             identity_quarantined: AtomicBool::new(false),
             connection_epoch: AtomicU64::new(0),
@@ -192,6 +198,45 @@ impl ResidentWorker {
 
     pub(crate) fn route_state_watcher(&self) -> tokio::sync::watch::Receiver<WorkerRouteState> {
         self.route_state_tx.subscribe()
+    }
+
+    pub(crate) fn registration_handoff(&self) -> Option<String> {
+        self.registration_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn mark_registration_handoff(&self, worker_instance_id: String) {
+        *self
+            .registration_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker_instance_id);
+    }
+
+    /// Finish only the generation whose authenticated registration still owns
+    /// the handoff. A concurrent relaunch clears this marker and closes the
+    /// route gate under the same short lock.
+    pub(crate) fn finish_registration_handoff(&self, worker_instance_id: &str) -> bool {
+        let mut handoff = self
+            .registration_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if handoff.as_deref() != Some(worker_instance_id) {
+            return false;
+        }
+        self.note_session_ready();
+        *handoff = None;
+        true
+    }
+
+    pub(crate) fn reset_registration_handoff_for_relaunch(&self) {
+        let mut handoff = self
+            .registration_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *handoff = None;
+        self.note_session_replaying();
     }
 
     fn publish_route_state(&self, edit: impl FnOnce(&mut WorkerRouteState)) {

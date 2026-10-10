@@ -30,6 +30,10 @@ pub(crate) struct SessionCore {
     /// gate's aborted-row exception stays closed while it settles its turn.
     pub(crate) suppress_aborted_row: bool,
     pub(crate) shutdown_requested: bool,
+    pub(crate) shutdown_interrupted_turn: bool,
+    pub(crate) cancel_handoffs_pending: usize,
+    #[cfg(test)]
+    pub(crate) pickup_checkpoint_gate: Option<std::sync::Arc<PickupCheckpointGate>>,
     /// True while a compaction run is in flight (TS `isCompacting`).
     pub(crate) compacting: bool,
     /// The turn's tool calls in flight, keyed by tool-call id: the
@@ -86,7 +90,7 @@ pub(crate) struct SessionCore {
     /// by the resume sites: `steer`/`follow_up`, `streamingBehavior`, `resume_queue`,
     /// a queued-message mutation, a cron/heartbeat fire, a compact with an active goal.
     pub(crate) queued_input_suspended: bool,
-    /// A supervisor-held shutdown needs an explicit, durable resume_queue;
+    /// A supervisor-held shutdown needs an explicit, durable `resume_queue`;
     /// ordinary steer/follow-up resume sites cannot release this fence.
     pub(crate) recovery_hold: bool,
     /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
@@ -96,6 +100,12 @@ pub(crate) struct SessionCore {
     /// (`preparing` at pickup, `committing` at the first row, `running` at the
     /// first assistant frame) and clears it once the turn settles.
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
+}
+
+#[cfg(test)]
+pub(crate) struct PickupCheckpointGate {
+    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone)]
@@ -137,6 +147,9 @@ impl SessionCore {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            shutdown_interrupted_turn: false,
+            cancel_handoffs_pending: 0,
+            pickup_checkpoint_gate: None,
             last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),

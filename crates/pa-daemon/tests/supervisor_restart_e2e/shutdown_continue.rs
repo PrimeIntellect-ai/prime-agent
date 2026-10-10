@@ -265,12 +265,12 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let registered = distinct(workers_registered_since(&log_path, &restart_before));
-        if registered == vec![busy_session.clone()] {
+        if registered == distinct(vec![busy_session.clone(), paused_session.clone()]) {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "the interrupted session did not re-register ({restart_before}): {registered:?}; log: {}",
+            "the interrupted and parked sessions did not re-register ({restart_before}): {registered:?}; log: {}",
             std::fs::read_to_string(&log_path).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(100));
@@ -327,14 +327,69 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         .collect();
     assert_eq!(
         distinct(listed_ids),
-        vec![busy_session],
-        "only the interrupted session came back"
+        distinct(vec![busy_session, paused_session.clone()]),
+        "only the interrupted and parked sessions came back; idle and noSession stay stopped"
+    );
+    // Read the adopted worker directly: attach/create would hide a missing
+    // recovery by starting a new worker over the transcript instead.
+    client2.send_command(
+        "g3-restart",
+        &json!({ "type": "get_queue", "activeSessionId": paused_session }),
+    );
+    let restored_queue = client2.read_response("g3-restart");
+    assert_eq!(
+        restored_queue["success"], true,
+        "parked queue read failed after restart: {restored_queue}"
     );
     assert_eq!(
-        std::fs::read(&paused_session_file).expect("paused transcript after restart"),
-        paused_bytes,
-        "a user-aborted session must not execute its parked queue after restart"
+        restored_queue["data"], queue["data"],
+        "restart must preserve the user-aborted queue without consuming it"
     );
+    client2.send_command(
+        "w3-restart",
+        &json!({ "type": "get_state", "activeSessionId": paused_session }),
+    );
+    let restored_state = client2.read_response("w3-restart");
+    assert_eq!(restored_state["success"], true);
+    assert_eq!(
+        restored_state["data"]["isStreaming"], false,
+        "the adopted parked worker must remain idle"
+    );
+    let restored_bytes =
+        std::fs::read(&paused_session_file).expect("paused transcript after restart");
+    assert!(
+        restored_bytes.starts_with(&paused_bytes),
+        "restart must preserve every preexisting transcript byte"
+    );
+    // Reopening an adopted worker appends its existing active lifecycle row.
+    // Accept exactly that one row, never a queued input or execution result.
+    let lifecycle: Value = serde_json::from_slice(&restored_bytes[paused_bytes.len()..])
+        .expect("exactly one appended lifecycle row");
+    let previous: Value = serde_json::from_str(
+        std::str::from_utf8(&paused_bytes)
+            .expect("original transcript utf8")
+            .lines()
+            .last()
+            .expect("original last row"),
+    )
+    .expect("original last row json");
+    assert_eq!(lifecycle.as_object().expect("lifecycle object").len(), 5);
+    assert_eq!(lifecycle["type"], "session_state");
+    assert_eq!(lifecycle["state"], json!({ "status": "active" }));
+    assert!(previous["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert_eq!(lifecycle["parentId"], previous["id"]);
+    assert!(lifecycle["id"].as_str().is_some_and(|id| !id.is_empty()));
+    assert!(
+        std::str::from_utf8(&paused_bytes)
+            .expect("original transcript utf8")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("original row json"))
+            .all(|entry| entry["id"] != lifecycle["id"]),
+        "the lifecycle row must have a fresh entry id"
+    );
+    assert!(lifecycle["timestamp"]
+        .as_str()
+        .is_some_and(|timestamp| !timestamp.is_empty()));
 
     client2.send_command("sd2", &json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd2");

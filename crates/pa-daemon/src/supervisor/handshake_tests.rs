@@ -150,6 +150,411 @@ async fn handshake_channel_stays_private_until_auth_answers() {
     );
 }
 
+#[tokio::test]
+async fn self_registered_replacement_keeps_its_authenticated_channel_ready() {
+    run_self_registered_replacement(true).await;
+}
+
+#[tokio::test]
+async fn self_registered_replacement_without_created_session_stays_closed() {
+    run_self_registered_replacement(false).await;
+}
+
+async fn run_self_registered_replacement(created_session: bool) {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = dir.path().join("replacement.sock");
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "w-adopt-replacement",
+        "pid": std::process::id(),
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "replacement-token",
+        "workerInstanceId": "old-instance",
+        "rootActiveSessionId": "w-adopt-replacement",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    crate::descriptor::persist_worker(
+        &supervisor.descriptor_dir.join("w-adopt-replacement.json"),
+        &descriptor,
+    )
+    .expect("persist predecessor descriptor");
+    let listener = bind_fake_worker(&socket_path).await;
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-adopt-replacement".into(),
+        session_id: Some("session-1".into()),
+        socket_path: socket_path.to_string_lossy().to_string(),
+        worker_instance_id: "new-instance".into(),
+        token: "replacement-token".into(),
+        pid: u64::from(std::process::id()),
+        rest: Map::default(),
+    };
+    let registration = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .handle_worker_register("register-1", "worker_register", &command)
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    for expected in ["worker_auth", "get_state", "get_state"] {
+        let frame = read_supervisor_frame(&mut fake).await;
+        assert_eq!(frame.header["commandType"], json!(expected));
+        let request_id = frame.header["requestId"].as_str().expect("request id");
+        if expected == "worker_auth" {
+            answer_supervisor_frame(&mut fake, request_id, expected).await;
+        } else {
+            let summary = if created_session {
+                json!({
+                    "id": "w-adopt-replacement",
+                    "activeSessionId": "w-adopt-replacement",
+                    "sessionId": "session-1",
+                    "sessionFile": dir.path().join("session-1.jsonl").to_string_lossy(),
+                    "workerInstanceId": "new-instance",
+                    "lifecycle": "live",
+                    "workerState": "ready",
+                })
+            } else {
+                json!({
+                    "id": "w-adopt-replacement",
+                    "activeSessionId": "w-adopt-replacement",
+                    "workerInstanceId": "new-instance",
+                    "workerState": "ready",
+                })
+            };
+            let response = DaemonResponse {
+                id: None,
+                command: expected.into(),
+                success: true,
+                data: Some(summary),
+                error: None,
+                error_info: None,
+            };
+            write_frame(
+                &mut fake.write_half,
+                &json!({
+                    "kind": "outbound",
+                    "requestId": request_id,
+                    "outboundType": "response",
+                }),
+                &crate::protocol::response_line_bytes(&response),
+                DEFAULT_PRIVATE_FRAME_LIMITS,
+            )
+            .await
+            .expect("answer live state");
+        }
+    }
+    let response = registration.await.expect("registration task");
+    assert_eq!(response.success, created_session, "registration proof: {response:?}");
+    let resident = supervisor
+        .registry
+        .get("w-adopt-replacement")
+        .await
+        .expect("adopted resident");
+    assert_eq!(resident.route_state().session_ready, created_session);
+    assert_eq!(
+        resident.descriptor.lock().await.worker_instance_id.as_deref(),
+        Some("new-instance")
+    );
+    if !created_session {
+        assert_eq!(resident.registration_handoff().as_deref(), Some("new-instance"));
+        return;
+    }
+    let routed = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .route_command_ready_typed(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::ClientRequest,
+                )
+                .await
+        })
+    };
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header["commandType"], json!("get_state"));
+    let request_id = frame.header["requestId"].as_str().expect("request id");
+    answer_supervisor_frame(&mut fake, request_id, "get_state").await;
+    assert!(routed.await.expect("route task").expect("ready route").success);
+}
+
+#[tokio::test]
+async fn known_resident_replacement_reopens_only_on_authenticated_channel() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket_path = dir.path().join("replacement.sock");
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "w-known-replacement",
+        "pid": 4242,
+        "socketPath": socket_path.to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "replacement-token",
+        "workerInstanceId": "old-instance",
+        "rootActiveSessionId": "w-known-replacement",
+        "rootSessionId": "session-1",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-known-replacement".into(),
+        descriptor,
+        dir.path().join("w-known-replacement.json"),
+    );
+    let (old_tx, mut old_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(old_tx);
+    resident.note_connection_live();
+    resident.note_session_ready();
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let listener = bind_fake_worker(&socket_path).await;
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-known-replacement".into(),
+        session_id: Some("session-1".into()),
+        socket_path: socket_path.to_string_lossy().to_string(),
+        worker_instance_id: "new-instance".into(),
+        token: "replacement-token".into(),
+        pid: 4242,
+        rest: Map::default(),
+    };
+    let retry_command = command.clone();
+    let registration = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .handle_worker_register("register-1", "worker_register", &command)
+                .await
+        })
+    };
+    let mut fake = accept_fake_worker(listener).await;
+    let auth = read_supervisor_frame(&mut fake).await;
+    assert_eq!(auth.header["commandType"], json!("worker_auth"));
+    assert!(!resident.route_state().session_ready);
+    assert!(old_rx.try_recv().is_err());
+    // First auth fails. The held generation must remain fenced and the
+    // worker's retry must reauthenticate even though its ID is unchanged.
+    write_frame(
+        &mut fake.write_half,
+        &json!({
+            "kind": "outbound",
+            "requestId": auth.header["requestId"],
+            "outboundType": "response",
+        }),
+        &crate::protocol::response_line_bytes(&DaemonResponse {
+            id: None,
+            command: "worker_auth".into(),
+            success: false,
+            data: None,
+            error: Some("refused once".into()),
+            error_info: None,
+        }),
+        DEFAULT_PRIVATE_FRAME_LIMITS,
+    )
+    .await
+    .expect("reject first auth");
+    assert!(!registration.await.expect("first registration task").success);
+    assert!(!resident.route_state().session_ready);
+    assert_eq!(resident.registration_handoff().as_deref(), Some("new-instance"));
+    let retry = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .handle_worker_register("register-2", "worker_register", &retry_command)
+                .await
+        })
+    };
+    let stream = fake.listener.accept().await.expect("retry worker connection");
+    let (read_half, write_half) = stream.split();
+    fake.read_half = read_half;
+    fake.write_half = write_half;
+    let auth = read_supervisor_frame(&mut fake).await;
+    assert_eq!(auth.header["commandType"], json!("worker_auth"));
+    answer_supervisor_frame(
+        &mut fake,
+        auth.header["requestId"].as_str().expect("retry auth id"),
+        "worker_auth",
+    )
+    .await;
+    let state = read_supervisor_frame(&mut fake).await;
+    assert_eq!(state.header["commandType"], json!("get_state"));
+    let response = DaemonResponse {
+        id: None,
+        command: "get_state".into(),
+        success: true,
+        data: Some(json!({
+            "id": "w-known-replacement",
+            "activeSessionId": "w-known-replacement",
+            "sessionId": "session-1",
+            "sessionFile": dir.path().join("session-1.jsonl").to_string_lossy(),
+            "workerInstanceId": "new-instance",
+            "lifecycle": "live",
+            "workerState": "ready",
+        })),
+        error: None,
+        error_info: None,
+    };
+    write_frame(
+        &mut fake.write_half,
+        &json!({
+            "kind": "outbound",
+            "requestId": state.header["requestId"],
+            "outboundType": "response",
+        }),
+        &crate::protocol::response_line_bytes(&response),
+        DEFAULT_PRIVATE_FRAME_LIMITS,
+    )
+    .await
+    .expect("answer live state");
+    let registered = retry.await.expect("retry registration task");
+    assert!(registered.success, "registration succeeds: {registered:?}");
+    assert!(resident.route_state().session_ready);
+    assert!(resident.registration_handoff().is_none());
+    let routed = {
+        let supervisor = Arc::clone(&supervisor);
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            supervisor
+                .route_command_ready_typed(
+                    &resident,
+                    "get_state",
+                    json!({}),
+                    ROUTE_TIMEOUT_MS,
+                    RouteAdmission::ClientRequest,
+                )
+                .await
+        })
+    };
+    let frame = read_supervisor_frame(&mut fake).await;
+    assert_eq!(frame.header["commandType"], json!("get_state"));
+    assert!(old_rx.try_recv().is_err());
+    answer_supervisor_frame(
+        &mut fake,
+        frame.header["requestId"].as_str().expect("route id"),
+        "get_state",
+    )
+    .await;
+    assert!(routed.await.expect("route task").expect("ready route").success);
+}
+
+#[tokio::test]
+async fn session_created_registration_during_replay_preserves_the_create_reply() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "w-replay-register",
+        "pid": 4242,
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "replay-token",
+        "workerInstanceId": "replay-instance",
+        "rootActiveSessionId": "w-replay-register",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-replay-register".into(),
+        descriptor,
+        dir.path().join("w-replay-register.json"),
+    );
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    resident.note_connection_live();
+    // Session readiness remains closed until the in-flight create replies.
+    let (create_reply, _create_waiter) = tokio::sync::oneshot::channel();
+    resident
+        .pending
+        .lock()
+        .await
+        .insert("create-in-flight".into(), create_reply);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-replay-register".into(),
+        session_id: Some("session-1".into()),
+        socket_path: dir.path().join("worker.sock").to_string_lossy().to_string(),
+        worker_instance_id: "replay-instance".into(),
+        token: "replay-token".into(),
+        pid: 4242,
+        rest: Map::default(),
+    };
+    let registration = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .handle_worker_register("register-1", "worker_register", &command)
+                .await
+        })
+    };
+    let request = cmd_rx.recv().await.expect("existing channel handles state pull");
+    assert_eq!(request.command_type, "get_state");
+    assert!(resident.pending.lock().await.contains_key("create-in-flight"));
+    let reply = resident
+        .pending
+        .lock()
+        .await
+        .remove(&request.request_id)
+        .expect("state pull reply slot");
+    assert!(reply
+        .send(WorkerReply::Typed(crate::protocol::response_success(
+            None,
+            "get_state",
+            Some(json!({
+                "id": "w-replay-register",
+                "activeSessionId": "w-replay-register",
+                "sessionId": "session-1",
+                "workerInstanceId": "replay-instance",
+                "lifecycle": "live",
+                "workerState": "ready",
+            })),
+        )))
+        .is_ok());
+    assert!(registration.await.expect("registration task").success);
+    assert!(resident.pending.lock().await.contains_key("create-in-flight"));
+    assert!(!resident.route_state().session_ready);
+}
+
 /// A tombstoned stop's entire silent-peer authentication uses the strict
 /// one-second budget, closes both transport halves, and drops its pending slot.
 #[tokio::test]

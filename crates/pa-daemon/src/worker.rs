@@ -13,6 +13,7 @@ pub(crate) use config::WorkerConfig;
 use env::KillCloseReason;
 mod input;
 mod lifecycle;
+pub(crate) use lifecycle::durable_input_ids;
 mod summary;
 
 mod connection;
@@ -23,16 +24,16 @@ mod queue;
 
 #[cfg(test)]
 pub(crate) use queue::restore_queue_snapshot;
+pub use queue::Lane;
 #[cfg(test)]
 pub(crate) use queue::QueueLanes;
-pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
     checkpoint_owned_input, checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch,
     parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_snapshot_reconciled,
-    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueuedItem,
-    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
+    restore_queue_records, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
     QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
@@ -305,6 +306,10 @@ impl Worker {
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
+            shutdown_interrupted_turn: false,
+            cancel_handoffs_pending: 0,
+            #[cfg(test)]
+            pickup_checkpoint_gate: None,
             last_activity_ms: 0,
             compacting: false,
             auto_compaction_enabled: true,

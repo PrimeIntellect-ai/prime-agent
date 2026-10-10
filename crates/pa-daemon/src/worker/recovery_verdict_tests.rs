@@ -12,9 +12,18 @@ struct BeforeUserRowEngine {
     entered: Arc<Notify>,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     emit_first_before_gate: bool,
+    child_replies: Arc<std::sync::Mutex<Vec<String>>>,
+    slash_echo: Option<(Value, Arc<Notify>)>,
 }
 
 impl SessionEngine for BeforeUserRowEngine {
+    fn mark_child_reply(&self, child_active_session_id: &str) {
+        self.child_replies
+            .lock()
+            .unwrap()
+            .push(child_active_session_id.to_string());
+    }
+
     fn run_prompt(
         &self,
         _prompt_index: usize,
@@ -22,6 +31,21 @@ impl SessionEngine for BeforeUserRowEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
+        if let Some((echo, after_echo)) = &self.slash_echo {
+            self.entered.notify_one();
+            if self.release.lock().unwrap().recv().is_err() {
+                emit(EngineEvent::DoneAborted);
+                return;
+            }
+            assert!(emit(EngineEvent::CustomMessage(echo.clone())));
+            after_echo.notify_one();
+            if self.release.lock().unwrap().recv().is_err() {
+                emit(EngineEvent::DoneAborted);
+                return;
+            }
+            emit(EngineEvent::DoneAborted);
+            return;
+        }
         if self.emit_first_before_gate {
             assert!(emit(EngineEvent::UserMessage(json!({
                 "role": "user", "content": request.message, "timestamp": 1,
@@ -468,6 +492,72 @@ async fn shutdown_does_not_ack_when_its_final_verdict_cannot_persist() {
     let _ = std::fs::remove_dir_all(fixture_dir);
 }
 
+#[tokio::test]
+async fn failed_shutdown_retry_keeps_original_interrupted_turn_decision() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    worker.core.lock().unwrap().busy = true;
+    let blocked = fixture_dir.join("blocked-retry-journal");
+    std::fs::write(&blocked, b"").unwrap();
+    let blocked_journal = WorkerRecoveryJournal::open(&blocked).unwrap();
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    *worker.recovery.lock().unwrap() = Some(blocked_journal);
+    let settling = Arc::clone(&worker);
+    let settle = tokio::spawn(async move {
+        loop {
+            if settling.core.lock().unwrap().shutdown_requested {
+                settling.core.lock().unwrap().busy = false;
+                settling.idle_notify.notify_waiters();
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let first = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        worker.handle_shutdown(&json!({
+            "daemonShutdown": true, "shutdownAttemptId": "failed-first-attempt",
+        })),
+    )
+    .await
+    .expect("first shutdown did not settle");
+    assert!(!first.success, "blocked journal cannot acknowledge shutdown");
+    settle.await.unwrap();
+    *worker.recovery.lock().unwrap() =
+        Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
+    let second = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        worker.handle_shutdown(&json!({
+            "daemonShutdown": true, "shutdownAttemptId": "durable-retry-attempt",
+        })),
+    )
+    .await
+    .expect("retry shutdown did not settle");
+    assert!(second.success, "retry failed: {second:?}");
+    assert_eq!(
+        WorkerRecoveryJournal::read_shutdown_checkpoint(
+            &worker.config.recovery_journal_path,
+            "durable-retry-attempt",
+            &worker.config.worker_instance_id,
+        )
+        .unwrap(),
+        Some(crate::journal::ShutdownVerdict::BusyContinued),
+    );
+    let (steering, _) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("retry snapshot");
+    assert_eq!(steering.len(), 1);
+    assert_eq!(
+        steering[0].message,
+        crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT,
+    );
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
 /// A dequeued turn remains the worker's responsibility until its accepted
 /// user rows are durable. Shutdown at that seam cannot replace the original
 /// batched prompt and image with only a generic continuation.
@@ -528,6 +618,8 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
         entered: Arc::new(Notify::new()),
         release: std::sync::Mutex::new(release_rx),
         emit_first_before_gate: false,
+        child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        slash_echo: None,
     });
     let entered_notify = Arc::clone(&engine.entered);
     let entered = entered_notify.notified();
@@ -593,7 +685,7 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
         Some("key:original with image")
     );
     assert_eq!(
-        serde_json::to_value(&steering[0]).unwrap()["admissionId"],
+        serde_json::to_value(&steering[0]).unwrap()["admission_id"],
         "admit:original with image",
         "the picked admission identity remains recoverable"
     );
@@ -681,6 +773,8 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
         entered: Arc::new(Notify::new()),
         release: std::sync::Mutex::new(release_rx),
         emit_first_before_gate: true,
+        child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        slash_echo: None,
     });
     let entered_notify = Arc::clone(&engine.entered);
     let entered = entered_notify.notified();
@@ -706,11 +800,13 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let core = worker.core.lock().unwrap();
-            if core.shutdown_requested && core.abort_requested {
+            let stopping = {
+                let core = worker.core.lock().unwrap();
+                core.shutdown_requested && core.abort_requested
+            };
+            if stopping {
                 break;
             }
-            drop(core);
             tokio::task::yield_now().await;
         }
     })
@@ -752,6 +848,69 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
     assert!(steering[0].forced_batch);
     running.abort();
     let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn slash_prefix_echo_does_not_commit_current_unaccepted_input() {
+    let worker = created_worker_with_journal().await;
+    let echo = json!({
+        "role": "custom", "customType": "session_slash_command",
+        "content": "/goal status", "display": true,
+        "details": { "command": { "text": "/goal status" } },
+    });
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.pending_next_turn.push(echo.clone());
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "/goal status".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    }
+    let before_echo = Arc::new(Notify::new());
+    let after_echo = Arc::new(Notify::new());
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let runner = gated_runner(
+        &worker,
+        Arc::new(BeforeUserRowEngine {
+            entered: Arc::clone(&before_echo),
+            release: std::sync::Mutex::new(release_rx),
+            emit_first_before_gate: false,
+            child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+            slash_echo: Some((echo, Arc::clone(&after_echo))),
+        }),
+    );
+    let running = tokio::spawn(async move { runner.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), before_echo.notified())
+        .await
+        .expect("prefix echo was not emitted");
+    {
+        let core = worker.core.lock().unwrap();
+        assert_eq!(core.active_action.as_ref().unwrap().phase, "preparing");
+        assert!(!core.in_flight_input[0].attempted);
+    }
+    release_tx.send(()).expect("release real echo");
+    tokio::time::timeout(std::time::Duration::from_secs(5), after_echo.notified())
+        .await
+        .expect("real slash echo was not emitted");
+    {
+        let core = worker.core.lock().unwrap();
+        assert_eq!(core.active_action.as_ref().unwrap().phase, "committing");
+        assert!(!core.in_flight_input[0].attempted);
+        assert!(!core.in_flight_input[0].committed);
+    }
+    drop(release_tx);
+    running.abort();
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
 #[tokio::test]
@@ -888,6 +1047,8 @@ async fn failed_pickup_checkpoint_parks_original_before_engine_entry() {
         entered: Arc::new(Notify::new()),
         release: std::sync::Mutex::new(release_rx),
         emit_first_before_gate: false,
+        child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        slash_echo: None,
     });
     let runner = gated_runner(&worker, engine);
     let running = tokio::spawn(async move { runner.run().await });
@@ -910,6 +1071,84 @@ async fn failed_pickup_checkpoint_parks_original_before_engine_entry() {
     assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
     drop(core);
     drop(release_tx);
+    running.abort();
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn cancelled_picked_input_is_not_requeued_when_pickup_checkpoint_fails() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    worker.core.lock().unwrap().pickup_checkpoint_gate =
+        Some(Arc::new(super::session_core::PickupCheckpointGate {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        }));
+    worker.register_prompt_admission("cancelled-pickup");
+    assert!(worker.prompt_admissions.commit("cancelled-pickup"));
+    let (done_tx, done_rx) = oneshot::channel();
+    worker.core.lock().unwrap().steering.push_back(QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "cancelled before pickup flush".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: Some("cancelled-pickup".to_string()),
+        images: Vec::new(),
+        done: Some(done_tx),
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
+    let (_engine_release_tx, engine_release_rx) = std::sync::mpsc::channel();
+    let runner = gated_runner(
+        &worker,
+        Arc::new(BeforeUserRowEngine {
+            entered: Arc::new(Notify::new()),
+            release: std::sync::Mutex::new(engine_release_rx),
+            emit_first_before_gate: false,
+            child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+            slash_echo: None,
+        }),
+    );
+    let running = tokio::spawn(async move { runner.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("runner never picked the original");
+    let blocked = fixture_dir.join("blocked-cancelled-pickup-journal");
+    std::fs::write(&blocked, b"").unwrap();
+    let blocked_journal = WorkerRecoveryJournal::open(&blocked).unwrap();
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    *worker.recovery.lock().unwrap() = Some(blocked_journal);
+    let cancelled = worker.handle_cancel_prompt_admission(&json!({
+        "admissionId": "cancelled-pickup", "cancelOwned": true,
+    }));
+    assert!(!cancelled.success, "failed durable withdrawal cannot ACK");
+    assert!(worker.core.lock().unwrap().in_flight_input[0].cancelled);
+    release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if worker.core.lock().unwrap().in_flight_input.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed pickup never rolled back");
+    let core = worker.core.lock().unwrap();
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    drop(core);
+    assert_eq!(worker.prompt_admissions.cancel("cancelled-pickup"), None);
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), done_rx)
+        .await
+        .expect("cancelled pickup did not settle")
+        .expect("cancelled pickup sender disappeared");
+    assert!(matches!(settled, TurnSettle::Withdrawn(_)));
     running.abort();
     let _ = std::fs::remove_dir_all(fixture_dir);
 }
@@ -948,15 +1187,51 @@ async fn held_live_input_reconciles_stable_id_before_explicit_resume() {
             });
         core.recovery_hold = true;
         core.queued_input_suspended = true;
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "deleted while held".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
     }
     checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let deleted = worker.handle_mutate_queued_message(&json!({
+        "lane": "steering", "index": 0, "expectedText": "deleted while held",
+        "mutation": { "type": "delete" },
+    }));
+    assert_eq!(deleted.data, Some(json!({ "status": "applied" })));
+    // This live waiter arrived after the picked checkpoint; reconciliation
+    // must retain its sender and its current queue position.
+    let (queued_done, mut queued_waiter) = oneshot::channel();
+    worker.core.lock().unwrap().steering.push_back(QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "queued waiter B".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: Some(queued_done),
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    });
     std::fs::write(&session_path, b"{torn\n").unwrap();
     let uncertain = worker.handle_resume_queue(&json!({
         "resumeQueueAttemptId": "invalid-session-attempt",
     }));
     assert!(!uncertain.success, "torn session row cannot justify replay");
     assert!(worker.core.lock().unwrap().recovery_hold);
-    std::fs::write(&session_path, b"").unwrap();
+    std::fs::write(&session_path, b"\n \n\t\n").unwrap();
     let resumed = worker.handle_resume_queue(&json!({
         "resumeQueueAttemptId": "live-resume-attempt",
     }));
@@ -969,7 +1244,12 @@ async fn held_live_input_reconciles_stable_id_before_explicit_resume() {
             core.steering.front().unwrap().message,
             "retry only if unaccepted"
         );
+        assert_eq!(core.steering.get(1).unwrap().message, "queued waiter B");
     }
+    assert!(matches!(
+        queued_waiter.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
     assert!(WorkerRecoveryJournal::read_resume_checkpoint(
         &worker.config.recovery_journal_path,
         "live-resume-attempt",
@@ -1138,6 +1418,19 @@ async fn closed_mutation_gate_rejects_injected_continuation() {
 }
 
 #[tokio::test]
+async fn shutdown_gate_cannot_unpark_aborted_queue() {
+    let worker = created_worker_with_journal().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.queued_input_suspended = true;
+        core.shutdown_requested = true;
+    }
+    worker.resume_queued_input();
+    assert!(worker.core.lock().unwrap().queued_input_suspended);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
 async fn prompt_past_precheck_cannot_enqueue_after_shutdown_gate() {
     let worker = created_worker_with_journal().await;
     let entered = Arc::new(Notify::new());
@@ -1169,5 +1462,92 @@ async fn prompt_past_precheck_cannot_enqueue_after_shutdown_gate() {
     assert!(core.steering.is_empty() && core.follow_up.is_empty());
     drop(core);
     assert_eq!(worker.prompt_admissions.cancel("late-admission"), None);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn rejected_child_delivery_does_not_count_as_reply() {
+    let mut worker = created_worker_with_journal().await;
+    let replies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    Arc::get_mut(&mut worker).expect("sole worker owner").engine = Arc::new(BeforeUserRowEngine {
+        entered: Arc::new(Notify::new()),
+        release: std::sync::Mutex::new(release_rx),
+        emit_first_before_gate: false,
+        child_replies: Arc::clone(&replies),
+        slash_echo: None,
+    });
+    worker.core.lock().unwrap().recovery_hold = true;
+    let payload = json!({
+        "message": "child result",
+        "sender": { "activeSessionId": "child-1" },
+    });
+    let rejected = worker.handle_worker_deliver_message(&payload);
+    assert!(!rejected.success);
+    assert!(replies.lock().unwrap().is_empty());
+    worker.core.lock().unwrap().recovery_hold = false;
+    let accepted = worker.handle_worker_deliver_message(&payload);
+    assert!(accepted.success, "delivery failed: {accepted:?}");
+    assert_eq!(&*replies.lock().unwrap(), &["child-1"]);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn all_cancel_handoffs_must_finish_before_next_pickup() {
+    let worker = created_worker_with_journal().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "next turn".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+        core.cancel_handoffs_pending = 2;
+    }
+    let (_release_tx, release_rx) = std::sync::mpsc::channel();
+    let engine = Arc::new(BeforeUserRowEngine {
+        entered: Arc::new(Notify::new()),
+        release: std::sync::Mutex::new(release_rx),
+        emit_first_before_gate: false,
+        child_replies: Arc::new(std::sync::Mutex::new(Vec::new())),
+        slash_echo: None,
+    });
+    let entered = Arc::clone(&engine.entered);
+    let runner = gated_runner(&worker, engine);
+    let wake = Arc::clone(&runner.work_notify);
+    let initial_park = worker.idle_notify.notified();
+    tokio::pin!(initial_park);
+    initial_park.as_mut().enable();
+    let running = tokio::spawn(async move { runner.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), initial_park.as_mut())
+        .await
+        .expect("runner did not park for the first handoff");
+    let second_park = worker.idle_notify.notified();
+    tokio::pin!(second_park);
+    second_park.as_mut().enable();
+    worker.core.lock().unwrap().cancel_handoffs_pending = 1;
+    wake.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), second_park.as_mut())
+        .await
+        .expect("runner did not park for the remaining handoff");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(!core.busy && core.steering.front().is_some());
+    }
+    worker.core.lock().unwrap().cancel_handoffs_pending = 0;
+    wake.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("runner did not pick after final handoff");
+    running.abort();
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }

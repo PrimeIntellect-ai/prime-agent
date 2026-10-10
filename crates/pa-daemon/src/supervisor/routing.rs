@@ -206,8 +206,11 @@ impl Supervisor {
             let remaining_ms = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
-            match self
-                .route_command(
+            let routed = if command_type == "resume_queue" {
+                self.route_ready_resume(resident, payload.clone(), remaining_ms, admission)
+                    .await
+            } else {
+                self.route_command(
                     resident,
                     command_type,
                     payload.clone(),
@@ -215,7 +218,8 @@ impl Supervisor {
                     admission,
                 )
                 .await
-            {
+            };
+            match routed {
                 // The socket died before the send: the command never reached a worker, so
                 // waiting for the replacement and sending again cannot duplicate it.
                 Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
@@ -229,6 +233,72 @@ impl Supervisor {
                 other => return other,
             }
         }
+    }
+
+    /// Bind a resume intent to the command channel selected after readiness.
+    /// A replacement can arrive while `route_command_ready` waits; pinning the
+    /// channel and reading its descriptor generation together avoids storing
+    /// the predecessor's identity for a request sent to the replacement.
+    async fn route_ready_resume(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        mut payload: Value,
+        remaining_ms: u64,
+        admission: RouteAdmission,
+    ) -> Result<WorkerReply> {
+        let channel = resident.cmd_tx.lock().await;
+        let cmd_tx = channel.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?;
+        let mut descriptor = resident.descriptor.lock().await;
+        let state = resident.route_state();
+        if !state.connected || !state.session_ready || state.retired || self.is_stopping(resident) {
+            return Err(anyhow!(WORKER_NOT_CONNECTED));
+        }
+        // Client rest fields cannot choose the private checkpoint identity.
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("resumeQueueAttemptId");
+        }
+        let attempt = if crate::descriptor::has_shutdown_hold(&descriptor) {
+            let mut hold = crate::descriptor::shutdown_hold(&descriptor)?
+                .ok_or_else(|| anyhow!("shutdown hold vanished"))?;
+            let instance = descriptor
+                .worker_instance_id
+                .clone()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| anyhow!("Worker generation is missing for queue resume"))?;
+            // Reuse a same-generation attempt after a lost ACK. A provably
+            // unsent request retried on a replacement gets a new binding.
+            let attempt = if hold.resume_worker_instance_id.as_deref() == Some(instance.as_str()) {
+                hold.resume_attempt_id
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            };
+            hold.resume_attempt_id = Some(attempt.clone());
+            hold.resume_worker_instance_id = Some(instance);
+            let mut next = descriptor.clone();
+            next.rest
+                .insert(crate::descriptor::SHUTDOWN_HOLD_KEY.into(), json!(hold));
+            crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)?;
+            *descriptor = next;
+            attempt
+        } else {
+            // A live worker can also park after a session-file persist error
+            // without a descriptor hold. It still needs a supervised attempt.
+            uuid::Uuid::new_v4().to_string()
+        };
+        payload["resumeQueueAttemptId"] = json!(attempt);
+        drop(descriptor);
+        drop(channel);
+        self.route_command_on(
+            resident,
+            cmd_tx,
+            "resume_queue",
+            payload,
+            remaining_ms,
+            admission,
+        )
+        .await
     }
 
     /// The typed [`Self::route_command`]: supervisor-internal forwards read the
@@ -602,88 +672,10 @@ impl Supervisor {
                 worker_command = "attach";
             }
         }
-        // A paused shutdown can be resumed only through an explicit client
-        // command. Persist its correlation identity before dispatch, so an
-        // ACK lost after the worker's queue checkpoint is recoverable.
-        let resume_attempt_id = if worker_command == "resume_queue" {
-            if let Some(object) = payload.as_object_mut() {
-                object.remove("resumeQueueAttemptId");
-            }
-            let mut descriptor = resident.descriptor.lock().await;
-            if crate::descriptor::has_shutdown_hold(&descriptor) {
-                let mut hold = match crate::descriptor::shutdown_hold(&descriptor) {
-                    Ok(Some(hold)) => hold,
-                    Ok(None) => unreachable!("hold presence checked"),
-                    Err(error) => {
-                        return (
-                            vec![response_line(&response_failure(
-                                Some(&command_id),
-                                &type_name,
-                                &format!("Cannot verify shutdown hold: {error:#}"),
-                                None,
-                            ))],
-                            false,
-                        );
-                    }
-                };
-                let Some(instance) = descriptor
-                    .worker_instance_id
-                    .clone()
-                    .filter(|id| !id.is_empty())
-                else {
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            "Worker generation is missing for queue resume",
-                            None,
-                        ))],
-                        false,
-                    );
-                };
-                // A retry against the same generation reuses the identity:
-                // the first command may have checkpointed despite a lost ACK.
-                let attempt =
-                    if hold.resume_worker_instance_id.as_deref() == Some(instance.as_str()) {
-                        hold.resume_attempt_id
-                            .clone()
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-                    } else {
-                        uuid::Uuid::new_v4().to_string()
-                    };
-                hold.resume_attempt_id = Some(attempt.clone());
-                hold.resume_worker_instance_id = Some(instance);
-                let mut next = descriptor.clone();
-                next.rest
-                    .insert(crate::descriptor::SHUTDOWN_HOLD_KEY.into(), json!(hold));
-                if let Err(error) =
-                    crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)
-                {
-                    return (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &format!("Failed to persist queue resume intent: {error:#}"),
-                            None,
-                        ))],
-                        false,
-                    );
-                }
-                *descriptor = next;
-                payload["resumeQueueAttemptId"] = json!(attempt);
-                Some(attempt)
-            } else {
-                // A live worker may be held after a session-file persist
-                // failure even though no daemon-shutdown descriptor hold
-                // exists. It still needs the private supervised attempt to
-                // checkpoint its queue before releasing that hold.
-                let attempt = uuid::Uuid::new_v4().to_string();
-                payload["resumeQueueAttemptId"] = json!(attempt);
-                Some(attempt)
-            }
-        } else {
-            None
-        };
+        // Correlate a resume only once the ready route has selected a worker
+        // generation. Waiting for a replacement before this point can change
+        // the generation; the send loop below binds intent to its actual channel.
+        let supervised_resume = worker_command == "resume_queue";
         // `Kill` is the one client command with a durable pre-route side effect (its stop
         // tombstone), so it rides the never-refused control admission.
         let admission = match command {
@@ -718,7 +710,7 @@ impl Supervisor {
                     .await
             }
         };
-        if resume_attempt_id.is_some() {
+        if supervised_resume {
             if let Err(error) = self.reconcile_shutdown_resume_hold(&resident).await {
                 self.log_line(&format!(
                     "session worker {} queue resume hold remains pending: {error:#}",

@@ -112,7 +112,7 @@ class Client:
             raise EOFError("daemon socket closed")
         return json.loads(line)
 
-    def command(self, command):
+    def response(self, command):
         self.counter += 1
         request_id = f"fixture-{self.counter}"
         envelope = {"type": "command", "id": request_id,
@@ -121,9 +121,13 @@ class Client:
         while True:
             row = self.read()
             if row.get("id") == request_id:
-                if row.get("success") is not True:
-                    raise RuntimeError(f"{command['type']} failed: {row}")
-                return row.get("data", {})
+                return row
+
+    def command(self, command):
+        row = self.response(command)
+        if row.get("success") is not True:
+            raise RuntimeError(f"{command['type']} failed: {row}")
+        return row.get("data", {})
 
     def close(self):
         try:
@@ -236,6 +240,7 @@ def run_one(kind, binary, root):
                                 "activeSessionId": sessions["park"]["id"]})
         park_before = Path(sessions["park"]["file"]).read_bytes()
         result["park_queue_before"] = queue.get("followUp")
+        result["park_queue_before_data"] = queue
         prompt("busy")
         until("busy stream chunk", lambda: provider.chunks["busy"] >= 1)
         client.command({"type": "shutdown"})
@@ -258,17 +263,66 @@ def run_one(kind, binary, root):
             except TimeoutError:
                 pass
         listed = client.command({"type": "list"}).get("sessions", [])
+        result["restart_listed_sessions"] = listed
+        listed_park = any((row.get("id") or row.get("activeSessionId")) ==
+                          sessions["park"]["id"] for row in listed)
+        # Do not attach/create to recover a missing worker: that would manufacture
+        # the state under test. Only read a worker observed in the restarted list.
+        park_queue_response = None
+        park_state_response = None
+        if listed_park:
+            park_queue_response = client.response({"type": "get_queue",
+                "activeSessionId": sessions["park"]["id"]})
+            park_state_response = client.response({"type": "get_state",
+                "activeSessionId": sessions["park"]["id"]})
+        result["park_queue_after_restart_read"] = {
+            "attempted": listed_park,
+            "not_attempted_reason": None if listed_park else "worker absent from restarted list",
+            "response": park_queue_response,
+        }
+        result["park_state_after_restart_response"] = park_state_response
+        park_queue_after = (park_queue_response or {}).get("data", {})
         busy_text = Path(sessions["busy"]["file"]).read_text()
         controls = {"idle": idle_before, "park": park_before}
         result["control_transcripts"] = {}
         for lane, before in controls.items():
             after = Path(sessions[lane]["file"]).read_bytes()
+            prefix_preserved = after.startswith(before)
+            appended = after[len(before):] if prefix_preserved else None
+            appended_rows = None
+            append_parse_error = None
+            if appended is not None:
+                try:
+                    appended_rows = [json.loads(line) for line in appended.splitlines()]
+                except (ValueError, UnicodeDecodeError) as error:
+                    append_parse_error = str(error)
             result["control_transcripts"][lane] = {
                 "before_utf8": before.decode("utf-8"),
                 "after_restart_utf8": after.decode("utf-8"),
                 "before_sha256": hashlib.sha256(before).hexdigest(),
                 "after_restart_sha256": hashlib.sha256(after).hexdigest(),
+                "preexisting_bytes_preserved": prefix_preserved,
+                "appended_utf8": None if appended is None else appended.decode("utf-8"),
+                "appended_rows": appended_rows,
+                "append_parse_error": append_parse_error,
             }
+        park_control = result["control_transcripts"]["park"]
+        park_appended = park_control["appended_rows"]
+        park_lifecycle = park_appended[0] if park_appended and len(park_appended) == 1 else None
+        previous_park_rows = [json.loads(line) for line in park_before.splitlines()]
+        previous_park_row = previous_park_rows[-1]
+        expected_status = "active" if kind == "rust" else "archived"
+        park_only_lifecycle = bool(
+            park_control["preexisting_bytes_preserved"] and
+            isinstance(park_lifecycle, dict) and
+            set(park_lifecycle) == {"type", "id", "parentId", "timestamp", "state"} and
+            park_lifecycle.get("type") == "session_state" and
+            park_lifecycle.get("state") == {"status": expected_status} and
+            isinstance(previous_park_row.get("id"), str) and previous_park_row["id"] and
+            park_lifecycle.get("parentId") == previous_park_row["id"] and
+            all(park_lifecycle.get("id") != row.get("id") for row in previous_park_rows) and
+            isinstance(park_lifecycle.get("id"), str) and park_lifecycle["id"] and
+            isinstance(park_lifecycle.get("timestamp"), str) and park_lifecycle["timestamp"])
         result["observed"] = {
             "provider_requests": dict(provider.calls),
             "busy_continuation_requested": provider.calls["busy"] >= 2,
@@ -277,6 +331,18 @@ def run_one(kind, binary, root):
             "idle_not_executed": provider.calls["idle"] == 1,
             "park_queue_before_shutdown_matches": queue.get("followUp") ==
                                                   ["PARKED_QUEUE_DO_NOT_RUN"],
+            "listed_park": listed_park,
+            "park_queue_after_restart_preserved":
+                (park_queue_response or {}).get("success") is True and
+                park_queue_after == queue,
+            "park_idle_after_restart":
+                (park_state_response or {}).get("success") is True and
+                (park_state_response or {}).get("data", {}).get("isStreaming") is False,
+            "park_transcript_only_expected_lifecycle_append": park_only_lifecycle,
+            "park_appended_lifecycle_status":
+                park_lifecycle.get("state", {}).get("status")
+                if isinstance(park_lifecycle, dict) and
+                isinstance(park_lifecycle.get("state"), dict) else None,
             "park_transcript_unchanged": result["control_transcripts"]["park"]["before_sha256"] ==
                                          result["control_transcripts"]["park"]["after_restart_sha256"],
             "idle_transcript_unchanged": result["control_transcripts"]["idle"]["before_sha256"] ==
@@ -357,7 +423,8 @@ def main():
         receipt["preflight_error"] = f"{type(error).__name__}: {error}"
     results = receipt["results"]
     checks = ("busy_continued", "park_not_executed", "idle_not_executed",
-              "park_queue_before_shutdown_matches",
+              "park_queue_before_shutdown_matches", "listed_park",
+              "park_queue_after_restart_preserved", "park_idle_after_restart",
               "park_transcript_unchanged", "idle_transcript_unchanged", "listed_busy")
     observed = [results.get(kind, {}).get("observed") for kind in ("ts", "rust")]
     receipt["parity"] = bool("preflight_error" not in receipt and

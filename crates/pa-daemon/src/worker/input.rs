@@ -202,12 +202,6 @@ impl Worker {
         if let Err(response) = self.require_created(lane.as_str()) {
             return response;
         }
-        if self.core.lock().unwrap().recovery_hold {
-            return response_failure(None, lane.as_str(), QUEUED_INPUT_SUSPENDED, None);
-        }
-        // These commands are resume sites: an admitted turn with
-        // `wake: "immediate"` resumes the suspension.
-        self.resume_queued_input();
         let message = payload
             .get("message")
             .and_then(Value::as_str)
@@ -261,6 +255,7 @@ impl Worker {
             Lane::Steering => enqueue_priority(&mut core.steering, item),
             Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
+        core.queued_input_suspended = false;
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The queue-write checkpoint: an undelivered lane is live work. The
@@ -273,6 +268,11 @@ impl Worker {
         self.checkpoint_queue(QueueCheckpoint::Admitted {
             operation: queued_operation,
         });
+        if !self.core.lock().unwrap().shutdown_requested {
+            if let Some(engine) = self.agent_engine.as_ref() {
+                engine.retry_owed_goal_continuation();
+            }
+        }
         let _ = self.emit_action_update(&snapshot);
         self.work_notify.notify_one();
         let command = if lane == Lane::Steering {
@@ -322,13 +322,11 @@ impl Worker {
         let sender = payload.get("sender").cloned().unwrap_or(Value::Null);
         // A delivery from one of this session's RLM children counts as the
         // child's reply: the settle watcher withholds the no-reply notice.
-        if let Some(child) = sender
+        let child_reply = sender
             .get("activeSessionId")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-        {
-            self.engine.mark_child_reply(child);
-        }
+            .map(str::to_string);
         // Sender label precedence (TS `createAgentSessionMessagePrompt`):
         // session name, session id, active session id, client id.
         let sender_name = ["sessionName", "sessionId", "activeSessionId", "clientId"]
@@ -438,6 +436,9 @@ impl Worker {
             let snapshot = Self::snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
+        if let Some(child) = child_reply.as_deref() {
+            self.engine.mark_child_reply(child);
+        }
         // The queued agent message is admitted live work — a restart must revive
         // the worker to deliver it (no client reopens the session).
         self.checkpoint_queue(QueueCheckpoint::Admitted {

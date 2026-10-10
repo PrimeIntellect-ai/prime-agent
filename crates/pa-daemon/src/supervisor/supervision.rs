@@ -84,7 +84,24 @@ impl Supervisor {
         mut child: Option<Child>,
         mut adopted_pid: u64,
     ) {
+        let mut watched_identity = {
+            let descriptor = resident.descriptor.lock().await;
+            (
+                child
+                    .as_ref()
+                    .and_then(Child::id)
+                    .map(u64::from)
+                    .or((adopted_pid != 0).then_some(adopted_pid))
+                    .unwrap_or(descriptor.pid),
+                descriptor.worker_instance_id.clone(),
+            )
+        };
         loop {
+            // The monitor owns this particular process lifetime. A worker
+            // that registers a replacement while this watch waits or backs
+            // off takes over the resident; the old watch must not relaunch
+            // over its authenticated channel.
+            let (watched_pid, watched_generation) = watched_identity.clone();
             if let Some(mut child) = child.take() {
                 let status = child.wait().await;
                 if resident.intentional_stop.load(Ordering::SeqCst)
@@ -126,6 +143,19 @@ impl Supervisor {
                     return;
                 }
             }
+            // The old process's exit is not ownership of the resident. A
+            // replacement may have registered while wait() was pending;
+            // serialize the identity check with registration before any
+            // child cleanup, failure bookkeeping, or give-up finalization.
+            let crash_guard = self.registry.adoption_guard(&resident.worker_id).await;
+            let replacement_registered = {
+                let descriptor = resident.descriptor.lock().await;
+                descriptor.pid != watched_pid
+                    || descriptor.worker_instance_id != watched_generation
+            };
+            if replacement_registered || self.is_stopping(&resident) {
+                return;
+            }
             self.note_daemon_event("worker_exited", Some("crash"));
             // A hard-killed parent bypasses every worker-side close (#246): close the
             // resident RLM children here, before the restart, so a relaunched parent
@@ -164,7 +194,6 @@ impl Supervisor {
                 // replacement must fail fast instead of parking.
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
-                self.registry.forget(&resident.worker_id).await;
                 // The residency change lands in the scheduled-jobs invalidation (TS
                 // `broadcastHeartbeatsChanged`): the dead worker's durable jobs are passive
                 // from here on, so a snapshot from while it was live must not be served again.
@@ -182,20 +211,45 @@ impl Supervisor {
                     "session worker {} failed after {failures} consecutive failures",
                     resident.worker_id
                 ));
+                // Keep the registration guard discoverable until every awaited
+                // give-up effect has finished; a new registration must not
+                // acquire a different lock while this one is still active.
+                self.registry.forget(&resident.worker_id).await;
                 return;
             }
+            drop(crash_guard);
             let backoff_ms = (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS);
             self.log_line(&format!(
                 "session worker {} exited unexpectedly; restarting in {backoff_ms}ms (failure {failures}/{MAX_CONSECUTIVE_FAILURES})",
                 resident.worker_id
             ));
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            // Serialize the monitor's replacement with registration handoff.
+            // A simultaneous registration's connect_worker clears pending
+            // replies; it must finish before this replay installs and awaits
+            // its create reply. Boot adoption already owns this same guard.
+            let _registration_guard = self.registry.adoption_guard(&resident.worker_id).await;
+            let replacement_registered = {
+                let descriptor = resident.descriptor.lock().await;
+                descriptor.pid != watched_pid
+                    || descriptor.worker_instance_id != watched_generation
+            };
+            if replacement_registered || self.is_stopping(&resident) {
+                return;
+            }
             match self.relaunch_worker(&resident).await {
                 Ok(new_child) => {
                     // No counter reset on a successful relaunch: a spawn that dies fast must
                     // accumulate toward the give-up cap (the reset comes only from a stable
                     // lifetime on the crash path).
                     self.note_daemon_event("worker_restarted", None);
+                    watched_identity = {
+                        let descriptor = resident.descriptor.lock().await;
+                        (
+                            new_child.id().map(u64::from).unwrap_or(descriptor.pid),
+                            descriptor.worker_instance_id.clone(),
+                        )
+                    };
                     child = Some(new_child);
                 }
                 Err(error) => {
@@ -205,6 +259,10 @@ impl Supervisor {
                     ));
                     child = None;
                     adopted_pid = 0;
+                    watched_identity = {
+                        let descriptor = resident.descriptor.lock().await;
+                        (descriptor.pid, descriptor.worker_instance_id.clone())
+                    };
                     if self.is_stopping(&resident) {
                         return;
                     }
@@ -237,7 +295,10 @@ impl Supervisor {
         }
         // The replacement's create replay is pending: routed client commands must wait
         // for the replayed session (the replacement-aware route gates on this).
-        resident.note_session_replaying();
+        // Relaunch owns its own auth and create barrier. A prior spontaneous
+        // registration handoff must not reconnect on SessionCreated and erase
+        // the in-flight create reply.
+        resident.reset_registration_handoff_for_relaunch();
         // The old worker is gone for good: a run with a pending abort is declared
         // terminal HERE, before the create payload is built, so the journal record
         // rides this replay even when the dead connection's EOF is late.

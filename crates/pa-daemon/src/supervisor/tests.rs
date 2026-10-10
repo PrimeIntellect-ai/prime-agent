@@ -215,6 +215,82 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     );
 }
 
+/// A monitor that observed an old generation must wait for a registration
+/// handoff before crash bookkeeping. The replacement is published while the
+/// registration guard is held, so the obsolete monitor cannot settle its
+/// journal, count a failure, or retire the new resident.
+#[tokio::test]
+async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-monitor-replaced",
+        "pid": 0,
+        "workerInstanceId": "old-instance",
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-monitor-replaced",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = Arc::new(ResidentWorker::new(
+        "w-monitor-replaced".to_string(),
+        descriptor,
+        dir.path().join("w-monitor-replaced.descriptor.json"),
+    ));
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+
+    let registration_guard = supervisor
+        .registry
+        .adoption_guard(&resident.worker_id)
+        .await;
+    let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        0,
+    ));
+    assert!(
+        futures::poll!(watch.as_mut()).is_pending(),
+        "the old monitor must wait at the registration guard before cleanup"
+    );
+    resident.descriptor.lock().await.worker_instance_id = Some("new-instance".to_string());
+    drop(registration_guard);
+    tokio::time::timeout(Duration::from_secs(1), watch)
+        .await
+        .expect("the obsolete monitor returns after replacement registration");
+
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(
+        supervisor.registry.get("w-monitor-replaced").await.is_some(),
+        "the new generation remains owned"
+    );
+}
+
 /// An adopted worker's watch parks on the kernel's exit notification and
 /// hands the exit to whoever owns the resident now - a stop that landed,
 /// or a relaunch elsewhere that took the resident's pid. Both cases return
@@ -857,6 +933,121 @@ async fn live_resume_without_descriptor_hold_gets_a_supervisor_attempt() {
     ));
 }
 
+#[tokio::test]
+async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "held-resume",
+        "pid": 4242,
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "workerInstanceId": "old-instance",
+        "rootActiveSessionId": "held-resume",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+        "shutdownHold": {
+            "version": 1,
+            "attemptId": "shutdown-attempt",
+            "workerInstanceId": "old-instance"
+        }
+    }))
+    .expect("descriptor");
+    let descriptor_path = dir.path().join("held-resume.json");
+    let resident = ResidentWorker::new("held-resume".into(), descriptor, descriptor_path.clone());
+    let (old_tx, mut old_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(old_tx);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    resident.note_session_replaying();
+    let (subscriber_tx, _subscriber_rx) = mpsc::channel::<Arc<Value>>(1);
+    let attached = subscribers::ClientSubscriptions::new("client".into(), subscriber_tx);
+    let command: DaemonCommand = serde_json::from_value(json!({
+        "type": "resume_queue", "activeSessionId": "held-resume"
+    }))
+    .expect("resume command");
+    let mut routed = Box::pin(supervisor.route_client_command(
+        &command,
+        "client",
+        &attached,
+        "resume-1".into(),
+        "resume_queue".into(),
+        None,
+    ));
+    // Poll the route against the old generation while its ready gate is
+    // closed. This is the deterministic boundary: the route has entered its
+    // wait before the replacement is published. A pre-ready generation bind
+    // therefore stores old-instance and cannot clear the hold below.
+    assert!(futures::poll!(routed.as_mut()).is_pending());
+
+    // The pending route cannot send on the predecessor's channel. Publish a
+    // replacement generation and channel, then open the ready gate.
+    {
+        let mut descriptor = resident.descriptor.lock().await;
+        descriptor.worker_instance_id = Some("new-instance".into());
+    }
+    let (new_tx, mut new_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(new_tx);
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let journal_path = dir.path().join("worker.recovery.jsonl");
+    let replacement = {
+        let resident = Arc::clone(&resident);
+        tokio::spawn(async move {
+            let request = new_rx.recv().await.expect("replacement channel remains open");
+            let attempt = request.payload["resumeQueueAttemptId"]
+                .as_str()
+                .expect("private resume attempt")
+                .to_string();
+            let held: DaemonWorkerDescriptor =
+                serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+            let hold = crate::descriptor::shutdown_hold(&held).unwrap().unwrap();
+            assert_eq!(hold.resume_worker_instance_id.as_deref(), Some("new-instance"));
+            assert_eq!(hold.resume_attempt_id.as_deref(), Some(attempt.as_str()));
+            crate::journal::WorkerRecoveryJournal::open(&journal_path)
+                .unwrap()
+                .record_resume_checkpoint(
+                    "held-resume", "session-1", None, &attempt, "new-instance", &[], &[],
+                )
+                .unwrap();
+            let reply = resident
+                .pending
+                .lock()
+                .await
+                .remove(&request.request_id)
+                .expect("pending request");
+            assert!(reply
+                .send(WorkerReply::Typed(crate::protocol::response_success(
+                    None, "resume_queue", None,
+                )))
+                .is_ok());
+        })
+    };
+    let (lines, stop) = tokio::time::timeout(Duration::from_secs(1), routed)
+        .await
+        .expect("replacement receives and completes route");
+    replacement.await.expect("replacement response task");
+    assert!(old_rx.try_recv().is_err());
+    assert!(!stop);
+    assert_eq!(lines[0]["success"], json!(true));
+    assert!(!crate::descriptor::has_shutdown_hold(
+        &*resident.descriptor.lock().await
+    ));
+}
+
 /// The stop's only `Err` (tombstone persist) leaves the worker untouched and the kill
 /// retryable.
 #[tokio::test]
@@ -1028,9 +1219,10 @@ async fn first_signal_drains_a_settling_turn_and_rejects_new_work() {
         "workerId": "w-signal",
         "pid": 0,
         "socketPath": "/tmp/none.sock",
-        "recoveryJournalPath": "/tmp/none.jsonl",
+        "recoveryJournalPath": dir.path().join("w-signal.recovery.jsonl").to_string_lossy(),
         "supervisorSocketPath": "/tmp/none.sock",
         "authenticationToken": "test",
+        "workerInstanceId": "signal-instance",
         "rootActiveSessionId": "w-signal",
         "createdAt": "t",
         "updatedAt": "t",

@@ -7,7 +7,7 @@ use super::{
     session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
     OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
     SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
-    ABORTED_TURN_SETTLE_ERROR,
+    ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
 };
 
 use std::sync::{Arc, Mutex};
@@ -60,6 +60,7 @@ impl TurnRunner {
                 if self.input_pauses.paused()
                     || core.queued_input_suspended
                     || core.recovery_hold
+                    || core.cancel_handoffs_pending != 0
                     || core.compacting
                 {
                     core.busy = false;
@@ -114,11 +115,35 @@ impl TurnRunner {
                 }
             };
             if let Some(items) = item {
+                #[cfg(test)]
+                {
+                    let gate = self.core.lock().unwrap().pickup_checkpoint_gate.clone();
+                    if let Some(gate) = gate {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                }
                 if let Err(error) = checkpoint_picked_input(&self.recovery, &self.core) {
                     eprintln!("pa-daemon: picked input checkpoint failed: {error:#}");
                     let mut core = self.core.lock().unwrap();
                     let lane = core.in_flight_input.first().map(|input| input.lane);
-                    for item in items.into_iter().rev() {
+                    let cancelled: Vec<bool> = core
+                        .in_flight_input
+                        .iter()
+                        .map(|input| input.cancelled)
+                        .collect();
+                    for (mut item, cancelled) in items.into_iter().zip(cancelled).rev() {
+                        if cancelled {
+                            if let Some(id) = item.admission_id.as_deref() {
+                                self.prompt_admissions.clear(id);
+                            }
+                            if let Some(done) = item.done.take() {
+                                let _ = done.send(TurnSettle::Withdrawn(
+                                    PROMPT_ABORTED_BEFORE_DELIVERY.to_string(),
+                                ));
+                            }
+                            continue;
+                        }
                         match lane {
                             Some(Lane::Steering) => core.steering.push_front(item),
                             Some(Lane::FollowUp) => core.follow_up.push_front(item),
@@ -731,7 +756,18 @@ impl TurnRunner {
                 }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
-                if !active_committed && input_persisted && accepted_index.is_some() {
+                let persisted_session_echo = input_persisted
+                    && !emitting_prefix_rows.get()
+                    && matches!(&event, EngineEvent::CustomMessage(message)
+                        if message.get("customType").and_then(Value::as_str) == Some("session_slash_command")
+                        && core.in_flight_input.first().is_some_and(|input|
+                            crate::session_commands::parse_prompt_session_command(&input.item.message).is_some()
+                            && message.pointer("/details/command/text").and_then(Value::as_str)
+                                == Some(input.item.message.as_str())));
+                if !active_committed
+                    && input_persisted
+                    && (accepted_index.is_some() || persisted_session_echo)
+                {
                     active_committed = true;
                     if let Some(active) = core.active_action.as_mut() {
                         active.phase = "committing".to_string();

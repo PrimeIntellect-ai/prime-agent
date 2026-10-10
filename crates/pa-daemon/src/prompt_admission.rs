@@ -614,20 +614,32 @@ impl Worker {
             }
             if abort_running {
                 core.abort_requested = true;
+                core.cancel_handoffs_pending += 1;
             }
             (status, dropped_queued, abort_running, cancelled_picked)
         };
+        if abort_running {
+            // The runner cannot pick the next turn until this abort and its
+            // durable ownership decision finish.
+            self.engine.abort_in_flight_turn();
+        }
         if dropped_queued || cancelled_picked {
             if let Err(error) =
                 crate::worker::checkpoint_owned_input(&self.recovery, &self.core, "queue_dropped")
             {
                 {
                     let mut core = self.core.lock().unwrap();
-                    core.recovery_hold = true;
-                    core.queued_input_suspended = true;
-                    core.abort_requested = true;
+                    if !core.shutdown_requested {
+                        core.recovery_hold = true;
+                        core.queued_input_suspended = true;
+                        if abort_running {
+                            core.abort_requested = true;
+                        }
+                    }
+                    if abort_running {
+                        core.cancel_handoffs_pending -= 1;
+                    }
                 }
-                self.engine.abort_in_flight_turn();
                 return response_failure(
                     None,
                     "cancel_prompt_admission",
@@ -637,7 +649,8 @@ impl Worker {
             }
         }
         if abort_running {
-            self.engine.abort_in_flight_turn();
+            self.core.lock().unwrap().cancel_handoffs_pending -= 1;
+            self.work_notify.notify_one();
         }
         let status = match status {
             None => "unknown",

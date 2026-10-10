@@ -428,6 +428,7 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
 
 /// Queue snapshot restore from the worker recovery journal (crash/respawn
 /// recovery): the latest persisted lanes for this session.
+#[cfg(test)]
 pub(crate) fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
@@ -445,7 +446,7 @@ pub(crate) fn restore_queue_snapshot(
         )
 }
 
-fn restore_queue_records(
+pub(crate) fn restore_queue_records(
     lanes: Vec<crate::journal::WorkerQueueItemRecord>,
 ) -> VecDeque<QueuedItem> {
     lanes
@@ -503,7 +504,7 @@ pub(crate) fn restore_queue_snapshot_reconciled(
             String::new()
         };
         let mut landed = std::collections::HashSet::new();
-        for line in text.lines() {
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
             let row: Value = serde_json::from_str(line)?;
             if let Some(id) = row.get("id").and_then(Value::as_str) {
                 if pending_ids.contains(id) {

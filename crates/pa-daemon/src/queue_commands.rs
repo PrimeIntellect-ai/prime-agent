@@ -174,7 +174,7 @@ impl Worker {
         }
         if let Some(attempt_id) = attempt_id {
             let mut recovery = self.recovery.lock().unwrap();
-            let (active_session_id, session_id, session_file, held, busy, has_in_flight) = {
+            let (active_session_id, generation, session_id, session_file, held, busy, inputs) = {
                 let core = self.core.lock().unwrap();
                 if core.shutdown_requested {
                     return response_failure(
@@ -186,6 +186,7 @@ impl Worker {
                 }
                 (
                     core.active_session_id.clone(),
+                    core.generation.clone(),
                     core.store
                         .as_ref()
                         .map(|store| store.session_id().to_string())
@@ -195,7 +196,7 @@ impl Worker {
                         .map(|store| store.path.to_string_lossy().to_string()),
                     core.recovery_hold,
                     core.busy,
-                    !core.in_flight_input.is_empty(),
+                    core.in_flight_input.clone(),
                 )
             };
             if held && busy {
@@ -214,19 +215,42 @@ impl Worker {
                         &self.config.recovery_journal_path,
                     )?)
                 };
-                if held && has_in_flight {
+                if held && !inputs.is_empty() {
                     let path = session_file
                         .as_deref()
                         .ok_or_else(|| anyhow::anyhow!("picked input has no session file"))?;
-                    let (steering, follow_up) = crate::worker::restore_queue_snapshot_reconciled(
-                        journal,
-                        &active_session_id,
-                        std::path::Path::new(path),
-                    )?;
+                    let landed = crate::worker::durable_input_ids(Some(path), &inputs)?;
                     let mut core = self.core.lock().unwrap();
-                    core.steering = steering;
-                    core.follow_up = follow_up;
-                    core.in_flight_input.clear();
+                    anyhow::ensure!(
+                        core.recovery_hold && !core.busy && !core.shutdown_requested,
+                        "held input changed while reconciling"
+                    );
+                    anyhow::ensure!(
+                        core.active_session_id == active_session_id
+                            && core.generation == generation
+                            && core.store.as_ref().map(|store| store.session_id())
+                                == Some(session_id.as_str())
+                            && core.store.as_ref().map(|store| store.path.to_string_lossy().to_string())
+                                == session_file,
+                        "held input session changed while reconciling"
+                    );
+                    // Only picked ownership is reconstructed. Existing live
+                    // queue items keep their edits and completion senders.
+                    for input in std::mem::take(&mut core.in_flight_input)
+                        .into_iter()
+                        .rev()
+                    {
+                        if input.cancelled || landed.contains(&input.row_id) {
+                            continue;
+                        }
+                        let item = crate::worker::restore_queue_records(vec![input.item])
+                            .pop_front()
+                            .expect("one picked input");
+                        match input.lane {
+                            Lane::Steering => core.steering.push_front(item),
+                            Lane::FollowUp => core.follow_up.push_front(item),
+                        }
+                    }
                     core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
                 }
                 let lanes = {
