@@ -25,7 +25,9 @@
 //! - A missing, unreadable, invalid, or zero-certificate source behind an
 //!   explicitly-set variable is a loud [`TlsTrustError`] naming the
 //!   variable and the path — never a silently ignored trust change.
-//! - An empty value is unset (Node and OpenSSL both ignore it).
+//! - An empty `NODE_EXTRA_CA_CERTS` is unset (Node's own truthiness); an
+//!   empty `SSL_CERT_FILE` is a misconfigured source that fails loud (the
+//!   OpenSSL convention reads it as a path).
 //! - When none of the variables is set, nothing changes: the helpers report
 //!   `Ok(None)` and the caller keeps its existing default TLS behavior.
 
@@ -106,7 +108,7 @@ impl TlsAlpn {
 /// platform's native root store loaded no roots at all with errors (partial
 /// damage — errors next to loaded roots — is tolerated).
 pub fn extra_ca_store() -> Result<Option<RootCertStore>, TlsTrustError> {
-    let extras = env_path(EXTRA_CA_CERTS_ENV);
+    let extras = extras_path();
     let ssl_file = env_path(SSL_CERT_FILE_ENV);
     let ssl_dirs = env_dirs(SSL_CERT_DIR_ENV);
 
@@ -161,11 +163,19 @@ pub fn extra_ca_client_config(alpn: TlsAlpn) -> Result<Option<ClientConfig>, Tls
     Ok(Some(config))
 }
 
-/// An explicitly-set variable's path (`None` when unset or set to an empty
-/// value: Node and OpenSSL both treat an empty value as unset, the way
-/// `env_dirs` treats an empty list).
+/// An explicitly-set file variable's path (`None` when unset; an empty
+/// value is a real, misconfigured source — the OpenSSL convention reads it
+/// as a path and fails loud at "", the same reading the native-root loader
+/// gives it, so the store's branch decision stays consistent with the
+/// loader's own).
 fn env_path(variable: &str) -> Option<PathBuf> {
-    std::env::var_os(variable)
+    std::env::var_os(variable).map(PathBuf::from)
+}
+
+/// The extras variable's path: set-but-empty is unset (Node's own
+/// truthiness — an empty value there must not break every HTTPS client).
+fn extras_path() -> Option<PathBuf> {
+    std::env::var_os(EXTRA_CA_CERTS_ENV)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
@@ -505,7 +515,7 @@ V1BRFUaQ1qcqy2T5dC3Irw==
                     .contains(missing.to_string_lossy().as_ref())
         );
 
-        ssl_source_pins(dir, &no_certs);
+        ssl_source_pins(dir, &ca, &no_certs);
 
         // The live-TLS pin: a loopback server presents the leaf signed by
         // the fixture CA. With the CA passed through NODE_EXTRA_CA_CERTS the
@@ -580,12 +590,38 @@ V1BRFUaQ1qcqy2T5dC3Irw==
     /// variables are process state, so the phases must not race each other):
     /// an empty value is unset, and a named source that loads zero
     /// certificates fails loud naming the variable and the path.
-    fn ssl_source_pins(dir: &std::path::Path, no_certs: &Path) {
-        // A set-but-empty value is unset (Node and OpenSSL both ignore an
-        // empty variable): the caller keeps today's default.
+    fn ssl_source_pins(dir: &std::path::Path, ca: &Path, no_certs: &Path) {
+        // An empty NODE_EXTRA_CA_CERTS is unset (Node's own truthiness):
+        // the caller keeps today's default.
         std::env::set_var(EXTRA_CA_CERTS_ENV, "");
-        std::env::set_var(SSL_CERT_FILE_ENV, "");
+        std::env::remove_var(SSL_CERT_FILE_ENV);
+        std::env::remove_var(SSL_CERT_DIR_ENV);
         assert!(matches!(extra_ca_store(), Ok(None)));
+
+        // An empty SSL_CERT_FILE is a misconfigured source, not an unset
+        // variable: the OpenSSL convention reads it as a path, so it fails
+        // loud naming the variable — the reading the native-root loader
+        // gives it too.
+        std::env::set_var(SSL_CERT_FILE_ENV, "");
+        let error = extra_ca_store().expect_err("an empty ssl cert file fails");
+        let TlsTrustError::Source { variable, path, .. } = &error else {
+            panic!("the error names its source: {error}");
+        };
+        assert_eq!(*variable, SSL_CERT_FILE_ENV);
+        assert_eq!(*path, Path::new(""));
+
+        // The dispatch stays consistent with the native-root loader's own
+        // environment reading: with valid extras, an empty SSL_CERT_FILE
+        // must surface the SSL_CERT_FILE error, never fall through to a
+        // native-store failure (the extras variable's empty filter must
+        // not leak into the SSL file variable's raw reading).
+        std::env::set_var(EXTRA_CA_CERTS_ENV, ca);
+        let error = extra_ca_store().expect_err("the empty ssl cert file fails with extras");
+        assert!(
+            error.to_string().contains(SSL_CERT_FILE_ENV),
+            "the error names its source: {error}"
+        );
+        std::env::remove_var(EXTRA_CA_CERTS_ENV);
 
         // A readable file that holds no certificates fails loud here too:
         // the named paths replace the whole root store, and a source that
