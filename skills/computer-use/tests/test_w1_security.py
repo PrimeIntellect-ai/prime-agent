@@ -1512,6 +1512,15 @@ class RetinaScaleTests(AppTestCase):
         self.assertEqual(env.clipboard_calls, [], "an empty paste never saves, writes, or restores")
         self.assertEqual(env.recorder.calls, [], "an empty paste never posts cmd+v")
 
+    async def test_select_text_counts_utf16_units_for_non_bmp_characters(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        env.set_tree(fakes.window(children=[fakes.element(role="AXTextField", title="Search", value="\U0001F600abc")]))
+        await app.get_ax_state()
+        await app.select_text(0, "abc")
+        ranges = [call for call in env.ax_calls if call[0] == "select_text_range"]
+        self.assertEqual((ranges[0][2], ranges[0][3]), (2, 3), "a non-BMP character is two UTF-16 units to Cocoa")
+
 
 if __name__ == "__main__":
     unittest.main()

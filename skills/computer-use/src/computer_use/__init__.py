@@ -761,7 +761,13 @@ class App:
                     f"{text!r} occurs {len(starts)} times; disambiguate it with prefix and suffix",
                     {"element_index": element_index, "occurrences": len(starts)},
                 )
-            ax._select_text_range(ref, starts[0], len(text))
+            # Cocoa ranges count UTF-16 code units, not Python code points:
+            # a non-BMP character is one char here but two units there
+            ax._select_text_range(
+                ref,
+                len(value[: starts[0]].encode("utf-16-le")) // 2,
+                len(text.encode("utf-16-le")) // 2,
+            )
 
         await self._action("select_text", dispatch)
 
