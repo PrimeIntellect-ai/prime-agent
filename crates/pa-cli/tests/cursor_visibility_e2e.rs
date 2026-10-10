@@ -225,10 +225,18 @@ fn shell_markers_are_reserved_for_the_exit_transcript() {
     harness.wait_from_start("\x1b[?2026l", "the attached transcript frame finished");
     let mark = harness.mark();
     harness.write(b"hi");
-    harness.wait_from(mark, "\x1b[?25l\x1b[20;7H", "the editor parked the hidden caret after the typed text");
+    harness.wait_from(
+        mark,
+        "\x1b[?25l\x1b[20;7H",
+        "the editor parked the hidden caret after the typed text",
+    );
     let mark = harness.mark();
     harness.write(b"\x7f\x7f");
-    harness.wait_from(mark, "\x1b[?25l\x1b[20;5H", "the editor emptied back to the bare caret");
+    harness.wait_from(
+        mark,
+        "\x1b[?25l\x1b[20;5H",
+        "the editor emptied back to the bare caret",
+    );
     harness.write(b"\x04");
     harness.wait_from_start("\x1b[?1049l", "exit restored the main screen");
     harness.wait_from_start("\x1b]133;C\x07", "exit replayed the marked transcript");
