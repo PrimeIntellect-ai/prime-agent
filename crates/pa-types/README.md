@@ -18,6 +18,10 @@ Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui
   (the TUI dispatch + autocomplete, the session engine's command admission,
   CLI suggestion help) plus its pure parse/suggestion helpers — the TS
   product keeps the same single table in core and imports it from its TUI.
+  `DECISION_API_STATUS_CUSTOM_TYPE` is imported directly from this crate by
+  consumers; higher crates do not re-export it. The durable row's
+  `details.provider` is `jev`, `clef`, or null (off). Selected-branch metadata,
+  rather than the compacted prompt transcript, determines restoration.
 - `incident`: the daemon incident classifier shared by the incident CLI
   (pa-cli's `prime-agent incident`, TS `src/cli/incident.ts`) and the
   agents-view incident notice (pa-tui's `incident_notices`, TS

@@ -591,6 +591,7 @@ mod tests {
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "responses": ["ack"] })),
+            decision_child: false,
         }
     }
 
