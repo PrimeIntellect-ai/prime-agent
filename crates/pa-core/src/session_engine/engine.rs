@@ -895,11 +895,11 @@ impl SessionEngine {
     }
 
     /// One factory activity over this session's live kernel: the `/factory`
-    /// view's bridge lane (graph/status/watch/run/stop/resume). A `run`
-    /// prefights the spec's declared models first (allowlist pin, request
-    /// auth) so a doomed run fails before any child spawns; then the
-    /// out-of-band frame carries the request into the kernel's executor,
-    /// which owns the run registry.
+    /// view's bridge lane (graph/status/watch/run/stop/resume, plus the
+    /// machine library's list/graph reads). A `run` prefights the spec's
+    /// declared models first (allowlist pin, request auth) so a doomed run
+    /// fails before any child spawns; then the out-of-band frame carries
+    /// the request into the kernel's executor, which owns the run registry.
     ///
     /// # Errors
     ///

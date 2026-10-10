@@ -983,6 +983,7 @@ __all__ = [
     "export_machine",
     "factory_enabled",
     "import_machine",
+    "library_graph",
     "list_machines",
     "machine_library_dirs",
     "parse_machine_file",
@@ -992,6 +993,7 @@ __all__ = [
     "resolve_machine",
     "resume_factory",
     "run_factory",
+    "spec_to_mermaid",
     "status_factory",
     "stop_factory",
     "topological_order",
@@ -1044,10 +1046,12 @@ FACTORY_FRAME_CAP = 262_144
 full 1024-state machine cap fits; a snapshot that cannot shrink under the
 cap fails loudly instead of being silently truncated."""
 
-ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume")
-"""The host bridge's actions over one factory run, the ``factory_activity``
-frame's action vocabulary (the kernel namespace is the same surface plus
-``graph``/``watch`` for agents)."""
+ACTIVITY_ACTIONS = ("graph", "status", "watch", "run", "stop", "resume", "library")
+"""The host bridge's actions over the factory surface, the
+``factory_activity`` frame's action vocabulary: one run's
+``graph``/``status``/``watch``/``stop``/``resume``, a ``run`` by spec id,
+and the machine library's list/graph reads (the kernel namespace is the
+same surface plus ``graph``/``watch`` for agents)."""
 
 ACTIVITY_TIMEOUT_MS_CAP = int(WATCH_TIMEOUT_CAP_SECONDS * 1000)
 """Upper bound on one factory_activity frame's timeoutMs (the watch wait
@@ -1977,9 +1981,12 @@ class FactoryExecutor:
     async def activity(self, request: dict[str, Any]) -> Any:
         """Handle one out-of-band ``factory_activity`` request frame (the
         host bridge's lane): route the action to ``graph``/``status``/
-        ``watch``/``run``/``stop``/``resume`` and return the reply's result
-        payload. Raises ``ValueError`` for malformed requests and unknown
-        runs/specs (the reply carries it as the error reason). ``graph``
+        ``watch``/``run``/``stop``/``resume``/``library`` and return the
+        reply's result payload. Raises ``ValueError`` for malformed
+        requests and unknown runs/specs (the reply carries it as the error
+        reason). ``library`` serves the machine library: the list with no
+        target, or one machine's graph payload when ``specId`` names it.
+        ``graph``
         and ``watch`` answer with the compact snapshots (the host lane
         renders diagrams, not answers); ``run`` is the lane that starts a
         run from the daemon or TUI, so it rides the full ``run()``
@@ -2009,6 +2016,35 @@ class FactoryExecutor:
             raise ValueError(
                 f"factory activity timeoutMs must be an integer between 0 and {ACTIVITY_TIMEOUT_MS_CAP}"
             )
+        if action == "library":
+            # The library lane: the machine list (no target), or one
+            # machine's graph payload (``specId`` names it) — the same
+            # snapshot shape a stored spec's ``graph`` answers, plus the
+            # machine file's fields and the mermaid rendering. The machine
+            # resolves through the library's own contract (repo first,
+            # user second; broken machines name their errors), so the
+            # lane, run, and export never disagree about a name.
+            if spec_id is None:
+                return _wire_payload(
+                    {
+                        "machines": [
+                            {
+                                "name": entry["name"],
+                                "description": entry["description"],
+                                "source": entry["source"],
+                            }
+                            for entry in list_machines()
+                        ]
+                    }
+                )
+            graph = library_graph(spec_id)
+            canonical = canonicalize_factory_spec(graph["spec"])
+            snapshot = self._spec_snapshot(graph["name"], canonical, compact=True)
+            snapshot["mermaid"] = graph["mermaid"]
+            snapshot["description"] = graph["description"]
+            snapshot["version"] = graph["version"]
+            snapshot["author"] = graph["author"]
+            return _wire_payload(snapshot)
         if action == "graph":
             return _wire_payload(self.graph(run_id or spec_id, compact=True))
         if action == "status":
@@ -3956,6 +3992,161 @@ def render_machine_file(machine: MachineFile) -> str:
     return "\n".join(sections) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Mermaid rendering: one spec's graph as diagram text (the library view's
+# copyable payload — GitHub, previews, and external tools render it).
+# ---------------------------------------------------------------------------
+
+_MERMAID_ID_PATTERN = re.compile(r"[a-z0-9_]+")
+
+
+def _mermaid_state_ids(states: list[Any]) -> dict[str, str]:
+    """Map every state id to a mermaid-safe ``stateDiagram-v2`` identifier.
+
+    Mermaid state ids cannot carry hyphens (the parser reads
+    ``review-a --> b`` as a malformed edge) while machine ids may, so a
+    hyphenated id aliases to its underscored form — with a deterministic
+    numeric suffix when two ids alias to the same spelling (``a-b`` and
+    ``a_b``), so two states never merge into one diagram node. Safe ids
+    pass through verbatim.
+    """
+    ids: dict[str, str] = {}
+    taken: set[str] = set()
+    for state in states:
+        if not isinstance(state, dict) or not isinstance(state.get("id"), str):
+            continue
+        state_id = state["id"]
+        base = (
+            state_id
+            if _MERMAID_ID_PATTERN.fullmatch(state_id) is not None
+            else state_id.replace("-", "_")
+        )
+        candidate = base
+        suffix = 2
+        while candidate in taken:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        taken.add(candidate)
+        ids[state_id] = candidate
+    return ids
+
+
+def _mermaid_guard_label(when: Any) -> str:
+    """One guard's edge label: ``<output>[.<path>] <op>[ <value>]``.
+
+    The same shape the machine contract and the TUI's compact guard
+    rendering use (``verdict.approved eq false``): the output, the dotted
+    path when the guard drills one, the op, and the JSON value when the
+    guard declares one (``exists`` carries none).
+    """
+    if not isinstance(when, dict):
+        return ""
+    output = when.get("output")
+    path = when.get("path")
+    target = f"{output}.{path}" if isinstance(path, str) and path else str(output)
+    label = f"{target} {when.get('op')}"
+    if "value" in when:
+        label += f" {json.dumps(when.get('value'))}"
+    return label
+
+
+def _machine_to_mermaid_lines(machine: dict[str, Any]) -> list[str]:
+    """Machine form: a ``stateDiagram-v2``.
+
+    Every state is a node (one ``state`` declaration per state, labeled
+    with the state's own id — the declaration keeps an edge-less state on
+    the diagram instead of dropping it), every entry state is marked with
+    a ``[*] -->`` edge, and every transition is an edge per source state
+    labeled with its guard (``stateDiagram-v2`` has no multi-source edge,
+    so a join renders its connectivity: one edge per source).
+    """
+    states = machine.get("states") if isinstance(machine.get("states"), list) else []
+    ids = _mermaid_state_ids(states)
+    lines = ["stateDiagram-v2"]
+    for state in states:
+        if isinstance(state, dict) and isinstance(state.get("id"), str):
+            lines.append(f'    state "{state["id"]}" as {ids[state["id"]]}')
+    for state in states:
+        if isinstance(state, dict) and state.get("entry") is True and isinstance(state.get("id"), str):
+            lines.append(f'    [*] --> {ids[state["id"]]}')
+    transitions = machine.get("transitions") if isinstance(machine.get("transitions"), list) else []
+    for transition in transitions:
+        if not isinstance(transition, dict):
+            continue
+        raw_from = transition.get("from")
+        sources = raw_from if isinstance(raw_from, list) else [raw_from]
+        guard = _mermaid_guard_label(transition.get("when"))
+        to = ids.get(transition.get("to")) if isinstance(transition.get("to"), str) else None
+        for source in sources:
+            source_id = ids.get(source) if isinstance(source, str) else None
+            if source_id is None or to is None:
+                continue
+            edge = f"    {source_id} --> {to}"
+            if guard:
+                edge += f": {guard}"
+            lines.append(edge)
+    return lines
+
+
+def _dag_to_mermaid_lines(dag: dict[str, Any]) -> list[str]:
+    """Dag form: a ``flowchart TB`` over the effective dependency edges.
+
+    Every node is a node line (bare, or labeled with the machine
+    annotation when the node declares a ``foreach``: ``foreach: over
+    <input> (max N)``); every node's effective dependencies
+    (``depends_on`` plus every ``inputs[].from`` source) render as one
+    edge each. Dag node ids are mermaid-flowchart-safe as written
+    (hyphens parse in flowchart ids), so no aliasing is needed here.
+    """
+    nodes = dag.get("nodes") if isinstance(dag.get("nodes"), list) else []
+    lines = ["flowchart TB"]
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        node_id = node["id"]
+        foreach = node.get("foreach")
+        if isinstance(foreach, dict) and _is_nonempty_str(foreach.get("over")):
+            lines.append(
+                f'    {node_id}["{node_id}<br/>foreach: over '
+                f'{foreach.get("over")} (max {foreach.get("max")})"]'
+            )
+        else:
+            lines.append(f"    {node_id}")
+    for node in nodes:
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        for dependency in _effective_dag_edges(node):
+            lines.append(f"    {dependency} --> {node['id']}")
+    return lines
+
+
+def spec_to_mermaid(spec: Any) -> str:
+    """Render one factory spec as Mermaid diagram text (pure).
+
+    Machine form (``states``/``transitions``) renders as a
+    ``stateDiagram-v2``: each state a node, each entry state marked
+    ``[*] --> entryId``, and each transition an edge labeled with its
+    guard (``<output>[.<path>] <op>[ <value>]``) when it carries one.
+    Dag form (``nodes``) renders as a ``flowchart TB``: each node a node
+    line, a ``foreach`` node annotated ``foreach: over <input> (max N)``,
+    and the effective dependency set one edge each. The output is plain
+    mermaid text — GitHub, previews, and external tools render it; a
+    terminal renders the in-page ANSI diagram instead. The renderer is
+    pure and defensive: it renders the shape it is given (the library and
+    the run lane only feed it validated specs) without touching the
+    filesystem or validating.
+    """
+    if (
+        not _is_machine_form(spec)
+        and isinstance(spec, dict)
+        and isinstance(spec.get("nodes"), list)
+    ):
+        lines = _dag_to_mermaid_lines(spec)
+    else:
+        lines = _machine_to_mermaid_lines(spec if isinstance(spec, dict) else {})
+    return "\n".join(lines) + "\n"
+
+
 def _machine_env_dir(name: str) -> str | None:
     # Set-but-empty env values behave as unset (mirrors harness._env_dir).
     value = (os.environ.get(name) or "").strip()
@@ -4156,6 +4347,36 @@ def resolve_machine(
         f"unknown machine {name!r}: no MACHINE.md for it in the machine library (machines: {listing or 'none'})",
         broken=False,
     )
+
+
+def library_graph(
+    name: str,
+    *,
+    repo_dir: "str | Path | None" = None,
+    user_dir: "str | Path | None" = None,
+) -> dict[str, Any]:
+    """One library machine's graph payload.
+
+    Resolves the machine exactly like a run does (``resolve_machine``:
+    repo directory first, user second) and returns the machine file's own
+    fields with the spec rendered as diagram text:
+    ``{"name", "description", "version", "author", "spec", "mermaid"}``.
+    The spec is the file's payload as written (machine form, or dag sugar
+    — the same object ``parse_machine_file`` read); ``mermaid`` is its
+    ``spec_to_mermaid`` rendering. Raises ``ValueError`` for an invalid
+    machine name and ``MachineResolutionError`` when no valid machine
+    carries the name — the library's own resolution contract, so the graph
+    seam can never disagree with run/export about a name.
+    """
+    machine, _path = resolve_machine(name, repo_dir=repo_dir, user_dir=user_dir)
+    return {
+        "name": machine.name,
+        "description": machine.description,
+        "version": machine.version,
+        "author": machine.author,
+        "spec": machine.spec,
+        "mermaid": spec_to_mermaid(machine.spec),
+    }
 
 
 def import_machine(path: "str | Path", *, target_dir: "str | Path | None" = None) -> "dict[str, Any]":
@@ -4707,6 +4928,11 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   rows (stop, or resume first while the run is paused — the arrows walk
   the rows, Enter runs the tracked action), and Esc backs out of the rows
   before it closes the page.
+- The machine library view: the dock's `☰ machines` group (the factory
+  group's neighbor, the same opt-in gate) lists every machine with its
+  description and source; Enter drills into one for its diagram and its
+  mermaid text (plain monospace, copyable for GitHub and previews), and
+  Esc backs out before closing the page.
 
 ## Safety
 

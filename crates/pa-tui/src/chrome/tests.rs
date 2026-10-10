@@ -17,7 +17,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ☰ machines"
     );
     let ordered: Vec<ActivityGroup> = segments.iter().map(|segment| segment.group).collect();
     assert_eq!(
@@ -27,6 +27,7 @@ fn the_dock_segments_cover_each_groups_own_cells() {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
             ActivityGroup::Factory,
+            ActivityGroup::Library,
         ],
         "the segments follow the row's group order"
     );
@@ -144,7 +145,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  Pursuing goal (0s)"
+        " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  ⚙ 0 factory  ·  ☰ machines  ·  Pursuing goal (0s)"
     );
     // The operator's 2026-09-24 color-coding directive.
     let success = theme.fg_style(ThemeColor::Success).fg;
@@ -194,7 +195,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
     );
     // The all-zero dock renders its own empty state — the zero
     // readout — and the zero segments stay neutral, never green. The
@@ -211,7 +212,7 @@ fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         .collect::<String>();
     assert_eq!(
         text,
-        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory"
+        " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells  \u{b7}  \u{2699} 0 factory  \u{b7}  \u{2630} machines"
     );
     assert!(frame[1]
         .iter()
@@ -276,7 +277,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
     );
     // Two running children plus seven running descendants: ONE
     // number — the summed total, never the pair, never the
@@ -294,7 +295,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 9 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
     );
     assert!(!text.contains("2,"), "no direct/nested pair: {text}");
     assert!(!text.contains("idle"), "no category breakdown: {text}");
@@ -315,7 +316,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
     );
 }
 
@@ -384,8 +385,8 @@ fn activity_dock_selection_is_the_hover_colored_band() {
 #[test]
 fn dock_arrows_visit_every_group_even_when_empty() {
     // The all-zero dock with the factory lane advertised: the
-    // heartbeats, shells, and factory groups are empty and stay in
-    // the cycle.
+    // heartbeats, shells, factory, and machine-library groups are
+    // empty and stay in the cycle.
     let dock = ActivityDock {
         factory_group: true,
         ..ActivityDock::default()
@@ -397,6 +398,7 @@ fn dock_arrows_visit_every_group_even_when_empty() {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
             ActivityGroup::Factory,
+            ActivityGroup::Library,
         ]
     );
     assert_eq!(
@@ -413,14 +415,22 @@ fn dock_arrows_visit_every_group_even_when_empty() {
     );
     assert_eq!(
         dock.step(ActivityGroup::Factory, ActivityDirection::Next),
+        ActivityGroup::Library
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Library, ActivityDirection::Next),
         ActivityGroup::Subagents,
         "the cycle wraps past the last group"
     );
     // Left: the same groups in reverse, wrapping past the first.
     assert_eq!(
         dock.step(ActivityGroup::Subagents, ActivityDirection::Prev),
-        ActivityGroup::Factory,
+        ActivityGroup::Library,
         "the cycle wraps past the first group"
+    );
+    assert_eq!(
+        dock.step(ActivityGroup::Library, ActivityDirection::Prev),
+        ActivityGroup::Factory
     );
     assert_eq!(
         dock.step(ActivityGroup::Factory, ActivityDirection::Prev),
@@ -471,16 +481,18 @@ fn dock_arrows_visit_the_same_groups_with_items() {
             ActivityGroup::Heartbeats,
             ActivityGroup::Bash,
             ActivityGroup::Factory,
+            ActivityGroup::Library,
             ActivityGroup::Goal,
         ]
     );
     // The full cycle right: every group in order, the goal group
-    // included, back to the start in five presses.
+    // included, back to the start in six presses.
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Heartbeats,
         ActivityGroup::Bash,
         ActivityGroup::Factory,
+        ActivityGroup::Library,
         ActivityGroup::Goal,
         ActivityGroup::Subagents,
     ] {
@@ -490,6 +502,7 @@ fn dock_arrows_visit_the_same_groups_with_items() {
     let mut walked = ActivityGroup::Subagents;
     for expected in [
         ActivityGroup::Goal,
+        ActivityGroup::Library,
         ActivityGroup::Factory,
         ActivityGroup::Bash,
         ActivityGroup::Heartbeats,
@@ -519,7 +532,7 @@ fn dock_goal_group_unmounts_with_its_row() {
     );
     assert_eq!(
         ended.step(ActivityGroup::Goal, ActivityDirection::Prev),
-        ActivityGroup::Factory,
+        ActivityGroup::Library,
         "a stale goal selection lands on the row's last group"
     );
     assert_eq!(
@@ -529,10 +542,11 @@ fn dock_goal_group_unmounts_with_its_row() {
     );
 }
 
-/// The factory group is the lane's opt-in surface: an unadvertised
+/// The factory groups are the lane's opt-in surface: an unadvertised
 /// `factory_activity` lane mounts no factory group anywhere — no row
-/// segment, no traversal, no click region (the factory's default-off
-/// gate; the dock's factory group renders exactly while the daemon
+/// segment, no traversal, no click region, for the run page or the
+/// machine library either (the factory's default-off gate; the dock's
+/// factory and machine-library groups render exactly while the daemon
 /// advertises the lane).
 #[test]
 fn an_unadvertised_factory_lane_mounts_no_factory_group() {
@@ -542,6 +556,10 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
     assert!(
         !dock.groups().contains(&ActivityGroup::Factory),
         "the unadvertised lane stays out of the traversal cycle"
+    );
+    assert!(
+        !dock.groups().contains(&ActivityGroup::Library),
+        "the machine library stays out of the cycle with the lane off"
     );
     let (frame, segments) = render_activity_dock_segments(&dock, &theme, 120);
     let text = frame[1]
@@ -557,6 +575,12 @@ fn an_unadvertised_factory_lane_mounts_no_factory_group() {
             .iter()
             .all(|segment| segment.group != ActivityGroup::Factory),
         "no factory click region records"
+    );
+    assert!(
+        segments
+            .iter()
+            .all(|segment| segment.group != ActivityGroup::Library),
+        "no machine-library click region records"
     );
     // The arrows wrap the remaining groups exactly: a stale Factory
     // selection steps to the row's real ends, never a hidden group.
@@ -593,7 +617,7 @@ fn dock_renders_the_focused_empty_group() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory  ·  ☰ machines"
     );
     // The selection's band rides exactly the entered empty group's
     // zero readout, which keeps its own muted color (the selection
