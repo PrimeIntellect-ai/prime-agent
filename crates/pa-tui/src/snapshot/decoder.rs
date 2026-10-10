@@ -71,8 +71,10 @@ pub enum TurnUpdate {
         final_error: Option<String>,
         restored_model: Option<String>,
     },
-    /// `agent_end`: the prompt queue drained.
-    Idle,
+    /// `agent_end`: the prompt queue drained; `aborted` marks a run that
+    /// ended under an abort (the daemon's wire marker — absent when the
+    /// run settled on its own).
+    Idle { aborted: bool },
     /// `compaction_start`: a compaction run began.
     CompactionStart {
         /// Why the compaction runs (`manual`/`requested`/`overflow`/`threshold`).
@@ -230,7 +232,12 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                     .is_some_and(|reason| reason == "aborted" || reason == "error");
             Some(TurnUpdate::TurnEnded { error, run_failed })
         }
-        "agent_end" => Some(TurnUpdate::Idle),
+        "agent_end" => Some(TurnUpdate::Idle {
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }),
         "message_start" | "message_update" | "message_end" => {
             let message = event.get("message")?.clone();
             let event_type = event.get("type").and_then(Value::as_str);

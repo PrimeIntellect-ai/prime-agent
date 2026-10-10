@@ -371,6 +371,7 @@ impl MockSupervisor {
         let mut events_seen = 0;
         let mut run_open = false;
         let mut retry_pending = false;
+        let mut in_tools = false;
         write_json(
             &mut writer,
             &json!({
@@ -514,6 +515,34 @@ impl MockSupervisor {
                         }
                         run_open = true;
                         retry_pending = true;
+                    } else if command.get("message").and_then(Value::as_str) == Some("batch") {
+                        // A run whose step ended on a tool batch still executing:
+                        // an abort here emits the ORIGINAL `toolUse` turn_end
+                        // and then the run's agent_end (the real abort trace).
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "message_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "tool_execution_start",
+                                "toolCallId": "t1",
+                                "toolName": "read",
+                                "args": {},
+                            }),
+                        );
+                        run_open = true;
+                        in_tools = true;
                     } else if command.get("message").and_then(Value::as_str) == Some("step") {
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
@@ -567,17 +596,42 @@ impl MockSupervisor {
                         }),
                     );
                     if run_open {
-                        events_seen += 1;
-                        push_event(
-                            &mut writer,
-                            events_seen,
-                            &json!({
-                                "type": "turn_end",
-                                "message": { "role": "assistant", "stopReason": "aborted" },
-                            }),
-                        );
-                        events_seen += 1;
-                        push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        if in_tools {
+                            // An abort during a tool batch settles through the
+                            // step's original turn_end (the daemon emits the
+                            // message as it stands) and an agent_end that
+                            // carries the abort marker.
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "turn_end",
+                                    "message": { "role": "assistant", "stopReason": "toolUse" },
+                                }),
+                            );
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({ "type": "agent_end", "aborted": true }),
+                            );
+                            in_tools = false;
+                        } else {
+                            // An abort mid-stream: the aborted terminal
+                            // message settles the run.
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "turn_end",
+                                    "message": { "role": "assistant", "stopReason": "aborted" },
+                                }),
+                            );
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        }
                         run_open = false;
                     }
                 }

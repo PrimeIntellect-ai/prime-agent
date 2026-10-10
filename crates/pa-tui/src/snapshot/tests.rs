@@ -1459,7 +1459,11 @@ fn decodes_streamed_events() {
     }
     assert_eq!(
         event_to_update(&json!({ "type": "agent_end" })),
-        Some(TurnUpdate::Idle)
+        Some(TurnUpdate::Idle { aborted: false })
+    );
+    assert_eq!(
+        event_to_update(&json!({ "type": "agent_end", "aborted": true })),
+        Some(TurnUpdate::Idle { aborted: true })
     );
 }
 

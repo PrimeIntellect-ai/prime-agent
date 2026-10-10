@@ -808,12 +808,22 @@ impl TurnRunner {
                     // `agent_end` (one frame per agent run — retried and
                     // continued runs included); the rows themselves
                     // already went out through their own events, so no
-                    // persist here.
+                    // persist here. A run ending under an abort carries the
+                    // marker: between steps and tools the abort keeps the
+                    // original `toolUse` turn_end, so the marker is the one
+                    // wire fact that separates the aborted settle from a
+                    // normal one.
                     EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
-                    EngineEvent::AgentEnd { messages } => vec![json!({
-                        "type": "agent_end",
-                        "messages": messages,
-                    })],
+                    EngineEvent::AgentEnd { messages } => {
+                        let mut frame = json!({
+                            "type": "agent_end",
+                            "messages": messages,
+                        });
+                        if core.abort_requested {
+                            frame["aborted"] = json!(true);
+                        }
+                        vec![frame]
+                    }
                     // Turn-boundary frames: the terminal message and tool
                     // results ride `turn_end`; no persist here.
                     EngineEvent::TurnStart => vec![json!({ "type": "turn_start" })],
