@@ -867,12 +867,20 @@ class LiveWindowBoundsTests(unittest.TestCase):
 
         created: list[tuple[Any, Any]] = []
 
+        class WindowEntry:
+            # the bridged CFDictionaryRef is a mapping, not a builtin dict
+            def __init__(self, bounds):
+                self._bounds = bounds
+
+            def get(self, key):
+                return self._bounds if key == "kCGWindowBounds" else None
+
         class Quartz:
             kCGWindowListOptionIncludingWindow = 1
 
             def CGWindowListCopyWindowInfo(self, option, window_id):
                 self.requested = (option, window_id)
-                return [{"kCGWindowBounds": {"X": 12, "Y": 34, "Width": 800, "Height": 600}}]
+                return [WindowEntry({"X": 12, "Y": 34, "Width": 800, "Height": 600})]
 
             def CGRectMakeWithDictionaryRepresentation(self, bounds, rect):
                 # the CoreGraphics dictionary converter, not CGRectMakeWithString;

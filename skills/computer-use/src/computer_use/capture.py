@@ -253,7 +253,9 @@ def _live_window_bounds(window_id: int) -> tuple[float, float, float, float] | N
         info = quartz.CGWindowListCopyWindowInfo(quartz.kCGWindowListOptionIncludingWindow, window_id)
         if not info:
             return None
-        bounds = info[0].get("kCGWindowBounds") if isinstance(info[0], dict) else None
+        # the bridged CFDictionaryRef is a mapping, not a builtin dict; .get
+        # itself raises into the blanket handler when it is not one
+        bounds = info[0].get("kCGWindowBounds")
         if bounds is None:
             return None
         # the CoreGraphics dictionary converter, not CGRectMakeWithString:
