@@ -18,6 +18,9 @@ struct MockSupervisor {
     listener: UnixListener,
     windowed: bool,
     failures: usize,
+    /// Hold the history backfill page instead of answering it: the plan then
+    /// leaves the request in flight across an exit or a transcript rebuild.
+    hold_backfill: bool,
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -27,6 +30,7 @@ impl MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             windowed,
             failures: 0,
+            hold_backfill: false,
             requests,
         }
     }
@@ -36,6 +40,7 @@ impl MockSupervisor {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
+        let mut held_backfill: Option<String> = None;
 
         let hello = json!({
             "type": "daemon_hello",
@@ -79,8 +84,23 @@ impl MockSupervisor {
                         );
                         continue;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
-                    write_json(&mut writer, &get_messages_response(id, self.windowed));
+                    if command.get("before").is_some() {
+                        if self.hold_backfill {
+                            held_backfill = Some(id.to_string());
+                            continue;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
+                        write_json(&mut writer, &get_messages_response(id, self.windowed));
+                        continue;
+                    }
+                    // A cursor-less fetch is a transcript rebuild: the held page goes out
+                    // first and the whole head follows after the page delay, so the stale
+                    // note is queued before the rebuild can finish.
+                    if let Some(held) = held_backfill.take() {
+                        write_json(&mut writer, &get_messages_response(&held, self.windowed));
+                        std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
+                    }
+                    write_json(&mut writer, &whole_head_response(id));
                 }
                 "get_session_stats" => {
                     write_json(
@@ -201,6 +221,16 @@ fn get_messages_response(id: &str, windowed: bool) -> Value {
     })
 }
 
+fn whole_head_response(id: &str) -> Value {
+    json!({
+        "type": "response",
+        "id": id,
+        "command": "get_messages",
+        "success": true,
+        "data": { "messages": all_messages() },
+    })
+}
+
 fn options(socket: PathBuf) -> InteractiveOptions {
     InteractiveOptions {
         models: None,
@@ -273,6 +303,43 @@ fn run_attached_with_failures(
     (outcome.frames, requests)
 }
 
+fn run_attached_holding_backfill(
+    windowed: bool,
+    height: u16,
+    steps: Vec<HeadlessStep>,
+) -> (Vec<String>, Vec<Value>) {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
+    supervisor.hold_backfill = true;
+    let (served_tx, served_rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        supervisor.serve();
+        let _ = served_tx.send(());
+    });
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let plan = HeadlessPlan {
+        steps,
+        width: 100,
+        height,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
+        .expect("interactive run");
+    served_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the run returned, but the mock supervisor socket never closed: the obsolete transcript backfill task still holds the daemon connection");
+    handle.join().expect("mock supervisor finished");
+    let requests = requests.lock().unwrap().clone();
+    (outcome.frames, requests)
+}
+
 fn first_marker_line(frame: &str) -> Option<String> {
     frame
         .lines()
@@ -282,6 +349,20 @@ fn first_marker_line(frame: &str) -> Option<String> {
                 .find(|word| word.starts_with("msg-"))
                 .expect("marker token")
                 .to_string()
+        })
+}
+
+/// The history rows a frame renders, top to bottom: one entry per row, since a
+/// row's body repeats its marker across wrapped lines.
+fn collapsed_markers(frame: &str) -> Vec<String> {
+    frame
+        .split_whitespace()
+        .filter(|token| token.starts_with("msg-"))
+        .fold(Vec::new(), |mut rows: Vec<String>, token| {
+            if rows.last().is_none_or(|last| last != token) {
+                rows.push(token.to_string());
+            }
+            rows
         })
 }
 
@@ -366,4 +447,78 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
         .any(|frame| frame.contains("Older history could not be loaded")));
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0], requests[1]);
+}
+
+#[test]
+fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
+    let (frames, requests) =
+        run_attached_holding_backfill(true, 30, vec![HeadlessStep::WaitMs(500)]);
+    assert_eq!(
+        requests.len(),
+        1,
+        "the held history request stayed in flight across the run: {requests:?}"
+    );
+    assert_eq!(
+        requests[0]["before"],
+        json!(HISTORY_MESSAGES as u64),
+        "the windowed attach armed exactly the history backfill: {requests:?}"
+    );
+    assert!(!frames.is_empty(), "frames were captured");
+    assert!(
+        frames[0].contains("msg-15"),
+        "the windowed first frame renders the tail's bottom: {}",
+        frames[0]
+    );
+}
+
+#[test]
+fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered() {
+    let (frames, requests) = run_attached_holding_backfill(
+        true,
+        50,
+        vec![
+            HeadlessStep::WaitMs(500),
+            HeadlessStep::Submit("/reload".to_string()),
+            HeadlessStep::WaitRender {
+                needle: "Reloaded keybindings, skills, prompts, themes".to_string(),
+                timeout_ms: 5000,
+            },
+            // The whole-head response is held past the stale page, so the note is queued
+            // before the reload outcome applies; with the plan idle here the run loop
+            // drains it, and the scroll below starts at whatever then sits at the top.
+            HeadlessStep::WaitMs(600),
+            HeadlessStep::ScrollTop,
+            HeadlessStep::WaitRender {
+                needle: "msg-00".to_string(),
+                timeout_ms: 5000,
+            },
+        ],
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "one held backfill page plus the reload's whole-head rebuild: {requests:?}"
+    );
+    assert_eq!(
+        requests[0]["before"],
+        json!(HISTORY_MESSAGES as u64),
+        "the backfill page carries the history cursor: {requests:?}"
+    );
+    assert!(
+        requests[1].get("before").is_none(),
+        "the rebuild fetches the whole head without a cursor: {requests:?}"
+    );
+    for (index, frame) in frames.iter().enumerate() {
+        let markers = collapsed_markers(frame);
+        assert!(
+            markers.windows(2).all(|pair| pair[0] < pair[1]),
+            "frame {index} renders a history row twice or out of order: {frame}"
+        );
+    }
+    let final_frame = frames.last().expect("the settled frame renders");
+    assert_eq!(
+        first_marker_line(final_frame).as_deref(),
+        Some("msg-00"),
+        "the rebuild's true top renders the first message: {final_frame}"
+    );
 }
