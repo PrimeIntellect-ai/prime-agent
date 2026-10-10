@@ -109,7 +109,7 @@ async fn serve_systemone(
         }
     }
     let url = format!("{}/systemone", model.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
+    let client = crate::utils_inner::tls::http_client_builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .default_headers(headers)
         .build()

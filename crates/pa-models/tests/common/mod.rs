@@ -8,8 +8,13 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use pa_models::fetch::{CatalogFetcher, FetchOutcome};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_rustls::rustls::pki_types::PrivateKeyDer;
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::TlsAcceptor;
 
 type RequestLog = Arc<Mutex<Vec<String>>>;
 
@@ -157,4 +162,62 @@ pub fn oversized_stream() -> Vec<u8> {
     response.extend_from_slice(&vec![b'a'; 1024 * 1024]);
     response.extend_from_slice(b"\r\n");
     response
+}
+
+const TLS_TEST_BODY: &str = "{\"schemaVersion\":1,\"models\":[]}";
+
+async fn tls_catalog_server() -> (String, String) {
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(DnType::CommonName, "catalog test ca");
+    let ca_key = KeyPair::generate().expect("ca key");
+    let ca_cert = ca_params.self_signed(&ca_key).expect("ca cert");
+
+    let leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).expect("leaf params");
+    let leaf_key = KeyPair::generate().expect("leaf key");
+    let leaf_cert = leaf_params
+        .signed_by(&leaf_key, &Issuer::from_params(&ca_params, &ca_key))
+        .expect("leaf cert");
+
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(
+            vec![leaf_cert.der().clone()],
+            PrivateKeyDer::Pkcs8(leaf_key.serialize_der().into()),
+        )
+        .expect("tls config");
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind tls server");
+    let port = listener.local_addr().expect("tls addr").port();
+    let response = ok_json(TLS_TEST_BODY, None);
+    tokio::spawn(async move {
+        let Ok((socket, _)) = listener.accept().await else {
+            return;
+        };
+        let Ok(mut stream) = acceptor.accept(socket).await else {
+            return;
+        };
+        let mut buffer = [0u8; 8_192];
+        let _ = stream.read(&mut buffer).await;
+        let _ = stream.write_all(&response).await;
+        let _ = stream.flush().await;
+    });
+    (format!("https://127.0.0.1:{port}"), ca_cert.pem())
+}
+
+pub async fn fetch_trusting_test_ca(env_var: &str) {
+    let (base_url, ca_pem) = tls_catalog_server().await;
+    let bundle = tempfile::NamedTempFile::new().expect("ca bundle");
+    std::fs::write(bundle.path(), ca_pem).expect("write ca bundle");
+    std::env::set_var(env_var, bundle.path());
+    let fetcher = CatalogFetcher::new();
+    let outcome = fetcher.fetch(&format!("{base_url}/x"), None).await;
+    let FetchOutcome::Fresh { body, .. } = outcome.expect("fetch") else {
+        panic!("expected a fresh body");
+    };
+    assert_eq!(body, TLS_TEST_BODY.as_bytes());
 }

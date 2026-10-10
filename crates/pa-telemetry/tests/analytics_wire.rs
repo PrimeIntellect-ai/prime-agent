@@ -54,7 +54,10 @@ async fn batch_posts_the_exact_ts_request() {
         Some(&json!("0.9.9-beta.3"))
     );
     let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 2 }))]);
-    let sink = AnalyticsSink::new(format!("{base}/api/v1/agent-analytics/events"));
+    let sink = AnalyticsSink::new(
+        format!("{base}/api/v1/agent-analytics/events"),
+        reqwest::Client::builder(),
+    );
     let events = vec![event("agent started"), event("agent run completed")];
     let outcome = sink.send_batch(INSTALL_ID, events.clone()).await;
     assert_eq!(outcome, SinkOutcome::Sent);
@@ -87,7 +90,9 @@ async fn the_client_batches_through_the_sink() {
     let (base, rx) = spawn_stub(vec![(202, json!({ "accepted": 2 }))]);
     let mut config = TelemetryClientConfig::new(INSTALL_ID);
     config.flush_interval = Duration::from_mins(1);
-    config.sinks = vec![Arc::new(AnalyticsSink::new(base)) as Arc<dyn TelemetrySink>];
+    config.sinks = vec![
+        Arc::new(AnalyticsSink::new(base, reqwest::Client::builder())) as Arc<dyn TelemetrySink>,
+    ];
     let client = TelemetryClient::spawn(config).unwrap();
     client.track("agent command used", properties("command_name", "model"));
     client.track("agent command used", properties("command_name", "resume"));
@@ -111,7 +116,7 @@ async fn failures_drop_the_batch() {
         // The backend's answer when its PostHog delivery failed.
         (202, json!({ "accepted": 0 })),
     ]);
-    let sink = AnalyticsSink::new(base);
+    let sink = AnalyticsSink::new(base, reqwest::Client::builder());
     assert_eq!(
         sink.send_batch(INSTALL_ID, vec![event("agent started")])
             .await,
@@ -132,6 +137,7 @@ async fn an_unreachable_endpoint_times_out_as_a_drop() {
     let sink = AnalyticsSink::with_timeout(
         format!("http://{}", listener.local_addr().unwrap()),
         Duration::from_millis(200),
+        reqwest::Client::builder(),
     );
     let started = std::time::Instant::now();
     let outcome = sink

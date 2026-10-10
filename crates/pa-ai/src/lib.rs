@@ -45,6 +45,7 @@ pub mod utils {
     pub use crate::utils_inner::json_parse;
     pub use crate::utils_inner::overflow;
     pub use crate::utils_inner::stream_failure;
+    pub use crate::utils_inner::tls;
 }
 mod utils_inner;
 

@@ -992,9 +992,10 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
     let install_id = "6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b";
     let mut config = TelemetryClientConfig::new(install_id);
     config.flush_interval = Duration::from_mins(10);
-    config.sinks = vec![
-        Arc::new(pa_telemetry::AnalyticsSink::new(url)) as Arc<dyn pa_telemetry::TelemetrySink>
-    ];
+    config.sinks = vec![Arc::new(pa_telemetry::AnalyticsSink::new(
+        url,
+        reqwest::Client::builder(),
+    )) as Arc<dyn pa_telemetry::TelemetrySink>];
     let client = TelemetryClient::spawn(config).unwrap();
     let mut fixture = fixture();
     fixture.client = client.clone();
