@@ -173,6 +173,8 @@ struct ChildRecord {
     /// nothing has been observed since the reseed, and the first delivery
     /// primes the cursor at the file's tail.
     attributed_rows: Option<usize>,
+    /// Frozen before delivery: cancellation and retries keep the same row identities.
+    pending_usage_report: Option<(RlmChildUsageReport, usize)>,
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
@@ -670,6 +672,7 @@ impl SupervisorChildSessions {
                 closed_by_parent: false,
                 session_file: None,
                 attributed_rows: Some(0),
+                pending_usage_report: None,
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

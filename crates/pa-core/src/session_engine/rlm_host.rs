@@ -951,6 +951,7 @@ mod tests {
             crate::session_engine::runtime_wiring::RlmWiring {
                 model_registry: Some(Arc::clone(&registry)),
                 subagent_host: host,
+                usage_store: None,
             },
             None,
             None,

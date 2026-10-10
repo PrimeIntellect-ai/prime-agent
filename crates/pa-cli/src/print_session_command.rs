@@ -345,6 +345,7 @@ mod tests {
                     additional_prompt_paths: Vec::new(),
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
+                    rlm_usage_store: None,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
                     prewarm_ipython_kernel: None,

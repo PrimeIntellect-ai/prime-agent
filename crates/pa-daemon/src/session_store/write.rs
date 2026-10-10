@@ -190,10 +190,6 @@ impl SessionFile {
         fields: Value,
         timestamp: &str,
     ) -> Result<String> {
-        anyhow::ensure!(
-            self.window.is_none() || self.path.exists(),
-            "window-backed session file is missing"
-        );
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
@@ -206,6 +202,24 @@ impl SessionFile {
         if self.window.is_some() {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
+        self.persist_built_entry(entry)
+    }
+
+    /// The durable-append core [`Self::persist_entry_at`] and the attribution
+    /// append-once share: the entry arrives fully built (its id included),
+    /// its line reaches the file first, and the entry joins the index only
+    /// after, so a failed append leaves no indexed row a reload would
+    /// resurface as the leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store only holds a window without a file,
+    /// or the append, flush, sync, or the bootstrap rewrite fails.
+    pub(super) fn persist_built_entry(&mut self, entry: SessionEntry) -> Result<String> {
+        anyhow::ensure!(
+            self.window.is_none() || self.path.exists(),
+            "window-backed session file is missing"
+        );
         let id = entry.id.clone();
         if !self.path.as_os_str().is_empty() && self.path.exists() {
             let mut bytes = Vec::new();

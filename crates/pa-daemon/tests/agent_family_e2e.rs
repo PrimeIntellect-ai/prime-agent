@@ -1246,6 +1246,7 @@ async fn parent_renames_a_child_end_to_end() {
         pa_core::session_engine::runtime_wiring::RlmWiring {
             model_registry: None,
             subagent_host: Some(Arc::clone(&children) as Arc<dyn RlmSubagentHost>),
+            usage_store: None,
         },
         None,
         None,

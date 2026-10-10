@@ -166,6 +166,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     closed_by_parent: false,
                     session_file: created.session_file.clone(),
                     attributed_rows: Some(0),
+                    pending_usage_report: None,
                     usage_watch_live: false,
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

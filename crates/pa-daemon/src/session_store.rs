@@ -28,6 +28,10 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
+mod child_usage;
+#[cfg(test)]
+#[path = "session_store/child_usage_tests.rs"]
+mod child_usage_tests;
 mod index;
 
 use index::fold_child_usage_attributions;

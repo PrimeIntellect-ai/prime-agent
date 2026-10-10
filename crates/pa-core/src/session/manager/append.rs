@@ -274,7 +274,8 @@ impl SessionManager {
         (id, write_error)
     }
 
-    /// Fold child usage into the target assistant and record the attribution.
+    /// Fold child usage into the target assistant and record the attribution
+    /// under the caller's row id (the idempotent retry's stable identity).
     ///
     /// # Errors
     ///
@@ -282,6 +283,7 @@ impl SessionManager {
     /// durable append's I/O error.
     pub fn append_child_usage_attribution(
         &mut self,
+        row_id: &str,
         target_id: &str,
         child_usage: pa_types::ai::Usage,
         aggregate_usage: pa_types::ai::Usage,
@@ -304,8 +306,9 @@ impl SessionManager {
                 format!("Assistant message entry {target_id} not found"),
             )
         })?;
-        let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
+        let mut base = self.next_base();
+        base.id = Some(row_id.to_owned());
+        let id = row_id.to_owned();
         self.append_entry(FileEntry::ChildUsageAttributed {
             payload: pa_types::session::ChildUsageAttributionEntry {
                 target_id: target_id.to_string(),

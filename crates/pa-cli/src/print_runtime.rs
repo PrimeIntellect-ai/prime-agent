@@ -598,6 +598,7 @@ async fn build_headless_engine_with(
                 .collect(),
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
+            rlm_usage_store: None,
             rlm_depth: None,
             model_info: Some(model.clone()),
             // The kernel boots in the background at creation.
@@ -1527,6 +1528,7 @@ async fn build_faux_engine_with(
             additional_prompt_paths: vec![],
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
+            rlm_usage_store: None,
             rlm_depth: None,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.

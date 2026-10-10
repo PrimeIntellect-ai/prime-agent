@@ -805,6 +805,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     // the manager folds its own copy (the detached window has none).
     manager
         .append_child_usage_attribution(
+            "attr-1",
             "a1",
             pa_types::ai::Usage {
                 input: 5,
