@@ -142,6 +142,20 @@ pub struct AgentSessionEngine {
     /// daemon worker.
     pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
     pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
+    /// The worker-installed digest inbox seams (swarm PR C): the inbox
+    /// reads and the pin live on the receiving worker; the kernel host
+    /// handlers call through these. Set by the worker at construction;
+    /// `None` outside a daemon worker.
+    pub(crate) digest_inbox_seams:
+        std::sync::Mutex<Option<crate::agent_inbox_host::DigestInboxSeams>>,
+    /// The worker-installed watch notice routing (swarm PR E): one watch
+    /// event routed through the digest-aware notice pipeline. Set by the
+    /// worker at construction; `None` outside a daemon worker.
+    pub(crate) watch_notice_sink:
+        std::sync::Mutex<Option<crate::agent_inbox_host::WatchNoticeSink>>,
+    /// The agent-watch registration state (swarm PR E): the subscription
+    /// registry plus the one-shared-poll arming flag.
+    pub(crate) agent_watches: std::sync::Mutex<crate::agent_inbox_host::AgentWatchHostState>,
     /// The live agent handle: the eager turn-abort funnel's target, mirrored
     /// because a running turn holds the core session's mutex.
     pub(crate) turn_agent: std::sync::Mutex<Option<std::sync::Arc<pa_agent::agent::Agent>>>,
@@ -209,7 +223,7 @@ pub struct AgentSessionEngine {
     >,
     /// One shared supervisor-link client: agent messaging and RLM children
     /// multiplex the same connection.
-    link: Arc<crate::supervisor_link::SupervisorLink>,
+    pub(crate) link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
     /// The worker-installed summary-delta sink, adopted onto every built

@@ -11,6 +11,13 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
+    /// Swarm PR E's "watchers die with the session" at a session
+    /// replacement (the registry is the engine's; the reused runtime must
+    /// not carry the replaced session's subscriptions into the new one).
+    fn clear_agent_watches(&self, reset: Box<dyn FnOnce() + '_>) {
+        AgentSessionEngine::clear_agent_watches(self, reset);
+    }
+
     /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self

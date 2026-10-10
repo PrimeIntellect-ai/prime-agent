@@ -10,6 +10,7 @@ use serde_json::Map;
 mod abort;
 mod autonomous;
 mod compaction;
+mod digest_host;
 mod goal;
 mod model_resolution;
 mod quota_park;

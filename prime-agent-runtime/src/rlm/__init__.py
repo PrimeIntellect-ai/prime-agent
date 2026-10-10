@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 import sys
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -487,6 +490,218 @@ async def delete_subagent(target: str | RLMSubagent | RLMSpawnHandle) -> RLMSuba
     return _subagent_from_payload(payload.get("subagent"), "rlm.delete_subagent")
 
 
+# ---------------------------------------------------------------------------
+# Digest inbox (the swarm digest lane, default off)
+# ---------------------------------------------------------------------------
+
+
+async def inbox_list() -> dict[str, Any]:
+    """List this session's digest inbox entries (ids, senders, read state, previews).
+
+    Entries appear only when the digest lane is enabled for this session; the
+    default is push delivery, where agent messages arrive directly.
+    """
+    return await host_request("rlm.inbox.list")
+
+
+async def inbox_read(ids: list[str] | None = None) -> dict[str, Any]:
+    """Read digest inbox entries and mark them read.
+
+    Reads every unread entry when ``ids`` is None; otherwise only the entries
+    with the given ids (unknown ids are ignored). Returns the entries and the
+    remaining unread count.
+    """
+    return await host_request("rlm.inbox.read", {} if ids is None else {"ids": ids})
+
+
+async def inbox_configure(mode: str) -> dict[str, Any]:
+    """Pin this session's agent-message delivery lane.
+
+    mode:
+      - "auto": the daemon-side controller decides (default).
+      - "push": always deliver agent messages directly (never digest).
+      - "digest": always store non-parent messages in the inbox.
+    """
+    if mode not in ("auto", "push", "digest"):
+        raise ValueError('mode must be "auto", "push", or "digest"')
+    return await host_request("rlm.inbox.configure", {"mode": mode})
+
+
+class _RLMInbox:
+    """The digest inbox for agent messages (digest lane, default off)."""
+
+    async def list(self) -> dict[str, Any]:
+        return await inbox_list()
+
+    async def read(self, ids: list[str] | None = None) -> dict[str, Any]:
+        return await inbox_read(ids)
+
+    async def configure(self, mode: str) -> dict[str, Any]:
+        return await inbox_configure(mode)
+
+
+# ---------------------------------------------------------------------------
+# Quiet watches (child activity as message-index ranges, job output as
+# byte ranges; never content)
+# ---------------------------------------------------------------------------
+
+
+_JOB_WATCHES: dict[int, dict[str, Any]] = {}
+
+
+async def _job_watch_loop(handle: Any, interval: float, baseline: int) -> None:
+    pid = int(getattr(handle, "pid"))
+    command = str(getattr(handle, "command", "") or "")
+    try:
+        # Byte offsets over the job's stream (not the rendered buffer — it
+        # trims past the caps), read through the non-consuming accessors: a
+        # watching agent must not mark the job's result consumed or suppress
+        # its `bash.completed` notice. The baseline comes from the caller so
+        # output produced between registration and the task's first run
+        # still reports its range instead of silently becoming the baseline.
+        last = baseline
+        while pid in _JOB_WATCHES:
+            await asyncio.sleep(interval)
+            if pid not in _JOB_WATCHES:
+                break
+            current = handle.peek_output_bytes()
+            if current > last:
+                await host_request(
+                    "bash.progress",
+                    {"pid": pid, "command": command, "fromBytes": last, "toBytes": current},
+                )
+                last = current
+            if not handle.running:
+                # The stdout pump may still be copying the process's final
+                # bytes (`running` flips at reap, before the pump drains), so
+                # the watcher drains briefly: the job's final output range
+                # still reports instead of vanishing with the loop's exit.
+                stable = 0
+                drain_deadline = time.monotonic() + 1.0
+                while time.monotonic() < drain_deadline and stable < 2:
+                    await asyncio.sleep(0.05)
+                    current = handle.peek_output_bytes()
+                    if current > last:
+                        await host_request(
+                            "bash.progress",
+                            {
+                                "pid": pid,
+                                "command": command,
+                                "fromBytes": last,
+                                "toBytes": current,
+                            },
+                        )
+                        last = current
+                        stable = 0
+                    else:
+                        stable += 1
+                break
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # A dead bridge or a reaped job just ends the watch; the handle stays usable.
+        pass
+    finally:
+        # The watch always ends with the job: the entry leaves the table
+        # so `job_list` reports only live watches and a re-registration on
+        # the same pid starts a fresh poller. The pop only fires when this
+        # task still owns the entry — a cancelled task's finally must not
+        # undo a replacement registration that reused the pid.
+        entry = _JOB_WATCHES.get(pid)
+        if entry is not None and entry["task"] is asyncio.current_task():
+            _JOB_WATCHES.pop(pid, None)
+
+
+async def watch_job(handle: Any, interval_seconds: float = 5.0) -> dict[str, Any]:
+    """Watch an async bash job's output growth.
+
+    Emits quiet byte-range progress notices (``[watch-job pid:N] output +K
+    bytes (a..b)``) every ``interval_seconds`` while the job runs; the notice
+    pipeline lands them in the digest inbox when that lane is on. Cancel with
+    ``rlm.watch.job_cancel(pid)``.
+    """
+    pid = getattr(handle, "pid", None)
+    if not isinstance(pid, int):
+        raise TypeError("rlm.watch.job requires a bash handle returned by bash()")
+    if interval_seconds <= 0 or not math.isfinite(interval_seconds):
+        raise ValueError("interval_seconds must be a positive finite number")
+    existing = _JOB_WATCHES.get(pid)
+    if existing is not None:
+        if existing["handle"] is handle:
+            return {"pid": pid, "watching": True, "already_watched": True}
+        # A different handle on a watched pid means the old job exited and
+        # the OS reused its pid before the old poller noticed: replace the
+        # stale watcher instead of answering a false already_watched. The
+        # cancelled task's finally leaves the replacement entry alone.
+        existing["task"].cancel()
+    # The baseline is captured at registration (not inside the scheduled
+    # task): bytes produced before the first poll still report their range.
+    baseline = handle.peek_output_bytes()
+    task = asyncio.get_running_loop().create_task(
+        _job_watch_loop(handle, float(interval_seconds), baseline)
+    )
+    _JOB_WATCHES[pid] = {
+        "task": task,
+        "interval": float(interval_seconds),
+        "handle": handle,
+    }
+    return {"pid": pid, "watching": True}
+
+
+def watch_job_list() -> list[dict[str, Any]]:
+    return [{"pid": pid, "interval": entry["interval"]} for pid, entry in sorted(_JOB_WATCHES.items())]
+
+
+def watch_job_cancel(pid: int) -> bool:
+    entry = _JOB_WATCHES.pop(pid, None)
+    if entry is None:
+        return False
+    entry["task"].cancel()
+    return True
+
+
+async def watch_agent(target: str) -> dict[str, Any]:
+    """Watch a direct child's activity: quiet notices with message-index ranges.
+
+    Registering again re-baselines; cancel with ``rlm.watch.agent_cancel(id)``.
+    """
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError("target must be a non-empty child name or id")
+    return await host_request("rlm.watch.agent", {"target": target.strip()})
+
+
+async def watch_agent_list() -> dict[str, Any]:
+    return await host_request("rlm.watch.agent_list")
+
+
+async def watch_agent_cancel(watch_id: str) -> dict[str, Any]:
+    if not isinstance(watch_id, str) or not watch_id.strip():
+        raise ValueError("watch_id must be a non-empty watch id")
+    return await host_request("rlm.watch.agent_cancel", {"id": watch_id.strip()})
+
+
+class _RLMWatch:
+    """Quiet watches: child activity as message-index ranges, job output as byte ranges."""
+
+    async def agent(self, target: str) -> dict[str, Any]:
+        return await watch_agent(target)
+
+    async def agent_list(self) -> dict[str, Any]:
+        return await watch_agent_list()
+
+    async def agent_cancel(self, watch_id: str) -> dict[str, Any]:
+        return await watch_agent_cancel(watch_id)
+
+    async def job(self, handle: Any, interval_seconds: float = 5.0) -> dict[str, Any]:
+        return await watch_job(handle, interval_seconds)
+
+    def job_list(self) -> list[dict[str, Any]]:
+        return watch_job_list()
+
+    def job_cancel(self, pid: int) -> bool:
+        return watch_job_cancel(pid)
+
+
 async def rename(new_name: str, *, session_id: str | RLMSpawnHandle | RLMSubagent | None = None) -> str:
     """Rename this session or one of its direct children.
 
@@ -665,6 +880,14 @@ class _RLMNamespace:
     async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
         return await collect(targets, timeout_ms=timeout_ms)
 
+    @property
+    def inbox(self) -> _RLMInbox:
+        return _RLMInbox()
+
+    @property
+    def watch(self) -> _RLMWatch:
+        return _RLMWatch()
+
     factory = _RLMFactoryNamespace()
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -712,11 +935,20 @@ __all__ = [
     "get_harness_state",
     "harness",
     "host_request",
+    "inbox_configure",
+    "inbox_list",
+    "inbox_read",
     "list_subagents",
     "progress_note",
     "rename",
     "rlm",
     "spawn",
+    "watch_agent",
+    "watch_agent_cancel",
+    "watch_agent_list",
+    "watch_job",
+    "watch_job_cancel",
+    "watch_job_list",
 ]
 
 # Lazily re-export the MCP base class. Kept lazy so `import rlm` never requires

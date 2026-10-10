@@ -154,6 +154,10 @@ pub(crate) struct SessionWindow {
     boundary_model: Option<(String, String)>,
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
+    /// Whether the window walk retained every file row (no compaction
+    /// boundary): `false` means the in-memory INDEX omits the discarded
+    /// prefix, and complete-history consumers must read the file itself.
+    pub(crate) retained_whole_file: bool,
     retained_ids: std::collections::HashSet<String>,
     /// The discarded prefix's on-chain spend (attribution-folded): added by the
     /// active stats when no compaction bounds the region.

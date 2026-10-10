@@ -86,6 +86,15 @@ pub(crate) struct SessionCore {
     /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
     /// `restore_next_turn`): delivered as prefix rows with the next turn.
     pub(crate) pending_next_turn: Vec<Value>,
+    /// The digest inbox lane (swarm PR C): inbound agent messages from
+    /// non-parent senders land in the durable inbox instead of prompting.
+    /// Default off — push delivery keeps the exact current flow.
+    pub(crate) agent_message_digest_mode: bool,
+    /// The user pin for the digest lane (swarm PR D): `"auto"` hands the
+    /// lane to the receiving worker's controller; a pinned lane never
+    /// flips. Default `"push"` (the controller ships dormant — see
+    /// [`crate::worker::digest::DigestLanePin`]).
+    pub(crate) agent_message_digest_pin: super::digest::DigestLanePin,
     /// The queue projection's active action: the runner sets the phase transitions
     /// (`preparing` at pickup, `committing` at the first row, `running` at the
     /// first assistant frame) and clears it once the turn settles.
@@ -141,6 +150,8 @@ impl SessionCore {
             retry_abort_requested: false,
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
+            agent_message_digest_mode: false,
+            agent_message_digest_pin: super::digest::DigestLanePin::default(),
             active_action: None,
         }
     }

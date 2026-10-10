@@ -228,6 +228,17 @@ class _BoundedBuffer:
         with self._lock:
             return len(self._head) + self._tail_size
 
+    def stream_bytes(self) -> int:
+        """Total bytes the process stream produced, including dropped bytes.
+
+        `size()` is the resident buffer; `text()` renders a drop marker once
+        bytes are trimmed. Quiet watchers report byte ranges over THIS
+        stream offset so the ranges keep growing with real output past the
+        buffer caps.
+        """
+        with self._lock:
+            return len(self._head) + self._tail_size + self._dropped
+
     def text(self) -> str:
         with self._lock:
             head = bytes(self._head)
@@ -397,6 +408,28 @@ class BashHandle:
         self._released = True
         self._note_result_consumed()
         return self._buffer.text()
+
+    def peek_output(self) -> str:
+        """The current output text without marking the result consumed.
+
+        Reading through `output()`/`tail()` consumes the result (the
+        completion notice withdraws), so quiet watchers — `rlm.watch.job`
+        polling growth byte ranges — read through this accessor instead
+        and leave the job's normal completion notice intact.
+        """
+        self._released = True
+        return self._buffer.text()
+
+    def peek_output_bytes(self) -> int:
+        """The job's stream byte offset without marking the result consumed.
+
+        The rendered `peek_output()` text stops growing once the bounded
+        buffer trims (the drop marker replaces real output), so watch
+        notices report ranges over THIS offset: it counts every byte the
+        process stream produced, past the buffer caps included.
+        """
+        self._released = True
+        return self._buffer.stream_bytes()
 
     def tail(self, n: int = 50) -> str:
         self._released = True

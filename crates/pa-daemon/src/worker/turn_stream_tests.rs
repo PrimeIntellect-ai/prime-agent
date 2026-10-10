@@ -50,6 +50,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         retry_abort_requested: false,
         queued_input_suspended: false,
         pending_next_turn: Vec::new(),
+        agent_message_digest_mode: false,
+        agent_message_digest_pin: crate::worker::digest::DigestLanePin::Auto,
         active_action: None,
         running_tool_calls: std::collections::HashSet::new(),
         running_admission_ids: std::collections::HashSet::new(),
@@ -66,6 +68,11 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         active_session_id: "burst-session".to_string(),
         roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
         user_bash: std::sync::Arc::new(crate::user_bash::UserBash::new()),
+        agent_digest: Arc::new(AgentMessageDigest::new(
+            Arc::new(Mutex::new(SessionCore::test_core(None, String::new()))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Notify::new()),
+        )),
         passivation: crate::worker::turn::PassivationContext {
             agent_dir: std::path::PathBuf::from("/tmp"),
             link: std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(

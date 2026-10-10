@@ -380,3 +380,239 @@ async fn attach_response_wire_bytes_keep_the_ts_key_order() {
         }
     }
 }
+
+/// A recording engine for the reply-marking seam: the delivery path only
+/// calls `mark_child_reply` here (the run seams stay inert — this suite
+/// drives no turn).
+struct ReplyRecorderEngine {
+    marks: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl SessionEngine for ReplyRecorderEngine {
+    fn run_prompt(
+        &self,
+        _: usize,
+        _: PromptRequest,
+        _: &dyn Fn() -> bool,
+        _: &mut dyn FnMut(EngineEvent) -> bool,
+    ) {
+    }
+    fn run_side_question(
+        &self,
+        request: crate::engine::SideQuestionRequest,
+        signal: &pa_agent::abort::AbortSignal,
+        sink: &pa_core::session_engine::side_question::SideQuestionSink,
+    ) -> crate::engine::SideQuestionOutcome {
+        ScriptedEngine::default().run_side_question(request, signal, sink)
+    }
+    fn run_compaction(
+        &self,
+        request: crate::engine::CompactionRequest,
+        signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::CompactionOutcome {
+        ScriptedEngine::default().run_compaction(request, signal)
+    }
+    fn run_branch_summary(
+        &self,
+        request: crate::engine::BranchSummaryRequest,
+        signal: &pa_agent::abort::AbortSignal,
+    ) -> crate::engine::BranchSummaryOutcome {
+        ScriptedEngine::default().run_branch_summary(request, signal)
+    }
+    fn rebuild_session_context(
+        &self,
+        _: Vec<pa_types::session::FileEntry>,
+        _: pa_core::session_engine::goal_driver::GoalBranchReload,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn mark_child_reply(&self, child_active_session_id: &str) {
+        self.marks
+            .lock()
+            .unwrap()
+            .push(child_active_session_id.to_string());
+    }
+}
+
+/// A created worker whose engine records `mark_child_reply` calls.
+fn recording_worker() -> (Worker, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let dir = std::env::temp_dir().join(format!("pa-worker-am-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "target-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: Some(true),
+        script: Some(json!({ "responses": ["ack"] })),
+    };
+    let marks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut worker = Worker::new(config, None);
+    worker.engine = std::sync::Arc::new(ReplyRecorderEngine {
+        marks: std::sync::Arc::clone(&marks),
+    });
+    (worker, marks)
+}
+
+async fn created_recording_worker() -> (Worker, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let (worker, marks) = recording_worker();
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    (worker, marks)
+}
+
+fn child_sender() -> Value {
+    json!({
+        "activeSessionId": "child-session",
+        "sessionId": "child-file",
+        "sessionName": "child-lane",
+        "runtimeKind": "subagent",
+        "parentActiveSessionId": "target-session",
+    })
+}
+
+/// A sender without a live session id: deliveries from it never mark.
+fn anonymous_sender() -> Value {
+    json!({ "sessionName": "filler" })
+}
+
+async fn deliver_from(
+    worker: &Worker,
+    message: &str,
+    sender: Value,
+) -> crate::protocol::DaemonResponse {
+    worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": worker.config.active_session_id,
+                "message": message,
+                "sender": sender,
+            }),
+        )
+        .await
+}
+
+/// Every refusal arm of the delivery path — the push queue cap, the digest
+/// inbox cap, and the failed durable append — must leave the child
+/// unmarked: a reply that never landed cannot suppress the settle watcher's
+/// terminal no-reply notice.
+#[tokio::test]
+async fn refused_deliveries_never_mark_the_child_replied() {
+    // The push queue cap: the queue is full, so the delivery is refused
+    // before the enqueue.
+    let (worker, marks) = created_recording_worker().await;
+    {
+        let mut core = worker.core.lock().unwrap();
+        for _ in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
+            core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Human,
+                preview: None,
+                message: "occupied".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Injected,
+                forced_batch: false,
+            });
+        }
+    }
+    let response = deliver_from(&worker, "over the push cap", child_sender()).await;
+    assert!(!response.success, "deliver should fail: {response:?}");
+    assert!(
+        marks.lock().unwrap().is_empty(),
+        "a cap-refused delivery marked the child replied: {:?}",
+        marks.lock().unwrap()
+    );
+
+    // The digest inbox cap: the unread inbox is at its bound, so the
+    // delivery is refused inside the append's lock section.
+    let (worker, marks) = created_recording_worker().await;
+    worker.agent_digest.configure_pin("digest").unwrap();
+    for index in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
+        let filled = deliver_from(&worker, &format!("fill {index}"), anonymous_sender()).await;
+        assert!(filled.success, "fill delivery failed: {filled:?}");
+    }
+    let response = deliver_from(&worker, "over the inbox cap", child_sender()).await;
+    assert!(
+        !response.success,
+        "over-cap delivery admitted: {response:?}"
+    );
+    assert!(
+        marks.lock().unwrap().is_empty(),
+        "an inbox-cap-refused delivery marked the child replied: {:?}",
+        marks.lock().unwrap()
+    );
+
+    // The failed durable append: every append to the store fails (a
+    // directory as the session-file path), so the digest delivery is
+    // refused with the store's error.
+    let (worker, marks) = created_recording_worker().await;
+    worker.agent_digest.configure_pin("digest").unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    worker
+        .core
+        .lock()
+        .unwrap()
+        .store
+        .as_mut()
+        .unwrap()
+        .set_path(dir.path().to_path_buf());
+    let response = deliver_from(&worker, "must not mark", child_sender()).await;
+    assert!(
+        !response.success,
+        "a failed durable append answered success: {response:?}"
+    );
+    assert!(
+        marks.lock().unwrap().is_empty(),
+        "an append-failed delivery marked the child replied: {:?}",
+        marks.lock().unwrap()
+    );
+}
+
+/// Both acceptance arms of the delivery path — the digest inbox's stored
+/// row and the push lane's enqueue — record the child's reply exactly
+/// once, so the settle watcher can withhold the no-reply notice.
+#[tokio::test]
+async fn accepted_deliveries_mark_the_child_replied_on_both_lanes() {
+    // The digest lane: the row reaches the durable inbox.
+    let (worker, marks) = created_recording_worker().await;
+    worker.agent_digest.configure_pin("digest").unwrap();
+    let response = deliver_from(&worker, "digested reply", child_sender()).await;
+    assert!(response.success, "deliver failed: {response:?}");
+    assert_eq!(
+        response.data.expect("receipt data")["deliveryStatus"],
+        "digest"
+    );
+    assert_eq!(
+        marks.lock().unwrap().as_slice(),
+        ["child-session"],
+        "the digested reply must mark the child once"
+    );
+
+    // The push lane: the message is enqueued on the steering lane.
+    let (worker, marks) = created_recording_worker().await;
+    let response = deliver_from(&worker, "pushed reply", child_sender()).await;
+    assert!(response.success, "deliver failed: {response:?}");
+    assert_eq!(
+        response.data.expect("receipt data")["deliveryStatus"],
+        "delivered"
+    );
+    assert_eq!(
+        marks.lock().unwrap().as_slice(),
+        ["child-session"],
+        "the queued reply must mark the child once"
+    );
+}

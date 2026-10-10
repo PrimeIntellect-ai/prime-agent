@@ -293,6 +293,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_key: item.queue_key.clone(),
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
+                agent_message: item.agent_message.clone(),
             })
             .collect()
     }
@@ -372,7 +373,7 @@ pub(crate) fn restore_queue_snapshot(
                         }
                     }),
                     custom_message: record.custom_message,
-                    agent_message: None,
+                    agent_message: record.agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
                     images: Vec::new(),

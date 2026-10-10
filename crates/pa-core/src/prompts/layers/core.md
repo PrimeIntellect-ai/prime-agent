@@ -38,6 +38,13 @@ The following programmatic tools are available in the REPL for subagent manageme
 - `rlm.rename(new_name: str, *, session_id=None) -> str`: rename the calling session (omit `session_id`) or a direct child (spawn handle, `list_subagents()` row, or session id; never the child's name); names must be unique among siblings, and the renamed session sees a transcript line for the change
 - `rlm.collect(targets=None, *, timeout_ms: int = 0) -> list[RLMChildResult]`: typed snapshots of direct children (status, settled flag, answer preview, error) without steering anyone; `timeout_ms=0` returns a non-blocking snapshot; a positive timeout blocks only this call until the children settle or the deadline passes
 - `rlm.progress_note(message: str) -> dict`: report brief in-flight progress to the parent orchestrator (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply
+- `rlm.inbox.list() -> dict`: the session's digest inbox entries (ids, senders, read state, previews) plus unread/total counts; empty while the digest lane is off (the default — agent messages arrive directly)
+- `rlm.inbox.read(ids: list[str] | None = None) -> dict`: read inbox entries and mark them read (every unread entry when `ids` is None, only the given ids otherwise); returns the entries and the remaining unread count
+- `rlm.inbox.configure(mode: Literal["auto", "push", "digest"]) -> dict`: pin the session's agent-message delivery lane; "push"/"digest" fix delivery and suspend the daemon's dynamic lane controller, "auto" returns control to it
+- `rlm.watch.agent(target: str) -> dict`: subscribe to a direct child's activity — quiet notices carry message-index ranges (`[watch-agent child:name] messages 4..7 (+3) status: idle -> running`) and status transitions, never content; re-registering re-baselines
+- `rlm.watch.agent_list() -> dict`: the active watches
+- `rlm.watch.agent_cancel(id: str) -> dict`: cancel one watch
+- `rlm.watch.job(handle, interval_seconds: float = 5.0) -> dict`: watch an async `bash()` job's output growth — quiet byte-range notices (`[watch-job pid:N] output +K bytes (a..b)`); `rlm.watch.job_list()` lists them and `rlm.watch.job_cancel(pid)` cancels one
 - `RLMSpawnHandle`
   - `rlm_child_id: str`
   - `name: str`
@@ -65,7 +72,7 @@ The following programmatic tools are available in the REPL for subagent manageme
 
 The following programmatic tools are available in the REPL for a2a communication:
 
-- `agent_message.send(message: str, *, receiver_role: Literal["parent", "sibling", "child"], receiver_name: str | None) -> dict`: send a message to the receiver; returns a receipt with the message id and a delivery status (delivered or queued); all root sessions are siblings; `send("all", broadcast_message)` broadcasts to the family roster and returns `{receipts: [...]}`
+- `agent_message.send(message: str, *, receiver_role: Literal["parent", "sibling", "child"], receiver_name: str | None) -> dict`: send a message to the receiver; returns a receipt with the message id and a delivery status (delivered, queued, or digest — the target stored the message in its digest inbox instead of prompting; the target pulls it with `rlm.inbox.read()`); all root sessions are siblings; `send("all", broadcast_message)` broadcasts to the family roster and returns `{receipts: [...]}`
 - `agent_observe.list_agents() -> dict`: list nuclear family
 - `agent_observe.get_agent(target: str) -> dict`: one agent's status detail
 - `agent_observe.recent_messages(target: str, limit: int = 8, max_chars: int = 800) -> dict`: transcript preview; `limit` errors outside [1-50], `max_chars` outside [80-2000]

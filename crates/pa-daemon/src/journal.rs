@@ -134,6 +134,15 @@ pub struct WorkerQueueItemRecord {
     /// restores as "queued" — the only class a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
+    /// The original agent-message text when the row came from an
+    /// `agent_message` delivery (`worker::QueuedItem::agent_message`):
+    /// the marker `agent_messages_clear`/`agent_messages_pause` remove
+    /// queued rows by, and the turn's ingestion-turn classification reads
+    /// (`first.agent_message` before `note_model_turn`). `None` for rows
+    /// a client queued directly; a record written before the field
+    /// existed restores as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_message: Option<String>,
 }
 
 fn queue_visible_default() -> bool {
@@ -494,6 +503,7 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         queue_key: None,
                         queue_visible: true,
                         policy: queue_policy_default(),
+                        agent_message: None,
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
                     _ => None,
@@ -565,6 +575,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            agent_message: None,
         };
         sequential
             .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
@@ -698,6 +709,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            agent_message: None,
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal

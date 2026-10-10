@@ -46,6 +46,12 @@ if child is not None:
   context; `"queued"` means a steering message was accepted and will deliver when
   the target's current work allows (`send` does not block waiting for that).
   Delivered receipts carry `deliveredAt`, queued receipts carry `queuedAt`.
+  A third status `"digest"` appears when the target session runs with its
+  digest inbox lane enabled (an opt-in per-recipient lane the daemon's
+  dynamic controller or the recipient's `rlm.inbox.configure("digest")`
+  pin controls): the message was stored in the target's inbox and carries
+  `digestAt`; the target pulls it with `rlm.inbox.read()` instead of being
+  prompted per message.
 
 ## Safety
 

@@ -141,6 +141,9 @@ pub struct KernelSentAgentMessage {
 pub enum SentDeliveryStatus {
     Delivered,
     Queued,
+    /// The digest-lane receipt (swarm PR C): the message waits in the target
+    /// session's inbox instead of prompting.
+    Digest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +409,7 @@ pub fn parse_sent_agent_message(payload: &Value) -> Option<KernelSentAgentMessag
     let delivery_status = match obj.get("deliveryStatus")?.as_str()? {
         "delivered" => SentDeliveryStatus::Delivered,
         "queued" => SentDeliveryStatus::Queued,
+        "digest" => SentDeliveryStatus::Digest,
         _ => return None,
     };
     let active_session_id = target.get("activeSessionId")?.as_str()?;
