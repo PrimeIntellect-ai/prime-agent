@@ -428,6 +428,7 @@ impl SessionUi {
                     // pending-state reset or arrive without its own streamed frame).
                     self.pending_tools.insert(tool_call_id.clone());
                     Self::set_working_activity("Executing", false, view);
+                    self.track_live_tool_timer(&tool_name);
                 }
             }
             TurnUpdate::ToolExecutionUpdate {
@@ -915,6 +916,20 @@ impl SessionUi {
             }
         }
         false
+    }
+
+    /// `tui live tool timer`: a tool call started executing, so its running
+    /// card carries the live timer; once per live call (replayed cards never
+    /// take this path), and the tracker maps the name onto the fixed
+    /// category vocabulary — no tool name leaves the process.
+    fn track_live_tool_timer(&self, tool_name: &str) {
+        let Some(telemetry) = self.telemetry.clone() else {
+            return;
+        };
+        let tool_name = tool_name.to_string();
+        tokio::spawn(async move {
+            telemetry.live_tool_timer_started(tool_name).await;
+        });
     }
 
     /// `tui ipython bash rendered`: the settled ipython card that renders

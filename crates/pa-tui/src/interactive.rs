@@ -256,6 +256,14 @@ pub trait InteractionTelemetry: Send + Sync {
         cell_lines: usize,
         count: usize,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A tool call started executing, so its running card carries the live
+    /// elapsed timer (event `tui live tool timer`): the tracker maps the
+    /// name onto the fixed tool-category vocabulary, so no tool name
+    /// leaves the process.
+    fn live_tool_timer_started(
+        &self,
+        tool_name: String,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
 /// Options for one interactive run. `Debug` skips the telemetry handle (the trait object is not
