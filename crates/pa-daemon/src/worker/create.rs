@@ -596,7 +596,9 @@ impl Worker {
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
-        self.reseed_rlm_children().await;
+        if opened_existing_session {
+            self.reseed_rlm_children().await;
+        }
         // The built-in Herdr connector binds here, per session: the pane
         // identity comes from the create payload's client env (the client
         // that owns the pane sent it), never from this process's ambient

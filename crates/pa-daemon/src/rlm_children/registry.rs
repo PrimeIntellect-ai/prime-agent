@@ -8,7 +8,6 @@ use super::{
     bail, json, rlm_child_label, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand,
     DeletedChild, Map, Mutex, Result, SupervisorChildSessionsInner, KILL_TIMEOUT_MS,
 };
-use crate::lease::canonical_session_path;
 
 /// The already-gone marker inside a close failure: a close walking a
 /// child that died earlier must not fail (a missing child session is a completed no-op).
@@ -310,16 +309,14 @@ fn ledger_child_records(
     };
     let ledger =
         crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, Path::new(&sessions_dir), |_| {});
-    let edges = ledger.live_edges().unwrap_or_else(|error| {
-        eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
-        Vec::new()
-    });
-    let parent_file = canonical_session_path(parent_file);
+    let edges = ledger
+        .live_edges_of_parent(parent_file)
+        .unwrap_or_else(|error| {
+            eprintln!("pa-daemon: RLM ledger reseed skipped: {error:#}");
+            Vec::new()
+        });
     let mut records = Vec::new();
     for edge in edges {
-        if canonical_session_path(Path::new(&edge.parent)) != parent_file {
-            continue;
-        }
         let child = PathBuf::from(&edge.child);
         let session_id = child
             .file_stem()
