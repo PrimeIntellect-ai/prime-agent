@@ -385,11 +385,9 @@ impl Worker {
         // The in-flight turn's fetch cancels now, not at its next
         // streamed event.
         self.engine.abort_in_flight_turn();
-        if let Err(error) = super::queue::checkpoint_owned_input(
-            &self.recovery,
-            &self.core,
-            "abort",
-        ) {
+        if let Err(error) =
+            super::queue::checkpoint_owned_input(&self.recovery, &self.core, "abort")
+        {
             self.core.lock().unwrap().recovery_hold = true;
             return Err(error);
         }

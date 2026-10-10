@@ -486,7 +486,10 @@ impl WorkerRecoveryJournal {
         };
         append_records(
             &self.path,
-            &[serde_json::to_value(&snapshot)?, serde_json::to_value(&record)?],
+            &[
+                serde_json::to_value(&snapshot)?,
+                serde_json::to_value(&record)?,
+            ],
         )?;
         self.queue_snapshots
             .insert(active_session_id.to_string(), snapshot);
@@ -556,11 +559,15 @@ impl WorkerRecoveryJournal {
         };
         append_records(
             &self.path,
-            &[serde_json::to_value(&snapshot)?, serde_json::to_value(&record)?],
+            &[
+                serde_json::to_value(&snapshot)?,
+                serde_json::to_value(&record)?,
+            ],
         )?;
         self.queue_snapshots
             .insert(active_session_id.to_string(), snapshot.clone());
-        self.latest.insert(active_session_id.to_string(), record.clone());
+        self.latest
+            .insert(active_session_id.to_string(), record.clone());
         self.latest_resume_pair = Some((snapshot, record));
         Ok(())
     }
@@ -623,7 +630,9 @@ impl WorkerRecoveryJournal {
 
     /// Only the final complete pair can prove an attempt. A torn final line
     /// or a later write invalidates the proof rather than restoring old work.
-    fn read_attempt_pair(path: &Path) -> Result<Option<(WorkerQueueSnapshotRecord, WorkerRecoveryRecord)>> {
+    fn read_attempt_pair(
+        path: &Path,
+    ) -> Result<Option<(WorkerQueueSnapshotRecord, WorkerRecoveryRecord)>> {
         if !path.exists() {
             return Ok(None);
         }
@@ -645,7 +654,9 @@ impl WorkerRecoveryJournal {
         let Ok(snapshot) = serde_json::from_str::<WorkerQueueSnapshotRecord>(snapshot_line) else {
             return Ok(None);
         };
-        if snapshot.version != QUEUE_SNAPSHOT_VERSION || snapshot.r#type != QUEUE_SNAPSHOT_RECORD_TYPE {
+        if snapshot.version != QUEUE_SNAPSHOT_VERSION
+            || snapshot.r#type != QUEUE_SNAPSHOT_RECORD_TYPE
+        {
             return Ok(None);
         }
         Ok(Some((snapshot, record)))

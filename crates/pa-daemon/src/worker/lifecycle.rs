@@ -5,8 +5,8 @@ use super::{
     DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value,
     Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
-use anyhow::{Context, Result};
 use crate::journal::{ShutdownVerdict, WorkerRecoveryJournal};
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 
 /// Reconcile a sync-uncertain accepted row by its stable session entry ID.
@@ -185,21 +185,20 @@ impl Worker {
                     continue;
                 }
                 if durable.contains(&input.row_id) {
-                    lanes.steering.retain(|item| {
-                        item.entry_id.as_deref() != Some(input.row_id.as_str())
-                    });
-                    lanes.follow_up.retain(|item| {
-                        item.entry_id.as_deref() != Some(input.row_id.as_str())
-                    });
+                    lanes
+                        .steering
+                        .retain(|item| item.entry_id.as_deref() != Some(input.row_id.as_str()));
+                    lanes
+                        .follow_up
+                        .retain(|item| item.entry_id.as_deref() != Some(input.row_id.as_str()));
                     continue;
                 }
                 // An interrupted slash command may have completed side
                 // effects without an accepted user row. Leave its exact
                 // input parked for an explicit user decision.
-                manual_hold |= crate::session_commands::parse_prompt_session_command(
-                    &input.item.message,
-                )
-                .is_some();
+                manual_hold |=
+                    crate::session_commands::parse_prompt_session_command(&input.item.message)
+                        .is_some();
             }
             let unaccepted_picked = lanes
                 .steering
@@ -237,7 +236,9 @@ impl Worker {
             let journal = if let Some(journal) = recovery.as_mut() {
                 journal
             } else {
-                recovery.insert(WorkerRecoveryJournal::open(&self.config.recovery_journal_path)?)
+                recovery.insert(WorkerRecoveryJournal::open(
+                    &self.config.recovery_journal_path,
+                )?)
             };
             journal.record_shutdown_checkpoint(
                 &active_session_id,

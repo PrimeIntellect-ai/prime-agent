@@ -85,12 +85,17 @@ impl Worker {
         }
         #[cfg(test)]
         {
-            let gate = self.prompt_enqueue_gate.lock().unwrap().as_ref().map(|gate| {
-                (
-                    std::sync::Arc::clone(&gate.entered),
-                    std::sync::Arc::clone(&gate.release),
-                )
-            });
+            let gate = self
+                .prompt_enqueue_gate
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|gate| {
+                    (
+                        std::sync::Arc::clone(&gate.entered),
+                        std::sync::Arc::clone(&gate.release),
+                    )
+                });
             if let Some((entered, release)) = gate {
                 entered.notify_one();
                 release.notified().await;

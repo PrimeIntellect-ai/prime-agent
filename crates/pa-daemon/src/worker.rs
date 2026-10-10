@@ -21,18 +21,20 @@ pub(crate) use connection::{AuthOutcome, ConnectionSink, EventPump, OutboundFram
 
 mod queue;
 
+#[cfg(test)]
+pub(crate) use queue::restore_queue_snapshot;
+#[cfg(test)]
+pub(crate) use queue::QueueLanes;
 pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_owned_input, checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot_reconciled, restored_turn_policy,
-    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
-    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    checkpoint_owned_input, checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch,
+    parse_custom_message, parse_prompt_images, queue_lanes, restore_queue_snapshot_reconciled,
+    restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint, QueuedItem,
+    TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY,
+    QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
-#[cfg(test)]
-pub(crate) use queue::restore_queue_snapshot;
 
 mod create;
 mod turn;
@@ -156,7 +158,7 @@ pub struct Worker {
     /// The `/model` catalog background-refresh coalescing gate: at most
     /// one refresh plus one queued re-arm per burst.
     pub(crate) model_catalog_refresh_gate: std::sync::Arc<crate::model_catalog::RefreshGate>,
-    recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
+    pub(crate) recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
     pub(crate) peer_grants: PeerGrantStore,

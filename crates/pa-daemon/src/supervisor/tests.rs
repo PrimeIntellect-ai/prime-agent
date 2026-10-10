@@ -759,7 +759,9 @@ async fn partial_shutdown_preflight_failure_does_not_dispatch_prepared_worker() 
     let first_disk: DaemonWorkerDescriptor =
         serde_json::from_slice(&std::fs::read(first_path).unwrap()).unwrap();
     assert!(first_disk.stop_requested_at.is_some());
-    assert!(crate::descriptor::shutdown_hold(&first_disk).unwrap().is_some());
+    assert!(crate::descriptor::shutdown_hold(&first_disk)
+        .unwrap()
+        .is_some());
     assert!(first.descriptor.lock().await.stop_requested_at.is_some());
     assert!(second.descriptor.lock().await.stop_requested_at.is_none());
 }
@@ -850,7 +852,9 @@ async fn live_resume_without_descriptor_hold_gets_a_supervisor_attempt() {
     let (lines, stop) = routed.await.expect("route task");
     assert!(!stop);
     assert_eq!(lines[0]["success"], json!(true));
-    assert!(!crate::descriptor::has_shutdown_hold(&resident.descriptor.lock().await));
+    assert!(!crate::descriptor::has_shutdown_hold(
+        &*resident.descriptor.lock().await
+    ));
 }
 
 /// The stop's only `Err` (tombstone persist) leaves the worker untouched and the kill

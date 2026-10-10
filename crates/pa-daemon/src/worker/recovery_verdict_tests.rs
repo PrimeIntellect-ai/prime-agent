@@ -1,6 +1,6 @@
 //! Worker tests.
-use super::*;
 use super::queue::{checkpoint_picked_input, queue_item_record};
+use super::*;
 use crate::engine::{
     CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
@@ -577,7 +577,11 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     )
     .unwrap()
     .expect("shutdown queue snapshot");
-    assert_eq!(steering.len(), 2, "untouched originals need no generic continuation");
+    assert_eq!(
+        steering.len(),
+        2,
+        "untouched originals need no generic continuation"
+    );
     assert_eq!(steering[0].message, "original with image");
     assert_eq!(steering[1].message, "batched second");
     assert_eq!(
@@ -608,7 +612,10 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     assert_eq!(restored.len(), 2);
     assert_eq!(restored[0].message, "original with image");
     assert_eq!(restored[0].images[0].data, "QUJD");
-    assert_eq!(restored[0].admission_id.as_deref(), Some("admit:original with image"));
+    assert_eq!(
+        restored[0].admission_id.as_deref(),
+        Some("admit:original with image")
+    );
     running.abort();
     let _ = std::fs::remove_dir_all(fixture_dir);
 }
@@ -675,7 +682,8 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
         release: std::sync::Mutex::new(release_rx),
         emit_first_before_gate: true,
     });
-    let entered = engine.entered.notified();
+    let entered_notify = Arc::clone(&engine.entered);
+    let entered = entered_notify.notified();
     let runner = gated_runner(&worker, engine);
     let running = tokio::spawn(async move { runner.run().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
@@ -733,8 +741,14 @@ async fn shutdown_reconciles_partial_batch_after_prefix_row() {
     assert_eq!(steering[0].message, "second with image");
     assert!(steering.iter().all(|item| item.message != "first accepted"));
     assert_eq!(steering[0].images[0].data, "QUJD");
-    assert_eq!(steering[0].agent_message.as_deref(), Some("agent:second with image"));
-    assert_eq!(steering[0].admission_id.as_deref(), Some("admit:second with image"));
+    assert_eq!(
+        steering[0].agent_message.as_deref(),
+        Some("agent:second with image")
+    );
+    assert_eq!(
+        steering[0].admission_id.as_deref(),
+        Some("admit:second with image")
+    );
     assert!(steering[0].forced_batch);
     running.abort();
     let _ = std::fs::remove_dir_all(fixture_dir);
@@ -761,14 +775,15 @@ async fn cancel_owned_picked_input_withdraws_its_durable_snapshot() {
         let mut core = worker.core.lock().unwrap();
         core.busy = true;
         core.running_admission_ids.insert("owned-a".to_string());
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "picked-owned-a".to_string(),
-            item: queue_item_record(&item),
-            attempted: false,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "picked-owned-a".to_string(),
+                item: queue_item_record(&item),
+                attempted: false,
+                committed: false,
+                cancelled: false,
+            });
     }
     checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
     let reply = worker.handle_cancel_prompt_admission(&json!({
@@ -812,14 +827,15 @@ async fn failed_cancel_checkpoint_refuses_ack_and_holds_live_input() {
         let mut core = worker.core.lock().unwrap();
         core.busy = true;
         core.running_admission_ids.insert("owned-b".to_string());
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "picked-owned-b".to_string(),
-            item: queue_item_record(&item),
-            attempted: false,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "picked-owned-b".to_string(),
+                item: queue_item_record(&item),
+                attempted: false,
+                committed: false,
+                cancelled: false,
+            });
     }
     checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
     let fixture_dir = worker.config.socket_path.parent().unwrap();
@@ -886,7 +902,10 @@ async fn failed_pickup_checkpoint_parks_original_before_engine_entry() {
     .await
     .expect("failed pickup never parked");
     let core = worker.core.lock().unwrap();
-    assert_eq!(core.steering.front().unwrap().message, "original before engine");
+    assert_eq!(
+        core.steering.front().unwrap().message,
+        "original before engine"
+    );
     assert!(core.in_flight_input.is_empty());
     assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
     drop(core);
@@ -918,14 +937,15 @@ async fn held_live_input_reconciles_stable_id_before_explicit_resume() {
     {
         let mut core = worker.core.lock().unwrap();
         core.store.as_mut().unwrap().set_path(session_path.clone());
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "stable-picked-row".to_string(),
-            item: queue_item_record(&item),
-            attempted: true,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "stable-picked-row".to_string(),
+                item: queue_item_record(&item),
+                attempted: true,
+                committed: false,
+                cancelled: false,
+            });
         core.recovery_hold = true;
         core.queued_input_suspended = true;
     }
@@ -945,7 +965,10 @@ async fn held_live_input_reconciles_stable_id_before_explicit_resume() {
         let core = worker.core.lock().unwrap();
         assert!(!core.recovery_hold && !core.queued_input_suspended);
         assert!(core.in_flight_input.is_empty());
-        assert_eq!(core.steering.front().unwrap().message, "retry only if unaccepted");
+        assert_eq!(
+            core.steering.front().unwrap().message,
+            "retry only if unaccepted"
+        );
     }
     assert!(WorkerRecoveryJournal::read_resume_checkpoint(
         &worker.config.recovery_journal_path,
@@ -976,14 +999,15 @@ async fn ordinary_busy_resume_does_not_requeue_its_active_input() {
     {
         let mut core = worker.core.lock().unwrap();
         core.busy = true;
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "ordinary-running-id".to_string(),
-            item: queue_item_record(&item),
-            attempted: false,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "ordinary-running-id".to_string(),
+                item: queue_item_record(&item),
+                attempted: false,
+                committed: false,
+                cancelled: false,
+            });
     }
     checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
     let _ = worker.handle_resume_queue(&json!({
@@ -1024,14 +1048,15 @@ async fn sync_uncertain_accepted_id_is_not_replayed_on_explicit_resume() {
     {
         let mut core = worker.core.lock().unwrap();
         core.store.as_mut().unwrap().set_path(session_path);
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "accepted-stable-id".to_string(),
-            item: queue_item_record(&item),
-            attempted: true,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "accepted-stable-id".to_string(),
+                item: queue_item_record(&item),
+                attempted: true,
+                committed: false,
+                cancelled: false,
+            });
         core.recovery_hold = true;
         core.queued_input_suspended = true;
     }
@@ -1075,14 +1100,15 @@ async fn abort_ack_durably_withdraws_last_picked_original() {
     {
         let mut core = worker.core.lock().unwrap();
         core.busy = true;
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "abort-picked-id".to_string(),
-            item: queue_item_record(&item),
-            attempted: false,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "abort-picked-id".to_string(),
+                item: queue_item_record(&item),
+                attempted: false,
+                committed: false,
+                cancelled: false,
+            });
     }
     checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
     let reply = worker.dispatch("abort", &json!({})).await;

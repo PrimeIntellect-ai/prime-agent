@@ -311,7 +311,10 @@ pub(crate) fn checkpoint_owned_input(
     };
     let (active_session_id, session_id, session_file, lanes) = {
         let core = core_lock.lock().unwrap();
-        anyhow::ensure!(!core.shutdown_requested, "shutdown owns final queue checkpoint");
+        anyhow::ensure!(
+            !core.shutdown_requested,
+            "shutdown owns final queue checkpoint"
+        );
         (
             core.active_session_id.clone(),
             core.store
@@ -337,13 +340,16 @@ pub(crate) fn checkpoint_owned_input(
 
 pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
     fn items(lane: &VecDeque<QueuedItem>) -> Vec<crate::journal::WorkerQueueItemRecord> {
-        lane.iter()
-            .map(queue_item_record)
-            .collect()
+        lane.iter().map(queue_item_record).collect()
     }
     let mut steering = items(&core.steering);
     let mut follow_up = items(&core.follow_up);
-    for input in core.in_flight_input.iter().rev().filter(|input| !input.cancelled) {
+    for input in core
+        .in_flight_input
+        .iter()
+        .rev()
+        .filter(|input| !input.cancelled)
+    {
         let mut record = input.item.clone();
         record.entry_id = Some(input.row_id.clone());
         match input.lane {
@@ -351,7 +357,10 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
             Lane::FollowUp => follow_up.insert(0, record),
         }
     }
-    QueueLanes { steering, follow_up }
+    QueueLanes {
+        steering,
+        follow_up,
+    }
 }
 
 pub(crate) fn queue_item_record(item: &QueuedItem) -> crate::journal::WorkerQueueItemRecord {
@@ -425,9 +434,15 @@ pub(crate) fn restore_queue_snapshot(
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
     journal
         .latest_queue_snapshot(active_session_id)
-        .map_or_else(|| (VecDeque::new(), VecDeque::new()), |(steering, follow_up)| {
-            (restore_queue_records(steering), restore_queue_records(follow_up))
-        })
+        .map_or_else(
+            || (VecDeque::new(), VecDeque::new()),
+            |(steering, follow_up)| {
+                (
+                    restore_queue_records(steering),
+                    restore_queue_records(follow_up),
+                )
+            },
+        )
 }
 
 fn restore_queue_records(
@@ -499,7 +514,10 @@ pub(crate) fn restore_queue_snapshot_reconciled(
         steering.retain(|item| !item.entry_id.as_ref().is_some_and(|id| landed.contains(id)));
         follow_up.retain(|item| !item.entry_id.as_ref().is_some_and(|id| landed.contains(id)));
     }
-    Ok((restore_queue_records(steering), restore_queue_records(follow_up)))
+    Ok((
+        restore_queue_records(steering),
+        restore_queue_records(follow_up),
+    ))
 }
 
 /// Admit one held autonomous continuation through the follow-up lane:

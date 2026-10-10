@@ -216,7 +216,10 @@ impl SessionFile {
             "window-backed session file is missing"
         );
         if let Some(id) = entry_id {
-            anyhow::ensure!(!self.by_id.contains_key(id), "session entry ID already exists");
+            anyhow::ensure!(
+                !self.by_id.contains_key(id),
+                "session entry ID already exists"
+            );
         }
         let mut entry = SessionEntry::new(
             entry_type,

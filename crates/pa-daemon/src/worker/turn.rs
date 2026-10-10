@@ -3,8 +3,8 @@
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
     emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    queue::{checkpoint_picked_input, queue_item_record}, session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent,
-    EventPump, Lane, Map, Notify,
+    queue::{checkpoint_picked_input, queue_item_record},
+    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
     OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
     SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
     ABORTED_TURN_SETTLE_ERROR,
@@ -629,12 +629,14 @@ impl TurnRunner {
                 match &event {
                     // A `message` entry per row (TS's appendMessage path).
                     EngineEvent::UserMessage(message) => {
-                        let entry_id = accepted_index
-                            .map(|index| core.in_flight_input[index].row_id.clone());
+                        let entry_id =
+                            accepted_index.map(|index| core.in_flight_input[index].row_id.clone());
                         if let Some(store) = core.store.as_mut() {
                             input_persisted = if let Some(id) = entry_id.as_deref() {
                                 store.persist_input_entry(
-                                    "message", json!({ "message": message }), id,
+                                    "message",
+                                    json!({ "message": message }),
+                                    id,
                                 )
                             } else {
                                 store.persist_entry("message", json!({ "message": message }))
@@ -667,8 +669,8 @@ impl TurnRunner {
                         core.running_tool_calls.remove(tool_call_id);
                     }
                     EngineEvent::CustomMessage(message) => {
-                        let entry_id = accepted_index
-                            .map(|index| core.in_flight_input[index].row_id.clone());
+                        let entry_id =
+                            accepted_index.map(|index| core.in_flight_input[index].row_id.clone());
                         if let Some(store) = core.store.as_mut() {
                             let fields = json!({
                                 "customType": message.get("customType").cloned().unwrap_or(Value::Null),
@@ -729,8 +731,7 @@ impl TurnRunner {
                 }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
-                if !active_committed && input_persisted && accepted_index.is_some()
-                {
+                if !active_committed && input_persisted && accepted_index.is_some() {
                     active_committed = true;
                     if let Some(active) = core.active_action.as_mut() {
                         active.phase = "committing".to_string();

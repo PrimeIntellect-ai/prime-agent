@@ -218,12 +218,11 @@ impl Worker {
                     let path = session_file
                         .as_deref()
                         .ok_or_else(|| anyhow::anyhow!("picked input has no session file"))?;
-                    let (steering, follow_up) =
-                        crate::worker::restore_queue_snapshot_reconciled(
-                            journal,
-                            &active_session_id,
-                            std::path::Path::new(path),
-                        )?;
+                    let (steering, follow_up) = crate::worker::restore_queue_snapshot_reconciled(
+                        journal,
+                        &active_session_id,
+                        std::path::Path::new(path),
+                    )?;
                     let mut core = self.core.lock().unwrap();
                     core.steering = steering;
                     core.follow_up = follow_up;

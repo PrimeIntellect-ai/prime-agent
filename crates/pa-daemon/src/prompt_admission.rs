@@ -585,9 +585,10 @@ impl Worker {
             // process-local registry was rebuilt on worker restart.
             let status = status.or_else(|| {
                 (queued
-                    || core.in_flight_input.iter().any(|input| {
-                        input.item.admission_id.as_deref() == Some(admission_id)
-                    }))
+                    || core
+                        .in_flight_input
+                        .iter()
+                        .any(|input| input.item.admission_id.as_deref() == Some(admission_id)))
                 .then_some(AdmissionStatus::Owned)
             });
             let dropped_queued = matches!(status, Some(AdmissionStatus::Cancelled))
@@ -617,11 +618,9 @@ impl Worker {
             (status, dropped_queued, abort_running, cancelled_picked)
         };
         if dropped_queued || cancelled_picked {
-            if let Err(error) = crate::worker::checkpoint_owned_input(
-                &self.recovery,
-                &self.core,
-                "queue_dropped",
-            ) {
+            if let Err(error) =
+                crate::worker::checkpoint_owned_input(&self.recovery, &self.core, "queue_dropped")
+            {
                 {
                     let mut core = self.core.lock().unwrap();
                     core.recovery_hold = true;

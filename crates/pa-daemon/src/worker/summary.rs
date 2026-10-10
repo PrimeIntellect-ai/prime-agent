@@ -4,8 +4,8 @@ use super::lifecycle::active_lifecycle;
 use super::{
     checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
     is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
-    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint,
-    QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
+    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueuedItem,
+    Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
 };
 
 use crate::types::SessionSummary;
@@ -170,13 +170,13 @@ impl Worker {
             if core.shutdown_requested {
                 return;
             }
-            (core.active_session_id.clone(), crate::worker::queue_lanes(&core))
+            (
+                core.active_session_id.clone(),
+                crate::worker::queue_lanes(&core),
+            )
         };
-        let _ = journal.record_queue_snapshot(
-            &active_session_id,
-            &lanes.steering,
-            &lanes.follow_up,
-        );
+        let _ =
+            journal.record_queue_snapshot(&active_session_id, &lanes.steering, &lanes.follow_up);
     }
 
     /// One queue-lane recovery checkpoint: the lane snapshot and the
@@ -198,7 +198,9 @@ impl Worker {
             let store = core.store.as_ref();
             (
                 core.active_session_id.clone(),
-                store.map_or("", crate::session_store::SessionFile::session_id).to_string(),
+                store
+                    .map_or("", crate::session_store::SessionFile::session_id)
+                    .to_string(),
                 store.map(|s| s.path.to_string_lossy().to_string()),
             )
         };

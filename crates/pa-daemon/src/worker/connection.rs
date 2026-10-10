@@ -525,9 +525,7 @@ impl Worker {
                         self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
-                    if command_type == "resume_queue"
-                        && self.core.lock().unwrap().recovery_hold
-                    {
+                    if command_type == "resume_queue" && self.core.lock().unwrap().recovery_hold {
                         let failure = response_failure(
                             Some(&request_id),
                             "resume_queue",
