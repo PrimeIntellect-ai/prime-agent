@@ -272,9 +272,7 @@ impl Worker {
                 // proof into a refusal that the supervisor later misreads.
                 let mut core = self.core.lock().unwrap();
                 anyhow::ensure!(
-                    !core.shutdown_requested
-                        && core.recovery_hold == held
-                        && (!held || !core.busy),
+                    !core.shutdown_requested && core.recovery_hold == held && (!held || !core.busy),
                     "Session recovery changed or shutdown is in progress"
                 );
                 anyhow::ensure!(

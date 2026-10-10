@@ -211,14 +211,8 @@ impl Supervisor {
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
             let routed = if let Some(attempt) = resume_attempt.as_deref() {
-                self.route_ready_resume(
-                    resident,
-                    payload.clone(),
-                    attempt,
-                    remaining_ms,
-                    admission,
-                )
-                .await
+                self.route_ready_resume(resident, payload.clone(), attempt, remaining_ms, admission)
+                    .await
             } else {
                 self.route_command(
                     resident,

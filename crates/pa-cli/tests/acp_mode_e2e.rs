@@ -257,7 +257,11 @@ impl Drop for AcpChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(home) = self.fixture_home.as_ref().filter(|_| std::thread::panicking()) {
+        if let Some(home) = self
+            .fixture_home
+            .as_ref()
+            .filter(|_| std::thread::panicking())
+        {
             use std::io::{Read as _, Seek as _, SeekFrom};
             let agent_dir = home.path().join(".prime/agent");
             let daemon_log = pa_daemon::paths::daemon_log_path(&self.socket, &agent_dir);
