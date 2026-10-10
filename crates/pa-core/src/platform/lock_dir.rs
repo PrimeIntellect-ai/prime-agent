@@ -29,6 +29,13 @@ const MIN_STALE: Duration = Duration::from_secs(2);
 /// live-lease arm runs); `swap_mode` drives the swap-home attempts: 0
 /// real, 1 fail without exchanging, 2 perform the real exchange and
 /// THEN report EIO (the ambiguous completion).
+/// Test-only, path-scoped fault: force `release_by_inode`'s unsupported
+/// arm for the listed lock paths (the fallback's unowned-inode gate is
+/// otherwise unreachable on `RENAME_EXCHANGE` mounts).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static RELEASE_UNSUPPORTED_FAULT: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) static DANCE_FAULT: std::sync::Mutex<Vec<(std::path::PathBuf, bool, u8)>> =
     std::sync::Mutex::new(Vec::new());
@@ -1938,12 +1945,25 @@ impl LockDir {
                             // fallback's home): release by pathname under
                             // the same guard - every protocol note first,
                             // then the directory - or the fresh lock
-                            // leaks behind a working acquisition.
+                            // leaks behind a working acquisition. An
+                            // UNOWNED lock has no owner record to gate on,
+                            // so the DIRECT inode gate applies: the public
+                            // path must still name THIS guard's pinned
+                            // inode before the removal - a stale-reclaimed
+                            // holder whose directory a successor's dance
+                            // displaced must never delete the successor's
+                            // live lock at the vacated-then-reoccupied
+                            // path.
                             if let Some(owner) = &self.owner {
                                 if !Self::owner_matches(&self.path, owner) {
                                     drop(guard);
                                     return;
                                 }
+                            } else if identity_at(&self.path) != Some(pinned) {
+                                // The path names a different inode (or
+                                // nothing): not this guard's to remove.
+                                drop(guard);
+                                return;
                             }
                             let _ = remove_candidate_dir(&self.path);
                         }
@@ -2021,6 +2041,18 @@ impl LockDir {
     /// leaking a fresh lock behind a working acquisition.
     #[cfg(target_os = "linux")]
     fn release_by_inode(&self, pinned: &(u64, u64)) -> InodeRelease {
+        // Test-only, path-scoped fault: force the unsupported-rename
+        // fallback arm on mounts that actually support RENAME_EXCHANGE, so
+        // the fallback's inode gate is red-first testable.
+        #[cfg(all(test, target_os = "linux"))]
+        if RELEASE_UNSUPPORTED_FAULT
+            .lock()
+            .expect("release fault table lock")
+            .iter()
+            .any(|armed_path| armed_path == &self.path)
+        {
+            return InodeRelease::Unsupported;
+        }
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |age| age.as_nanos());

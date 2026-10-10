@@ -545,18 +545,87 @@ impl Supervisor {
         >::new()));
         let adoption_fanout = crate::recovery_pacing::FanoutDrain::new();
         let boot_ownership = async {
-            // The boot reap (the operator's same-socket predecessor rule):
-            // this daemon now owns the socket's lineage, so leftover
-            // worker processes of a dead predecessor - alive, still
-            // holding their runtime session leases, unreachable through
-            // any descriptor or registration - die here, and a wedged
-            // predecessor supervisor dies with them. Daemons and workers
-            // on OTHER sockets are never touched (the scan matches the
-            // socket path alone). The reap precedes the adoption pass and
-            // the first client: a create racing a leftover holder would
-            // answer the lease refusal this pass exists to clear. Bounded
-            // by construction (every target shares one escalation window).
-            crate::boot_reap::reap_predecessors(&self).await;
+            // The reap is an OWNERSHIP action against the socket's
+            // lineage, and it must not race a successor's publication:
+            // (1) the RECLAIM-SIDECAR EXCLUSION is held ACROSS the whole
+            // pass - every COMPLIANT successor (a judge or stale-reclaim
+            // dance) must hold this same sidecar before displacing
+            // anything, so a protocol-following takeover cannot publish
+            // mid-signal; the lease is REASSERTED under the held
+            // exclusion, where a path mismatch is a real compromise and
+            // never a transient dance. (2) the grace-waited assert
+            // settles any displacement that predates the exclusion. (3)
+            // the per-step displacement probe remains the belt for
+            // NON-compliant actors (the select's `biased` monitor is only
+            // a tie-breaker - a grace-parked monitor does not stop this
+            // block).
+            #[cfg(target_os = "linux")]
+            {
+                let exclusion_budget = std::time::Duration::from_millis(500);
+                match socket_lease.hold_reclaim_exclusion(exclusion_budget).await {
+                    Ok(Some(exclusion)) => {
+                        socket_lease.assert_held_async().await?;
+                        // The boot reap (the operator's same-socket
+                        // predecessor rule): this daemon now owns the
+                        // socket's lineage, so leftover worker processes
+                        // of a dead predecessor - alive, still holding
+                        // their runtime session leases, unreachable
+                        // through any descriptor or registration - die
+                        // here, and a wedged predecessor supervisor dies
+                        // with them. Daemons and workers on OTHER
+                        // sockets are never touched (the scan matches
+                        // the socket path alone). The reap precedes the
+                        // adoption pass and the first client: a create
+                        // racing a leftover holder would answer the lease
+                        // refusal this pass exists to clear. Bounded by
+                        // construction (every target shares one
+                        // escalation window). The sidecar exclusion and
+                        // the belt probe are held across every signal.
+                        crate::boot_reap::reap_predecessors(
+                            &self,
+                            Some(&|| socket_lease.path_displaced()),
+                        )
+                        .await;
+                        drop(exclusion);
+                    }
+                    Ok(None) => {
+                        // The sidecar stayed with a suspended dance past
+                        // the budget: OWNERSHIP IS UNPROVABLE - a
+                        // suspended dance may already have displaced this
+                        // lease, and no further ownership action of this
+                        // boot may run against what may be a successor's
+                        // socket. The whole ownership boot fails here;
+                        // the select's boot arm runs the full lease-loss
+                        // teardown (admission closes, everything tracked
+                        // is fenced, the lease is consumed off the
+                        // worker).
+                        return Err(anyhow!(
+                            "boot ownership unavailable: the lock reclaim exclusion was held past its budget"
+                        ));
+                    }
+                    Err(error) => {
+                        // The acquisition task itself failed (distinct
+                        // from budget contention): the same fail-closed
+                        // ownership abort, with the real cause surfaced.
+                        return Err(error.context(
+                            "boot ownership unavailable: the lock reclaim exclusion acquisition failed",
+                        ));
+                    }
+                }
+            }
+            #[cfg(all(unix, not(target_os = "linux")))]
+            {
+                // No sidecar primitive exists on this platform (the
+                // documented floor): the grace-waited assert plus the
+                // per-step displacement probe is the belt the floor
+                // allows - a suspended dance cannot exist without the
+                // exchange primitives.
+                socket_lease.assert_held_async().await?;
+                crate::boot_reap::reap_predecessors(&self, Some(&|| socket_lease.path_displaced()))
+                    .await;
+            }
+            #[cfg(not(unix))]
+            crate::boot_reap::reap_predecessors(&self, None).await;
 
             // Update boot (spec §6): consume the roster from the spawn
             // env BEFORE the sweep deletes the file it points at, sweep
@@ -686,6 +755,7 @@ impl Supervisor {
                     }),
                 );
             }
+            Ok::<(), anyhow::Error>(())
         };
         #[cfg(unix)]
         tokio::select! {
@@ -725,12 +795,30 @@ impl Supervisor {
                 }
                 return Err(anyhow!("daemon socket lease compromised"));
             }
-            () = boot_ownership => {},
+            boot = boot_ownership => {
+                if let Err(error) = boot {
+                    // The boot block's own lease assert failed (the grace
+                    // settled into a real displacement): the same loss
+                    // teardown the monitor arm runs - admission closes,
+                    // everything tracked is fenced, and the lease is
+                    // consumed off the worker.
+                    self.mark_supervisor_shutting_down();
+                    let mut boot_tasks = std::mem::take(
+                        &mut *boot_tasks_slot.lock().expect("boot task slot lock"),
+                    );
+                    self.lease_loss_fence(&mut boot_tasks).await;
+                    adoption_fanout.wait_drained().await;
+                    if let Err(join_error) = socket_lease.shutdown().await {
+                        self.log.append(&format!(
+                            "daemon socket lease shutdown join failed: {join_error:#}"
+                        ));
+                    }
+                    return Err(error);
+                }
+            },
         };
         #[cfg(not(unix))]
-        {
-            let () = boot_ownership.await;
-        }
+        boot_ownership.await?;
 
         // The boot block completed: take the registered passes for the
         // fences below (the non-unix daemon has no lease choreography -

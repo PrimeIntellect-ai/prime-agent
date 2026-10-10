@@ -52,10 +52,22 @@ pub(crate) enum ReapOutcome {
     /// The process outlived SIGKILL (a D-state wedged task): its lease
     /// stays held; the operator-facing refusal keeps naming the holder.
     Survived,
+    /// The reap froze before the signal: the socket lease was displaced
+    /// (a successor took the socket) - nothing further is signaled.
+    Froze,
 }
 
 /// Reap the same-socket predecessors before a client or adoption races the reap.
-pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
+pub(crate) async fn reap_predecessors(
+    supervisor: &Arc<Supervisor>,
+    displaced: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) {
+    // The lease displacement probe: TRUE the moment the public lock path
+    // no longer names this lease's pinned inode (a successor published).
+    // Every destructive step below re-checks it - the reap must never
+    // signal a successor's lineage, whatever the boot select's monitor
+    // was doing when the displacement landed.
+    let frozen = || displaced.is_some_and(|probe| probe());
     let socket_path = supervisor.options.socket_path.clone();
     // The adoption pass's business, never the reap's: this daemon's own descriptors,
     // protected while the identity still matches (none recorded stays protected).
@@ -75,7 +87,13 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
         targets
             .iter()
             .map(|target| async move {
-                let outcome = stop_target(target).await;
+                // The freeze probe runs inside stop_target before every
+                // signal; a top-level check here skips even the scan
+                // side of a target once the lease is gone.
+                if frozen() {
+                    return (target.clone(), ReapOutcome::Froze);
+                }
+                let outcome = stop_target(target, &frozen).await;
                 supervisor.log_line(&format!(
                     "boot reap: {} pid {} (start id {:?}) - {:?}",
                     match target.kind {
@@ -97,6 +115,11 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
         if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
             (&target.worker_socket, outcome)
         {
+            // A lease displaced by the time the cleanup runs freezes it:
+            // the successor owns the socket's lineage now.
+            if frozen() {
+                break;
+            }
             if is_unix_socket_file(socket) {
                 let _ = std::fs::remove_file(socket);
             }
@@ -117,6 +140,7 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
         },
         TERM_GRACE,
         STOP_FORCE_TIMEOUT,
+        &|| false,
     )
     .await
 }
@@ -147,7 +171,7 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
         targets
             .iter()
             .map(|target| async move {
-                let outcome = stop_target(target).await;
+                let outcome = stop_target(target, &|| false).await;
                 supervisor.log_line(&format!(
                     "give-up sweep: leftover worker pid {} (start id {:?}) of {worker_id} - {:?}",
                     target.pid, target.start_id, outcome
@@ -182,17 +206,24 @@ fn identity_current(target: &ReapTarget) -> bool {
 }
 
 /// Stop one target on the boot reap's fast budgets.
-async fn stop_target(target: &ReapTarget) -> ReapOutcome {
-    stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
+async fn stop_target(
+    target: &ReapTarget,
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+) -> ReapOutcome {
+    stop_target_within(target, TERM_GRACE, KILL_VERIFY, frozen).await
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
 /// grace, SIGKILL, verify. The signals ride the kernel-held pidfd: a pid
 /// recycled in the check-then-signal window never receives the signal.
+/// The `frozen` probe runs before EVERY signal: a displaced socket lease
+/// (a successor took the socket) freezes the escalation mid-pass - the
+/// reap must never signal a successor's lineage.
 async fn stop_target_within(
     target: &ReapTarget,
     term_grace: Duration,
     kill_verify: Duration,
+    frozen: &(dyn Fn() -> bool + Send + Sync),
 ) -> ReapOutcome {
     // The handle opens BEFORE the identity check and the check runs WHILE
     // it is held: a target that dies and has its pid recycled in between
@@ -216,10 +247,18 @@ async fn stop_target_within(
         pa_core::platform::process::close_pidfd(pidfd);
         return ReapOutcome::AlreadyGone;
     }
+    if frozen() {
+        pa_core::platform::process::close_pidfd(pidfd);
+        return ReapOutcome::Froze;
+    }
     if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
         if await_gone(target, term_grace).await {
             pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Term;
+        }
+        if frozen() {
+            pa_core::platform::process::close_pidfd(pidfd);
+            return ReapOutcome::Froze;
         }
         if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Kill)
             && await_gone(target, kill_verify).await
@@ -757,7 +796,7 @@ mod tests {
             pa_core::platform::process::open_pidfd(pid).is_ok(),
             "the kernel-held handle opens"
         );
-        let outcome = stop_target(&target(pid)).await;
+        let outcome = stop_target(&target(pid), &|| false).await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
     }
@@ -799,7 +838,10 @@ mod tests {
             .expect("spawn true");
         let pid = child.id();
         let _ = child.wait();
-        assert_eq!(stop_target(&target(pid)).await, ReapOutcome::AlreadyGone);
+        assert_eq!(
+            stop_target(&target(pid), &|| false).await,
+            ReapOutcome::AlreadyGone
+        );
     }
 
     #[tokio::test]
@@ -811,7 +853,10 @@ mod tests {
         let pid = child.id();
         let mut stale = target(pid);
         stale.start_id = stale.start_id.map(|id| id + "recycled");
-        assert_eq!(stop_target(&stale).await, ReapOutcome::AlreadyGone);
+        assert_eq!(
+            stop_target(&stale, &|| false).await,
+            ReapOutcome::AlreadyGone
+        );
         assert!(
             child.try_wait().expect("child alive").is_none(),
             "the recycled identity must not have been signaled"
@@ -819,7 +864,7 @@ mod tests {
         let mut unobservable = target(pid);
         unobservable.start_id = None;
         assert_eq!(
-            stop_target(&unobservable).await,
+            stop_target(&unobservable, &|| false).await,
             ReapOutcome::AlreadyGone,
             "an unverifiable identity is never signaled"
         );
@@ -1030,5 +1075,41 @@ mod tests {
             &interactive,
             "/tmp/sock/daemon.sock"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_displaced_lease_freezes_the_reap_before_any_signal() {
+        // Red-first regression for the per-step freeze: a live target with a
+        // permanently displaced lease (the probe reads TRUE after every
+        // preflight) must freeze with NO signal sent - the escalation never
+        // touches a lineage the lease does not own. With the probe checks
+        // removed, the target is signaled and the outcome drifts off Froze.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a live reap target");
+        let pid = child.id();
+        // A verifiable identity: the target passes the alive-and-current
+        // gate so the freeze check is genuinely reached mid-escalation.
+        let start_id = crate::lease::get_process_start_id(pid).expect("the live child's start id");
+        let target = ReapTarget {
+            pid,
+            start_id: Some(start_id),
+            worker_socket: None,
+            kind: ReapKind::Worker,
+        };
+        let outcome = stop_target(&target, &|| true).await;
+        assert_eq!(
+            outcome,
+            ReapOutcome::Froze,
+            "a displaced lease must freeze the escalation"
+        );
+        assert!(
+            crate::lease::is_process_alive(pid).unwrap_or(false),
+            "no signal may ride after the freeze - the target must survive"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

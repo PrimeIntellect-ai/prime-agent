@@ -857,3 +857,61 @@ fn an_ambiguous_swap_home_completion_restores_the_live_lease() {
     let still_refused = LockDir::acquire(&file, MIN_STALE).unwrap_err();
     assert_eq!(still_refused.kind(), std::io::ErrorKind::WouldBlock);
 }
+
+/// Arms the path-scoped release fallback fault; the guard's Drop clears
+/// its own entry (panic-safe).
+#[cfg(target_os = "linux")]
+struct ReleaseUnsupportedFault(std::path::PathBuf);
+
+#[cfg(target_os = "linux")]
+impl ReleaseUnsupportedFault {
+    fn arm(lock_path: std::path::PathBuf) -> Self {
+        super::RELEASE_UNSUPPORTED_FAULT
+            .lock()
+            .unwrap()
+            .push(lock_path.clone());
+        ReleaseUnsupportedFault(lock_path)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ReleaseUnsupportedFault {
+    fn drop(&mut self) {
+        super::RELEASE_UNSUPPORTED_FAULT
+            .lock()
+            .unwrap()
+            .retain(|path| path != &self.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unowned_fallback_release_never_unlinks_a_reclaimed_successor() {
+    // Red-first regression for the unsupported-rename fallback: an
+    // UNOWNED lock whose pinned directory a successor's stale-reclaim
+    // displaced - the public path now names the SUCCESSOR's live lock -
+    // must not be removed by the displaced holder's release. The
+    // direct-inode gate refuses; without it the pathname removal deletes
+    // the successor's lock.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.json");
+    std::fs::write(&file, "{}").unwrap();
+    let lock_path = lock_of(&file);
+    let holder = LockDir::acquire(&file, MIN_STALE).unwrap();
+    // A successor takes over: the holder's directory is displaced and a
+    // fresh live lock lands at the public path.
+    let displaced = dir.path().join("displaced.lock");
+    std::fs::rename(&lock_path, &displaced).unwrap();
+    let successor = LockDir::acquire(&file, MIN_STALE).unwrap();
+    let _faults = ReleaseUnsupportedFault::arm(lock_path.clone());
+    let mut holder = holder;
+    holder.release();
+    // The successor's live lock at the public path must SURVIVE the
+    // displaced holder's fallback release.
+    assert!(
+        lock_path.is_dir(),
+        "the fallback release deleted the successor's live lock"
+    );
+    drop(successor);
+    drop(displaced);
+}

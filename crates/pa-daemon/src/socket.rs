@@ -257,6 +257,39 @@ impl SocketLease {
         self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost()
     }
 
+    /// The fast displacement probe for mid-pass destructive-step checks:
+    /// TRUE the moment the public lock path no longer names this lease's
+    /// pinned inode (a transient reclaim dance also trips it - callers
+    /// freeze, which is always the safe direction).
+    #[cfg(unix)]
+    pub(crate) fn path_displaced(&self) -> bool {
+        self.path_lost()
+    }
+
+    /// The reclaim-sidecar exclusion for this lease's lock: held across a
+    /// destructive pass (the boot reap), it excludes every COMPLIANT
+    /// successor - a judge or reclaim dance must hold this same sidecar
+    /// before it displaces anything - so the pass cannot race a
+    /// protocol-following takeover mid-signal. The acquisition runs on a
+    /// blocking thread (the sidecar's flock retry spins with in-thread
+    /// sleeps - never on the async worker). `Ok(None)` means the budget
+    /// expired (a suspended dance holds the sidecar); `Err` means the
+    /// acquisition task itself failed. Callers fail closed on both.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn hold_reclaim_exclusion(
+        &self,
+        budget: std::time::Duration,
+    ) -> anyhow::Result<Option<std::fs::File>> {
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            pa_core::platform::try_reclaim_guard(&lock_path, budget)
+        })
+        .await
+        .map_err(|join_error| {
+            anyhow::anyhow!("the reclaim-exclusion acquisition task failed: {join_error:#}")
+        })
+    }
+
     /// Compromise verdict for the direct synchronous callers (boot
     /// fences, the serve-completion recheck, Drop): a single transient
     /// identity mismatch - a stale-reclaim dance holding this lease's
