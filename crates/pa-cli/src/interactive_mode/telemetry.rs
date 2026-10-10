@@ -184,10 +184,7 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
             };
             let category = pa_telemetry::ToolCategory::from_tool_name(&tool_name);
             let mut properties = pa_telemetry::base_properties("interactive");
-            properties.set(
-                "tool_category",
-                serde_json::Value::from(category.as_str()),
-            );
+            properties.set("tool_category", serde_json::Value::from(category.as_str()));
             client.track("tui live tool timer", properties);
             let _ = client.shutdown().await;
         })

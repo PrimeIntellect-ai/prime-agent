@@ -987,18 +987,16 @@ const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
 const TUI_LIVE_TOOL_TIMER: EventRule = EventRule {
     name: "tui live tool timer",
     since: 2,
-    properties: &[
-        (
-            "tool_category",
-            required(enum_rule(
-                &[
-                    "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp",
-                    "custom", "unknown",
-                ],
+    properties: &[(
+        "tool_category",
+        required(enum_rule(
+            &[
+                "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp", "custom",
                 "unknown",
-            )),
-        ),
-    ],
+            ],
+            "unknown",
+        )),
+    )],
 };
 
 /// `tui exit` (v1, enriched): one per interactive session run (each agents
