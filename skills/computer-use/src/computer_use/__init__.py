@@ -477,6 +477,13 @@ class App:
                 "scoped to it; call get_ax_state() again and retry",
                 {},
             )
+        # the window-id capture renders the LIVE window whatever its current
+        # size, so the pixel-to-logical scale must divide by the live bounds -
+        # a resize between the observation and this capture would otherwise
+        # leave the scale stale and map image clicks to the wrong screen
+        # points. An unreadable live rect falls back to the observed one.
+        live_bounds = capture._live_window_bounds(observation.window_id)
+        rect = live_bounds if live_bounds is not None else rect
         # screencapture blocks for up to its timeout, so it must not stall the
         # kernel's event loop; the observation is snapshotted once so a
         # concurrent re-observe cannot re-tag the image with another window

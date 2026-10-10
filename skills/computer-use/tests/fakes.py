@@ -484,6 +484,7 @@ class AppEnvironment:
         self.paste_baseline_side_effect: Any = None  # runs mid-paste during the baseline read
         self.live_geometry_moved = False  # a control's live bounds moved off the snapshot
         self.live_geometry: Any = None  # an explicit live-geometry override
+        self.live_window_bounds: Any = None  # the window's live global bounds (None = unreadable)
         self.paste_focus_before: Any = object()  # the focused element before the paste
         self.paste_focus_after: Any = object()  # the focused element after a focus move
         self.paste_focus_moved = False  # a queued cmd+v with the focus moving mid-paste
@@ -541,6 +542,10 @@ class AppEnvironment:
 
     def _cmd_v_presses(self) -> int:
         return sum(1 for name, args in self.recorder.calls if name == "press_key" and args.get("key") == "cmd+v")
+
+    def _live_window_bounds(self, window_id: int) -> Any:
+        """Serve the window's live global bounds, or None when unreadable."""
+        return self.live_window_bounds
 
     def _live_geometry(self, ref: Any) -> Any:
         """Serve one element's live bounds: the snapshot's geometry, or the moved oracle."""
@@ -625,6 +630,7 @@ class AppEnvironment:
         patch(ax, "_window_fingerprint", self._window_fingerprint)
         patch(ax, "_paste_baseline", self._paste_baseline)
         patch(ax, "_live_geometry", self._live_geometry)
+        patch(capture, "_live_window_bounds", self._live_window_bounds)
         patch(ax, "_perform_action", lambda ref, action: self.ax_calls.append(("perform_action", ref, action)))
         patch(ax, "_is_settable", lambda ref, attribute: self.settable)
         patch(ax, "_current_value", lambda ref: (ref.get("value") if isinstance(ref, dict) else None))

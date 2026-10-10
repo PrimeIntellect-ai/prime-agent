@@ -239,6 +239,33 @@ def _png_dimensions(dir_fd: int, name: str) -> tuple[int, int]:
     return width, height
 
 
+def _live_window_bounds(window_id: int) -> tuple[float, float, float, float] | None:
+    """Read one window's live global bounds through its CGWindowID, or None.
+
+    The window-id capture scope renders the observed window whatever its
+    current size, so the pixel-to-logical scale must divide by the window's
+    LIVE bounds - the observation's rect is a cache that a resize between
+    observe and capture invalidates.
+    """
+    try:
+        quartz = _require_mac().quartz
+        info = quartz.CGWindowListCopyWindowInfo(quartz.kCGWindowListOptionIncludingWindow, window_id)
+        if not info:
+            return None
+        bounds = info[0].get("kCGWindowBounds") if isinstance(info[0], dict) else None
+        if bounds is None:
+            return None
+        rect = quartz.CGRectMakeWithString(bounds, None)
+        return (
+            float(rect.origin.x),
+            float(rect.origin.y),
+            float(rect.size.width),
+            float(rect.size.height),
+        )
+    except Exception:
+        return None
+
+
 def _screenshot_window(
     origin: tuple[int, int], size: tuple[int, int], window_id: int | None = None
 ) -> dict[str, str | int]:

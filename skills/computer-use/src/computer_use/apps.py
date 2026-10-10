@@ -87,8 +87,10 @@ def _bundle_for_name(name: str) -> str | None:
         return None
     escaped = _escape_spotlight(name)
     query = (
+        # ==[c]: display names match case-insensitively, exactly like the
+        # running-app binding that casefolds names
         'kMDItemContentTypeTree == "com.apple.application" '
-        f'&& kMDItemDisplayName == "{escaped}"'
+        f'&& kMDItemDisplayName ==[c] "{escaped}"'
     )
     try:
         finished = subprocess.run(

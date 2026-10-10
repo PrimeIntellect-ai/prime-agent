@@ -1383,5 +1383,57 @@ class RestoreVerificationTests(unittest.TestCase):
         self.assertIn("built-in system deny-list", result.reason)
 
 
+class SpotlightCaseTests(unittest.TestCase):
+    def test_the_spotlight_name_query_matches_display_names_case_insensitively(self) -> None:
+        from computer_use import apps
+
+        queries: list[str] = []
+
+        class Finished:
+            returncode = 0
+            stdout = ""
+
+        real_run = apps.subprocess.run
+
+        def recording_run(command, capture_output, text, timeout):
+            queries.append(" ".join(command))
+            return Finished()
+
+        with mock.patch.object(apps.subprocess, "run", recording_run):
+            apps._bundle_for_name("slack")
+        self.assertTrue(any("==[c]" in q for q in queries), "the display-name predicate is case-insensitive: " + queries[0])
+
+
+
+
+class RetinaScaleTests(AppTestCase):
+    async def test_the_shot_scale_uses_the_live_window_bounds(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()  # observed logical bounds: 400x300
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 1600, "height": 1200}
+        # the window resized between the observation and the capture
+        env.live_window_bounds = (100.0, 50.0, 800.0, 600.0)
+        await app.get_screenshot(attach=False)
+        self.assertEqual(
+            app._shot_rect,
+            (100.0, 50.0, 800.0, 600.0),
+            "the pixel-to-logical scale must divide by the window's LIVE bounds",
+        )
+
+    async def test_an_image_click_after_a_resize_lands_on_the_live_element(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 1600, "height": 1200}
+        env.live_window_bounds = (100.0, 50.0, 800.0, 600.0)
+        await app.get_screenshot(attach=False)
+        env.window_rect = (100.0, 50.0, 800.0, 600.0)
+        await app.get_ax_state()  # re-observed at the live size
+        await app.click((800.0, 600.0))  # the image center
+        clicks = env.recorder.calls_named("click")
+        self.assertEqual(clicks[0]["point"], (500.0, 350.0), "the click lands on the live window's center")
+
+
 if __name__ == "__main__":
     unittest.main()
