@@ -258,7 +258,8 @@ pub struct RefinementTranscript<'a> {
 // (same style as the daemon's too_many_arguments seams).
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement(
-    session: &mut SessionManager,
+    session: &tokio::sync::Mutex<SessionManager>,
+    agent: &pa_agent::agent::Agent,
     transcript: RefinementTranscript<'_>,
     global_harness_dir: &Path,
     model: &pa_types::ai::Model,
@@ -269,6 +270,7 @@ pub async fn execute_refinement(
 ) -> anyhow::Result<RefinementResult> {
     Ok(execute_refinement_with_rows(
         session,
+        agent,
         transcript,
         global_harness_dir,
         model,
@@ -299,7 +301,8 @@ pub async fn execute_refinement(
 /// without a wired agent dir) keeps the fail-closed disabled default.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_refinement_with_rows(
-    session: &mut SessionManager,
+    session: &tokio::sync::Mutex<SessionManager>,
+    agent: &pa_agent::agent::Agent,
     transcript: RefinementTranscript<'_>,
     global_harness_dir: &Path,
     model: &pa_types::ai::Model,
@@ -312,7 +315,10 @@ pub async fn execute_refinement_with_rows(
         messages,
         refinement_history,
     } = transcript;
-    let local_harness_dir = local_harness_state_dir(session);
+    let (local_harness_dir, has_session_dir) = {
+        let session = session.lock().await;
+        (local_harness_state_dir(&session), session.has_session_dir())
+    };
     let core_options = CoreRefineOptions {
         global: options.global,
         instructions: options.instructions.clone(),
@@ -326,10 +332,7 @@ pub async fn execute_refinement_with_rows(
     // A local refinement needs the session's own directory: its harness state
     // and artifact paths live there. The daemon's engine session is deliberately
     // non-persisted but carries the session's directory, so local refinement runs.
-    if options.rollback_id.is_none()
-        && requested_scope == HarnessScope::Local
-        && !session.has_session_dir()
-    {
+    if options.rollback_id.is_none() && requested_scope == HarnessScope::Local && !has_session_dir {
         anyhow::bail!(
             "Local harness refinement requires a session directory; use global refinement instead."
         );
@@ -378,8 +381,7 @@ pub async fn execute_refinement_with_rows(
     // after the planning request — so a setting that changed during the
     // request (`/factory off` mid-plan) decides, not a snapshot captured
     // before it. The read rides `spawn_blocking` so the settings I/O
-    // never blocks the async runtime worker (the refine arm holds the
-    // session lock across this whole call). A session without a wired
+    // never blocks the async runtime worker. A session without a wired
     // agent dir keeps the fail-closed disabled default, and a panicked
     // read task reads as disabled — the same fail-closed leniency as
     // `factory_enabled` itself.
@@ -409,6 +411,13 @@ pub async fn execute_refinement_with_rows(
     if target_scope == HarnessScope::Global {
         append_global_refinement(global_harness_dir, &result)?;
     }
+    let mut session = loop {
+        agent.wait_for_idle().await;
+        let session = session.lock().await;
+        if agent.signal().is_none() {
+            break session;
+        }
+    };
     // The audit append is attempted first; a failed write is caught (the row
     // stays live-indexed) and the audit error surfaces only after the outcome
     // records — the user's view and the durable stores do not diverge.
@@ -613,7 +622,9 @@ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::execu
 mod tests {
     use super::*;
     use crate::refinement::executor::RefinerFn;
+    use pa_agent::agent::{Agent, AgentOptions};
     use pa_types::ai::{AssistantContentBlock, AssistantMessage, Model, StopReason, TextContent};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn text_assistant(text: &str) -> AssistantMessage {
@@ -785,11 +796,13 @@ Reviewer instructions: record it"
         // is off, the edit refuses with the one exact disabled message
         // and nothing persists; enabled, the same proposal applies.
         let dir = TempDir::new().unwrap();
-        let mut session = persisted_session(&dir);
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"sweep","edits":[{"action":"create","kind":"factory","id":"sweep","title":"Factory","content":"Sweep review.","arguments":{"machine":{"states":[{"id":"collect","entry":true,"subagent":"worker"}],"transitions":[]}}}]}"#;
         let disabled = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
@@ -808,9 +821,9 @@ Reviewer instructions: record it"
             disabled.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
+        let session_dir = session.lock().await.get_session_dir().to_path_buf();
         let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
-                .unwrap();
+            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
         let state = load_harness_state(&harness_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // The user opts in: the same proposal applies, read live from the
@@ -823,7 +836,8 @@ Reviewer instructions: record it"
         )
         .unwrap();
         let enabled = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
@@ -853,7 +867,8 @@ Reviewer instructions: record it"
         // persists, and a plan authored while disabled that lands after
         // the opt-in applies.
         let dir = TempDir::new().unwrap();
-        let mut session = persisted_session(&dir);
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -862,7 +877,8 @@ Reviewer instructions: record it"
         // Authored while enabled; the request flips the setting off.
         std::fs::write(&settings, r#"{"factory": {"enabled": true}}"#).unwrap();
         let turned_off = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
@@ -881,15 +897,16 @@ Reviewer instructions: record it"
             turned_off.applied_edits[0].error.as_deref(),
             Some(crate::refinement::FACTORY_DISABLED_MESSAGE)
         );
+        let session_dir = session.lock().await.get_session_dir().to_path_buf();
         let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
-                .unwrap();
+            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
         let state = load_harness_state(&harness_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Factory].is_empty());
         // Authored while disabled; the request opts in.
         std::fs::write(&settings, r#"{"factory": {"enabled": false}}"#).unwrap();
         let turned_on = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
@@ -910,14 +927,17 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn execute_refinement_persists_state_and_entries() {
         let dir = TempDir::new().unwrap();
-        let mut session = persisted_session(&dir);
-        session
+        let mut manager = persisted_session(&dir);
+        manager
             .append_message(user_message("do a thing twice"))
             .unwrap();
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
         let result = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("do a thing twice")],
                 refinement_history: &[],
@@ -935,12 +955,12 @@ Reviewer instructions: record it"
         assert!(result.applied_edits[0].applied);
         let state_path = Path::new(&result.harness_state_path);
         assert!(state_path.exists());
+        let session_dir = session.lock().await.get_session_dir().to_path_buf();
         let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
-                .unwrap();
+            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
         let state = load_harness_state(&harness_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m1"));
-        let entries = session.get_all_entries().to_vec();
+        let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
         let custom_messages: Vec<&FileEntry> = entries
             .iter()
@@ -951,6 +971,7 @@ Reviewer instructions: record it"
             })
             .collect();
         assert_eq!(custom_messages.len(), 2);
+        let session = session.lock().await;
         assert_eq!(load_refinement_history(&session, &global_dir).len(), 1);
     }
 
@@ -959,21 +980,24 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn audit_write_failure_reports_after_durable_edits() {
         let dir = TempDir::new().unwrap();
-        let mut session = persisted_session(&dir);
+        let mut manager = persisted_session(&dir);
         // Bootstrap the flush rule: rows only persist after the first
         // assistant entry (persist_entry defers them until then).
-        session
+        manager
             .append_message(AgentMessage::Assistant(text_assistant("seed")))
             .unwrap();
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"lesson","edits":[{"action":"create","kind":"memory","id":"m9","title":"Lesson","content":"durable"}]}"#;
         // Fail every session-file write: the path becomes a directory (the
         // harness stores live under a sibling dir and stay writable).
-        let file = session.get_session_file().unwrap().to_path_buf();
+        let file = manager.get_session_file().unwrap().to_path_buf();
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
+        let session = tokio::sync::Mutex::new(manager);
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let error = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("x")],
                 refinement_history: &[],
@@ -991,13 +1015,13 @@ Reviewer instructions: record it"
             error.to_string().contains("audit row not persisted"),
             "the audit error surfaces after the durable writes: {error:#}"
         );
+        let session_dir = session.lock().await.get_session_dir().to_path_buf();
         let harness_dir =
-            crate::refinement::get_local_harness_state_dir(Some(session.get_session_dir()))
-                .unwrap();
+            crate::refinement::get_local_harness_state_dir(Some(&session_dir)).unwrap();
         let state = load_harness_state(&harness_dir, HarnessScope::Local);
         assert!(state.entries[&crate::refinement::RefinementKind::Memory].contains_key("m9"));
         // The notice is ordered after the audit rethrow.
-        let entries = session.get_all_entries().to_vec();
+        let entries = session.lock().await.get_all_entries().to_vec();
         assert_eq!(session_refinement_history(&entries).len(), 1);
         assert!(
             !entries.iter().any(
@@ -1036,6 +1060,7 @@ Reviewer instructions: record it"
     async fn refine_request_is_identical_across_extraction_paths() {
         use std::io::Write as _;
         let body = oracle_fixture();
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let mut captured: Vec<CapturedRequest> = Vec::new();
         for leg in ["full-reader", "windowed-leased", "windowed-unleased"] {
             let dir = TempDir::new().unwrap();
@@ -1065,12 +1090,14 @@ Reviewer instructions: record it"
                 messages,
                 refinement_history,
             } = parts.await.unwrap();
+            let session = tokio::sync::Mutex::new(session);
             let captured_requests: std::sync::Arc<std::sync::Mutex<Vec<CapturedRequest>>> =
                 std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let sink = std::sync::Arc::clone(&captured_requests);
             let reply = r#"{"summary":"bench","edits":[]}"#.to_string();
             let result = execute_refinement(
-                &mut session,
+                &session,
+                &agent,
                 RefinementTranscript {
                     messages: &messages,
                     refinement_history: &refinement_history,
@@ -1145,11 +1172,13 @@ Reviewer instructions: record it"
     #[tokio::test]
     async fn global_refinement_appends_history() {
         let dir = TempDir::new().unwrap();
-        let mut session = persisted_session(&dir);
+        let session = tokio::sync::Mutex::new(persisted_session(&dir));
+        let agent = Arc::new(Agent::new(AgentOptions::default()));
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"global lesson","edits":[{"action":"create","kind":"memory","id":"g1","title":"Lesson","content":"durable"}]}"#;
         let result = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[user_message("x")],
                 refinement_history: &[],
@@ -1175,7 +1204,8 @@ Reviewer instructions: record it"
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, result.id);
         let rolled = execute_refinement(
-            &mut session,
+            &session,
+            &agent,
             RefinementTranscript {
                 messages: &[],
                 refinement_history: &[],
