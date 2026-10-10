@@ -33,7 +33,7 @@ struct AcpChild {
     /// Held (never read) so the child's cwd directory outlives the process:
     /// dropping the tempdir deletes it and the child's `current_dir` fails.
     /// `None` for a second child sharing another child's home.
-    _home: Option<tempfile::TempDir>,
+    fixture_home: Option<tempfile::TempDir>,
     spawn_stderr: Option<std::process::ChildStderr>,
     /// The sandboxed supervisor socket the child spawned: the drop shuts
     /// the supervisor down with it (a killed child must not leak the
@@ -73,7 +73,7 @@ impl AcpChild {
             stdin: Some(stdin),
             lines,
             next_id: 0,
-            _home: home,
+            fixture_home: home,
             spawn_stderr: Some(stderr),
             socket,
         }
@@ -257,7 +257,7 @@ impl Drop for AcpChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(home) = self._home.as_ref().filter(|_| std::thread::panicking()) {
+        if let Some(home) = self.fixture_home.as_ref().filter(|_| std::thread::panicking()) {
             use std::io::{Read as _, Seek as _, SeekFrom};
             let agent_dir = home.path().join(".prime/agent");
             let daemon_log = pa_daemon::paths::daemon_log_path(&self.socket, &agent_dir);

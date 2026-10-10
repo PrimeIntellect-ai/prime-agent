@@ -1041,12 +1041,14 @@ async fn a_distinct_refused_resume_cannot_reuse_an_earlier_release_proof() {
             &[],
         )
         .unwrap();
-    assert!(crate::journal::WorkerRecoveryJournal::read_resume_checkpoint(
-        &journal_path,
-        "earlier-accepted-resume",
-        "instance-1",
-    )
-    .unwrap());
+    assert!(
+        crate::journal::WorkerRecoveryJournal::read_resume_checkpoint(
+            &journal_path,
+            "earlier-accepted-resume",
+            "instance-1",
+        )
+        .unwrap()
+    );
     let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
         "version": 2,
         "workerId": "distinct-resume",
