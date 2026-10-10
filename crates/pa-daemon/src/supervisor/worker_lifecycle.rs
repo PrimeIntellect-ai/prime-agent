@@ -67,11 +67,12 @@ impl Supervisor {
             // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                self.retire_worker_after_stop(resident).await;
-                self.log_line(&format!(
-                    "finished the tombstoned stop of session worker {}",
-                    resident.worker_id
-                ));
+                if self.retire_worker_after_stop(resident).await {
+                    self.log_line(&format!(
+                        "finished the tombstoned stop of session worker {}",
+                        resident.worker_id
+                    ));
+                }
             } else {
                 self.log_line(&format!(
                     "tombstoned stop of session worker {} not settled; descriptor kept",
@@ -86,11 +87,12 @@ impl Supervisor {
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
-            self.retire_worker_after_stop(resident).await;
-            self.log_line(&format!(
-                "finished the tombstoned per-session stop of session worker {}",
-                resident.worker_id
-            ));
+            if self.retire_worker_after_stop(resident).await {
+                self.log_line(&format!(
+                    "finished the tombstoned per-session stop of session worker {}",
+                    resident.worker_id
+                ));
+            }
         }
     }
 
@@ -749,8 +751,11 @@ impl Supervisor {
 
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
-    /// it behind its lease.
-    pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+    /// it behind its lease. Returns whether the descriptor was deleted.
+    pub(super) async fn retire_worker_after_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+    ) -> bool {
         let (pid, start_id, recovery_journal_path) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -771,12 +776,14 @@ impl Supervisor {
                     "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                false
             }
             _ if alive_unverified => {
                 self.log_line(&format!(
                     "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
                     resident.worker_id
                 ));
+                false
             }
             _ => {
                 // Metadata retirement historically treats failed liveness probes
@@ -793,6 +800,7 @@ impl Supervisor {
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                true
             }
         }
     }

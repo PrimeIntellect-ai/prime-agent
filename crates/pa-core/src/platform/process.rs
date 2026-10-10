@@ -239,9 +239,7 @@ pub fn pid_exists(pid: u32) -> bool {
 
 /// The kernel-held process handle (`pidfd_open`): pins the exact process
 /// behind the pid, so a signal through it ([`pidfd_signal`]) reaches that
-/// process even if the numeric pid is recycled afterwards. The caller
-/// treats an unobtainable handle as never-signal: a missed stop is
-/// recoverable, a wrong one is not.
+/// process even if the numeric pid is recycled afterwards.
 ///
 /// # Errors
 ///
