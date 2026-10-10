@@ -1504,6 +1504,14 @@ class RetinaScaleTests(AppTestCase):
         self.assertIn("fresh screenshot", caught.exception.message)
         self.assertEqual(env.recorder.calls_named("click"), [])
 
+    async def test_an_empty_paste_is_a_noop_that_never_touches_the_clipboard(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        status = await app.paste("")
+        self.assertIn("empty", status)
+        self.assertEqual(env.clipboard_calls, [], "an empty paste never saves, writes, or restores")
+        self.assertEqual(env.recorder.calls, [], "an empty paste never posts cmd+v")
+
 
 if __name__ == "__main__":
     unittest.main()

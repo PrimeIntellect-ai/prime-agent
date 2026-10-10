@@ -808,6 +808,10 @@ class App:
                 f"text must be a string, got {type(text).__name__}",
                 {"text": type(text).__name__},
             )
+        if not text:
+            # an empty paste would clear the user's clipboard and could never
+            # verify consumption - type_text no-ops on empty the same way
+            return "nothing to paste: the text is empty, and the clipboard is untouched"
 
         posted = False
         consumed = False
