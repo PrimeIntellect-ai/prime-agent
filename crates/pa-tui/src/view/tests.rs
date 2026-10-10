@@ -44,7 +44,7 @@ fn a_paste_never_reaches_the_editor_behind_an_overlay() {
     let editor_text = |view: &AgentView| view.editor.get_lines().join("\n");
     // The /effort picker takes it into its search.
     let mut v = view();
-    v.effort_picker = Some(crate::effort_picker::EffortPicker::new(
+    v.choice_picker = Some(crate::choice_picker::ChoicePicker::effort(
         &["high".to_string()],
         None,
     ));

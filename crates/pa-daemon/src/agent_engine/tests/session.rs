@@ -2,6 +2,56 @@
 use super::*;
 use crate::engine::PromptBatchRow;
 
+#[test]
+fn constructor_reordering_keeps_completed_goals_after_later_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("completed.jsonl");
+    let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+    store.set_path(path.clone());
+    let completed = pa_core::goals::GoalState {
+        status: pa_core::goals::GoalStatus::Complete,
+        objective: Some("finished".to_string()),
+        ..pa_core::goals::empty_goal_state()
+    };
+    store.append_entry(
+        "custom",
+        json!({"customType":pa_core::goals::GOAL_STATE_CUSTOM_TYPE,"data":completed}),
+    );
+    let mut kept = String::new();
+    for i in 0..12 {
+        let id = store
+            .append_message(&json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+        if i == 8 {
+            kept = id;
+        }
+    }
+    store.append_entry(
+        "compaction",
+        json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":1000}),
+    );
+    store.append_message(
+        &json!({"role":"assistant","provider":"test","model":"test","api":"openai-completions",
+        "content":[],"stopReason":"error","errorMessage":"later failure","timestamp":1}),
+    );
+    store.rewrite().unwrap();
+    let engine = bare_engine(dir.path());
+    *engine.session_file.lock().unwrap() = Some(path);
+    let model: pa_types::ai::Model = serde_json::from_value(json!({
+        "id":"test","name":"test","api":"openai-completions","provider":"test",
+        "baseUrl":"http://127.0.0.1:9","reasoning":false,"input":["text"],
+        "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+        "contextWindow":1000,"maxTokens":100,
+    }))
+    .unwrap();
+    engine
+        .runtime
+        .block_on(engine.ensure_core_session_async(&model))
+        .unwrap();
+    let restored: pa_core::goals::GoalState =
+        serde_json::from_value(engine.goal_state_value()).unwrap();
+    assert_eq!(restored, completed);
+}
+
 /// `get_commands` enumerates the session's skills as `skill:<name>`
 /// commands, including before the first prompt (the read seam demand-builds
 /// the core session). The faux provider registers under `FAUX_TEST_LOCK`
