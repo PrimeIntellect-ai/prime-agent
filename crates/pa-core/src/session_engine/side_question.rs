@@ -262,6 +262,7 @@ async fn run_attempts(
         0
     };
     let mut retries_performed = 0u32;
+    let mut auth_retries = 0u32;
     let mut prompted = false;
     let final_message: anyhow::Result<Option<AssistantMessage>> = loop {
         let prompt = side_question_prompt(question, previous_turns.is_empty());
@@ -300,7 +301,7 @@ async fn run_attempts(
         }
         let kind = provider_stream_failure_kind(&message);
         let status = provider_stream_failure_status(&message);
-        if is_permanent_provider_failure_kind(kind.as_deref(), retries_performed, status) {
+        if is_permanent_provider_failure_kind(kind.as_deref(), auth_retries, status) {
             break Ok(Some(message));
         }
         let delay = provider_retry_delay(
@@ -322,6 +323,9 @@ async fn run_attempts(
             break Ok(None);
         }
         retries_performed += 1;
+        if kind.as_deref() == Some("auth") {
+            auth_retries += 1;
+        }
     };
 
     let message = match final_message {

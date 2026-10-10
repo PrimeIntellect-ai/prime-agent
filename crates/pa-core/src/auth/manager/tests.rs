@@ -500,10 +500,12 @@ fn prime_inference_team_selection_reads_follow_the_ts_tri_state() {
 }
 
 /// A scripted OAuth integration for the refresh-flow tests: counts refresh calls,
-/// optionally delays inside the fetch, and serves a fixed fresh credential.
+/// optionally delays inside the fetch, and serves a fixed fresh credential;
+/// `forced_outcome` scripts the force-refresh arm (`None` = no forced support).
 struct CountingOAuth {
     calls: std::sync::atomic::AtomicUsize,
     delay_ms: u64,
+    forced_outcome: Option<Result<AuthCredential, String>>,
 }
 
 impl CountingOAuth {
@@ -539,6 +541,21 @@ impl OAuthIntegration for CountingOAuth {
         }
         Some(Self::fetched_credential())
     }
+
+    fn refresh_forced(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Option<Result<AuthCredential, String>> {
+        // `None` (no forced support) consults without fetching: the
+        // fetch counter stays honest.
+        self.forced_outcome.as_ref()?;
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+        }
+        self.forced_outcome.clone()
+    }
 }
 
 fn oauth_credential(access: &str, expires: i64) -> AuthCredential {
@@ -562,7 +579,7 @@ fn expired_oauth(access: &str) -> AuthCredential {
 }
 
 fn storage_over_backend_with(
-    oauth: Arc<CountingOAuth>,
+    oauth: Arc<dyn OAuthIntegration>,
     provider: &str,
     credential: &AuthCredential,
 ) -> (AuthStorage, Arc<dyn AuthStorageBackend>) {
@@ -588,6 +605,7 @@ fn an_unexpired_oauth_credential_serves_without_a_fetch() {
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 0,
+        forced_outcome: None,
     });
     let (mut auth, _backend) = storage_over_backend_with(
         oauth.clone(),
@@ -609,6 +627,7 @@ fn the_token_fetch_holds_no_document_lock_and_a_peer_write_keeps_its_fresher_cre
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 120,
+        forced_outcome: None,
     });
     let (mut auth, backend) =
         storage_over_backend_with(oauth.clone(), "x-peer", &expired_oauth("old-access"));
@@ -666,6 +685,7 @@ fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
     let oauth = Arc::new(CountingOAuth {
         calls: std::sync::atomic::AtomicUsize::new(0),
         delay_ms: 80,
+        forced_outcome: None,
     });
     let (_, backend) =
         storage_over_backend_with(oauth.clone(), "x-flight", &expired_oauth("old-access"));
@@ -687,5 +707,1065 @@ fn a_second_refresh_joins_the_first_flight_instead_of_fetching_again() {
         oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "one flight per provider: the second caller served the first's fresh credential"
+    );
+}
+
+#[test]
+fn a_locally_valid_credential_force_refreshes_and_resolves() {
+    // The revoked-session shape: the stored expiry is still future-dated,
+    // so the ordinary lookup serves the rejected token — only the forced
+    // refresh replaces it.
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let (mut auth, _backend) = storage_over_backend_with(
+        oauth.clone(),
+        "x-live",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    assert_eq!(
+        auth.get_api_key("x-live").as_deref(),
+        Some("rejected-access"),
+        "the locally-valid credential serves before the force refresh"
+    );
+    let refreshed = auth.force_refresh_oauth("x-live");
+    assert!(matches!(
+        &refreshed,
+        Ok(AuthCredential::Oauth { access, .. }) if access == "fetched-access"
+    ));
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the force refresh spent exactly one fetch"
+    );
+    assert_eq!(
+        auth.get_api_key("x-live").as_deref(),
+        Some("fetched-access"),
+        "the refreshed credential resolves after the force refresh"
+    );
+}
+
+#[test]
+fn a_rejected_force_refresh_keeps_the_stored_credential() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Err(
+            "OpenAI Codex token refresh failed (401): expired".to_string()
+        )),
+    });
+    let (mut auth, _backend) = storage_over_backend_with(
+        oauth.clone(),
+        "x-revoked",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let outcome = auth.force_refresh_oauth("x-revoked");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
+                if reason == "OpenAI Codex token refresh failed (401): expired"
+        ),
+        "the provider's rejection classifies for the re-login surface"
+    );
+    assert_eq!(
+        auth.get_api_key("x-revoked").as_deref(),
+        Some("rejected-access"),
+        "the stored credential stands untouched after a rejected grant"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one fetch was spent"
+    );
+}
+
+#[test]
+fn force_refresh_without_forced_support_reports_it() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: None,
+    });
+    let (mut auth, _backend) = storage_over_backend_with(
+        oauth.clone(),
+        "x-plain",
+        &oauth_credential("live-access", now_epoch_ms() + 3_600_000),
+    );
+    let outcome = auth.force_refresh_oauth("x-plain");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "x-plain has no forced-refresh support"
+        ),
+        "the unexchanged attempt classifies for the ordinary ladder"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no fetch was attempted without forced support"
+    );
+}
+
+/// A transient token-endpoint failure (a 5xx overload, a transport
+/// error) never reads as a dead grant: the ordinary retry ladder
+/// stands instead of a false re-login.
+#[test]
+fn a_transient_refresh_failure_never_reads_as_a_rejection() {
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Err(
+            "OpenAI Codex token refresh failed (503): overloaded".to_string()
+        )),
+    });
+    let (mut auth, _backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-overloaded",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let outcome = auth.force_refresh_oauth("x-overloaded");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "OpenAI Codex token refresh failed (503): overloaded"
+        ),
+        "the transient endpoint failure keeps the ordinary ladder"
+    );
+}
+
+#[test]
+fn a_removed_grant_never_spends_the_refresh_token() {
+    // Reads after the constructor and the load see the credential
+    // removed: the pre-fetch peer check reads the removal as a
+    // concurrent logout and reports the re-login rejection without any
+    // exchange.
+    struct StagedReadBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl AuthStorageBackend for StagedReadBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.reads.load(std::sync::atomic::Ordering::SeqCst) <= 2 {
+                return self.inner.read();
+            }
+            Ok(Some("{}".to_string()))
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(StagedReadBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-removed",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-removed");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
+                if reason == "the stored credential for x-removed was removed"
+        ),
+        "the removal reports the re-login rejection"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange spends the removed grant's token"
+    );
+}
+
+/// An unreadable store mid-flight never spends the refresh token
+/// either: the peer state cannot be verified, so the ordinary retry
+/// ladder stands.
+#[test]
+fn an_unreadable_peer_recheck_never_spends_the_refresh_token() {
+    struct ReadOnceBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl AuthStorageBackend for ReadOnceBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            // The constructor's reload and the refresh load read fine;
+            // the pre-fetch peer recheck is the first read to fail.
+            if self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2 {
+                anyhow::bail!("the store went away");
+            }
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(ReadOnceBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-unreadable",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let outcome = auth.force_refresh_oauth("x-unreadable");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "the credential store could not be re-read"
+        ),
+        "the unreadable recheck keeps the ordinary ladder"
+    );
+}
+
+/// A transient write failure retries the locked write: the rotated
+/// grant still lands in the store.
+#[test]
+fn a_malformed_peer_recheck_keeps_the_ordinary_ladder() {
+    struct MalformedPeerBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+    impl AuthStorageBackend for MalformedPeerBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            let n = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= 2 {
+                return Ok(Some("{ not json".to_string()));
+            }
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(MalformedPeerBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-malformed",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-malformed");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::NotExchanged(reason))
+                if reason == "the credential store could not be parsed"
+        ),
+        "the malformed recheck keeps the ordinary ladder"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no exchange runs against an unverifiable store"
+    );
+}
+
+#[test]
+fn a_transient_write_failure_retries_the_locked_write() {
+    struct FlakyWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        failures_left: std::sync::atomic::AtomicUsize,
+    }
+    impl AuthStorageBackend for FlakyWriteBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            // The failure lands AFTER the callback staged the grant: the
+            // atomic write itself is what flakes.
+            let ((), next) = update(self.inner.read()?)?;
+            let left = self.failures_left.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.failures_left
+                    .store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("transient write failure");
+            }
+            let Some(next) = next else {
+                return Ok(());
+            };
+            self.inner.with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(next.clone())))
+            })
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(FlakyWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        failures_left: std::sync::atomic::AtomicUsize::new(2),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-flaky-write",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-flaky-write");
+    assert!(
+        matches!(&outcome, Ok(AuthCredential::Oauth { access, .. }) if access == "fetched-access"),
+        "the retried write lands the rotated grant"
+    );
+    let stored = auth.get_all().credential("x-flaky-write");
+    assert!(
+        matches!(&stored, Some(AuthCredential::Oauth { access, .. }) if access == "fetched-access"),
+        "the store holds the rotated grant after the retry"
+    );
+}
+
+#[test]
+fn a_persistent_write_failure_reports_the_dead_grant() {
+    struct AlwaysFailingWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+    }
+    impl AuthStorageBackend for AlwaysFailingWriteBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            self.inner.read()
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            let _ = update(self.inner.read()?)?;
+            anyhow::bail!("persistent write failure")
+        }
+    }
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(AlwaysFailingWriteBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-dead-write",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+    );
+    let outcome = auth.force_refresh_oauth("x-dead-write");
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::auth::ForcedRefreshFailure::Rejected(reason))
+                if reason == "the refreshed credential could not be stored"
+        ),
+        "the unwritten rotation reports the dead grant"
+    );
+}
+
+#[test]
+fn an_expiry_refresh_never_overwrites_a_landing_login() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: None,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-login",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-expiry-login",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let api_key = auth.get_api_key("x-expiry-login");
+    writer.join().expect("the writer settles");
+    let stored = auth.get_all().credential("x-expiry-login");
+    assert!(
+        matches!(&stored, Some(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"),
+        "the landing login stands over the expiry fetch's write: {stored:?}"
+    );
+    assert_eq!(
+        api_key.as_deref(),
+        Some("sk-fresh"),
+        "the landing login serves through the normal credential path"
+    );
+}
+
+/// A logout landing while the expiry refresh exchanges is never
+/// resurrected: the write-back writes nothing over the removal.
+#[test]
+fn an_expiry_refresh_never_resurrects_a_landing_logout() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: None,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-expiry-logout",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let removed = AuthStorageData::default();
+        let content = serde_json::to_string_pretty(&removed.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let _ = auth.get_api_key("x-expiry-logout");
+    writer.join().expect("the writer settles");
+    assert!(
+        auth.get_all().credential("x-expiry-logout").is_none(),
+        "the landing logout stays removed over the expiry fetch's write"
+    );
+}
+
+#[test]
+fn a_force_refresh_write_keeps_a_peer_s_fresher_credential() {
+    // A peer refreshed against the same rejection while this fetch ran:
+    // the locked write keeps the peer's fresher credential. The fetch
+    // signals it started and hands control to the writer, so the peer's
+    // write lands strictly inside the fetch window, no timing involved.
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-force-peer",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut peer = AuthStorageData::default();
+        peer.insert(
+            "x-force-peer",
+            &oauth_credential("peer-access", now_epoch_ms() + 3_600_000),
+        );
+        let content = serde_json::to_string_pretty(&peer.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let refreshed = auth.force_refresh_oauth("x-force-peer");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &refreshed,
+            Ok(AuthCredential::Oauth { access, .. }) if access == "peer-access"
+        ),
+        "the peer's fresher credential wins over this attempt's own fetch"
+    );
+    assert_eq!(
+        auth.get_api_key("x-force-peer").as_deref(),
+        Some("peer-access")
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one fetch ran"
+    );
+}
+
+/// A mock whose token exchange hands control to the test: the fetch
+/// signals it started, waits for the peer's mutation, and only then
+/// returns — the peer write lands strictly between the fetch and the
+/// locked write, no timing involved.
+struct SignaledOAuth {
+    fetch_started_tx: std::sync::mpsc::Sender<()>,
+    writer_done_rx: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    forced_outcome: Option<Result<AuthCredential, String>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl OAuthIntegration for SignaledOAuth {
+    fn api_key_for(&self, _provider: &str, credential: &AuthCredential) -> Option<String> {
+        match credential {
+            AuthCredential::Oauth { access, .. } => Some(access.clone()),
+            _ => None,
+        }
+    }
+
+    fn refresh(&self, _provider: &str, _credentials: &AuthStorageData) -> Option<AuthCredential> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fetch_started_tx.send(()).expect("the writer waits");
+        self.writer_done_rx
+            .lock()
+            .expect("writer-done lock")
+            .recv()
+            .expect("the writer reports its write");
+        Some(CountingOAuth::fetched_credential())
+    }
+
+    fn refresh_forced(
+        &self,
+        _provider: &str,
+        _credentials: &AuthStorageData,
+    ) -> Option<Result<AuthCredential, String>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.fetch_started_tx.send(()).expect("the writer waits");
+        let writer_done_rx = self.writer_done_rx.lock().expect("writer channel lock");
+        writer_done_rx
+            .recv()
+            .expect("the peer completes its mutation before the fetch returns");
+        self.forced_outcome.clone()
+    }
+}
+
+/// A concurrent logout (the credential vanishes while the fetch runs) must
+/// stand: the locked write never resurrects the credential this refresh
+/// loaded. A deletion is not "no fresher peer credential".
+#[test]
+fn a_concurrent_logout_wins_over_the_forced_refresh_write() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-logged-out",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let logged_out = AuthStorageData::default();
+        let content = serde_json::to_string_pretty(&logged_out.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let outcome = auth.force_refresh_oauth("x-logged-out");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(outcome, Err(crate::auth::ForcedRefreshFailure::Rejected(_))),
+        "a concurrent logout fails the recovery: no usable credential remains"
+    );
+    assert!(
+        auth.get_all().credential("x-logged-out").is_none(),
+        "the logout stands: the forced write never resurrects the credential"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one fetch ran"
+    );
+}
+
+/// A concurrent replacement with an API key must stand too: the locked
+/// write never overwrites the replacement with the refreshed OAuth grant.
+#[test]
+fn an_api_key_replacement_wins_over_the_forced_refresh_write() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-swapped",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-swapped",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let outcome = auth.force_refresh_oauth("x-swapped");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &outcome,
+            Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the replacement serves to the caller's rebind"
+    );
+    assert!(
+        matches!(
+            auth.get_all().credential("x-swapped"),
+            Some(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the API key stands: the forced write never overwrites it"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one fetch ran"
+    );
+}
+
+/// A replacement that lands between the initial load and the flight
+/// (a `/login` to an API key) serves without spending the obsolete
+/// refresh token: the peer check compares the full credential, not just
+/// OAuth grants.
+#[test]
+fn an_api_key_peer_replacement_serves_without_a_fetch() {
+    // The writer holds the provider's flight first, so the main call is
+    // guaranteed to have finished its initial read (the backend signals
+    // each read) and then park on the flight while the replacement lands.
+    struct ReadSignalingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        read_tx: std::sync::mpsc::Sender<()>,
+    }
+    impl AuthStorageBackend for ReadSignalingBackend {
+        fn read(&self) -> anyhow::Result<Option<String>> {
+            let content = self.inner.read()?;
+            let _ = self.read_tx.send(());
+            Ok(content)
+        }
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            self.inner.with_lock(update)
+        }
+    }
+
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let (read_tx, read_rx) = std::sync::mpsc::channel::<()>();
+    let backend = Arc::new(ReadSignalingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        read_tx,
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-peer-api",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    // Build the storage first and drain its constructor read from the
+    // channel, so the writer waits for exactly the forced call's
+    // initial load.
+    let mut auth = AuthStorage::from_storage(
+        Arc::clone(&backend) as Arc<dyn AuthStorageBackend>,
+        oauth.clone(),
+    );
+    read_rx
+        .recv()
+        .expect("the constructor's reload read is drained first");
+    let (flight_held_tx, flight_held_rx) = std::sync::mpsc::channel::<()>();
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        let _flight = refresh_flight("x-peer-api");
+        flight_held_tx
+            .send(())
+            .expect("the main call parks on the held flight");
+        read_rx
+            .recv()
+            .expect("the forced call's initial load read completes first");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-peer-api",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+    });
+    flight_held_rx
+        .recv()
+        .expect("the writer holds the flight first");
+    let outcome = auth.force_refresh_oauth("x-peer-api");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &outcome,
+            Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the replacement serves without spending the obsolete refresh token"
+    );
+    assert_eq!(
+        oauth.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the peer check settles before any fetch"
+    );
+}
+
+/// A replacement that lands while the rejected fetch ran settles the
+/// recovery: the failed fetch never surfaces its rejection over the
+/// standing API-key replacement.
+#[test]
+fn a_failed_fetch_still_serves_a_landed_api_key_replacement() {
+    let (fetch_started_tx, fetch_started_rx) = std::sync::mpsc::channel::<()>();
+    let (writer_done_tx, writer_done_rx) = std::sync::mpsc::channel::<()>();
+    let oauth = Arc::new(SignaledOAuth {
+        fetch_started_tx,
+        writer_done_rx: std::sync::Mutex::new(writer_done_rx),
+        forced_outcome: Some(Err("the refresh was rejected".to_string())),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let (mut auth, backend) = storage_over_backend_with(
+        Arc::clone(&oauth) as Arc<dyn OAuthIntegration>,
+        "x-swapped-error",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let peer_backend = Arc::clone(&backend);
+    let writer = std::thread::spawn(move || {
+        fetch_started_rx
+            .recv()
+            .expect("the fetch signals the writer");
+        let mut replacement = AuthStorageData::default();
+        replacement.insert(
+            "x-swapped-error",
+            &AuthCredential::ApiKey {
+                key: "sk-fresh".into(),
+                prime_team: None,
+            },
+        );
+        let content = serde_json::to_string_pretty(&replacement.0).unwrap_or_default();
+        peer_backend
+            .with_lock(&mut |current| {
+                let _ = current;
+                Ok(((), Some(content.clone())))
+            })
+            .ok();
+        writer_done_tx
+            .send(())
+            .expect("the writer reports its write");
+    });
+    let outcome = auth.force_refresh_oauth("x-swapped-error");
+    writer.join().expect("the writer settles");
+    assert!(
+        matches!(
+            &outcome,
+            Ok(AuthCredential::ApiKey { key, .. }) if key == "sk-fresh"
+        ),
+        "the standing replacement settles the failed fetch"
+    );
+}
+
+/// The forced-refresh single-flight guard must still be held while the
+/// refreshed credential persists: a waiter released between the fetch and
+/// the write re-spends the same single-use refresh token. The write
+/// callback probes the flight synchronously on the persisting thread —
+/// the querying thread's own hold reports as contention.
+#[test]
+fn the_forced_refresh_flight_guards_the_write() {
+    struct WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        probed: std::sync::atomic::AtomicBool,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuthStorageBackend for WriteProbingBackend {
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            let probed = &self.probed;
+            let held = &self.held;
+            let mut wrapped = |current: Option<String>| -> anyhow::Result<((), Option<String>)> {
+                let ((), next) = update(current)?;
+                if next.is_some() && !probed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    // The refreshed credential is being persisted on the
+                    // flight-holding thread: a held flight reports as
+                    // contention here, a released one locks instantly.
+                    held.store(
+                        refresh_flight_is_held("x-flight-write"),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                Ok(((), next))
+            };
+            self.inner.with_lock(&mut wrapped)
+        }
+    }
+
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: Some(Ok(CountingOAuth::fetched_credential())),
+    });
+    let backend = Arc::new(WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        probed: std::sync::atomic::AtomicBool::new(false),
+        held: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-flight-write",
+        &oauth_credential("rejected-access", now_epoch_ms() + 3_600_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let outcome = auth.force_refresh_oauth("x-flight-write");
+    assert!(
+        matches!(&outcome, Ok(AuthCredential::Oauth { access, .. }) if access == "fetched-access"),
+        "the forced refresh completes"
+    );
+    assert!(
+        backend.held.load(std::sync::atomic::Ordering::SeqCst),
+        "the single flight is still held while the refreshed credential persists"
+    );
+}
+
+/// The expiry-gated refresh holds the same single flight through its
+/// write: a waiter that acquires the flight after the fetch must see
+/// this attempt's write land before it spends the same single-use
+/// refresh token.
+#[test]
+fn the_expiry_refresh_flight_guards_the_write() {
+    struct WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend,
+        probed: std::sync::atomic::AtomicBool,
+        held: std::sync::atomic::AtomicBool,
+    }
+
+    impl AuthStorageBackend for WriteProbingBackend {
+        fn with_lock(
+            &self,
+            update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
+        ) -> anyhow::Result<()> {
+            let probed = &self.probed;
+            let held = &self.held;
+            let mut wrapped = |current: Option<String>| -> anyhow::Result<((), Option<String>)> {
+                let ((), next) = update(current)?;
+                if next.is_some() && !probed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    held.store(
+                        refresh_flight_is_held("x-expiry-flight"),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                Ok(((), next))
+            };
+            self.inner.with_lock(&mut wrapped)
+        }
+    }
+
+    let oauth = Arc::new(CountingOAuth {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        delay_ms: 0,
+        forced_outcome: None,
+    });
+    let backend = Arc::new(WriteProbingBackend {
+        inner: crate::auth::InMemoryAuthStorageBackend::default(),
+        probed: std::sync::atomic::AtomicBool::new(false),
+        held: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut seeded = AuthStorageData::default();
+    seeded.insert(
+        "x-expiry-flight",
+        &oauth_credential("expired-access", now_epoch_ms() - 1_000),
+    );
+    let seed = serde_json::to_string_pretty(&seeded.0).unwrap_or_default();
+    backend
+        .inner
+        .with_lock(&mut |current| {
+            let _ = current;
+            Ok(((), Some(seed.clone())))
+        })
+        .ok();
+    let mut auth =
+        AuthStorage::from_storage(Arc::clone(&backend) as Arc<dyn AuthStorageBackend>, oauth);
+    let api_key = auth.get_api_key("x-expiry-flight");
+    assert_eq!(
+        api_key.as_deref(),
+        Some("fetched-access"),
+        "the expiry refresh serves the fetched credential"
+    );
+    assert!(
+        backend.held.load(std::sync::atomic::Ordering::SeqCst),
+        "the single flight is still held while the refreshed credential persists"
     );
 }
