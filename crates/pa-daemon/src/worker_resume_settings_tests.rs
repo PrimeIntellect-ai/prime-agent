@@ -183,4 +183,50 @@ mod resume_settings_tests {
             drop(released);
         }
     }
+
+    #[tokio::test]
+    async fn create_backfills_the_default_tier_when_the_resumed_file_has_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-tier.jsonl");
+        let mut file = SessionFile::create("/tmp", None, 0);
+        file.set_path(path.clone());
+        file.append_entry(
+            "model_change",
+            json!({"provider":"saved","modelId":"pinned"}),
+        );
+        file.append_message(&json!({"role":"user","content":"kept","timestamp":0}));
+        file.rewrite().unwrap();
+        let capture = Arc::new(CaptureEngine::default());
+        let mut worker = Worker::new(
+            WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: PathBuf::new(),
+                token: "test".into(),
+                worker_instance_id: String::new(),
+                active_session_id: "resume".into(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: Some(json!({"responses":[]})),
+            },
+            None,
+        );
+        worker.engine = capture.clone();
+        let response = worker
+            .dispatch("create", &json!({"sessionPath":path,"cwd":"/tmp"}))
+            .await;
+        assert!(response.success, "{response:?}");
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(core.store.as_ref().unwrap().window.is_some());
+            assert_eq!(core.service_tier, Some(pa_types::ai::ServiceTier::Default));
+        }
+        assert_eq!(
+            *capture.tier.lock().unwrap(),
+            Some(pa_types::ai::ServiceTier::Default)
+        );
+        let killed = worker.dispatch("kill", &json!({})).await;
+        assert!(killed.success, "{killed:?}");
+        drop(worker);
+    }
 }
