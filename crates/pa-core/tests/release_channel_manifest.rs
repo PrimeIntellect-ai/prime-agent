@@ -345,9 +345,9 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
     // The newest-wins guard: re-runs of an older tag must never clobber a newer rolling beta.json;
     // gh release download's destination flag is --dir (Bugbot: --output-dir was discarded and never
     // wrote the guard file). The guard FAILS CLOSED: a release carrying an unreadable beta.json is
-    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), while a
-    // release with NO beta.json asset (a partial earlier refresh) has nothing to protect - the
-    // clobber heals it.
+    // never clobbered (Bugbot: a discarded download failure fell through to --clobber), and a
+    // witnessless release clobbers only when its own tarball asset names carry no newer version -
+    // an empty release (no versioned assets at all) heals unconditionally.
     assert!(run.contains("sort -V"), "{run}");
     assert!(run.contains("skipping the refresh"), "{run}");
     assert!(run.contains(r#"--dir "$guard""#), "{run}");

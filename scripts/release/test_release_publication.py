@@ -36,6 +36,12 @@ if args[:2] == ['release', 'view']:
     if mode == 'empty': response = {'assets': []}
     if mode == 'malformed': response = {'assets': [{'other': 'beta.json'}]}
     if mode == 'wrong-shape': response = []
+    if mode in ('no-beta-newer', 'no-beta-older', 'no-beta-unparsable'):
+        served = '0.10.1-beta.11' if mode == 'no-beta-newer' else '0.10.1-beta.9'
+        names = [f'prime-agent-{served}-linux-x64.tar.gz', 'prime-agent-0.9.9-beta.999.tgz',
+                 'prime-agent-linux.debug.gz', 'SHA256SUMS', 'manifest.json']
+        if mode == 'no-beta-unparsable': names = ['prime-agent-unversioned.tar.gz', 'SHA256SUMS']
+        response = {'assets': [{'name': name} for name in names]}
     print(json.dumps(response))
 elif args[:2] == ['release', 'download']:
     if mode == 'download-error': sys.exit(1)
@@ -162,6 +168,29 @@ class PublicationTests(unittest.TestCase):
                 result = self.refresh(MODE=mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.mutations()[0][:3], ['release', operation, 'nightly'])
+
+    def test_witnessless_release_blocks_stale_rerun(self):
+        result = self.refresh(MODE='no-beta-newer')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('already serves v0.10.1-beta.11', result.stdout)
+        self.assertEqual(self.mutations(), [])
+
+    def test_witnessless_release_heals_when_this_refresh_is_newest(self):
+        result = self.refresh(MODE='no-beta-older')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.mutations()[0][:3], ['release', 'upload', 'nightly'])
+
+    def test_witnessless_release_with_unreadable_asset_names_fails_closed(self):
+        result = self.refresh(MODE='no-beta-unparsable')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.mutations(), [])
+
+    def test_malformed_release_version_fails_closed_on_bootstrap_and_heal(self):
+        for mode in ('absent', 'empty'):
+            with self.subTest(mode=mode):
+                result = self.refresh(MODE=mode, RELEASE_VERSION='v0.10.1-beta2')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.mutations(), [])
 
     def test_superseded_beta_archives_every_file_without_advancing_pointers(self):
         result = self.run_step('Publish the R2 channel (the channel serves no GitHub URL)')
