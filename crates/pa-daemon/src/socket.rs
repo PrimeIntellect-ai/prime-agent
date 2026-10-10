@@ -303,6 +303,33 @@ impl SocketLease {
     /// # Errors
     ///
     /// Returns an error if this lease was displaced or compromised.
+    /// The async-facing path-checked fence: the path check of
+    /// [`Self::assert_path_held`] with the grace waited
+    /// asynchronously, so a displaced lock path costs an await on the
+    /// async preparation paths instead of stalling the Tokio worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is not this lease's socket path or
+    /// the lease was displaced or compromised.
+    #[cfg(unix)]
+    pub async fn assert_path_held_async(&self, path: &Path) -> Result<()> {
+        if path != self.socket_path {
+            return Err(anyhow!(
+                "Daemon socket lease does not match {}",
+                path.display()
+            ));
+        }
+        self.assert_held_async().await
+    }
+
+    /// The async-facing fence: identical to `assert_held`, with the
+    /// grace waited asynchronously - a displaced lock path costs an
+    /// await, never a Tokio-worker stall.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lease was displaced or compromised.
     #[cfg(unix)]
     pub async fn assert_held_async(&self) -> Result<()> {
         if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
@@ -622,7 +649,7 @@ fn release_lock_dir_identity(
     let pid = std::process::id();
     for attempt in 0..8 {
         let placeholder = parent.join(format!(".l{pid:x}{nanos:x}{attempt:x}"));
-        match std::fs::create_dir(&placeholder) {
+        match pa_core::platform::mkdir_mode_0700(&placeholder) {
             Ok(()) => {}
             // Only a plain name collision regenerates the suffix; a
             // real I/O error (EACCES, ENOSPC, EIO) must not burn
@@ -640,32 +667,25 @@ fn release_lock_dir_identity(
                 return Err(error);
             }
         }
-        // A restrictive umask strips the owner-write bit from the fresh
-        // directory and the owner write below would fail, leaking the
-        // lease behind a normal shutdown: restore the private mode at
-        // creation (same as the acquisition candidates).
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o700))
-                .is_err()
-            {
-                let _ = std::fs::remove_dir(&placeholder);
-                drop(guarded);
-                return Ok(());
-            }
-        }
         // The placeholder carries this process's live owner record for
         // the whole exchange interval: a suspended release leaves a
-        // live-owned artifact at the public path, never a vacancy.
+        // live-owned artifact at the public path, never a vacancy. The
+        // mode is fixed AT CREATION by the guarded mkdir (no pathname
+        // chmod follows). A failed owner write must NEVER report a
+        // successful release: the lease directory still sits at the
+        // public path unexchanged and unmarked - mark it released
+        // through the pinned fd (the dance consumes it) and surface
+        // the error instead of the old silent Ok.
         let owner_record = format!(
             "{} {:#x}\n",
             std::process::id(),
             uuid::Uuid::new_v4().as_u128()
         );
-        if std::fs::write(placeholder.join("owner"), owner_record).is_err() {
+        if let Err(error) = std::fs::write(placeholder.join("owner"), owner_record) {
             let _ = std::fs::remove_dir(&placeholder);
+            pa_core::platform::mark_released_through(lock_dir);
             drop(guarded);
-            return Ok(());
+            return Err(error);
         }
         // The created placeholder's identity: on an AMBIGUOUS exchange
         // error the swap may have completed with the incumbent (or a
@@ -830,7 +850,7 @@ pub async fn prepare_socket_path(path: &Path) -> Result<()> {
 /// a live listener or replaced inode prevents stale cleanup.
 #[cfg(unix)]
 pub async fn prepare_socket_path_with_lease(path: &Path, lease: &SocketLease) -> Result<()> {
-    lease.assert_path_held(path)?;
+    lease.assert_path_held_async(path).await?;
     if let Some(parent) = path.parent() {
         crate::paths::ensure_dir(parent)?;
     }
@@ -842,7 +862,7 @@ pub async fn prepare_socket_path_with_lease(path: &Path, lease: &SocketLease) ->
 async fn prepare_locked_socket_path(path: &Path, lease: Option<&SocketLease>) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
     if let Some(lease) = lease {
-        lease.assert_path_held(path)?;
+        lease.assert_path_held_async(path).await?;
     }
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
