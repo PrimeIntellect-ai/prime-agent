@@ -666,37 +666,42 @@ impl SupervisorChildSessionsInner {
         // assistant text when it is still reachable, else the durable
         // session file's last assistant row. It lands on the record only
         // when no answer was captured, so a positive verdict's capture
-        // stands; the parent-side reader (the factory's provisional
-        // answer) sees what the child last said instead of a bare
-        // failure row.
-        let (active_session_id, session_file) = {
+        // stands and the round trip never runs when one does; the
+        // parent-side reader (the factory's provisional answer) sees
+        // what the child last said instead of a bare failure row.
+        let live_or_file = {
             let record = record.lock().await;
             if record.answer_captured && record.answer_preview.is_some() {
-                (record.active_session_id.clone(), None)
+                None
             } else {
-                (
+                Some((
                     record.active_session_id.clone(),
                     record.session_file.clone(),
-                )
+                ))
             }
         };
-        let exit_text = self
-            .child_answer_raw(&active_session_id)
-            .await
-            .ok()
-            .flatten();
-        let exit_text = if exit_text.is_some() {
-            exit_text
-        } else {
-            match session_file.filter(|path| !path.is_empty()) {
-                Some(path) => {
-                    tokio::task::spawn_blocking(move || last_assistant_text_from_file(&path))
+        let exit_text = match live_or_file {
+            Some((active_session_id, session_file)) => {
+                let live = self
+                    .child_answer_raw(&active_session_id)
+                    .await
+                    .ok()
+                    .flatten();
+                if live.is_some() {
+                    live
+                } else {
+                    match session_file.filter(|path| !path.is_empty()) {
+                        Some(path) => tokio::task::spawn_blocking(move || {
+                            last_assistant_text_from_file(&path)
+                        })
                         .await
                         .ok()
-                        .flatten()
+                        .flatten(),
+                        None => None,
+                    }
                 }
-                None => None,
             }
+            None => None,
         };
         let message = {
             let mut record = record.lock().await;

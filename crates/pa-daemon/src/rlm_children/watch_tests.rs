@@ -72,9 +72,6 @@ async fn spawn_fake_supervisor(
         // Shared across link connections: the give-up gate counts the
         // child's state reads on whichever connection carries them.
         let state_reads = Arc::new(AtomicU32::new(0));
-        // Shared across link connections: the late-text variant counts the
-        // child's answer reads on whichever connection carries them.
-        let text_reads = Arc::new(AtomicU32::new(0));
         loop {
             let Ok(stream) = listener.accept().await else {
                 return;
@@ -84,10 +81,8 @@ async fn spawn_fake_supervisor(
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
             let state_reads = Arc::clone(&state_reads);
-            let text_reads = Arc::clone(&text_reads);
             let child_session_file = std::sync::Arc::clone(&child_session_file);
             let child_subagents = Arc::clone(&child_subagents);
-            let text_reads = Arc::clone(&text_reads);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -184,12 +179,12 @@ async fn spawn_fake_supervisor(
                             if matches!(child, FakeChild::LeavesAfterSettle) {
                                 gone.store(true, Ordering::SeqCst);
                             }
-                            // The late-text variant: the FIRST answer read
-                            // races the worker's answer hand-off and reads
-                            // no text (a None capture); later reads answer.
-                            if matches!(child, FakeChild::TextLate)
-                                && text_reads.fetch_add(1, Ordering::SeqCst) == 0
-                            {
+                            // Every answer read counts; the late-text
+                            // variant's FIRST read races the worker's
+                            // answer hand-off and reads no text (a None
+                            // capture), later reads answer.
+                            let reads = child_subagents.answer_reads.fetch_add(1, Ordering::SeqCst);
+                            if matches!(child, FakeChild::TextLate) && reads == 0 {
                                 response_success(Some(&id), command_type, Some(json!({})))
                             } else {
                                 response_success(
@@ -258,11 +253,14 @@ async fn sessions_with_fake_supervisor(
 
 /// The fake child's own subagents: whether one still runs (the child
 /// reports `hasRunningSubagents`, and a `waitForRlmQuiescence` idle wait
-/// holds until it finishes), and how many such waits started.
+/// holds until it finishes), how many such waits started, and how many
+/// `get_last_assistant_text` reads the child link answered (the
+/// late-text variant scripts its first read empty off the count).
 #[derive(Default)]
 struct FakeChildSubagents {
     running: AtomicBool,
     quiescent_waits: std::sync::atomic::AtomicUsize,
+    answer_reads: AtomicU32,
 }
 
 /// [`sessions_with_fake_supervisor`] whose child reports its own running
@@ -1284,4 +1282,78 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
     let mut noticed = base();
     noticed.notice_delivered = true;
     assert!(!super::lifecycle::should_mark_unreachable_error(&noticed));
+}
+
+/// The unreachable give-up's exit capture is a wasted round trip when a
+/// captured answer already stands (a child that settled, went busy again
+/// on a queued continuation, then lost its worker): the record keeps its
+/// capture, so the fetched text could never land. The give-up must skip
+/// the capture entirely — zero `get_last_assistant_text` reads, the
+/// standing capture unchanged.
+#[tokio::test]
+async fn the_unreachable_give_up_skips_the_exit_capture_when_a_capture_stands() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let child_subagents = Arc::new(FakeChildSubagents::default());
+    let (sessions, _kill_rx) = sessions_with_fake_child_subagents(
+        follow_up_tx,
+        0,
+        FakeKill::Success,
+        FakeChild::Unreachable,
+        Arc::clone(&child_subagents),
+    )
+    .await;
+    let record = Arc::new(tokio::sync::Mutex::new(ChildRecord {
+        rlm_child_id: "child-id".to_string(),
+        session_name: "lane".to_string(),
+        active_session_id: "child-live".to_string(),
+        session_id: Some("child-file".to_string()),
+        session_dir: "/tmp".to_string(),
+        model: String::new(),
+        label: "task".to_string(),
+        started_at_ms: 0,
+        settled_status: None,
+        settled: false,
+        answer_preview: Some("the captured say".to_string()),
+        answer_text: Some("the captured say".to_string()),
+        answer_captured: true,
+        replied_since_task: false,
+        notice_delivered: false,
+        prompt_admitted: true,
+        error: None,
+        closed_by_parent: false,
+        session_file: Some(
+            std::env::temp_dir()
+                .join(format!(
+                    "pa-rlm-watch-skip-{}.jsonl",
+                    uuid::Uuid::new_v4().simple()
+                ))
+                .to_string_lossy()
+                .to_string(),
+        ),
+        attributed_rows: Some(0),
+        usage_watch_live: false,
+        usage_rearm: false,
+        emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        last_emitted_status: None,
+        rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    }));
+    let claimed = sessions
+        .inner
+        .settle_failed(
+            &record,
+            "Child worker unreachable".to_string(),
+            super::lifecycle::FailedArm::Unreachable,
+        )
+        .await;
+    assert!(claimed, "the give-up claims the settle");
+    assert_eq!(
+        child_subagents.answer_reads.load(Ordering::SeqCst),
+        0,
+        "no exit-capture round trip may run while a captured answer stands"
+    );
+    let record = record.lock().await;
+    assert_eq!(record.settled_status, Some("error"));
+    assert_eq!(record.answer_preview.as_deref(), Some("the captured say"));
+    assert_eq!(record.answer_text.as_deref(), Some("the captured say"));
+    assert!(record.answer_captured);
 }
