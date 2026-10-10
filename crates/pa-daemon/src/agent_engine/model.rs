@@ -434,35 +434,24 @@ impl AgentSessionEngine {
     }
 
     /// The primary target a failover episode restores: the captured model
-    /// with the request auth RE-RESOLVED from the store (a credential
-    /// rotated — and reloaded — during the failover serves from the store,
-    /// never the pre-failover capture). The capture also backs a
-    /// resolution whose store read FAILED — an unreadable `auth.json`
-    /// resolves the configured fallback key, which is not a credential,
-    /// the same overwrite `/reload`'s gate avoids — and the create-config
-    /// key override stands in memory regardless, keeping the captured
-    /// headers when the store read fails.
+    /// with the request auth RE-RESOLVED from the store. The captured
+    /// pair only backs the restore when the store cannot serve a live
+    /// credential; the create-config key override stands in memory
+    /// regardless, keeping the captured headers off a failed read.
     pub(crate) fn restored_primary_target(
         &self,
         primary: &Model,
         captured_api_key: Option<String>,
         captured_headers: Option<std::collections::BTreeMap<String, String>>,
     ) -> pa_core::session_engine::provider_adapter::ProviderTarget {
-        // The create-config key override stands in memory, whatever the
-        // store's health; its headers still ride the store read, so a
-        // failed read keeps the captured headers — the last-good team
-        // context — instead of the header-less resolution.
         let override_key = self.current_selection().api_key;
         let (api_key, headers, store_auth) =
             self.resolve_request_key_and_headers_and_store_health(primary);
         // The capture backs the restore whenever the store cannot serve a
-        // live credential — a failed read OR a healthy store with nothing
-        // stored: both resolve the configured `models.json` fallback key,
-        // which is not a stored credential, the same overwrite
-        // `/reload`'s gate avoids. The create-config key override stands
-        // in memory regardless, keeping the captured headers when the
-        // store cannot serve them; a live stored credential REPLACES the
-        // pair, headers included.
+        // live credential (a failed read, or a healthy store with nothing
+        // stored — both resolve the configured `models.json` fallback key,
+        // which is not a credential); a live stored credential REPLACES
+        // the pair, headers included.
         let (api_key, headers) = if let Some(override_key) = override_key {
             if store_auth {
                 (Some(override_key), headers)

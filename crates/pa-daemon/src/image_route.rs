@@ -89,11 +89,9 @@ impl AgentSessionEngine {
     /// at every model-turn attempt; a text-only session model with an
     /// unusable or missing `settings.imageModel` returns the refusal.
     pub(crate) fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
-        // The lock spans the route's auth resolution AND its publication:
+        // The lock spans the route's auth resolution and its publication:
         // a `/reload` in between would refresh a route the arm then
-        // overwrites with the older pair (the reload's own refreshes run
-        // under the same lock, so whichever runs last leaves the newest
-        // store standing).
+        // overwrites with the older pair.
         let _reload_serialized = self
             .reload_lock
             .lock()
