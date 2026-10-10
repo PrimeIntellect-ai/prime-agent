@@ -662,6 +662,11 @@ impl DaemonClient {
     /// The live direct link that may serve `command` (TS `servesDirect`):
     /// the command must be session-plane and address the link's session.
     fn direct_link_for(&self, command: &DaemonCommand) -> Option<DirectLink> {
+        // Queue recovery releases supervisor-owned shutdown intent. Keep this
+        // explicit control on the supervisor even when a session peer is live.
+        if matches!(command, DaemonCommand::ResumeQueue { .. }) {
+            return None;
+        }
         let link = self.direct.live_link()?;
         let command_type = command_type_debug(command);
         if !is_session_plane_daemon_command(&command_type) {

@@ -72,6 +72,14 @@ impl Worker {
         let index = index as usize;
         let (status, queue_changed): (&'static str, bool) = {
             let mut core = self.core.lock().unwrap();
+            if core.shutdown_requested {
+                return response_failure(
+                    None,
+                    "mutate_queued_message",
+                    "Session is shutting down",
+                    None,
+                );
+            }
             let status = match lane {
                 Lane::Steering => mutate_lane(
                     &mut core.steering,
@@ -148,9 +156,98 @@ impl Worker {
 
     /// `resume_queue`: the queue's queued work resumes (the turn runner
     /// drains the lanes when idle); the failure string is TS-verbatim for the empty queue.
-    pub(crate) fn handle_resume_queue(&self) -> DaemonResponse {
+    pub(crate) fn handle_resume_queue(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("resume_queue") {
             return response;
+        }
+        let attempt_id = payload
+            .get("resumeQueueAttemptId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        if self.core.lock().unwrap().recovery_hold && attempt_id.is_none() {
+            return response_failure(
+                None,
+                "resume_queue",
+                "Held recovery requires supervised resume_queue",
+                None,
+            );
+        }
+        if let Some(attempt_id) = attempt_id {
+            let mut recovery = self.recovery.lock().unwrap();
+            let (active_session_id, session_id, session_file, held, busy, has_in_flight) = {
+                let core = self.core.lock().unwrap();
+                if core.shutdown_requested {
+                    return response_failure(
+                        None,
+                        "resume_queue",
+                        "Session is shutting down",
+                        None,
+                    );
+                }
+                (
+                    core.active_session_id.clone(),
+                    core.store
+                        .as_ref()
+                        .map(|store| store.session_id().to_string())
+                        .unwrap_or_default(),
+                    core.store
+                        .as_ref()
+                        .map(|store| store.path.to_string_lossy().to_string()),
+                    core.recovery_hold,
+                    core.busy,
+                    !core.in_flight_input.is_empty(),
+                )
+            };
+            if held && busy {
+                return response_failure(
+                    None,
+                    "resume_queue",
+                    "Held input is still settling",
+                    None,
+                );
+            }
+            let result = (|| -> anyhow::Result<()> {
+                let journal = if let Some(journal) = recovery.as_mut() {
+                    journal
+                } else {
+                    recovery.insert(crate::journal::WorkerRecoveryJournal::open(
+                        &self.config.recovery_journal_path,
+                    )?)
+                };
+                if held && has_in_flight {
+                    let path = session_file
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("picked input has no session file"))?;
+                    let (steering, follow_up) =
+                        crate::worker::restore_queue_snapshot_reconciled(
+                            journal,
+                            &active_session_id,
+                            std::path::Path::new(path),
+                        )?;
+                    let mut core = self.core.lock().unwrap();
+                    core.steering = steering;
+                    core.follow_up = follow_up;
+                    core.in_flight_input.clear();
+                    core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
+                }
+                let lanes = {
+                    let core = self.core.lock().unwrap();
+                    crate::worker::queue_lanes(&core)
+                };
+                journal.record_resume_checkpoint(
+                    &active_session_id,
+                    &session_id,
+                    session_file.as_deref(),
+                    attempt_id,
+                    &self.config.worker_instance_id,
+                    &lanes.steering,
+                    &lanes.follow_up,
+                )
+            })();
+            if let Err(error) = result {
+                return response_failure(None, "resume_queue", &error.to_string(), None);
+            }
+            self.core.lock().unwrap().recovery_hold = false;
         }
         // The suspension clears first, so `resume_queue` is a resume
         // site even when it answers "No queued work to resume".

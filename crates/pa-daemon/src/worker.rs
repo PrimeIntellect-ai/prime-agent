@@ -25,12 +25,14 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot, restored_turn_policy,
+    checkpoint_owned_input, checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
+    parse_prompt_images, queue_lanes, restore_queue_snapshot_reconciled, restored_turn_policy,
     withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
     TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
     QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
+#[cfg(test)]
+pub(crate) use queue::restore_queue_snapshot;
 
 mod create;
 mod turn;
@@ -94,6 +96,12 @@ use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
 
 use crate::types::{AgentConnectionState, SessionActionSnapshot};
+
+#[cfg(test)]
+pub(crate) struct PromptEnqueueGate {
+    pub(crate) entered: Arc<Notify>,
+    pub(crate) release: Arc<Notify>,
+}
 
 pub struct Worker {
     pub(crate) config: WorkerConfig,
@@ -177,6 +185,8 @@ pub struct Worker {
     /// Worker-side prompt admissions: the registry the supervisor's
     /// forwarded `cancel_prompt_admission` reads.
     pub(crate) prompt_admissions: crate::prompt_admission::WorkerAdmissions,
+    #[cfg(test)]
+    pub(crate) prompt_enqueue_gate: std::sync::Mutex<Option<PromptEnqueueGate>>,
     /// The scheduling surface: the session's cron/heartbeat store plus the
     /// scheduler firing due jobs into the queue (jobs rebind on replacement).
     pub(crate) scheduled: std::sync::Arc<crate::scheduled_jobs::ScheduledJobs>,
@@ -313,6 +323,8 @@ impl Worker {
             scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
+            recovery_hold: false,
+            in_flight_input: Vec::new(),
             pending_next_turn: Vec::new(),
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
@@ -744,6 +756,8 @@ impl Worker {
             input_pauses,
             navigation,
             prompt_admissions,
+            #[cfg(test)]
+            prompt_enqueue_gate: std::sync::Mutex::new(None),
             scheduled,
             herdr: std::sync::Arc::clone(&herdr_slot),
             herdr_generation: std::sync::Arc::clone(&herdr_generation),
@@ -807,17 +821,7 @@ impl Worker {
     /// registration-retirement path share it (`std::process::exit` runs
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
-        // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let busy = {
-            let core = self.core.lock().unwrap();
-            // A user abort parks visible input until an explicit resume.
-            // Restarting a fresh worker would otherwise drop that suspension
-            // and execute the parked prompts without the user's consent.
-            !core.queued_input_suspended
-                && (!core.steering.is_empty() || !core.follow_up.is_empty())
-        };
-        let _ = self.record_recovery(busy, "shutdown");
+        // The paired, synced final verdict landed before the shutdown ACK.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }

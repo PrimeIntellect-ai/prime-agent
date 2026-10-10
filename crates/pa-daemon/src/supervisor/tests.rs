@@ -653,6 +653,206 @@ async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
     );
 }
 
+#[tokio::test]
+async fn failed_shutdown_hold_write_keeps_live_supervision_and_skips_dispatch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "hold-write-fails",
+        "pid": 4242,
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "workerInstanceId": "instance-1",
+        "rootActiveSessionId": "hold-write-fails",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0
+    }))
+    .expect("descriptor");
+    // An occupied directory makes atomic rename fail without using
+    // process signalling or a live external service.
+    let descriptor_path = dir.path().join("occupied.json");
+    std::fs::create_dir(&descriptor_path).unwrap();
+    let resident = ResidentWorker::new("hold-write-fails".to_string(), descriptor, descriptor_path);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    supervisor.shutdown_started.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
+        .await
+        .expect("failed hold write must not enter worker routing");
+
+    assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+    assert!(!supervisor.shutting_down.load(Ordering::SeqCst));
+    assert!(!supervisor.shutdown_started.load(Ordering::SeqCst));
+    assert!(supervisor.registry.get("hold-write-fails").await.is_some());
+    assert!(!resident.intentional_stop.load(Ordering::SeqCst));
+    assert!(!resident.route_state().retired);
+    assert!(resident.descriptor.lock().await.stop_requested_at.is_none());
+    assert!(!dir.path().join("worker.recovery.jsonl").exists());
+}
+
+#[tokio::test]
+async fn partial_shutdown_preflight_failure_does_not_dispatch_prepared_worker() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let make_resident = |worker_id: &str, descriptor_path: std::path::PathBuf| {
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": worker_id,
+            "pid": 4242,
+            "socketPath": dir.path().join(format!("{worker_id}.sock")).to_string_lossy(),
+            "recoveryJournalPath": dir.path().join(format!("{worker_id}.recovery.jsonl")).to_string_lossy(),
+            "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+            "authenticationToken": "token",
+            "workerInstanceId": format!("instance-{worker_id}"),
+            "rootActiveSessionId": worker_id,
+            "createdAt": "2026-10-01T00:00:00Z",
+            "updatedAt": "2026-10-01T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0
+        }))
+        .expect("descriptor");
+        ResidentWorker::new(worker_id.to_string(), descriptor, descriptor_path)
+    };
+    let first_path = dir.path().join("a-held.json");
+    let first = make_resident("a-held", first_path.clone());
+    let second_path = dir.path().join("z-fails.json");
+    std::fs::create_dir(&second_path).unwrap();
+    let second = make_resident("z-fails", second_path);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    *first.cmd_tx.lock().await = Some(tx);
+    supervisor.registry.insert(Arc::clone(&second)).await;
+    supervisor.registry.insert(Arc::clone(&first)).await;
+    supervisor.shutdown_started.store(true, Ordering::SeqCst);
+
+    tokio::time::timeout(Duration::from_secs(1), supervisor.begin_shutdown())
+        .await
+        .expect("preflight failure must not wait for a worker RPC");
+
+    assert!(rx.try_recv().is_err(), "the prepared worker got an RPC");
+    assert!(supervisor.registry.get("a-held").await.is_some());
+    assert!(supervisor.registry.get("z-fails").await.is_some());
+    assert!(!first.intentional_stop.load(Ordering::SeqCst));
+    assert!(!second.intentional_stop.load(Ordering::SeqCst));
+    assert!(!first.route_state().retired);
+    assert!(!second.route_state().retired);
+    assert!(!supervisor.shutting_down.load(Ordering::SeqCst));
+    assert!(!supervisor.shutdown_started.load(Ordering::SeqCst));
+    assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+    let first_disk: DaemonWorkerDescriptor =
+        serde_json::from_slice(&std::fs::read(first_path).unwrap()).unwrap();
+    assert!(first_disk.stop_requested_at.is_some());
+    assert!(crate::descriptor::shutdown_hold(&first_disk).unwrap().is_some());
+    assert!(first.descriptor.lock().await.stop_requested_at.is_some());
+    assert!(second.descriptor.lock().await.stop_requested_at.is_none());
+}
+
+#[tokio::test]
+async fn live_resume_without_descriptor_hold_gets_a_supervisor_attempt() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "live-resume",
+        "pid": 4242,
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("worker.recovery.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "workerInstanceId": "instance-1",
+        "rootActiveSessionId": "live-resume",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "live-resume".to_string(),
+        descriptor,
+        dir.path().join("live-resume.json"),
+    );
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let (subscriber_tx, _subscriber_rx) = mpsc::channel::<Arc<Value>>(1);
+    let attached = subscribers::ClientSubscriptions::new("client".into(), subscriber_tx);
+    let command: DaemonCommand = serde_json::from_value(json!({
+        "type": "resume_queue",
+        "activeSessionId": "live-resume",
+        "resumeQueueAttemptId": "untrusted-client-value"
+    }))
+    .expect("resume command");
+    let routed = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .route_client_command(
+                    &command,
+                    "client",
+                    &attached,
+                    "resume-1".into(),
+                    "resume_queue".into(),
+                    None,
+                )
+                .await
+        })
+    };
+    let request = tokio::time::timeout(Duration::from_secs(1), cmd_rx.recv())
+        .await
+        .expect("routed request arrives")
+        .expect("request channel remains open");
+    assert_eq!(request.command_type, "resume_queue");
+    let attempt = request.payload["resumeQueueAttemptId"]
+        .as_str()
+        .expect("supervisor attempt");
+    assert!(!attempt.is_empty());
+    assert_ne!(attempt, "untrusted-client-value");
+    let reply = resident
+        .pending
+        .lock()
+        .await
+        .remove(&request.request_id)
+        .expect("pending route");
+    assert!(reply
+        .send(WorkerReply::Typed(crate::protocol::response_success(
+            None,
+            "resume_queue",
+            None,
+        )))
+        .is_ok());
+    let (lines, stop) = routed.await.expect("route task");
+    assert!(!stop);
+    assert_eq!(lines[0]["success"], json!(true));
+    assert!(!crate::descriptor::has_shutdown_hold(&resident.descriptor.lock().await));
+}
+
 /// The stop's only `Err` (tombstone persist) leaves the worker untouched and the kill
 /// retryable.
 #[tokio::test]

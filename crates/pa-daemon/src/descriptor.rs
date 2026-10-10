@@ -18,6 +18,69 @@ pub const SUPERVISOR_CONFIG_FILE_NAME: &str = "supervisor-config";
 pub type WorkerLifecycle = DaemonWorkerLifecycle;
 pub type WorkerDescriptor = DaemonWorkerDescriptor;
 
+/// A daemon shutdown remains owned by the recorded worker generation until its
+/// journal proves the outcome. Keep this in the descriptor's existing atomic
+/// record, rather than adding another independently recoverable file.
+pub(crate) const SHUTDOWN_HOLD_KEY: &str = "shutdownHold";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ShutdownHold {
+    pub version: u8,
+    pub attempt_id: String,
+    pub worker_instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_worker_instance_id: Option<String>,
+}
+
+impl ShutdownHold {
+    pub(crate) fn new(attempt_id: String, worker_instance_id: String) -> Self {
+        Self {
+            version: 1,
+            attempt_id,
+            worker_instance_id,
+            resume_attempt_id: None,
+            resume_worker_instance_id: None,
+        }
+    }
+}
+
+/// A present but malformed hold is still an unresolved stop, never evidence
+/// that the worker was idle. Callers must handle `Err` conservatively.
+pub(crate) fn shutdown_hold(descriptor: &WorkerDescriptor) -> Result<Option<ShutdownHold>> {
+    let Some(value) = descriptor.rest.get(SHUTDOWN_HOLD_KEY) else {
+        return Ok(None);
+    };
+    let hold: ShutdownHold = serde_json::from_value(value.clone())?;
+    if hold.version != 1 || hold.attempt_id.is_empty() || hold.worker_instance_id.is_empty() {
+        return Err(anyhow!("invalid shutdown hold identity"));
+    }
+    if hold.resume_attempt_id.is_some() != hold.resume_worker_instance_id.is_some()
+        || hold.resume_attempt_id.as_deref() == Some("")
+        || hold.resume_worker_instance_id.as_deref() == Some("")
+    {
+        return Err(anyhow!("invalid resume hold identity"));
+    }
+    Ok(Some(hold))
+}
+
+pub(crate) fn has_shutdown_hold(descriptor: &WorkerDescriptor) -> bool {
+    descriptor.rest.contains_key(SHUTDOWN_HOLD_KEY)
+}
+
+/// This descriptor update is a dispatch barrier: both the file and its rename
+/// must survive a crash before the shutdown request may leave the supervisor.
+pub(crate) fn persist_shutdown_boundary(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
+    persist_worker(path, descriptor)?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow!("descriptor has no parent directory"))?;
+    pa_core::platform::fs::sync_directory(directory)?;
+    Ok(())
+}
+
 /// Extract the durable create fields from a create command payload.
 pub fn durable_create_command(payload: &Value) -> DurableDaemonCreateCommand {
     let mut rest = serde_json::Map::new();
@@ -454,6 +517,42 @@ use std::io::Write as _;
 mod tests {
     use super::*;
     use serde_json::Map;
+
+    #[test]
+    fn shutdown_hold_requires_a_complete_correlated_identity() {
+        let mut descriptor: WorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w",
+            "pid": 1,
+            "socketPath": "/tmp/w.sock",
+            "recoveryJournalPath": "/tmp/w.recovery.jsonl",
+            "supervisorSocketPath": "/tmp/daemon.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0
+        }))
+        .unwrap();
+        assert!(shutdown_hold(&descriptor).unwrap().is_none());
+        descriptor.rest.insert(
+            SHUTDOWN_HOLD_KEY.into(),
+            json!({
+                "version": 1,
+                "attemptId": "attempt",
+                "workerInstanceId": "instance",
+                "resumeAttemptId": "resume"
+            }),
+        );
+        assert!(shutdown_hold(&descriptor).is_err());
+        descriptor.rest.insert(
+            SHUTDOWN_HOLD_KEY.into(),
+            json!(ShutdownHold::new("attempt".into(), "instance".into())),
+        );
+        assert!(shutdown_hold(&descriptor).unwrap().is_some());
+    }
 
     #[test]
     fn write_file_atomic_replaces_an_existing_destination() {

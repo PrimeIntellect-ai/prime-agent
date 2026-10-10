@@ -510,7 +510,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         .await;
     assert!(follow.success, "follow_up failed: {follow:?}");
     // The funnel: arm the steering, abort the run, resume the pump.
-    let sent = worker.abort_and_send_queued();
+    let sent = worker.abort_and_send_queued().expect("abort checkpoint");
     assert!(sent, "the armed steering batch sent with the abort");
     let idle = tokio::time::timeout(
         std::time::Duration::from_secs(15),

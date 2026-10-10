@@ -260,6 +260,12 @@ impl Supervisor {
         let (payload, injected_compaction_abort) = {
             let descriptor = resident.descriptor.lock().await;
             let mut payload = create_command_payload(&descriptor.create_command);
+            // A parked or unproven shutdown must become visible without
+            // executing its recovered queue. The create-time flag is applied
+            // before the worker's runner can wake.
+            if crate::descriptor::has_shutdown_hold(&descriptor) {
+                payload["restoreQueueSuspended"] = json!(true);
+            }
             // The pending terminal record rides the create replay: the replacement
             // discloses the aborted run in the rebuilt transcript, and the record is
             // consumed by the reply.

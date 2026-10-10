@@ -4,7 +4,7 @@ use super::lifecycle::active_lifecycle;
 use super::{
     checkpoint_queue_recovery, create_daemon_event_meta, is_injected_prompt_item,
     is_rlm_child_status_item, json, AgentConnectionState, Arc, DaemonOutbound,
-    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint, QueueLanes,
+    DaemonSessionClosedReason, EventPump, Map, Mutex, OutboundFrame, QueueCheckpoint,
     QueuedItem, Result, SessionActionSnapshot, SessionCore, SessionEngine, Value, Worker,
 };
 
@@ -142,12 +142,41 @@ impl Worker {
     /// Persist the queue lanes to the recovery journal. Call after
     /// releasing the core lock: `record_recovery` takes the locks in
     /// the opposite order.
-    pub(crate) fn persist_queue_snapshot(&self, active_session_id: &str, lanes: &QueueLanes) {
+    #[cfg(test)]
+    pub(crate) fn persist_queue_snapshot(
+        &self,
+        active_session_id: &str,
+        lanes: &crate::worker::QueueLanes,
+    ) {
         let mut guard = self.recovery.lock().unwrap();
         let Some(journal) = guard.as_mut() else {
             return;
         };
+        if self.core.lock().unwrap().shutdown_requested {
+            return;
+        }
         let _ = journal.record_queue_snapshot(active_session_id, &lanes.steering, &lanes.follow_up);
+    }
+
+    /// Take the queue read inside the recovery lock so a delayed update
+    /// snapshot cannot overwrite a picked batch's stable row identities.
+    pub(crate) fn persist_current_queue_snapshot(&self) {
+        let mut guard = self.recovery.lock().unwrap();
+        let Some(journal) = guard.as_mut() else {
+            return;
+        };
+        let (active_session_id, lanes) = {
+            let core = self.core.lock().unwrap();
+            if core.shutdown_requested {
+                return;
+            }
+            (core.active_session_id.clone(), crate::worker::queue_lanes(&core))
+        };
+        let _ = journal.record_queue_snapshot(
+            &active_session_id,
+            &lanes.steering,
+            &lanes.follow_up,
+        );
     }
 
     /// One queue-lane recovery checkpoint: the lane snapshot and the
@@ -161,14 +190,22 @@ impl Worker {
         let Some(journal) = guard.as_mut() else {
             return Ok(());
         };
-        let core = self.core.lock().unwrap();
-        let store = core.store.as_ref();
+        let (active_session_id, session_id, session_file) = {
+            let core = self.core.lock().unwrap();
+            if core.shutdown_requested && operation != "shutdown" {
+                return Ok(());
+            }
+            let store = core.store.as_ref();
+            (
+                core.active_session_id.clone(),
+                store.map_or("", crate::session_store::SessionFile::session_id).to_string(),
+                store.map(|s| s.path.to_string_lossy().to_string()),
+            )
+        };
         journal.record(
-            &core.active_session_id,
-            store.map_or("", crate::session_store::SessionFile::session_id),
-            store
-                .map(|s| s.path.to_string_lossy().to_string())
-                .as_deref(),
+            &active_session_id,
+            &session_id,
+            session_file.as_deref(),
             busy,
             operation,
         )

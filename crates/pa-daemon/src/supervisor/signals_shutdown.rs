@@ -27,24 +27,65 @@ impl Supervisor {
 
     pub(super) async fn begin_shutdown(self: &Arc<Self>) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        for resident in self.registry.list().await {
+        let mut prepared = Vec::new();
+        let mut residents = self.registry.list().await;
+        residents.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+        for resident in residents {
+            // Persist the exact request and worker generation before dispatch. An ACK
+            // can disappear after the worker has fsynced its queue checkpoint; only
+            // this identity lets the next boot decide what actually happened.
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let persisted = {
+                let mut current = resident.descriptor.lock().await;
+                let worker_instance_id = current.worker_instance_id.clone();
+                match worker_instance_id.filter(|id| !id.is_empty()) {
+                    None => Err(anyhow::anyhow!("worker generation is missing")),
+                    Some(worker_instance_id) => {
+                        let mut next = current.clone();
+                        next.rest.insert(
+                            crate::descriptor::SHUTDOWN_HOLD_KEY.into(),
+                            json!(crate::descriptor::ShutdownHold::new(
+                                attempt_id.clone(),
+                                worker_instance_id
+                            )),
+                        );
+                        next.stop_requested_at = Some(crate::util::now_iso());
+                        next.archive_on_stop = Some(false);
+                        let result = crate::descriptor::persist_shutdown_boundary(
+                            &resident.descriptor_path,
+                            &next,
+                        );
+                        if result.is_ok() {
+                            *current = next;
+                        }
+                        result
+                    }
+                }
+            };
+            if let Err(error) = persisted {
+                self.log_line(&format!(
+                    "session worker {} shutdown hold could not persist; graceful teardown aborted while the supervisor retains its live workers: {error:#}",
+                    resident.worker_id,
+                ));
+                // Exiting here would drop the supervisor link. The worker's
+                // orphan exit writes a generic idle row, and a later boot
+                // could make a decision without this shutdown attempt.
+                // None of the prepared workers has received shutdown yet.
+                self.shutting_down.store(false, Ordering::SeqCst);
+                self.shutdown_started.store(false, Ordering::SeqCst);
+                *self.shutdown_owner.lock().unwrap() = None;
+                return;
+            }
+            prepared.push((resident, attempt_id));
+        }
+        for (resident, attempt_id) in prepared {
             resident.intentional_stop.store(true, Ordering::SeqCst);
             resident.note_retired();
-            // The stop tombstone persists before the worker is even told (TS
-            // `stopWorkerUntracked`): a supervisor that dies between here and the worker's
-            // exit leaves durable stop intent, and the next boot finishes the stop.
-            if self.persist_stop_tombstone(&resident).await.is_err() {
-                self.log_line(&format!(
-                    "session worker {} stop tombstone could not persist; leaving the worker untouched (the next boot retries the stop)",
-                    resident.worker_id
-                ));
-                continue;
-            }
             let _ = self
                 .route_command_typed(
                     &resident,
                     "shutdown",
-                    json!({ "daemonShutdown": true }),
+                    json!({ "daemonShutdown": true, "shutdownAttemptId": attempt_id }),
                     ROUTE_TIMEOUT_MS,
                     RouteAdmission::SupervisorInternal,
                 )

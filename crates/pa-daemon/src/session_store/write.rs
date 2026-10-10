@@ -190,10 +190,34 @@ impl SessionFile {
         fields: Value,
         timestamp: &str,
     ) -> Result<String> {
+        self.persist_entry_with_id_at(entry_type, fields, timestamp, None)
+    }
+
+    /// The worker's picked input supplies a stable private entry ID so a
+    /// shutdown can reconcile an append whose sync result was uncertain.
+    pub(crate) fn persist_input_entry(
+        &mut self,
+        entry_type: &str,
+        fields: Value,
+        entry_id: &str,
+    ) -> Result<String> {
+        self.persist_entry_with_id_at(entry_type, fields, &crate::util::now_iso(), Some(entry_id))
+    }
+
+    fn persist_entry_with_id_at(
+        &mut self,
+        entry_type: &str,
+        fields: Value,
+        timestamp: &str,
+        entry_id: Option<&str>,
+    ) -> Result<String> {
         anyhow::ensure!(
             self.window.is_none() || self.path.exists(),
             "window-backed session file is missing"
         );
+        if let Some(id) = entry_id {
+            anyhow::ensure!(!self.by_id.contains_key(id), "session entry ID already exists");
+        }
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
@@ -203,7 +227,9 @@ impl SessionFile {
         );
         // A windowed index lacks the pre-window IDs, so the short minted ID could
         // collide with unloaded history; a UUID cannot (same rule as `append_entry`).
-        if self.window.is_some() {
+        if let Some(id) = entry_id {
+            entry.id = id.to_string();
+        } else if self.window.is_some() {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
         let id = entry.id.clone();

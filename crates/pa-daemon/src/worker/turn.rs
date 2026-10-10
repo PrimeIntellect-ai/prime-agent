@@ -3,7 +3,8 @@
 use super::{
     checkpoint_queue_recovery, compact_action_label, create_daemon_event_meta,
     emit_refinement_event_for_session, emit_refinement_row, gather_delivery_batch, json, oneshot,
-    session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent, EventPump, Lane, Map, Notify,
+    queue::{checkpoint_picked_input, queue_item_record}, session_snapshot, AssistantSnapshot, DaemonOutbound, EngineEvent,
+    EventPump, Lane, Map, Notify,
     OutboundFrame, PromptRequest, QueueCheckpoint, QueuedItem, Result, SessionActionSnapshot,
     SessionCore, SessionEngine, TurnSettle, Value, WorkerRecoveryJournal,
     ABORTED_TURN_SETTLE_ERROR,
@@ -56,11 +57,26 @@ impl TurnRunner {
                 }
                 // A cleared suspension alone must not admit: a manual
                 // compaction is a busy state the resume sites do NOT clear.
-                if self.input_pauses.paused() || core.queued_input_suspended || core.compacting {
+                if self.input_pauses.paused()
+                    || core.queued_input_suspended
+                    || core.recovery_hold
+                    || core.compacting
+                {
                     core.busy = false;
                     None
                 } else if core.steering.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::Steering);
+                    core.in_flight_input = items
+                        .iter()
+                        .map(|item| super::session_core::InFlightInput {
+                            lane: Lane::Steering,
+                            row_id: uuid::Uuid::new_v4().to_string(),
+                            item: queue_item_record(item),
+                            attempted: false,
+                            committed: false,
+                            cancelled: false,
+                        })
+                        .collect();
                     core.running_admission_ids = items
                         .iter()
                         .filter_map(|item| item.admission_id.clone())
@@ -72,6 +88,17 @@ impl TurnRunner {
                     Some(items)
                 } else if core.follow_up.front().is_some() {
                     let items = gather_delivery_batch(&mut core, Lane::FollowUp);
+                    core.in_flight_input = items
+                        .iter()
+                        .map(|item| super::session_core::InFlightInput {
+                            lane: Lane::FollowUp,
+                            row_id: uuid::Uuid::new_v4().to_string(),
+                            item: queue_item_record(item),
+                            attempted: false,
+                            committed: false,
+                            cancelled: false,
+                        })
+                        .collect();
                     core.running_admission_ids = items
                         .iter()
                         .filter_map(|item| item.admission_id.clone())
@@ -87,10 +114,27 @@ impl TurnRunner {
                 }
             };
             if let Some(items) = item {
-                // No pickup checkpoint: admission recorded its busy evidence; the
-                // settle's `turn_end` verdict parks the session later. The item leaves
-                // the queue projection BEFORE its turn starts (a stale row would
-                // reject a browse edit).
+                if let Err(error) = checkpoint_picked_input(&self.recovery, &self.core) {
+                    eprintln!("pa-daemon: picked input checkpoint failed: {error:#}");
+                    let mut core = self.core.lock().unwrap();
+                    let lane = core.in_flight_input.first().map(|input| input.lane);
+                    for item in items.into_iter().rev() {
+                        match lane {
+                            Some(Lane::Steering) => core.steering.push_front(item),
+                            Some(Lane::FollowUp) => core.follow_up.push_front(item),
+                            None => unreachable!("picked batch has an owned lane"),
+                        }
+                    }
+                    core.in_flight_input.clear();
+                    core.running_admission_ids.clear();
+                    core.busy = false;
+                    core.queued_input_suspended = true;
+                    drop(core);
+                    self.idle_notify.notify_waiters();
+                    continue;
+                }
+                // The item leaves the visible queue projection before its
+                // turn starts; the private picked snapshot retains ownership.
                 let visible_index = items.iter().position(|item| item.queue_visible);
                 let anchor = visible_index.map(|index| &items[index]);
                 {
@@ -564,10 +608,50 @@ impl TurnRunner {
                         );
                     }
                 }
+                let accepted_index = if emitting_prefix_rows.get() {
+                    None
+                } else {
+                    core.in_flight_input
+                        .iter()
+                        .position(|input| !input.attempted)
+                        .filter(|&index| match &event {
+                            EngineEvent::UserMessage(_) => {
+                                core.in_flight_input[index].item.custom_message.is_none()
+                            }
+                            EngineEvent::CustomMessage(message) => {
+                                core.in_flight_input[index].item.custom_message.as_ref()
+                                    == Some(message)
+                            }
+                            _ => false,
+                        })
+                };
+                let mut input_persisted = false;
                 match &event {
                     // A `message` entry per row (TS's appendMessage path).
-                    EngineEvent::UserMessage(message)
-                    | EngineEvent::AssistantMessage(message)
+                    EngineEvent::UserMessage(message) => {
+                        let entry_id = accepted_index
+                            .map(|index| core.in_flight_input[index].row_id.clone());
+                        if let Some(store) = core.store.as_mut() {
+                            input_persisted = if let Some(id) = entry_id.as_deref() {
+                                store.persist_input_entry(
+                                    "message", json!({ "message": message }), id,
+                                )
+                            } else {
+                                store.persist_entry("message", json!({ "message": message }))
+                            }
+                            .is_ok();
+                        }
+                        if let Some(index) = accepted_index {
+                            core.in_flight_input[index].attempted = true;
+                            core.in_flight_input[index].committed = input_persisted;
+                            if !input_persisted {
+                                core.recovery_hold = true;
+                                core.queued_input_suspended = true;
+                                core.abort_requested = true;
+                            }
+                        }
+                    }
+                    EngineEvent::AssistantMessage(message)
                     | EngineEvent::ToolResultMessage(message) => {
                         if let Some(store) = core.store.as_mut() {
                             let _ = store.persist_entry("message", json!({ "message": message }));
@@ -583,16 +667,30 @@ impl TurnRunner {
                         core.running_tool_calls.remove(tool_call_id);
                     }
                     EngineEvent::CustomMessage(message) => {
+                        let entry_id = accepted_index
+                            .map(|index| core.in_flight_input[index].row_id.clone());
                         if let Some(store) = core.store.as_mut() {
-                            let _ = store.persist_entry(
-                                "custom_message",
-                                json!({
-                                    "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                                    "content": message.get("content").cloned().unwrap_or(Value::Null),
-                                    "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                                    "details": message.get("details").cloned().unwrap_or(Value::Null),
-                                }),
-                            );
+                            let fields = json!({
+                                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                                "details": message.get("details").cloned().unwrap_or(Value::Null),
+                            });
+                            input_persisted = if let Some(id) = entry_id.as_deref() {
+                                store.persist_input_entry("custom_message", fields, id)
+                            } else {
+                                store.persist_entry("custom_message", fields)
+                            }
+                            .is_ok();
+                        }
+                        if let Some(index) = accepted_index {
+                            core.in_flight_input[index].attempted = true;
+                            core.in_flight_input[index].committed = input_persisted;
+                            if !input_persisted {
+                                core.recovery_hold = true;
+                                core.queued_input_suspended = true;
+                                core.abort_requested = true;
+                            }
                         }
                     }
                     EngineEvent::Compaction { entry, .. } => {
@@ -623,14 +721,15 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
+                if accepted_index.is_some() && !input_persisted {
+                    *turn_outcome_slot.lock().unwrap() = Some(TurnSettle::Failed(
+                        "Input persistence is uncertain; queue held for recovery".to_string(),
+                    ));
+                    return false;
+                }
                 // The `committing`/`running` transitions ride the events that mark the moments.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
-                if !emitting_prefix_rows.get()
-                    && !active_committed
-                    && matches!(
-                        event,
-                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
-                    )
+                if !active_committed && input_persisted && accepted_index.is_some()
                 {
                     active_committed = true;
                     if let Some(active) = core.active_action.as_mut() {
@@ -1004,6 +1103,9 @@ impl TurnRunner {
         {
             let mut core = self.core.lock().unwrap();
             core.busy = false;
+            if !core.shutdown_requested && !core.recovery_hold {
+                core.in_flight_input.clear();
+            }
             core.active_action = None;
             core.running_admission_ids.clear();
         }

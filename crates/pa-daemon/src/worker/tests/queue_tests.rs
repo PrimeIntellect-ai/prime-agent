@@ -334,6 +334,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: Some("heartbeat:hb-1".to_string()),
         queue_visible: true,
         policy: "injected".to_string(),
+        ..Default::default()
     };
     let plain = crate::journal::WorkerQueueItemRecord {
         message: "follow-me".to_string(),
@@ -343,6 +344,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         queue_key: None,
         queue_visible: true,
         policy: "queued".to_string(),
+        ..Default::default()
     };
     journal
         .record_queue_snapshot(

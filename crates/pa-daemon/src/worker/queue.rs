@@ -246,6 +246,10 @@ pub(crate) fn checkpoint_queue_recovery(
     // never across the journal's fsyncs): no persist interleaves this read.
     let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
         let core = core_lock.lock().unwrap();
+        if core.shutdown_requested {
+            // The final attempt checkpoint owns shutdown's last verdict.
+            return;
+        }
         (
             core.active_session_id.clone(),
             core.store
@@ -282,23 +286,88 @@ pub(crate) fn checkpoint_queue_recovery(
     );
 }
 
+/// The picked batch's stable row identities must land before any engine row
+/// can reach the session file. A failed pickup keeps the original queue safe.
+pub(crate) fn checkpoint_picked_input(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core_lock: &std::sync::Mutex<SessionCore>,
+) -> Result<()> {
+    checkpoint_owned_input(recovery, core_lock, "picked")
+}
+
+pub(crate) fn checkpoint_owned_input(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core_lock: &std::sync::Mutex<SessionCore>,
+    operation: &str,
+) -> Result<()> {
+    let mut guard = recovery.lock().unwrap();
+    let Some(journal) = guard.as_mut() else {
+        // Standalone turn tests intentionally have no journal; a product
+        // worker must never accept input without its recovery sink.
+        #[cfg(test)]
+        return Ok(());
+        #[cfg(not(test))]
+        anyhow::bail!("picked input has no recovery journal");
+    };
+    let (active_session_id, session_id, session_file, lanes) = {
+        let core = core_lock.lock().unwrap();
+        anyhow::ensure!(!core.shutdown_requested, "shutdown owns final queue checkpoint");
+        (
+            core.active_session_id.clone(),
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default(),
+            core.store
+                .as_ref()
+                .map(|store| store.path.to_string_lossy().to_string()),
+            queue_lanes(&core),
+        )
+    };
+    journal.record_queue_checkpoint(
+        &active_session_id,
+        &session_id,
+        session_file.as_deref(),
+        operation == "picked" || !lanes.steering.is_empty() || !lanes.follow_up.is_empty(),
+        operation,
+        &lanes.steering,
+        &lanes.follow_up,
+    )
+}
+
 pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
     fn items(lane: &VecDeque<QueuedItem>) -> Vec<crate::journal::WorkerQueueItemRecord> {
         lane.iter()
-            .map(|item| crate::journal::WorkerQueueItemRecord {
-                message: item.message.clone(),
-                priority: Some(item.priority),
-                preview: item.preview.clone(),
-                custom_message: item.custom_message.clone(),
-                queue_key: item.queue_key.clone(),
-                queue_visible: item.queue_visible,
-                policy: item.policy.journal_value().to_string(),
-            })
+            .map(queue_item_record)
             .collect()
     }
-    QueueLanes {
-        steering: items(&core.steering),
-        follow_up: items(&core.follow_up),
+    let mut steering = items(&core.steering);
+    let mut follow_up = items(&core.follow_up);
+    for input in core.in_flight_input.iter().rev().filter(|input| !input.cancelled) {
+        let mut record = input.item.clone();
+        record.entry_id = Some(input.row_id.clone());
+        match input.lane {
+            Lane::Steering => steering.insert(0, record),
+            Lane::FollowUp => follow_up.insert(0, record),
+        }
+    }
+    QueueLanes { steering, follow_up }
+}
+
+pub(crate) fn queue_item_record(item: &QueuedItem) -> crate::journal::WorkerQueueItemRecord {
+    crate::journal::WorkerQueueItemRecord {
+        message: item.message.clone(),
+        priority: Some(item.priority),
+        preview: item.preview.clone(),
+        custom_message: item.custom_message.clone(),
+        agent_message: item.agent_message.clone(),
+        queue_key: item.queue_key.clone(),
+        admission_id: item.admission_id.clone(),
+        entry_id: None,
+        images: item.images.clone(),
+        queue_visible: item.queue_visible,
+        policy: item.policy.journal_value().to_string(),
+        forced_batch: item.forced_batch,
     }
 }
 
@@ -354,46 +423,83 @@ pub(crate) fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
-    fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
-        // Images on a queued prompt do not survive the restart; the
-        // delivery rows ride the item record without them.
-        lanes
-            .into_iter()
-            .map(|record| {
-                let policy = record.policy();
-                QueuedItem {
-                    preview: record.preview,
-                    message: record.message,
-                    priority: record.priority.unwrap_or_else(|| {
-                        if record.custom_message.is_some() {
-                            QueuePriority::Background
-                        } else {
-                            QueuePriority::Human
-                        }
-                    }),
-                    custom_message: record.custom_message,
-                    agent_message: None,
-                    queue_key: record.queue_key,
-                    admission_id: None,
-                    images: Vec::new(),
-                    done: None,
-                    queue_visible: record.queue_visible,
-                    policy,
-                    forced_batch: false,
-                }
-            })
-            .collect()
-    }
+    journal
+        .latest_queue_snapshot(active_session_id)
+        .map_or_else(|| (VecDeque::new(), VecDeque::new()), |(steering, follow_up)| {
+            (restore_queue_records(steering), restore_queue_records(follow_up))
+        })
+}
 
-    let mut steering = VecDeque::new();
-    let mut follow_up = VecDeque::new();
-    if let Some((steering_lanes, follow_up_lanes)) =
-        journal.latest_queue_snapshot(active_session_id)
-    {
-        steering = pending(steering_lanes);
-        follow_up = pending(follow_up_lanes);
+fn restore_queue_records(
+    lanes: Vec<crate::journal::WorkerQueueItemRecord>,
+) -> VecDeque<QueuedItem> {
+    lanes
+        .into_iter()
+        .map(|record| {
+            let policy = record.policy();
+            QueuedItem {
+                preview: record.preview,
+                message: record.message,
+                priority: record.priority.unwrap_or_else(|| {
+                    if record.custom_message.is_some() {
+                        QueuePriority::Background
+                    } else {
+                        QueuePriority::Human
+                    }
+                }),
+                custom_message: record.custom_message,
+                agent_message: record.agent_message,
+                queue_key: record.queue_key,
+                admission_id: record.admission_id,
+                images: record.images,
+                done: None,
+                queue_visible: record.queue_visible,
+                policy,
+                forced_batch: record.forced_batch,
+            }
+        })
+        .collect()
+}
+
+/// A picked input is still in the queue checkpoint. Omit only IDs proven
+/// present in the synced session file; an uncertain append cannot duplicate.
+pub(crate) fn restore_queue_snapshot_reconciled(
+    journal: &WorkerRecoveryJournal,
+    active_session_id: &str,
+    session_file: &std::path::Path,
+) -> Result<(VecDeque<QueuedItem>, VecDeque<QueuedItem>)> {
+    let Some((mut steering, mut follow_up)) = journal.latest_queue_snapshot(active_session_id)
+    else {
+        return Ok((VecDeque::new(), VecDeque::new()));
+    };
+    let pending_ids: std::collections::HashSet<&str> = steering
+        .iter()
+        .chain(&follow_up)
+        .filter_map(|item| item.entry_id.as_deref())
+        .collect();
+    if !pending_ids.is_empty() {
+        // An untouched picked prompt can precede the session file's first
+        // append. A missing file contains no accepted row; an existing file
+        // must be synced and parsed in full before any replay decision.
+        let text = if session_file.exists() {
+            crate::journal::sync_regular_file(session_file)?;
+            std::fs::read_to_string(session_file)?
+        } else {
+            String::new()
+        };
+        let mut landed = std::collections::HashSet::new();
+        for line in text.lines() {
+            let row: Value = serde_json::from_str(line)?;
+            if let Some(id) = row.get("id").and_then(Value::as_str) {
+                if pending_ids.contains(id) {
+                    landed.insert(id.to_string());
+                }
+            }
+        }
+        steering.retain(|item| !item.entry_id.as_ref().is_some_and(|id| landed.contains(id)));
+        follow_up.retain(|item| !item.entry_id.as_ref().is_some_and(|id| landed.contains(id)));
     }
-    (steering, follow_up)
+    Ok((restore_queue_records(steering), restore_queue_records(follow_up)))
 }
 
 /// Admit one held autonomous continuation through the follow-up lane:
@@ -406,6 +512,9 @@ pub(crate) fn admit_autonomous_follow_up(
 ) {
     {
         let mut core = core.lock().unwrap();
+        if core.shutdown_requested || core.recovery_hold {
+            return;
+        }
         core.follow_up.push_back(QueuedItem {
             priority: QueuePriority::Background,
             preview: None,
@@ -447,6 +556,9 @@ pub(crate) fn admit_goal_follow_up(
     if let Some(goal) = &follow_up.goal_update {
         {
             let mut guard = core.lock().unwrap();
+            if guard.shutdown_requested || guard.recovery_hold {
+                return;
+            }
             if let Some(store) = guard.store.as_mut() {
                 let _ = store.persist_entry(
                     "custom",
@@ -461,6 +573,9 @@ pub(crate) fn admit_goal_follow_up(
     }
     {
         let mut core = core.lock().unwrap();
+        if core.shutdown_requested || core.recovery_hold {
+            return;
+        }
         let item = QueuedItem {
             priority: QueuePriority::Background,
             preview: None,
@@ -522,7 +637,7 @@ pub(crate) fn admit_bash_completion_notice(
     let mut core_guard = core.lock().unwrap();
     // A notice that raced past the sink's first check is refused here or wiped
     // by the close's clear — never a completion turn for a closed session.
-    if session_is_closed() {
+    if session_is_closed() || core_guard.shutdown_requested || core_guard.recovery_hold {
         return;
     }
     let (policy, queue_visible) = if core_guard.busy {

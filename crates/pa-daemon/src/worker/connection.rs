@@ -525,6 +525,18 @@ impl Worker {
                         self.write_response_frame(&sink, &request_id, failure).await;
                         continue;
                     }
+                    if command_type == "resume_queue"
+                        && self.core.lock().unwrap().recovery_hold
+                    {
+                        let failure = response_failure(
+                            Some(&request_id),
+                            "resume_queue",
+                            "Held recovery requires supervisor resume_queue",
+                            None,
+                        );
+                        self.write_response_frame(&sink, &request_id, failure).await;
+                        continue;
+                    }
                     // Session-plane commands run concurrently for the same
                     // reason as the supervisor arm above.
                     let worker = Arc::clone(&self);

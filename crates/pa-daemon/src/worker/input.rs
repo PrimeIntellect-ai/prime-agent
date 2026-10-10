@@ -51,6 +51,14 @@ impl Worker {
         // `_assertSessionActionAdmissionAvailable()` pair).
         {
             let mut core = self.core.lock().unwrap();
+            if core.recovery_hold {
+                return response_failure(
+                    None,
+                    if wait { "prompt_and_wait" } else { "prompt" },
+                    QUEUED_INPUT_SUSPENDED,
+                    None,
+                );
+            }
             if core.queued_input_suspended && !core.busy {
                 if streaming_behavior.is_none() {
                     drop(core);
@@ -75,10 +83,34 @@ impl Worker {
         if let Some(admission_id) = &admission_id {
             self.register_prompt_admission(admission_id);
         }
+        #[cfg(test)]
+        {
+            let gate = self.prompt_enqueue_gate.lock().unwrap().as_ref().map(|gate| {
+                (
+                    std::sync::Arc::clone(&gate.entered),
+                    std::sync::Arc::clone(&gate.release),
+                )
+            });
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
         let (done_tx, done_rx) = oneshot::channel();
         let done = if wait { Some(done_tx) } else { None };
         let (snapshot, queued_behind_work) = {
             let mut core = self.core.lock().unwrap();
+            if core.shutdown_requested || core.recovery_hold {
+                if let Some(id) = &admission_id {
+                    self.prompt_admissions.clear(id);
+                }
+                return response_failure(
+                    None,
+                    if wait { "prompt_and_wait" } else { "prompt" },
+                    QUEUED_INPUT_SUSPENDED,
+                    None,
+                );
+            }
             // TS commits before accepting the prompt into its action queue.
             // Hold the queue lock across this transition and enqueue so a
             // cancellation cannot mistake an accepted prompt for waiting.
@@ -165,6 +197,9 @@ impl Worker {
         if let Err(response) = self.require_created(lane.as_str()) {
             return response;
         }
+        if self.core.lock().unwrap().recovery_hold {
+            return response_failure(None, lane.as_str(), QUEUED_INPUT_SUSPENDED, None);
+        }
         // These commands are resume sites: an admitted turn with
         // `wake: "immediate"` resumes the suspension.
         self.resume_queued_input();
@@ -195,6 +230,9 @@ impl Worker {
             }
         }
         let mut core = self.core.lock().unwrap();
+        if core.shutdown_requested || core.recovery_hold {
+            return response_failure(None, lane.as_str(), QUEUED_INPUT_SUSPENDED, None);
+        }
         let images = parse_prompt_images(payload);
         let item = QueuedItem {
             priority: if custom_message.is_some() {
@@ -317,6 +355,14 @@ impl Worker {
         };
         let (id, queued, snapshot, target) = {
             let (mut core, inputs) = self.summary_inputs();
+            if core.shutdown_requested || core.recovery_hold {
+                return response_failure(
+                    None,
+                    "worker_deliver_message",
+                    QUEUED_INPUT_SUSPENDED,
+                    None,
+                );
+            }
             let pending = core.steering.len() + core.follow_up.len();
             if let Err(error) =
                 pa_core::session_engine::agent_messaging::assert_agent_message_queue_capacity(

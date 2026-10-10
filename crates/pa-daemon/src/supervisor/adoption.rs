@@ -210,7 +210,8 @@ impl Supervisor {
         // treats the recorded process as alive (the graceful IPC leg
         // below degrades to the same finalize a dead verdict runs).
         let tombstoned = descriptor.stop_requested_at.is_some();
-        let recorded_process_alive = if tombstoned {
+        let identity_guarded = tombstoned || crate::descriptor::has_shutdown_hold(&descriptor);
+        let recorded_process_alive = if identity_guarded {
             let pid = descriptor.pid as u32;
             let expected = descriptor.process_start_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -225,7 +226,7 @@ impl Supervisor {
         } else {
             true
         };
-        let alive = (descriptor.stop_requested_at.is_none() || recorded_process_alive)
+        let alive = (!identity_guarded || recorded_process_alive)
             && socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
@@ -233,6 +234,84 @@ impl Supervisor {
         // The durable pending FIRST: a failed identity persist left a side record carrying the
         // moved-to identity — apply it before any routing or revival acts on the stale record.
         self.apply_identity_pending(&resident).await;
+        if let Err(error) = self.reconcile_shutdown_resume_hold(&resident).await {
+            self.log_line(&format!(
+                "session worker {worker_id} resume checkpoint could not be reconciled; shutdown hold retained: {error:#}"
+            ));
+        }
+        let shutdown_hold_owned = {
+            let descriptor = resident.descriptor.lock().await;
+            crate::descriptor::has_shutdown_hold(&descriptor)
+                && descriptor.archive_on_stop != Some(true)
+        };
+        if shutdown_hold_owned {
+            // A hold predates the routed shutdown and is intentionally separate
+            // from kill/per-session stop tombstones. A crash at any boundary must
+            // resolve it from the matching worker journal, not archive the session.
+            if resident.descriptor.lock().await.stop_requested_at.is_some() {
+                self.retire_worker_after_stop(&resident, true).await;
+            } else if alive {
+                // This is an already-restored, paused worker. Its hold remains
+                // until a durable explicit resume checkpoint supersedes it.
+                // Fall through to the ordinary live adoption below.
+            }
+            let held = resident.descriptor.lock().await.clone();
+            if !resident.descriptor_path.exists() {
+                return AdoptionOutcome::Stopped;
+            }
+            if held.stop_requested_at.is_some() {
+                return AdoptionOutcome::Failed;
+            }
+            if held.create_command.no_session == Some(true) {
+                // Memory-only history has no persisted conversation to replay.
+                return AdoptionOutcome::Stopped;
+            }
+            if !alive || tombstoned {
+                let pid = pid as u32;
+                let expected = held.process_start_id.clone();
+                let owner_gone = tokio::task::spawn_blocking(move || {
+                    super::worker_lifecycle::recovery_journal_owner_is_gone(
+                        crate::lease::is_process_alive(pid).ok(),
+                        expected.as_deref(),
+                        crate::lease::get_process_start_id(pid).as_deref(),
+                    )
+                })
+                .await
+                .unwrap_or(false);
+                if !owner_gone {
+                    return AdoptionOutcome::Failed;
+                }
+                if !resident.descriptor_path.exists() {
+                    return AdoptionOutcome::Stopped;
+                }
+                // A definite BusyContinued verdict removed the hold in the
+                // retirement pass; a Parked/Unknown verdict retains it, and
+                // relaunch_worker applies restoreQueueSuspended before wake.
+                if let Some(veto) =
+                    crate::revival_gate::revival_veto(&self.options.agent_dir, &held, true, None)
+                {
+                    self.log_line(&format!(
+                        "session worker {worker_id} shutdown hold not revived: {}",
+                        veto.log_reason()
+                    ));
+                    return AdoptionOutcome::SkippedIdle;
+                }
+                return match self.relaunch_worker(&resident).await {
+                    Ok(child) => {
+                        self.registry.insert(Arc::clone(&resident)).await;
+                        self.spawn_monitor(Arc::clone(&resident), Some(child), 0);
+                        self.refresh_roster_entry(&resident).await;
+                        AdoptionOutcome::Revived
+                    }
+                    Err(error) => {
+                        self.log_line(&format!(
+                            "could not restore session worker {worker_id} from shutdown hold: {error:#}"
+                        ));
+                        AdoptionOutcome::Failed
+                    }
+                };
+            }
+        }
         // The stop tombstone outranks liveness (TS's stop ownership: the stop was durable intent
         // BEFORE the worker was told): a supervisor that died between the tombstone and the
         // shutdown finishes the stop on the next boot — never adopts it as healthy.

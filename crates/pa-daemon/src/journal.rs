@@ -11,7 +11,19 @@ use std::path::Path;
 
 pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
 
+/// Sync a regular file before using its rows as proof. Windows needs a
+/// writable flush handle even when the caller only reads the contents.
+pub(crate) fn sync_regular_file(path: &Path) -> Result<()> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(windows)]
+    options.write(true);
+    options.open(path)?.sync_all()?;
+    Ok(())
+}
+
 pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
+    let created = !path.exists();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -24,6 +36,11 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     line.push('\n');
     file.write_all(line.as_bytes())?;
     pa_core::platform::fsync(&file)?;
+    if created {
+        if let Some(parent) = path.parent() {
+            pa_core::platform::fs::sync_directory(parent)?;
+        }
+    }
     Ok(())
 }
 
@@ -35,6 +52,7 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
 /// Returns an error when the open, serialization, write, or sync fails;
 /// the loader skips a partial write's truncated trailing lines.
 pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
+    let created = !path.exists();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -50,18 +68,19 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     }
     file.write_all(&lines)?;
     pa_core::platform::fsync(&file)?;
+    if created {
+        if let Some(parent) = path.parent() {
+            pa_core::platform::fs::sync_directory(parent)?;
+        }
+    }
     Ok(())
 }
 
-/// Whether the temp journal's data rides a full sync before the swap.
+/// The temp journal's data rides a full sync before the swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
-    /// Bare rename, temp synced before the swap: every failure surfaces
-    /// immediately.
+    /// Sync the replacement before the rename.
     Synced,
-    /// Bare rename with an UNSYNCED temp: durability is owned by the
-    /// append path — a lost compact falls back to the append-only history.
-    Bare,
 }
 
 pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize) -> Result<()> {
@@ -75,9 +94,8 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.write_all(line.as_bytes())?;
         }
         writer.flush()?;
-        if !matches!(finalize, Finalize::Bare) {
-            writer.get_ref().sync_all()?;
-        }
+        let _ = finalize;
+        writer.get_ref().sync_all()?;
     }
     let rename = fs::rename(&temp, path);
     rename.with_context(|| format!("persist {}", path.display()))?;
@@ -94,6 +112,21 @@ pub struct WorkerRecoveryRecord {
     pub busy: bool,
     pub operation: String,
     pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shutdown_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) worker_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) shutdown_verdict: Option<ShutdownVerdict>,
+}
+
+/// A shutdown's durable decision, independent of whether its wire reply lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ShutdownVerdict {
+    BusyContinued,
+    Parked,
+    Idle,
 }
 
 fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRecord>> {
@@ -116,7 +149,7 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
 /// One parked queue row in a worker queue snapshot: a restored queued
 /// heartbeat still delivers as the `heartbeat_prompt` component instead of
 /// a plain user message.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct WorkerQueueItemRecord {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,7 +159,17 @@ pub struct WorkerQueueItemRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_message: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_id: Option<String>,
+    /// Stable session-entry identity assigned before the engine accepts a
+    /// picked input. Queue rows that have not been picked have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) images: Vec<pa_agent::types::ImageContent>,
     #[serde(default = "queue_visible_default")]
     pub queue_visible: bool,
     /// The item's turn-execution class ("queued"/"injected"/"direct"):
@@ -134,6 +177,8 @@ pub struct WorkerQueueItemRecord {
     /// restores as "queued" — the only class a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
+    #[serde(default)]
+    pub(crate) forced_batch: bool,
 }
 
 fn queue_visible_default() -> bool {
@@ -167,6 +212,10 @@ pub struct WorkerQueueSnapshotRecord {
     pub steering: Vec<WorkerQueueItemRecord>,
     pub follow_up: Vec<WorkerQueueItemRecord>,
     pub recorded_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_instance_id: Option<String>,
 }
 
 /// Latest busy/operation per active session, plus the latest queue
@@ -175,6 +224,7 @@ pub struct WorkerRecoveryJournal {
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
     queue_snapshots: HashMap<String, WorkerQueueSnapshotRecord>,
+    latest_resume_pair: Option<(WorkerQueueSnapshotRecord, WorkerRecoveryRecord)>,
 }
 
 impl WorkerRecoveryJournal {
@@ -193,6 +243,7 @@ impl WorkerRecoveryJournal {
             path: path.to_path_buf(),
             latest: parse_worker_records(path)?,
             queue_snapshots,
+            latest_resume_pair: Self::find_latest_resume_pair(path)?,
         })
     }
 
@@ -283,6 +334,9 @@ impl WorkerRecoveryJournal {
             busy,
             operation: operation.to_string(),
             recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: None,
+            worker_instance_id: None,
+            shutdown_verdict: None,
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
         self.latest.insert(active_session_id.to_string(), record);
@@ -318,6 +372,8 @@ impl WorkerRecoveryJournal {
             steering: steering.to_vec(),
             follow_up: follow_up.to_vec(),
             recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: None,
+            worker_instance_id: None,
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
         self.queue_snapshots
@@ -351,6 +407,8 @@ impl WorkerRecoveryJournal {
             steering: steering.to_vec(),
             follow_up: follow_up.to_vec(),
             recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: None,
+            worker_instance_id: None,
         };
         let verdict_unchanged = self.latest.get(active_session_id).is_some_and(|previous| {
             previous.busy == busy
@@ -367,6 +425,9 @@ impl WorkerRecoveryJournal {
                 busy,
                 operation: operation.to_string(),
                 recorded_at: crate::util::now_iso(),
+                shutdown_attempt_id: None,
+                worker_instance_id: None,
+                shutdown_verdict: None,
             })
         };
         let mut batch = Vec::with_capacity(2);
@@ -386,6 +447,208 @@ impl WorkerRecoveryJournal {
             }
         }
         Ok(())
+    }
+
+    /// Publish the complete final queue and the shutdown decision under one
+    /// attempt identity. The supervisor may verify this after losing the ACK.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_shutdown_checkpoint(
+        &mut self,
+        active_session_id: &str,
+        session_id: &str,
+        session_file: Option<&str>,
+        shutdown_attempt_id: &str,
+        worker_instance_id: &str,
+        verdict: ShutdownVerdict,
+        steering: &[WorkerQueueItemRecord],
+        follow_up: &[WorkerQueueItemRecord],
+    ) -> Result<()> {
+        let snapshot = WorkerQueueSnapshotRecord {
+            version: QUEUE_SNAPSHOT_VERSION,
+            r#type: QUEUE_SNAPSHOT_RECORD_TYPE.to_string(),
+            active_session_id: active_session_id.to_string(),
+            steering: steering.to_vec(),
+            follow_up: follow_up.to_vec(),
+            recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: Some(shutdown_attempt_id.to_string()),
+            worker_instance_id: Some(worker_instance_id.to_string()),
+        };
+        let record = WorkerRecoveryRecord {
+            active_session_id: active_session_id.to_string(),
+            session_id: session_id.to_string(),
+            session_file: session_file.map(str::to_string),
+            busy: verdict == ShutdownVerdict::BusyContinued,
+            operation: "shutdown".to_string(),
+            recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: Some(shutdown_attempt_id.to_string()),
+            worker_instance_id: Some(worker_instance_id.to_string()),
+            shutdown_verdict: Some(verdict),
+        };
+        append_records(
+            &self.path,
+            &[serde_json::to_value(&snapshot)?, serde_json::to_value(&record)?],
+        )?;
+        self.queue_snapshots
+            .insert(active_session_id.to_string(), snapshot);
+        self.latest.insert(active_session_id.to_string(), record);
+        self.latest_resume_pair = None;
+        // Do not replace this fsynced attempt pair with the ordinary
+        // compactor's intentionally unsynced rename before the ACK.
+        Ok(())
+    }
+
+    /// Sync and verify a matching paired shutdown checkpoint. An ordinary
+    /// stale busy row is not proof of this stop attempt.
+    pub(crate) fn read_shutdown_checkpoint(
+        path: &Path,
+        shutdown_attempt_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<Option<ShutdownVerdict>> {
+        let Some((snapshot, record)) = Self::read_attempt_pair(path)? else {
+            return Ok(None);
+        };
+        let Some(verdict) = record.shutdown_verdict else {
+            return Ok(None);
+        };
+        Ok((record.operation == "shutdown"
+            && record.shutdown_attempt_id.as_deref() == Some(shutdown_attempt_id)
+            && snapshot.shutdown_attempt_id.as_deref() == Some(shutdown_attempt_id)
+            && record.worker_instance_id.as_deref() == Some(worker_instance_id)
+            && snapshot.worker_instance_id.as_deref() == Some(worker_instance_id)
+            && record.active_session_id == snapshot.active_session_id
+            && record.busy == (verdict == ShutdownVerdict::BusyContinued))
+            .then_some(verdict))
+    }
+
+    /// An explicit resume request supersedes a held shutdown only after its
+    /// queue and release decision have been synced together.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_resume_checkpoint(
+        &mut self,
+        active_session_id: &str,
+        session_id: &str,
+        session_file: Option<&str>,
+        resume_attempt_id: &str,
+        worker_instance_id: &str,
+        steering: &[WorkerQueueItemRecord],
+        follow_up: &[WorkerQueueItemRecord],
+    ) -> Result<()> {
+        let snapshot = WorkerQueueSnapshotRecord {
+            version: QUEUE_SNAPSHOT_VERSION,
+            r#type: QUEUE_SNAPSHOT_RECORD_TYPE.to_string(),
+            active_session_id: active_session_id.to_string(),
+            steering: steering.to_vec(),
+            follow_up: follow_up.to_vec(),
+            recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: Some(resume_attempt_id.to_string()),
+            worker_instance_id: Some(worker_instance_id.to_string()),
+        };
+        let record = WorkerRecoveryRecord {
+            active_session_id: active_session_id.to_string(),
+            session_id: session_id.to_string(),
+            session_file: session_file.map(str::to_string),
+            busy: !steering.is_empty() || !follow_up.is_empty(),
+            operation: "resume_queue".to_string(),
+            recorded_at: crate::util::now_iso(),
+            shutdown_attempt_id: Some(resume_attempt_id.to_string()),
+            worker_instance_id: Some(worker_instance_id.to_string()),
+            shutdown_verdict: None,
+        };
+        append_records(
+            &self.path,
+            &[serde_json::to_value(&snapshot)?, serde_json::to_value(&record)?],
+        )?;
+        self.queue_snapshots
+            .insert(active_session_id.to_string(), snapshot.clone());
+        self.latest.insert(active_session_id.to_string(), record.clone());
+        self.latest_resume_pair = Some((snapshot, record));
+        Ok(())
+    }
+
+    pub(crate) fn read_resume_checkpoint(
+        path: &Path,
+        resume_attempt_id: &str,
+        worker_instance_id: &str,
+    ) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        sync_regular_file(path)?;
+        let Some((snapshot, record)) = Self::find_latest_resume_pair(path)? else {
+            return Ok(false);
+        };
+        Ok(record.operation == "resume_queue"
+            && record.shutdown_attempt_id.as_deref() == Some(resume_attempt_id)
+            && snapshot.shutdown_attempt_id.as_deref() == Some(resume_attempt_id)
+            && record.worker_instance_id.as_deref() == Some(worker_instance_id)
+            && snapshot.worker_instance_id.as_deref() == Some(worker_instance_id)
+            && record.active_session_id == snapshot.active_session_id
+            && record.busy == (!snapshot.steering.is_empty() || !snapshot.follow_up.is_empty()))
+    }
+
+    fn find_latest_resume_pair(
+        path: &Path,
+    ) -> Result<Option<(WorkerQueueSnapshotRecord, WorkerRecoveryRecord)>> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let mut latest = None;
+        let mut preceding = None;
+        for line in text.lines() {
+            let Ok(value) = serde_json::from_str::<Value>(line) else {
+                preceding = None;
+                continue;
+            };
+            if value.get("type").and_then(Value::as_str) == Some(QUEUE_SNAPSHOT_RECORD_TYPE) {
+                preceding = serde_json::from_value::<WorkerQueueSnapshotRecord>(value).ok();
+                continue;
+            }
+            if let (Some(snapshot), Ok(record)) = (
+                preceding.take(),
+                serde_json::from_value::<WorkerRecoveryRecord>(value),
+            ) {
+                if record.operation == "resume_queue"
+                    && record.shutdown_attempt_id == snapshot.shutdown_attempt_id
+                    && record.worker_instance_id == snapshot.worker_instance_id
+                    && record.active_session_id == snapshot.active_session_id
+                {
+                    latest = Some((snapshot, record));
+                }
+            }
+        }
+        Ok(latest)
+    }
+
+    /// Only the final complete pair can prove an attempt. A torn final line
+    /// or a later write invalidates the proof rather than restoring old work.
+    fn read_attempt_pair(path: &Path) -> Result<Option<(WorkerQueueSnapshotRecord, WorkerRecoveryRecord)>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        sync_regular_file(path)?;
+        let text = fs::read_to_string(path)?;
+        if !text.ends_with('\n') {
+            return Ok(None);
+        }
+        let mut lines = text.lines().rev();
+        let Some(record_line) = lines.next() else {
+            return Ok(None);
+        };
+        let Some(snapshot_line) = lines.next() else {
+            return Ok(None);
+        };
+        let Ok(record) = serde_json::from_str::<WorkerRecoveryRecord>(record_line) else {
+            return Ok(None);
+        };
+        let Ok(snapshot) = serde_json::from_str::<WorkerQueueSnapshotRecord>(snapshot_line) else {
+            return Ok(None);
+        };
+        if snapshot.version != QUEUE_SNAPSHOT_VERSION || snapshot.r#type != QUEUE_SNAPSHOT_RECORD_TYPE {
+            return Ok(None);
+        }
+        Ok(Some((snapshot, record)))
     }
 
     /// The latest persisted queue rows for `active_session_id`.
@@ -427,7 +690,20 @@ impl WorkerRecoveryJournal {
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
         records.extend(snapshots);
-        rewrite_records(&self.path, &records, Finalize::Bare)
+        if let Some((snapshot, record)) = &self.latest_resume_pair {
+            // Keep the explicit release proof across ordinary idle compaction,
+            // ahead of the latest state so standard readers still see it.
+            records.insert(0, serde_json::to_value(record)?);
+            records.insert(0, serde_json::to_value(snapshot)?);
+        }
+        // Any idle rewrite can replace a previously acknowledged cancel or
+        // picked-input checkpoint. The replacement must be just as durable.
+        rewrite_records(&self.path, &records, Finalize::Synced)?;
+        #[cfg(unix)]
+        if let Some(parent) = self.path.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
     }
 }
 
@@ -471,6 +747,14 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            shutdown_attempt_id: record
+                .get("shutdown_attempt_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            worker_instance_id: record
+                .get("worker_instance_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         };
         latest.insert(active_session_id.to_string(), entry);
     }
@@ -494,6 +778,7 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         queue_key: None,
                         queue_visible: true,
                         policy: queue_policy_default(),
+                        ..Default::default()
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
                     _ => None,
@@ -565,6 +850,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            ..Default::default()
         };
         sequential
             .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
@@ -698,6 +984,7 @@ mod tests {
             queue_key: None,
             queue_visible: true,
             policy: queue_policy_default(),
+            ..Default::default()
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal

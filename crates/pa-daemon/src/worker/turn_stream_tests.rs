@@ -49,6 +49,8 @@ fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
         scoped_models: Vec::new(),
         retry_abort_requested: false,
         queued_input_suspended: false,
+        recovery_hold: false,
+        in_flight_input: Vec::new(),
         pending_next_turn: Vec::new(),
         active_action: None,
         running_tool_calls: std::collections::HashSet::new(),

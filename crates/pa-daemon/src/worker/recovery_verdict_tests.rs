@@ -1,5 +1,6 @@
 //! Worker tests.
 use super::*;
+use super::queue::{checkpoint_picked_input, queue_item_record};
 use crate::engine::{
     CompactionOutcome, CompactionRequest, PromptRequest, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest,
@@ -10,6 +11,7 @@ use crate::engine::{
 struct BeforeUserRowEngine {
     entered: Arc<Notify>,
     release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    emit_first_before_gate: bool,
 }
 
 impl SessionEngine for BeforeUserRowEngine {
@@ -20,6 +22,11 @@ impl SessionEngine for BeforeUserRowEngine {
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
+        if self.emit_first_before_gate {
+            assert!(emit(EngineEvent::UserMessage(json!({
+                "role": "user", "content": request.message, "timestamp": 1,
+            }))));
+        }
         self.entered.notify_one();
         // Dropping the sender on a failed assertion releases this blocking
         // thread too, so a red test cannot hang the Tokio runtime teardown.
@@ -29,10 +36,12 @@ impl SessionEngine for BeforeUserRowEngine {
         }
         if aborted() {
             emit(EngineEvent::DoneAborted);
-        } else {
+        } else if !self.emit_first_before_gate {
             emit(EngineEvent::UserMessage(json!({
                 "role": "user", "content": request.message, "timestamp": 1,
             })));
+            emit(EngineEvent::Done(Ok(())));
+        } else {
             emit(EngineEvent::Done(Ok(())));
         }
     }
@@ -118,6 +127,30 @@ fn latest_record(worker: &Worker) -> crate::journal::WorkerRecoveryRecord {
         .into_iter()
         .find(|record| record.active_session_id == "target-session")
         .expect("session record")
+}
+
+fn gated_runner(worker: &Arc<Worker>, engine: Arc<dyn SessionEngine>) -> TurnRunner {
+    TurnRunner {
+        core: Arc::clone(&worker.core),
+        input_pauses: worker.input_pauses.clone(),
+        prompt_admissions: worker.prompt_admissions.clone(),
+        work_notify: Arc::new(Notify::new()),
+        idle_notify: Arc::clone(&worker.idle_notify),
+        events: Arc::clone(&worker.events),
+        engine,
+        recovery: Arc::clone(&worker.recovery),
+        active_session_id: worker.config.active_session_id.clone(),
+        roster_pushes: worker.roster_pushes.clone(),
+        user_bash: Arc::clone(&worker.user_bash),
+        passivation: crate::worker::turn::PassivationContext {
+            agent_dir: worker.config.agent_dir.clone(),
+            link: Arc::new(crate::supervisor_link::SupervisorLink::new(
+                worker.config.supervisor_socket_path.clone(),
+            )),
+            worker_token: String::new(),
+        },
+        herdr: Arc::clone(&worker.herdr),
+    }
 }
 
 /// The admission (not the pickup) proves the work, so a plain boot revives the worker.
@@ -408,7 +441,10 @@ async fn shutdown_ack_has_already_settled_a_user_aborted_parked_queue() {
     assert!(reply.success, "shutdown failed: {reply:?}");
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "shutdown");
-    assert!(!latest.busy, "parked input cannot auto-replay after the ack");
+    assert!(
+        !latest.busy,
+        "parked input cannot auto-replay after the ack"
+    );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 
@@ -491,37 +527,21 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     let engine = Arc::new(BeforeUserRowEngine {
         entered: Arc::new(Notify::new()),
         release: std::sync::Mutex::new(release_rx),
+        emit_first_before_gate: false,
     });
     let entered_notify = Arc::clone(&engine.entered);
     let entered = entered_notify.notified();
-    let runner = TurnRunner {
-        core: Arc::clone(&worker.core),
-        input_pauses: worker.input_pauses.clone(),
-        prompt_admissions: worker.prompt_admissions.clone(),
-        work_notify: Arc::new(Notify::new()),
-        idle_notify: Arc::clone(&worker.idle_notify),
-        events: Arc::clone(&worker.events),
-        engine,
-        recovery: Arc::clone(&worker.recovery),
-        active_session_id: worker.config.active_session_id.clone(),
-        roster_pushes: worker.roster_pushes.clone(),
-        user_bash: Arc::clone(&worker.user_bash),
-        passivation: crate::worker::turn::PassivationContext {
-            agent_dir: worker.config.agent_dir.clone(),
-            link: Arc::new(crate::supervisor_link::SupervisorLink::new(
-                worker.config.supervisor_socket_path.clone(),
-            )),
-            worker_token: String::new(),
-        },
-        herdr: Arc::clone(&worker.herdr),
-    };
+    let runner = gated_runner(&worker, engine);
     let running = tokio::spawn(async move { runner.run().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), entered)
         .await
         .expect("turn never reached the pre-row gate");
     {
         let core = worker.core.lock().unwrap();
-        assert!(core.busy && core.steering.is_empty(), "runner picked the batch");
+        assert!(
+            core.busy && core.steering.is_empty(),
+            "runner picked the batch"
+        );
         assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
     }
 
@@ -557,10 +577,17 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
     )
     .unwrap()
     .expect("shutdown queue snapshot");
+    assert_eq!(steering.len(), 2, "untouched originals need no generic continuation");
     assert_eq!(steering[0].message, "original with image");
     assert_eq!(steering[1].message, "batched second");
-    assert_eq!(steering[0].preview.as_deref(), Some("preview original with image"));
-    assert_eq!(steering[0].queue_key.as_deref(), Some("key:original with image"));
+    assert_eq!(
+        steering[0].preview.as_deref(),
+        Some("preview original with image")
+    );
+    assert_eq!(
+        steering[0].queue_key.as_deref(),
+        Some("key:original with image")
+    );
     assert_eq!(
         serde_json::to_value(&steering[0]).unwrap()["admissionId"],
         "admit:original with image",
@@ -571,6 +598,550 @@ async fn shutdown_before_first_user_row_preserves_the_picked_prompt() {
         "QUJD",
         "the picked image remains recoverable"
     );
+    let reopened = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
+    let (restored, _) = restore_queue_snapshot_reconciled(
+        &reopened,
+        "target-session",
+        &fixture_dir.join("session.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(restored.len(), 2);
+    assert_eq!(restored[0].message, "original with image");
+    assert_eq!(restored[0].images[0].data, "QUJD");
+    assert_eq!(restored[0].admission_id.as_deref(), Some("admit:original with image"));
     running.abort();
     let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+/// A prefix custom row does not own the picked input. If only the first
+/// accepted batch row lands, shutdown replays only the still uncommitted row.
+#[tokio::test]
+async fn shutdown_reconciles_partial_batch_after_prefix_row() {
+    let worker = worker_with_journal();
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if worker.core.lock().unwrap().last_activity_ms != 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("ordinary runner never parked");
+    let mut store = SessionFile::create("/tmp", None, 0);
+    store.set_path(fixture_dir.join("partial-session.jsonl"));
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.created = true;
+        core.store = Some(store);
+        core.pending_next_turn.push(json!({
+            "role": "custom", "customType": "restored_context",
+            "content": "prefix", "display": true,
+        }));
+        for (message, images) in [
+            ("first accepted", Vec::new()),
+            (
+                "second with image",
+                vec![pa_agent::types::ImageContent {
+                    data: "QUJD".to_string(),
+                    mime_type: "image/png".to_string(),
+                }],
+            ),
+        ] {
+            core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
+                preview: Some(format!("preview {message}")),
+                message: message.to_string(),
+                custom_message: None,
+                agent_message: Some(format!("agent:{message}")),
+                queue_key: Some(format!("key:{message}")),
+                admission_id: Some(format!("admit:{message}")),
+                images,
+                done: None,
+                queue_visible: true,
+                policy: TurnPolicy::Queued,
+                forced_batch: true,
+            });
+        }
+        core.forced_all_steering = true;
+    }
+    worker.checkpoint_queue(QueueCheckpoint::Admitted {
+        operation: "prompt_accepted",
+    });
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let engine = Arc::new(BeforeUserRowEngine {
+        entered: Arc::new(Notify::new()),
+        release: std::sync::Mutex::new(release_rx),
+        emit_first_before_gate: true,
+    });
+    let entered = engine.entered.notified();
+    let runner = gated_runner(&worker, engine);
+    let running = tokio::spawn(async move { runner.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .expect("first batch row never committed");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(core.busy && core.steering.is_empty());
+        assert_eq!(core.store.as_ref().unwrap().message_count(), 1);
+        assert!(core.in_flight_input[0].committed);
+        assert!(!core.in_flight_input[1].attempted);
+    }
+    let stopping = Arc::clone(&worker);
+    let shutdown = tokio::spawn(async move {
+        stopping
+            .handle_shutdown(&json!({
+                "daemonShutdown": true, "shutdownAttemptId": "partial-batch-attempt",
+            }))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let core = worker.core.lock().unwrap();
+            if core.shutdown_requested && core.abort_requested {
+                break;
+            }
+            drop(core);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("shutdown never armed its abort gate");
+    release_tx.send(()).expect("release held engine");
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown never settled")
+        .expect("shutdown task panicked");
+    assert!(reply.success, "shutdown failed: {reply:?}");
+    assert_eq!(
+        WorkerRecoveryJournal::read_shutdown_checkpoint(
+            &worker.config.recovery_journal_path,
+            "partial-batch-attempt",
+            &worker.config.worker_instance_id,
+        )
+        .unwrap(),
+        Some(crate::journal::ShutdownVerdict::BusyContinued)
+    );
+    let (steering, _) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("shutdown queue snapshot");
+    assert_eq!(steering.len(), 1, "only the unaccepted batch row remains");
+    assert_eq!(steering[0].message, "second with image");
+    assert!(steering.iter().all(|item| item.message != "first accepted"));
+    assert_eq!(steering[0].images[0].data, "QUJD");
+    assert_eq!(steering[0].agent_message.as_deref(), Some("agent:second with image"));
+    assert_eq!(steering[0].admission_id.as_deref(), Some("admit:second with image"));
+    assert!(steering[0].forced_batch);
+    running.abort();
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn cancel_owned_picked_input_withdraws_its_durable_snapshot() {
+    let worker = created_worker_with_journal().await;
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: Some("owned preview".to_string()),
+        message: "owned original".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: Some("owned-a".to_string()),
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.running_admission_ids.insert("owned-a".to_string());
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "picked-owned-a".to_string(),
+            item: queue_item_record(&item),
+            attempted: false,
+            committed: false,
+            cancelled: false,
+        });
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let reply = worker.handle_cancel_prompt_admission(&json!({
+        "admissionId": "owned-a", "cancelOwned": true,
+    }));
+    assert!(reply.success, "cancel failed: {reply:?}");
+    assert_eq!(reply.data, Some(json!({ "status": "owned" })));
+    let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+        &worker.config.recovery_journal_path,
+        "target-session",
+    )
+    .unwrap()
+    .expect("cancel checkpoint");
+    assert!(steering.is_empty() && follow_up.is_empty());
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "cancelled last picked row cannot promise crash continuation",
+    );
+    assert!(worker.core.lock().unwrap().in_flight_input[0].cancelled);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn failed_cancel_checkpoint_refuses_ack_and_holds_live_input() {
+    let worker = created_worker_with_journal().await;
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "picked original".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: Some("owned-b".to_string()),
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.running_admission_ids.insert("owned-b".to_string());
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "picked-owned-b".to_string(),
+            item: queue_item_record(&item),
+            attempted: false,
+            committed: false,
+            cancelled: false,
+        });
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let blocked = fixture_dir.join("blocked-cancel-journal");
+    std::fs::write(&blocked, b"").unwrap();
+    let blocked_journal = WorkerRecoveryJournal::open(&blocked).unwrap();
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    *worker.recovery.lock().unwrap() = Some(blocked_journal);
+    let reply = worker.handle_cancel_prompt_admission(&json!({
+        "admissionId": "owned-b", "cancelOwned": true,
+    }));
+    assert!(!reply.success, "uncertain cancellation must not ack");
+    let core = worker.core.lock().unwrap();
+    assert!(core.recovery_hold && core.abort_requested);
+    assert!(core.in_flight_input[0].cancelled);
+    drop(core);
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn failed_pickup_checkpoint_parks_original_before_engine_entry() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let blocked = fixture_dir.join("blocked-pickup-journal");
+    std::fs::write(&blocked, b"").unwrap();
+    let blocked_journal = WorkerRecoveryJournal::open(&blocked).unwrap();
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    *worker.recovery.lock().unwrap() = Some(blocked_journal);
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.steering.push_back(QueuedItem {
+            priority: QueuePriority::Human,
+            preview: None,
+            message: "original before engine".to_string(),
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy: TurnPolicy::Queued,
+            forced_batch: false,
+        });
+    }
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let engine = Arc::new(BeforeUserRowEngine {
+        entered: Arc::new(Notify::new()),
+        release: std::sync::Mutex::new(release_rx),
+        emit_first_before_gate: false,
+    });
+    let runner = gated_runner(&worker, engine);
+    let running = tokio::spawn(async move { runner.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if worker.core.lock().unwrap().queued_input_suspended {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed pickup never parked");
+    let core = worker.core.lock().unwrap();
+    assert_eq!(core.steering.front().unwrap().message, "original before engine");
+    assert!(core.in_flight_input.is_empty());
+    assert_eq!(core.store.as_ref().unwrap().message_count(), 0);
+    drop(core);
+    drop(release_tx);
+    running.abort();
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn held_live_input_reconciles_stable_id_before_explicit_resume() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let session_path = fixture_dir.join("accepted.jsonl");
+    std::fs::write(&session_path, b"").unwrap();
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "retry only if unaccepted".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.store.as_mut().unwrap().set_path(session_path.clone());
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "stable-picked-row".to_string(),
+            item: queue_item_record(&item),
+            attempted: true,
+            committed: false,
+            cancelled: false,
+        });
+        core.recovery_hold = true;
+        core.queued_input_suspended = true;
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    std::fs::write(&session_path, b"{torn\n").unwrap();
+    let uncertain = worker.handle_resume_queue(&json!({
+        "resumeQueueAttemptId": "invalid-session-attempt",
+    }));
+    assert!(!uncertain.success, "torn session row cannot justify replay");
+    assert!(worker.core.lock().unwrap().recovery_hold);
+    std::fs::write(&session_path, b"").unwrap();
+    let resumed = worker.handle_resume_queue(&json!({
+        "resumeQueueAttemptId": "live-resume-attempt",
+    }));
+    assert!(resumed.success, "explicit resume failed: {resumed:?}");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(!core.recovery_hold && !core.queued_input_suspended);
+        assert!(core.in_flight_input.is_empty());
+        assert_eq!(core.steering.front().unwrap().message, "retry only if unaccepted");
+    }
+    assert!(WorkerRecoveryJournal::read_resume_checkpoint(
+        &worker.config.recovery_journal_path,
+        "live-resume-attempt",
+        &worker.config.worker_instance_id,
+    )
+    .unwrap());
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn ordinary_busy_resume_does_not_requeue_its_active_input() {
+    let worker = created_worker_with_journal().await;
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "still running".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "ordinary-running-id".to_string(),
+            item: queue_item_record(&item),
+            attempted: false,
+            committed: false,
+            cancelled: false,
+        });
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let _ = worker.handle_resume_queue(&json!({
+        "resumeQueueAttemptId": "ordinary-resume-attempt",
+    }));
+    let core = worker.core.lock().unwrap();
+    assert!(core.busy);
+    assert_eq!(core.in_flight_input.len(), 1);
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn sync_uncertain_accepted_id_is_not_replayed_on_explicit_resume() {
+    let worker = created_worker_with_journal().await;
+    let fixture_dir = worker.config.socket_path.parent().unwrap();
+    let session_path = fixture_dir.join("uncertain-session.jsonl");
+    std::fs::write(
+        &session_path,
+        b"{\"id\":\"accepted-stable-id\",\"type\":\"message\"}\n",
+    )
+    .unwrap();
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "accepted already".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.store.as_mut().unwrap().set_path(session_path);
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "accepted-stable-id".to_string(),
+            item: queue_item_record(&item),
+            attempted: true,
+            committed: false,
+            cancelled: false,
+        });
+        core.recovery_hold = true;
+        core.queued_input_suspended = true;
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let reply = worker.handle_resume_queue(&json!({
+        "resumeQueueAttemptId": "accepted-id-resume",
+    }));
+    assert!(!reply.success, "there is no unaccepted work left");
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(!core.recovery_hold && !core.queued_input_suspended);
+        assert!(core.in_flight_input.is_empty());
+        assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    }
+    assert!(WorkerRecoveryJournal::read_resume_checkpoint(
+        &worker.config.recovery_journal_path,
+        "accepted-id-resume",
+        &worker.config.worker_instance_id,
+    )
+    .unwrap());
+    let _ = std::fs::remove_dir_all(fixture_dir);
+}
+
+#[tokio::test]
+async fn abort_ack_durably_withdraws_last_picked_original() {
+    let worker = created_worker_with_journal().await;
+    let item = QueuedItem {
+        priority: QueuePriority::Human,
+        preview: None,
+        message: "abort this original".to_string(),
+        custom_message: None,
+        agent_message: None,
+        queue_key: None,
+        admission_id: None,
+        images: Vec::new(),
+        done: None,
+        queue_visible: true,
+        policy: TurnPolicy::Queued,
+        forced_batch: false,
+    };
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = true;
+        core.in_flight_input.push(super::session_core::InFlightInput {
+            lane: Lane::Steering,
+            row_id: "abort-picked-id".to_string(),
+            item: queue_item_record(&item),
+            attempted: false,
+            committed: false,
+            cancelled: false,
+        });
+    }
+    checkpoint_picked_input(&worker.recovery, &worker.core).unwrap();
+    let reply = worker.dispatch("abort", &json!({})).await;
+    assert!(reply.success, "abort failed: {reply:?}");
+    assert!(worker.core.lock().unwrap().in_flight_input[0].cancelled);
+    assert!(
+        !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+        "acknowledged abort cannot leave a busy replay verdict",
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn closed_mutation_gate_rejects_injected_continuation() {
+    let worker = created_worker_with_journal().await;
+    worker.core.lock().unwrap().shutdown_requested = true;
+    admit_autonomous_follow_up(
+        &worker.recovery,
+        &worker.core,
+        &Arc::new(Notify::new()),
+        "too late to continue".to_string(),
+    );
+    let core = worker.core.lock().unwrap();
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    drop(core);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn prompt_past_precheck_cannot_enqueue_after_shutdown_gate() {
+    let worker = created_worker_with_journal().await;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    *worker.prompt_enqueue_gate.lock().unwrap() = Some(PromptEnqueueGate {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let prompt_worker = Arc::clone(&worker);
+    let prompt = tokio::spawn(async move {
+        prompt_worker
+            .handle_prompt(
+                &json!({ "message": "late prompt", "admissionId": "late-admission" }),
+                false,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("prompt never passed its precheck");
+    worker.core.lock().unwrap().shutdown_requested = true;
+    release.notify_one();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), prompt)
+        .await
+        .expect("prompt did not leave gate")
+        .expect("prompt task panicked");
+    assert!(!reply.success, "late prompt cannot be acknowledged");
+    let core = worker.core.lock().unwrap();
+    assert!(core.steering.is_empty() && core.follow_up.is_empty());
+    drop(core);
+    assert_eq!(worker.prompt_admissions.cancel("late-admission"), None);
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
