@@ -215,7 +215,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - run: python3 -m unittest discover -s .github/scripts/discussion-notifier -p 'test_*.py'
+      - run: python3 .github/scripts/discussion-notifier/test_notify.py
 
   migration-packaging:
     name: historical upgrade packaging
