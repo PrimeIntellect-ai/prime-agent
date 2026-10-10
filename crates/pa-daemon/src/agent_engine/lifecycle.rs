@@ -879,15 +879,11 @@ impl AgentSessionEngine {
                 match self.reload_lock.try_lock() {
                     Ok(guard) => break guard,
                     Err(std::sync::TryLockError::WouldBlock) => {}
-                    // A poisoned lock is unlocked: the blocking acquire
-                    // below returns instantly (the panicking holder is
-                    // gone), so it never stalls this worker.
-                    Err(std::sync::TryLockError::Poisoned(_)) => {
-                        break self
-                            .reload_lock
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    }
+                    // The poisoned error CARRIES the acquired guard (the
+                    // panicking holder is gone, the lock is free): recover
+                    // it — a fresh .lock() here would wait on the guard
+                    // this match's scrutinee still holds.
+                    Err(std::sync::TryLockError::Poisoned(poison)) => break poison.into_inner(),
                 }
                 tokio::task::yield_now().await;
             };
