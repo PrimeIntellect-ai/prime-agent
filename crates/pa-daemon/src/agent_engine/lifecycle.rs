@@ -159,6 +159,7 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             image_route: std::sync::Mutex::new(None),
+            reload_lock: std::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -866,6 +867,30 @@ impl AgentSessionEngine {
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
+            // The build's resolve-and-install serializes with `/reload`'s
+            // live-input refresh (the other slot writers' fence): a reload
+            // landing between this resolution and the slot write must not
+            // be clobbered by the build's older pair. The lock is
+            // acquired by yielding, never by blocking this worker: a
+            // reload holds the lock across auth-file I/O and a possible
+            // OAuth refresh, so a blocking acquire on an async path
+            // would stall the executor for that span.
+            let _reload_serialized = loop {
+                match self.reload_lock.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                    // The poisoned error CARRIES the acquired guard (the
+                    // panicking holder is gone, the lock is free): recover
+                    // it — a fresh .lock() here would wait on the guard
+                    // this match's scrutinee still holds.
+                    Err(std::sync::TryLockError::Poisoned(poison)) => break poison.into_inner(),
+                }
+                // Park, never hot-spin: a reload holds the lock across
+                // auth-file I/O and a possible OAuth refresh, and
+                // yield_now would leave this task immediately runnable
+                // through all of it.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            };
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {

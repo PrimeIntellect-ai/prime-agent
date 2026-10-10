@@ -290,13 +290,24 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch (the same slot
                         // `set_model` swaps).
                         {
+                            // The switch's resolve-and-install serializes
+                            // with `/reload`'s live-input refresh — the
+                            // restore path in the sibling callback takes
+                            // the same lock: a reload landing between
+                            // this resolution and its slot write must not
+                            // be clobbered by the switch's older pair. The
+                            // turn runs on the blocking pool, so the
+                            // synchronous resolution never touches an
+                            // async executor worker.
+                            let _reload_serialized = self
+                                .reload_lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             // A routed episode keeps serving the route's
-                            // target across the failover switch.
-                            if let Some(route) = self.armed_image_route() {
-                                let mut target =
-                                    self.provider_target.write().expect("provider target lock");
-                                *target = Some(route.target);
-                            } else {
+                            // target across the failover switch — through
+                            // the fenced install (the route lock covers
+                            // the clone and the slot write together).
+                            if !self.install_armed_route_target() {
                                 let (api_key, headers) =
                                     self.resolve_request_key_and_headers(&next);
                                 let mut target =
@@ -338,20 +349,40 @@ impl AgentSessionEngine {
                         let agent_model = json_round_trip(&primary_model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         {
-                            let mut target =
-                                self.provider_target.write().expect("provider target lock");
-                            if let Some(route) = self.armed_image_route() {
-                                *target = Some(route.target);
-                            } else {
-                                *target = Some(ProviderTarget {
-                                    service_tier: *self
-                                        .service_tier
-                                        .read()
-                                        .expect("service tier lock"),
-                                    api_key: primary_api_key,
-                                    model: primary_model.clone(),
-                                    headers: primary_headers,
-                                });
+                            // The restore serializes with `/reload`'s
+                            // live-input refresh: without this fence a
+                            // reload landing between the restore's
+                            // resolution and its slot write is clobbered
+                            // by the restore's older pair — the lock
+                            // makes whichever runs last leave the newest
+                            // store standing. The whole turn (this
+                            // closure included) runs on the blocking
+                            // pool — the worker parks the turn there
+                            // (`worker/turn.rs`) — so the synchronous
+                            // credential resolution below, OAuth refresh
+                            // and all, never touches an async executor
+                            // worker; only a concurrently reloading
+                            // session waits on this span.
+                            let _reload_serialized = self
+                                .reload_lock
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            // The armed-route install goes through the
+                            // fenced helper (no provider-slot lock held
+                            // across the route read).
+                            if !self.install_armed_route_target() {
+                                // The primary's request auth re-resolves at
+                                // restore: a credential rotated (and
+                                // reloaded) during the failover serves from
+                                // the store, never the pre-failover
+                                // capture.
+                                let target = self.restored_primary_target(
+                                    &primary_model,
+                                    primary_api_key,
+                                    primary_headers,
+                                );
+                                *self.provider_target.write().expect("provider target lock") =
+                                    Some(target);
                             }
                         }
                         agent.set_model(agent_model).await;

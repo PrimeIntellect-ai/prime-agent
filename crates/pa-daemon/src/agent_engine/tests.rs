@@ -13,6 +13,7 @@ mod compaction;
 mod goal;
 mod model_resolution;
 mod quota_park;
+mod reload;
 mod rlm_children;
 mod saved_context;
 mod session;

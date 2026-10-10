@@ -44,8 +44,10 @@ impl Worker {
                 // The auth store re-read comes FIRST: the interactive client
                 // stores the api-key credentials through its own storage
                 // instance (the `/mcp` key flow runs client-side), so the
-                // view's reads must reload the store to see them.
-                manager.reload_auth_storage();
+                // view's reads must reload the store to see them. A failed
+                // reload serves the roster's last-good credentials — the
+                // view reports what the manager has, not the reload's error.
+                let _auth_reload = manager.reload_auth_storage();
                 manager.refresh();
                 (
                     manager.connection_roster(),

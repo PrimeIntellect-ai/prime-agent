@@ -357,11 +357,24 @@ impl McpManager {
     /// runtime): a credential another process wrote — the interactive
     /// client's `/mcp` key flow stores through its own storage instance —
     /// becomes visible to the next view read, like the settings re-read
-    /// above.
-    pub fn reload_auth_storage(&mut self) {
+    /// above. The reload's failure surfaces to the caller: a malformed
+    /// document or a lock that could not be acquired leaves the manager
+    /// serving its previous credentials, and a successful reload must
+    /// not be reported over that.
+    ///
+    /// # Errors
+    ///
+    /// Returns the storage reload's error when the document cannot be
+    /// read or parsed (a malformed `auth.json`, an unacquirable lock):
+    /// the manager keeps its previous credentials in that case.
+    pub fn reload_auth_storage(&mut self) -> Result<(), String> {
         let storage = self.auth_storage.clone();
         let mut handle = storage.blocking_lock();
         handle.reload();
+        match handle.load_error() {
+            Some(error) => Err(error.to_string()),
+            None => Ok(()),
+        }
     }
 
     /// The resolved integrations (login resolution and status displays).

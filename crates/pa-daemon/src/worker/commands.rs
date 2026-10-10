@@ -161,7 +161,7 @@ impl Worker {
             "restore_next_turn" => self.handle_restore_next_turn(payload),
             "restore_actions" => self.handle_restore_actions(payload),
             "refine" => self.handle_refine(payload).await,
-            "reload" => self.handle_reload(),
+            "reload" => self.handle_reload().await,
             "cancel_rlm_child" => self.handle_cancel_rlm_child(payload).await,
             "delete_rlm_subagent" => self.handle_delete_rlm_subagent(payload).await,
             // The engine call blocks on the engine runtime, so it

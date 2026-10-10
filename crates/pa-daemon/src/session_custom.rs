@@ -305,12 +305,44 @@ impl Worker {
         response_success(None, "refine", Some(result))
     }
 
-    /// `reload`: re-read the session's live inputs — settings, provider auth,
-    /// the MCP user-server config. This port resolves each per use, so the
-    /// command answers the TS success.
-    pub(crate) fn handle_reload(&self) -> DaemonResponse {
+    /// `reload`: re-read the session's live inputs — the request auth
+    /// rebinds from the credential store (a `/login` from another process
+    /// never reaches the running session's request path otherwise), and
+    /// the MCP manager re-reads its settings and auth state. Settings and
+    /// the model catalog resolve per use and need no re-read. The reload
+    /// touches the MCP auth store, whose snapshot takes a blocking lock —
+    /// it parks on a blocking thread, the same posture as
+    /// `get_mcp_connections`.
+    pub(crate) async fn handle_reload(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("reload") {
             return response;
+        }
+        if let Some(engine) = &self.agent_engine {
+            let engine = std::sync::Arc::clone(engine);
+            // The blocking thread's reload can fail two ways: the auth
+            // store's reload (a malformed document, an unacquirable lock)
+            // or the join itself (a panic). Both answer the client's
+            // reload with the failure, never a success the session did
+            // not apply.
+            match tokio::task::spawn_blocking(move || engine.reload_live_inputs()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return response_failure(
+                        None,
+                        "reload",
+                        &format!("session reload failed: {error}"),
+                        None,
+                    );
+                }
+                Err(error) => {
+                    return response_failure(
+                        None,
+                        "reload",
+                        &format!("session reload failed: {error}"),
+                        None,
+                    );
+                }
+            }
         }
         response_success(None, "reload", None)
     }
@@ -965,6 +997,48 @@ mod tests {
     #[tokio::test]
     async fn reload_answers_success() {
         let worker = created_worker().await;
+        let response = worker
+            .dispatch("reload", &json!({ "activeSessionId": "custom-session" }))
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        assert!(response.data.is_none());
+    }
+
+    /// The reload parks the engine's blocking work off the async executor:
+    /// with a REAL agent engine behind the worker (the faux-script engine)
+    /// the reload reaches the MCP auth store's blocking lock, which panics
+    /// when taken on the runtime — this fails if the blocking work moves
+    /// back onto the executor.
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn reload_parks_the_engine_reload_off_the_runtime() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A TempDir keeps the worker's files from piling up in /tmp.
+        let dir = tempfile::TempDir::new().unwrap();
+        let dir_path = dir.path().to_path_buf();
+        let config = crate::worker::WorkerConfig {
+            socket_path: dir_path.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "custom-session".to_string(),
+            agent_dir: dir_path.join("agent"),
+            recovery_journal_path: dir_path.join("recovery.jsonl"),
+            decision_child: false,
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
+        };
+        let worker = Arc::new(crate::worker::Worker::new(config, None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": "/tmp" }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        assert!(
+            worker.agent_engine.is_some(),
+            "the faux script must build a real agent engine"
+        );
         let response = worker
             .dispatch("reload", &json!({ "activeSessionId": "custom-session" }))
             .await;
