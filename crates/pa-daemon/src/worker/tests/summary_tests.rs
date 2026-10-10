@@ -287,6 +287,7 @@ async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
             "engine": "faux",
             "responses": ["first reply", "second reply"],
         })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
