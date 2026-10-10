@@ -436,14 +436,24 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
             .map(|_| ())
     });
 
-    // An unknown delete target is the TS selector miss.
-    let gone = children
+    // Retirement is idempotent (the M5 class): a re-delete of the deleted
+    // child's name answers from the tombstone with the row's status at its
+    // delete instead of the selector miss, so a repeated retire never
+    // reports the name slot as still held.
+    let redeleted = children
         .delete_subagent("worker-a".to_string())
         .await
-        .expect_err("deleted child no longer resolves");
+        .expect("the re-delete of a retired child is idempotent");
+    assert_eq!(redeleted.outcome, Some("deleted"));
+    assert_eq!(redeleted.subagent.rlm_child_id, handle.rlm_child_id);
+    // An unknown delete target keeps the TS selector miss.
+    let gone = children
+        .delete_subagent("ghost-worker".to_string())
+        .await
+        .expect_err("an unknown selector still errors");
     assert_eq!(
         gone.to_string(),
-        "No direct RLM subagent matches \"worker-a\" in the current parent session"
+        "No direct RLM subagent matches \"ghost-worker\" in the current parent session"
     );
 
     // TS #2388 F4: a just-deleted target resolves immediately to the settled cancelled
