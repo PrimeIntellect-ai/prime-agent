@@ -101,6 +101,51 @@ pub(crate) fn begin_spawn(
     Ok(())
 }
 
+/// Recover the planned launch from its authenticated registration before dialing
+/// its socket. Stop authority still requires the independent worker-auth reply.
+pub(crate) fn recover_registered_process(
+    path: &std::path::Path,
+    descriptor: &mut DaemonWorkerDescriptor,
+    pid: u64,
+    instance: Option<&str>,
+    socket: &str,
+    start_id: Option<String>,
+) -> Result<()> {
+    if descriptor.worker_instance_id.as_deref().is_some()
+        && descriptor.worker_instance_id.as_deref() != instance
+    {
+        return Err(anyhow!(
+            "Worker registration does not match the planned incarnation"
+        ));
+    }
+    let mut candidate = descriptor.clone();
+    reset(&mut candidate);
+    candidate.pid = pid;
+    candidate.worker_instance_id = instance.map(str::to_string);
+    candidate.socket_path = socket.to_string();
+    candidate.process_start_id = start_id;
+    crate::descriptor::persist_worker(path, &candidate)?;
+    *descriptor = candidate;
+    Ok(())
+}
+
+/// Persist the parent PID binding before publishing it. A failed write must not
+/// make the in-memory launch look durable or erase an early registrant's token.
+pub(crate) fn bind_spawned_process_durable(
+    path: &std::path::Path,
+    descriptor: &mut DaemonWorkerDescriptor,
+    instance: &str,
+    pid: u32,
+    start_id: Option<String>,
+    sync: crate::descriptor::TempSync,
+) -> Result<()> {
+    let mut candidate = descriptor.clone();
+    bind_spawned_process(&mut candidate, instance, pid, start_id)?;
+    crate::descriptor::persist_worker_at(path, &candidate, sync)?;
+    *descriptor = candidate;
+    Ok(())
+}
+
 /// A registrant may already have published this launch's native token. Preserve
 /// it while assigning the child PID, and reject a superseding incarnation.
 pub(crate) fn bind_spawned_process(
@@ -213,6 +258,109 @@ mod tests {
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(recorded(&persisted).is_none());
     }
+    #[test]
+    fn registration_recovery_and_parent_binding_are_durable_and_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let path = blocked.join("worker.json");
+        let mut descriptor = fixture_descriptor();
+        descriptor.process_start_id = Some("predecessor".to_string());
+        let original = parse(Some(&report_value()), 42, Some("original")).unwrap();
+        store(&mut descriptor, original.as_ref()).unwrap();
+        let before = descriptor.clone();
+        assert!(recover_registered_process(
+            &path,
+            &mut descriptor,
+            43,
+            Some("original"),
+            "/tmp/live.sock",
+            None
+        )
+        .is_err());
+        assert_eq!(descriptor, before, "failed recovery publishes nothing");
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(recover_registered_process(
+            &path,
+            &mut descriptor,
+            43,
+            Some("other"),
+            "/tmp/live.sock",
+            None
+        )
+        .is_err());
+        assert_eq!(
+            descriptor, before,
+            "another incarnation cannot take the planned launch"
+        );
+        recover_registered_process(
+            &path,
+            &mut descriptor,
+            43,
+            Some("original"),
+            "/tmp/live.sock",
+            None,
+        )
+        .unwrap();
+        let disk: DaemonWorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk.pid, 43);
+        assert_eq!(disk.socket_path, "/tmp/live.sock");
+        assert!(
+            disk.process_start_id.is_none(),
+            "never retain predecessor liveness"
+        );
+        assert!(
+            recorded(&disk).is_none(),
+            "registration alone grants no native authority"
+        );
+        // Legacy reports without native capability still require the PID write.
+        recover_registered_process(
+            &path,
+            &mut descriptor,
+            44,
+            Some("original"),
+            "/tmp/live.sock",
+            None,
+        )
+        .unwrap();
+        let disk: DaemonWorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk.pid, 44);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&blocked).unwrap();
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let before = descriptor.clone();
+        assert!(bind_spawned_process_durable(
+            &path,
+            &mut descriptor,
+            "original",
+            45,
+            None,
+            crate::descriptor::TempSync::Synced
+        )
+        .is_err());
+        assert_eq!(
+            descriptor, before,
+            "failed parent binding publishes nothing"
+        );
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        bind_spawned_process_durable(
+            &path,
+            &mut descriptor,
+            "original",
+            45,
+            None,
+            crate::descriptor::TempSync::Synced,
+        )
+        .unwrap();
+        let disk: DaemonWorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(disk.pid, 45);
+    }
+
     #[test]
     fn launch_incarnation_is_persisted_before_auth_and_keeps_early_registration() {
         let dir = tempfile::tempdir().unwrap();

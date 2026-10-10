@@ -577,10 +577,20 @@ impl Supervisor {
         };
         let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
-        crate::descriptor::validate_descriptor(&descriptor, &self.options.socket_path)?;
         if token != descriptor.authentication_token.as_str() {
             return Err(anyhow!("Session worker authentication failed"));
         }
+        // The pre-spawn durable record may legitimately have no child PID yet.
+        // Validate its other fields with the authenticated planned launch's PID,
+        // without publishing or trusting any registration stop capability.
+        let mut validation = descriptor.clone();
+        if validation.pid == 0
+            && validation.worker_instance_id.is_some()
+            && validation.worker_instance_id == registration.worker_instance_id
+        {
+            validation.pid = registration.pid;
+        }
+        crate::descriptor::validate_descriptor(&validation, &self.options.socket_path)?;
         let worker_id = descriptor.worker_id.clone();
         let resident = ResidentWorker::new(
             registration.active_session_id.clone(),
@@ -621,6 +631,21 @@ impl Supervisor {
                     &registration.active_session_id
                 )
             ));
+        }
+        // A crash between spawn and its PID write leaves the planned instance
+        // paired with a predecessor PID. The token-authenticated registration
+        // supplies that launch's live binding; worker_auth must then independently
+        // supply its native capability before routing or stop authority opens.
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            crate::native_signal::recover_registered_process(
+                &resident.descriptor_path,
+                &mut descriptor,
+                registration.pid,
+                registration.worker_instance_id.as_deref(),
+                &registration.socket_path,
+                crate::protocol::process_start_id(registration.pid as u32),
+            )?;
         }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;

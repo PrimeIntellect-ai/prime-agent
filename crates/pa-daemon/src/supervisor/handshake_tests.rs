@@ -597,3 +597,165 @@ async fn superseded_auth_never_overwrites_native_worker_identity() {
         assert!(resident.cmd_tx.lock().await.is_none());
     }
 }
+
+fn registration_adoption_fixture(
+    persisted_pid: u64,
+) -> (tempfile::TempDir, Arc<Supervisor>, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("worker.sock");
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .unwrap(),
+    );
+    let descriptor_path = supervisor.descriptor_dir.join("w-register.json");
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version":2,"workerId":"w-register","pid":persisted_pid,
+        "workerInstanceId":"planned","socketPath":socket_path.to_string_lossy(),
+        "recoveryJournalPath":dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath":supervisor.options.socket_path.to_string_lossy(),
+        "authenticationToken":"register-token","rootActiveSessionId":"w-register",
+        "createdAt":"now","updatedAt":"now","lifecycle":"starting",
+        "createCommand":{},"consecutiveFailures":0,
+        "nativeSignalIdentity":{"version":1,"workerInstanceId":"previous",
+            "identity":[0,0,0,0,0,4242,0,7]}
+    }))
+    .unwrap();
+    crate::descriptor::persist_worker(&descriptor_path, &descriptor).unwrap();
+    (dir, supervisor, socket_path, descriptor_path)
+}
+
+fn adoption_registration(socket_path: &Path, token: &str, instance: &str) -> DaemonCommand {
+    let pid = std::process::id();
+    let mut rest = Map::default();
+    rest.insert(
+        crate::native_signal::KEY.to_string(),
+        json!({
+            "version":1,"workerInstanceId":instance,"identity":[0,0,0,0,0,pid,0,8]
+        }),
+    );
+    DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-register".to_string(),
+        session_id: None,
+        socket_path: socket_path.to_string_lossy().to_string(),
+        worker_instance_id: instance.to_string(),
+        token: token.to_string(),
+        pid: u64::from(pid),
+        rest,
+    }
+}
+
+/// A prelaunch record can contain the new incarnation with its old or
+/// unassigned PID. Auth must bind to the registering live incarnation.
+#[tokio::test]
+async fn registration_adoption_authenticates_the_live_pid_before_persisting_authority() {
+    for persisted_pid in [4242, 0] {
+        let (_dir, supervisor, socket_path, descriptor_path) =
+            registration_adoption_fixture(persisted_pid);
+        let listener = bind_fake_worker(&socket_path).await;
+        let command = adoption_registration(&socket_path, "register-token", "planned");
+        let native = match &command {
+            DaemonCommand::WorkerRegister { rest, .. } => rest[crate::native_signal::KEY].clone(),
+            _ => unreachable!("registration fixture"),
+        };
+        let fake_peer =
+            async {
+                let mut fake = accept_fake_worker(listener).await;
+                let auth = read_supervisor_frame(&mut fake).await;
+                assert_eq!(auth.header.get("commandType"), Some(&json!("worker_auth")));
+                // Temporary pre-auth binding must not publish process-stop authority.
+                let pending: DaemonWorkerDescriptor =
+                    serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+                assert_eq!(pending.pid, u64::from(std::process::id()));
+                assert_eq!(pending.worker_instance_id.as_deref(), Some("planned"));
+                assert!(!pending.rest.contains_key(crate::native_signal::KEY));
+                let request_id = auth.header["requestId"].as_str().unwrap();
+                let payload = crate::protocol::response_line_bytes(&DaemonResponse {
+                    id: None,
+                    command: "worker_auth".to_string(),
+                    success: true,
+                    data: Some(json!({"capabilities":[],"nativeSignalIdentity":native})),
+                    error: None,
+                    error_info: None,
+                });
+                write_frame(
+                    &mut fake.write_half,
+                    &json!({"kind":"outbound","requestId":request_id,"outboundType":"response"}),
+                    &payload,
+                    DEFAULT_PRIVATE_FRAME_LIMITS,
+                )
+                .await
+                .unwrap();
+                for _ in 0..2 {
+                    let state = read_supervisor_frame(&mut fake).await;
+                    assert_eq!(state.header.get("commandType"), Some(&json!("get_state")));
+                    let request_id = state.header["requestId"].as_str().unwrap();
+                    let payload = crate::protocol::response_line_bytes(&DaemonResponse {
+                        id: None,
+                        command: "get_state".to_string(),
+                        success: true,
+                        data: Some(json!({"activeSessionId":"w-register","agentId":"w-register"})),
+                        error: None,
+                        error_info: None,
+                    });
+                    write_frame(&mut fake.write_half,
+                    &json!({"kind":"outbound","requestId":request_id,"outboundType":"response"}),
+                    &payload, DEFAULT_PRIVATE_FRAME_LIMITS).await.unwrap();
+                }
+                fake
+            };
+        let (response, _fake) = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::join!(
+                supervisor.handle_worker_register("registration", "worker_register", &command),
+                fake_peer
+            )
+        })
+        .await
+        .expect("registration and its authenticated state pulls complete");
+        assert!(
+            response.success,
+            "live registration must adopt: {response:?}"
+        );
+        let resident = supervisor.registry.get("w-register").await.unwrap();
+        let descriptor = resident.descriptor.lock().await;
+        assert_eq!(descriptor.pid, u64::from(std::process::id()));
+        assert_eq!(descriptor.worker_instance_id.as_deref(), Some("planned"));
+        assert_eq!(
+            descriptor.rest.get(crate::native_signal::KEY),
+            Some(&native)
+        );
+        let persisted: DaemonWorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        assert_eq!(persisted.pid, descriptor.pid);
+        assert_eq!(persisted.rest.get(crate::native_signal::KEY), Some(&native));
+        assert!(resident.cmd_tx.lock().await.is_some());
+    }
+}
+
+#[tokio::test]
+async fn registration_adoption_refuses_wrong_token_or_instance_before_dialing() {
+    for (token, instance) in [("wrong-token", "planned"), ("register-token", "unexpected")] {
+        let (_dir, supervisor, socket_path, descriptor_path) = registration_adoption_fixture(4242);
+        let listener = bind_fake_worker(&socket_path).await;
+        let before = std::fs::read(&descriptor_path).unwrap();
+        let command = adoption_registration(&socket_path, token, instance);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.handle_worker_register("registration", "worker_register", &command),
+        )
+        .await
+        .expect("invalid registration must refuse before auth");
+        assert!(!response.success, "invalid registration was accepted");
+        assert_eq!(std::fs::read(&descriptor_path).unwrap(), before);
+        assert!(supervisor.registry.get("w-register").await.is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "invalid registration must never dial the worker"
+        );
+    }
+}

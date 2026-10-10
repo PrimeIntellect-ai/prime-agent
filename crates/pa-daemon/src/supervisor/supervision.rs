@@ -3,11 +3,10 @@
 use super::routing::{fail_unsent_request, WORKER_REQUEST_TIMEOUT_MS, WORKER_SOCKET_CLOSED};
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
-    persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
-    Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
-    ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
-    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
-    WORKER_AUTH_FLOOR_MS,
+    probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command, Context,
+    DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader, ResidentWorker, Result,
+    RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value, WorkerReply, WorkerRequest,
+    DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
@@ -475,11 +474,13 @@ impl Supervisor {
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
             let child_pid = child.id().unwrap_or(0);
-            if let Err(error) = crate::native_signal::bind_spawned_process(
+            if let Err(error) = crate::native_signal::bind_spawned_process_durable(
+                &resident.descriptor_path,
                 &mut descriptor,
                 &worker_instance_id,
                 child_pid,
                 crate::protocol::process_start_id(child_pid),
+                spawn_record_sync,
             ) {
                 drop(descriptor);
                 let mut child = child;
@@ -499,7 +500,8 @@ impl Supervisor {
             // lose the descriptor's whole payload — the recovery journal
             // pointer and the durable create command the next boot's
             // revival replays.
-            let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
+            // The candidate write above is mandatory; on failure only our own
+            // newly spawned child is retired, and no binding is published.
         }
 
         // A worker that never comes up inside the connect budget is killed here, so a
