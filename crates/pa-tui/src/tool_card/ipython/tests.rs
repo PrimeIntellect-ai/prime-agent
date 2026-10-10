@@ -245,6 +245,63 @@ fn bash_cell_renders_bash_mode_line() {
 }
 
 #[test]
+fn running_cell_summary_ticks_live_elapsed() {
+    // The live timer (operator feature 2026-10-03): while the cell runs,
+    // the duration slot ticks the elapsed since the execution start; the
+    // kernel's `durationMs` lands in the same slot when the cell settles.
+    let mut card = cell_card("time.sleep(2)", json!({ "status": "ok" }), false, true);
+    card.started_at = Some(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1500))
+            .expect("the clock is past the start"),
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
+    let text = text_of(&lines[0]);
+    assert!(text.contains("↑ 1 lines"), "got: {text}");
+    // The duration slot ticks right after the line counts: the summary's
+    // last segment is a live `<seconds>s` value, without pinning the
+    // leading second (a descheduled render must not flake the shape).
+    let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
+    assert!(
+        duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok(),
+        "the live duration ticks in its own slot: {text}"
+    );
+    assert!(!text.contains("Took "), "got: {text}");
+}
+
+#[test]
+fn running_cell_long_preview_keeps_live_duration_visible() {
+    // The summary clips from the right, so a preview that fills the width
+    // would clip the ticking duration first: while the cell runs, the
+    // preview shortens itself to keep the live duration on screen (the
+    // settled card keeps its established layout, clipping the same way
+    // it always has). The preview words stay under the noise-redaction
+    // run length so the descriptor caps at its full 64 units.
+    let code = format!("print('{}')", "lorem ipsum ".repeat(8));
+    let mut card = cell_card(&code, json!({ "status": "ok" }), false, true);
+    card.started_at = Some(
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(1500))
+            .expect("the clock is past the start"),
+    );
+    let lines = render(&card, 0, Detail::Overview, &theme(), 80, true);
+    let text = text_of(&lines[0]);
+    // Pre-fix this line is red: the row overflows to 95 columns and the
+    // right clip eats the duration slot entirely, so the summary's last
+    // segment is a fragment of the line counts, never a duration.
+    let duration_part = text.rsplit(" \u{00b7} ").next().unwrap_or_default();
+    assert!(
+        duration_part.ends_with('s') && duration_part.trim_end_matches('s').parse::<f64>().is_ok(),
+        "the live duration stays on screen as its own segment: {text}"
+    );
+    assert!(crate::width::str_width(&text) <= 80, "got: {text}");
+    assert!(
+        text.matches("lorem").count() < 8,
+        "the preview gave the duration its room: {text}"
+    );
+}
+
+#[test]
 fn background_shell_duration_label_and_exit() {
     let code = "h = bash('sleep 0.1')";
     let details = json!({
