@@ -11,7 +11,8 @@ use serde::Deserialize;
 
 pub const MODEL_PROMPTS_TOML: &str = include_str!("layers/model_prompts.toml");
 
-const MODEL_PROMPT_FILES: &[(&str, &str)] = &[];
+const MODEL_PROMPT_FILES: &[(&str, &str)] =
+    &[("glm-5.3-bash.md", include_str!("layers/glm-5.3-bash.md"))];
 
 const USER_MODEL_PROMPTS_TOML: &str = "model-prompts.toml";
 
@@ -465,6 +466,23 @@ files = ["shared.md", "user-only.md"]
         let empty = tempfile::tempdir().unwrap();
         let resolution = load_model_prompts(Some("z-ai/glm-5.3"), empty.path());
         assert!(resolution.errors.is_empty());
+    }
+
+    #[test]
+    fn shipped_glm_bash_rule_applies_to_glm_models_only() {
+        let empty = tempfile::tempdir().unwrap();
+        let resolution =
+            load_model_prompts(Some("prime-inference/internal/glm-5.3-fast"), empty.path());
+        assert!(resolution.errors.is_empty(), "{:#?}", resolution.errors);
+        let expected = MODEL_PROMPT_FILES
+            .iter()
+            .find(|(name, _)| *name == "glm-5.3-bash.md")
+            .map(|(_, content)| (*content).trim())
+            .expect("the shipped file table names glm-5.3-bash.md");
+        assert_eq!(resolution.extras.as_deref(), Some(expected));
+
+        let other = load_model_prompts(Some("anthropic/claude-sonnet-4"), empty.path());
+        assert_eq!(other, ModelPromptResolution::default());
     }
 
     #[test]

@@ -1,0 +1,1 @@
+Never run shell commands through `subprocess`, `os.system`, or a helper that wraps them, even when you need the output. Start the command with `h = bash(cmd)` and collect `(await h).output` in a later `ipython` call, once it finishes. Only commands that finish in under a second may be awaited inline: `out = (await bash(cmd)).output`.
