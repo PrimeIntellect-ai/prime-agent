@@ -325,10 +325,18 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     (manager, lease)
                 }
             };
-            let engine = if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-                build_faux_engine_with(&options, &script, Some(manager), "rpc").await?
+            let engine = if let Some(script) = faux_script_env()? {
+                build_faux_engine_with(
+                    &options,
+                    &script,
+                    Some(manager),
+                    "rpc",
+                    &HeadlessEmbedding::Rpc,
+                )
+                .await?
             } else {
-                build_headless_engine_with(&options, Some(manager), "rpc").await?
+                build_headless_engine_with(&options, Some(manager), "rpc", &HeadlessEmbedding::Rpc)
+                    .await?
             };
             let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
             handle.session_lease = opened_lease;
@@ -393,8 +401,48 @@ async fn print_mode_main(
 ) -> Result<i32, String> {
     // `print` or `json`: the telemetry execution mode is the app mode (TS
     // main.ts `executionMode: appMode`).
-    let headless = build_headless_engine_parts(options, options.app_mode.as_str(), lease).await?;
+    crate::telemetry_notice::print_if_due(&options.config);
+    let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
+    *lease = opened_lease;
+    let session_manager = Some(session_manager.unwrap_or_else(|| {
+        pa_core::session::manager::SessionManager::in_memory(&options.config.cwd)
+    }));
+    // The print root's inline-subagent node: the quiescence drive, the
+    // host, and the messaging controller all hang off it. The faux
+    // script (when scripted) rides the recipe down to every child.
+    let faux = faux_script_env()?;
+    let root_node = crate::print_rlm::root_node(
+        options,
+        session_manager.as_ref().expect("a session manager"),
+        faux.clone(),
+    );
+    let headless = match &faux {
+        Some(script) => {
+            build_faux_engine_with(
+                options,
+                script,
+                session_manager,
+                options.app_mode.as_str(),
+                &HeadlessEmbedding::Root {
+                    node: std::sync::Arc::clone(&root_node),
+                },
+            )
+            .await?
+        }
+        None => {
+            build_headless_engine_with(
+                options,
+                session_manager,
+                options.app_mode.as_str(),
+                &HeadlessEmbedding::Root {
+                    node: std::sync::Arc::clone(&root_node),
+                },
+            )
+            .await?
+        }
+    };
     let engine = std::sync::Arc::new(headless.engine);
+    crate::print_rlm::adopt_built_engine(&root_node, &engine, &headless.model).await;
     // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
     // branch keeps its persisted goal. Depth 0 only — the print session is a root.
     if let Some(goal) = &options.config.initial_goal {
@@ -403,7 +451,18 @@ async fn print_mode_main(
             .await
             .map_err(|error| format!("{error:#}"))?;
     }
-    run_prompts_and_emit(&engine, &headless.model, headless.api_key.clone(), options).await
+    let exit = run_prompts_and_emit(
+        &engine,
+        &headless.model,
+        headless.api_key.clone(),
+        options,
+        &root_node,
+    )
+    .await;
+    // No inline descendant outlives the print process: kernels get their
+    // final snapshot, drivers join, runs abort (every exit path).
+    crate::print_rlm::dispose_inline_subagents(&root_node).await;
+    exit
 }
 
 /// Assemble the in-process session engine for a headless run: model
@@ -415,12 +474,58 @@ async fn print_mode_main(
 /// (shared with the RPC mode, whose picker model switches swap it live).
 pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
 
+/// The parsed `PRIME_AGENT_FAUX_SCRIPT` (the whole-process verification
+/// seam; never set by the product): `None` on a live run, an error when
+/// the script does not parse.
+pub(crate) fn faux_script_env() -> Result<Option<serde_json::Value>, String> {
+    match std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
+        Ok(script) => serde_json::from_str(&script)
+            .map(Some)
+            .map_err(|error| format!("invalid PRIME_AGENT_FAUX_SCRIPT: {error}")),
+        Err(_) => Ok(None),
+    }
+}
+
+/// What one engine build varies by session: the print root (inline
+/// subagents over its node), a spawned inline child (its own model,
+/// auth, and session), or the RPC mode (no inline subagents — today's
+/// behavior).
+pub(crate) enum HeadlessEmbedding {
+    Root {
+        node: std::sync::Arc<crate::print_rlm::InlineSessionNode>,
+    },
+    Child(Box<ChildEngineOverrides>),
+    Rpc,
+}
+
+/// One spawned inline child's engine deltas: the resolved model and
+/// request auth, the parent-edge identity, and (in a scripted run) its
+/// own faux queue.
+pub(crate) struct ChildEngineOverrides {
+    pub node: std::sync::Arc<crate::print_rlm::InlineSessionNode>,
+    /// The resolved child model (a real-provider child); a scripted child
+    /// builds its model from its own faux registration.
+    pub model: Option<Model>,
+    pub thinking: Option<pa_types::ai::ModelThinkingLevel>,
+    pub faux: Option<FauxChildQueue>,
+    pub semantic_parent_session_id: Option<String>,
+    pub spawned_by_request_id: Option<String>,
+}
+
+/// The per-child faux queue: its own registered provider (keyed by the
+/// child id, so siblings never share a response lane) and its steps.
+pub(crate) struct FauxChildQueue {
+    pub child_id: String,
+    pub steps: Vec<pa_ai::faux::FauxResponseStep>,
+    pub repeat_last: bool,
+}
+
 /// The assembled headless engine, so host transports can drive session-command
 /// executors (compact/refine) with the session's own model.
-struct HeadlessEngine {
-    engine: pa_core::session_engine::engine::SessionEngine,
-    model: Model,
-    api_key: Option<String>,
+pub(crate) struct HeadlessEngine {
+    pub(crate) engine: pa_core::session_engine::engine::SessionEngine,
+    pub(crate) model: Model,
+    pub(crate) api_key: Option<String>,
     /// The live provider target: the stream reads it per call, and the
     /// RPC mode's picker switches swap it (TS `setModel`'s stream
     /// re-registration; `set_model` swaps it without rebuilding the
@@ -441,10 +546,23 @@ async fn build_headless_engine_parts(
     crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
     *lease = opened_lease;
-    if let Ok(script) = std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        return build_faux_engine_with(options, &script, session_manager, execution_mode).await;
+    if let Some(script) = faux_script_env()? {
+        return build_faux_engine_with(
+            options,
+            &script,
+            session_manager,
+            execution_mode,
+            &HeadlessEmbedding::Rpc,
+        )
+        .await;
     }
-    build_headless_engine_with(options, session_manager, execution_mode).await
+    build_headless_engine_with(
+        options,
+        session_manager,
+        execution_mode,
+        &HeadlessEmbedding::Rpc,
+    )
+    .await
 }
 
 /// The session-manager selection every engine build shares, returning the opened session's runtime
@@ -466,26 +584,34 @@ fn select_session_manager_with_lease(
 }
 
 /// The real-provider engine assembly over one session-manager selection.
-async fn build_headless_engine_with(
+pub(crate) async fn build_headless_engine_with(
     options: &RunOptions,
     session_manager: Option<pa_core::session::manager::SessionManager>,
     execution_mode: &str,
+    embedding: &HeadlessEmbedding,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
 
-    // Model registry: composed catalog + models.json with real auth.
+    // Model registry: composed catalog + models.json with real auth. A
+    // spawned child carries its already-resolved model and request auth
+    // (the spawn resolved them against this same catalog).
     let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
     let mut registry =
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
     registry.load_private_authorization_from_cache();
-    let model = select_model(
-        &mut registry,
-        config.provider.as_deref(),
-        config.model.as_deref(),
-    )?;
-
+    let model = match embedding {
+        HeadlessEmbedding::Child(overrides) => overrides
+            .model
+            .clone()
+            .expect("a real-provider child build carries its resolved model"),
+        _ => select_model(
+            &mut registry,
+            config.provider.as_deref(),
+            config.model.as_deref(),
+        )?,
+    };
     // Resolve request auth once: the stored team / `PRIME_TEAM_ID` reach the wire through these
-    // headers.
+    // headers (children resolve against the same catalog the spawn used).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
     let provider_target: ProviderTargetSlot =
@@ -495,27 +621,46 @@ async fn build_headless_engine_with(
             service_tier: None,
             headers: resolved.headers.clone(),
         })));
-    // While an episode is armed the stream serves THIS target, so a concurrent
-    // `set_model` picker write cannot redirect an in-flight routed turn.
-    let armed_target: std::sync::Arc<std::sync::Mutex<Option<ProviderTarget>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(None));
-    let stream_fn = route_authoritative_stream_fn(
-        std::sync::Arc::clone(&provider_target),
-        std::sync::Arc::clone(&armed_target),
-    );
-    // TS settings.imageModel routing: image-attaching batches on a session model
-    // without image input route to the configured image model or refuse.
-    let image_model_router = headless_image_model_router(
-        &provider_target,
-        std::sync::Arc::clone(&armed_target),
-        config.cwd.clone(),
-        config.agent_dir.clone(),
-        model.clone(),
-    );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
+    // Children serve their own provider target (the route-authoritative
+    // stream would serve the parent's model, and children have no
+    // image-model routing).
+    let (stream_fn, image_model_router) = if matches!(embedding, HeadlessEmbedding::Child(_)) {
+        (
+            switchable_stream_fn(std::sync::Arc::clone(&provider_target)),
+            None,
+        )
+    } else {
+        // While an episode is armed the stream serves THIS target, so a concurrent
+        // `set_model` picker write cannot redirect an in-flight routed turn.
+        let armed_target: std::sync::Arc<std::sync::Mutex<Option<ProviderTarget>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let stream_fn = route_authoritative_stream_fn(
+            std::sync::Arc::clone(&provider_target),
+            std::sync::Arc::clone(&armed_target),
+        );
+        // TS settings.imageModel routing: image-attaching batches on a session model
+        // without image input route to the configured image model or refuse.
+        (
+            stream_fn,
+            Some(headless_image_model_router(
+                &provider_target,
+                armed_target,
+                config.cwd.clone(),
+                config.agent_dir.clone(),
+                model.clone(),
+            )),
+        )
+    };
+
     // Telemetry: the CLI's env/settings opt-out decides; depth 0 only, enforced by the engine.
-    let telemetry = (!config.telemetry_disabled).then(|| {
+    // A spawned child never reports (the engine's depth gate holds anyway).
+    let telemetry = matches!(
+        embedding,
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
+    )
+    .then(|| {
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
         pa_core::session_engine::telemetry::TelemetryWiring {
             client: pa_core::session_engine::telemetry::build_client(&settings, &config.agent_dir),
@@ -553,17 +698,52 @@ async fn build_headless_engine_with(
     // ledger-less but the request ids still go on the wire.
     let session_manager = session_manager
         .unwrap_or_else(|| pa_core::session::manager::SessionManager::in_memory(&config.cwd));
-    let semantic_edges = Some(
-        pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
-            session_id: session_manager.get_session_id().to_string(),
-            ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
-                None,
-                session_manager.get_session_artifact_dir().as_deref(),
+    let (rlm_subagent_host, extra_host_handlers) = match embedding {
+        HeadlessEmbedding::Rpc => (None, None),
+        HeadlessEmbedding::Root { node } => {
+            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(node);
+            (Some(host), Some(handlers))
+        }
+        HeadlessEmbedding::Child(overrides) => {
+            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(&overrides.node);
+            (Some(host), Some(handlers))
+        }
+    };
+    let (semantic_edges, rlm_depth, thinking_level) = match embedding {
+        HeadlessEmbedding::Child(overrides) => (
+            Some(
+                pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
+                    session_id: session_manager.get_session_id().to_string(),
+                    // A spawned child's ledger lives in its rlm session dir.
+                    ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+                        Some(std::path::Path::new(&overrides.node.session_dir)),
+                        session_manager.get_session_artifact_dir().as_deref(),
+                    ),
+                    parent_session_id: overrides.semantic_parent_session_id.clone(),
+                    spawned_by_request_id: overrides.spawned_by_request_id.clone(),
+                },
             ),
-            parent_session_id: None,
-            spawned_by_request_id: None,
-        },
-    );
+            Some(overrides.node.depth),
+            overrides
+                .thinking
+                .map(pa_core::session_engine::provider_adapter::map_thinking_level),
+        ),
+        _ => (
+            Some(
+                pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
+                    session_id: session_manager.get_session_id().to_string(),
+                    ledger_path: pa_core::session_engine::semantic_edges::semantic_edge_ledger_path(
+                        None,
+                        session_manager.get_session_artifact_dir().as_deref(),
+                    ),
+                    parent_session_id: None,
+                    spawned_by_request_id: None,
+                },
+            ),
+            None,
+            Some(resolve_thinking_level(config, &model)),
+        ),
+    };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message: None,
@@ -576,7 +756,7 @@ async fn build_headless_engine_with(
             agent_dir: config.agent_dir.clone(),
             mcp_manager: Some(mcp_manager),
             model: Some(agent_model),
-            thinking_level: Some(resolve_thinking_level(config, &model)),
+            thinking_level,
             stream_fn: Some(stream_fn),
             tools: builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
@@ -584,7 +764,7 @@ async fn build_headless_engine_with(
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager: Some(session_manager),
-            extra_host_handlers: None,
+            extra_host_handlers,
             conversation_log_path: None,
             additional_skill_paths: config
                 .skills
@@ -597,15 +777,18 @@ async fn build_headless_engine_with(
                 .map(|path| path.display().to_string())
                 .collect(),
             extra_builtin_skill_overrides: vec![],
-            rlm_subagent_host: None,
-            rlm_depth: None,
+            rlm_subagent_host,
+            rlm_depth,
+            daemonless: true,
             model_info: Some(model.clone()),
-            // The kernel boots in the background at creation.
-            prewarm_ipython_kernel: Some(true),
+            // The kernel boots in the background at creation; a spawned
+            // child boots lazily on first use.
+            prewarm_ipython_kernel: (!matches!(embedding, HeadlessEmbedding::Child(_)))
+                .then_some(true),
             on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
-            image_model_router: Some(image_model_router),
+            image_model_router,
         },
     )
     .await
@@ -1189,6 +1372,7 @@ async fn run_prompts_and_emit(
     model: &Model,
     api_key: Option<String>,
     options: &RunOptions,
+    root_node: &std::sync::Arc<crate::print_rlm::InlineSessionNode>,
 ) -> Result<i32, String> {
     let json_mode = options.app_mode == AppMode::Json;
     let mut unsubscribe: Option<pa_agent::agent::Subscription> = None;
@@ -1333,19 +1517,37 @@ async fn run_prompts_and_emit(
                 .map_err(|error| format!("{error:#}"))?;
         }
     }
-    goal_accounting.unsubscribe().await;
-    accounting.unsubscribe().await;
-    if let Some(subscription) = unsubscribe {
-        subscription.unsubscribe().await;
-    }
     // The rejected prompt wait: print the raw command error to stderr and
     // exit 1 — no later prompts ran, and the disposal drain still runs.
     if let Some(error) = command_failure {
         eprintln!("{error}");
+        goal_accounting.unsubscribe().await;
+        accounting.unsubscribe().await;
+        if let Some(subscription) = unsubscribe {
+            subscription.unsubscribe().await;
+        }
         boundary
             .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
             .await;
         return Ok(1);
+    }
+    // The #2270 fix: print waits for RLM quiescence — every admitted
+    // descendant settles and its replies and notices drain as turns —
+    // BEFORE the terminal result is selected. json mode keeps streaming
+    // through these turns (the subscription lives until after the drive).
+    crate::print_rlm::drive_to_quiescence(
+        root_node,
+        engine,
+        &mut boundary,
+        model,
+        api_key.clone(),
+        global_harness_dir.clone(),
+    )
+    .await?;
+    goal_accounting.unsubscribe().await;
+    accounting.unsubscribe().await;
+    if let Some(subscription) = unsubscribe {
+        subscription.unsubscribe().await;
     }
     let state = engine.session.agent().state().await;
     let messages: Vec<pa_types::session::AgentMessage> =
@@ -1396,68 +1598,27 @@ async fn run_prompts_and_emit(
 }
 
 /// The faux-script engine: identical session assembly, scripted provider.
-async fn build_faux_engine_with(
+/// A spawned child in a scripted run registers its OWN provider (keyed by
+/// the child id) with the queue under `children.<spawn name>`, so
+/// multi-child runs stay deterministic (the registry is process-global).
+pub(crate) async fn build_faux_engine_with(
     options: &RunOptions,
-    script: &str,
+    script: &serde_json::Value,
     session_manager: Option<pa_core::session::manager::SessionManager>,
     // The execution mode label carries through the real path only.
     _execution_mode: &str,
+    embedding: &HeadlessEmbedding,
 ) -> Result<HeadlessEngine, String> {
     let config = &options.config;
-    let script: serde_json::Value = serde_json::from_str(script)
-        .map_err(|error| format!("invalid PRIME_AGENT_FAUX_SCRIPT: {error}"))?;
     // Response entries: a plain string answers with fixed text; `{"systemPrompt":
     // true}` answers with the request's system prompt; other objects go through the
     // shared faux-script parser.
-    let response_steps: Vec<pa_ai::faux::FauxResponseStep> = script
-        .get("responses")
-        .and_then(serde_json::Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .map(|entry| match entry {
-                    serde_json::Value::String(text) => Ok(pa_ai::faux::FauxResponseStep::Message(
-                        pa_ai::faux::faux_assistant_text_message(
-                            text,
-                            pa_ai::faux::FauxAssistantMessageOptions::default(),
-                        ),
-                    )),
-                    serde_json::Value::Object(map)
-                        if map.get("systemPrompt").and_then(serde_json::Value::as_bool)
-                            == Some(true) =>
-                    {
-                        Ok(pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
-                            |context, _options, _call, _model| {
-                                Ok(pa_ai::faux::faux_assistant_text_message(
-                                    context.system_prompt.as_deref().unwrap_or_default(),
-                                    pa_ai::faux::FauxAssistantMessageOptions::default(),
-                                ))
-                            },
-                        )))
-                    }
-                    serde_json::Value::Object(_) => {
-                        pa_ai::faux::script::parse_faux_script(&serde_json::json!({
-                            "responses": [entry]
-                        }))
-                        .map(|parsed| {
-                            let mut steps = parsed.responses.into_iter();
-                            let first = steps
-                                .next()
-                                .expect("an object entry parses into one response step");
-                            debug_assert!(steps.next().is_none());
-                            first
-                        })
-                    }
-                    _ => Ok(pa_ai::faux::FauxResponseStep::Message(
-                        pa_ai::faux::faux_assistant_text_message(
-                            "",
-                            pa_ai::faux::FauxAssistantMessageOptions::default(),
-                        ),
-                    )),
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .ok_or_else(|| "PRIME_AGENT_FAUX_SCRIPT requires a responses array".to_string())??;
+    let response_steps = faux_response_steps(
+        script
+            .get("responses")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "PRIME_AGENT_FAUX_SCRIPT requires a responses array".to_string())?,
+    )?;
     // A `reasoning` model makes the harness script thinking-capable turns so
     // thinking-level resolution can be verified without the network.
     let reasoning = script
@@ -1471,10 +1632,21 @@ async fn build_faux_engine_with(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(100_000);
     // The stable faux identity (`api: "faux"`, `provider: "faux"`): fixtures can declare
-    // faux-provider models in models.json.
+    // faux-provider models in models.json. A spawned child gets its own api
+    // lane so its queue never interleaves with its parent's.
+    let (api, child_queue) = match embedding {
+        HeadlessEmbedding::Child(overrides) => {
+            let queue = overrides
+                .faux
+                .as_ref()
+                .expect("a scripted child build carries its faux queue");
+            (format!("faux-{}", queue.child_id), Some(queue))
+        }
+        _ => ("faux".to_string(), None),
+    };
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-            api: Some("faux".to_string()),
+            api: Some(api),
             provider: Some("faux".to_string()),
             models: Some(vec![pa_ai::faux::FauxModelDefinition {
                 id: "faux-1".to_string(),
@@ -1487,8 +1659,25 @@ async fn build_faux_engine_with(
             }]),
             ..Default::default()
         });
-    registration.set_responses(response_steps);
+    if let Some(queue) = child_queue {
+        registration.set_responses(queue.steps.clone());
+        registration.set_repeat_last_response(queue.repeat_last);
+    } else {
+        registration.set_responses(response_steps);
+        registration.set_repeat_last_response(
+            script
+                .get("repeatLastResponse")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        );
+    }
     let model = registration.get_model();
+    let thinking_level = match embedding {
+        HeadlessEmbedding::Child(overrides) => overrides
+            .thinking
+            .map(pa_core::session_engine::provider_adapter::map_thinking_level),
+        _ => Some(resolve_thinking_level(config, &model)),
+    };
     let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
     let provider_target: ProviderTargetSlot =
         std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
@@ -1500,6 +1689,18 @@ async fn build_faux_engine_with(
     let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring with the real provider
     // path so binary-level tests can verify persistence without the network.
+    let session_manager = session_manager;
+    let (rlm_subagent_host, extra_host_handlers, rlm_depth) = match embedding {
+        HeadlessEmbedding::Rpc => (None, None, None),
+        HeadlessEmbedding::Root { node } => {
+            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(node);
+            (Some(host), Some(handlers), None)
+        }
+        HeadlessEmbedding::Child(overrides) => {
+            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(&overrides.node);
+            (Some(host), Some(handlers), Some(overrides.node.depth))
+        }
+    };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             on_late_sent_agent_message: None,
@@ -1513,7 +1714,7 @@ async fn build_faux_engine_with(
             agent_dir: config.agent_dir.clone(),
             mcp_manager: None,
             model: Some(agent_model),
-            thinking_level: Some(resolve_thinking_level(config, &model)),
+            thinking_level,
             stream_fn: Some(stream_fn),
             tools: builtin_tools(&config.cwd),
             custom_system_prompt: config.system_prompt.clone(),
@@ -1521,13 +1722,14 @@ async fn build_faux_engine_with(
             generic_mcp_servers: vec![],
             allow_recursion: None,
             session_manager,
-            extra_host_handlers: None,
+            extra_host_handlers,
             conversation_log_path: None,
             additional_skill_paths: vec![],
             additional_prompt_paths: vec![],
             extra_builtin_skill_overrides: vec![],
-            rlm_subagent_host: None,
-            rlm_depth: None,
+            rlm_subagent_host,
+            rlm_depth,
+            daemonless: true,
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
@@ -1545,6 +1747,56 @@ async fn build_faux_engine_with(
         api_key: None,
         provider_target,
     })
+}
+
+/// One scripted response entry: a plain string answers with fixed text;
+/// `{"systemPrompt": true}` answers with the request's system prompt;
+/// other objects go through the shared faux-script parser.
+pub(crate) fn faux_response_steps(
+    entries: &[serde_json::Value],
+) -> Result<Vec<pa_ai::faux::FauxResponseStep>, String> {
+    entries
+        .iter()
+        .map(|entry| match entry {
+            serde_json::Value::String(text) => Ok(pa_ai::faux::FauxResponseStep::Message(
+                pa_ai::faux::faux_assistant_text_message(
+                    text,
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ),
+            )),
+            serde_json::Value::Object(map)
+                if map.get("systemPrompt").and_then(serde_json::Value::as_bool) == Some(true) =>
+            {
+                Ok(pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
+                    |context, _options, _call, _model| {
+                        Ok(pa_ai::faux::faux_assistant_text_message(
+                            context.system_prompt.as_deref().unwrap_or_default(),
+                            pa_ai::faux::FauxAssistantMessageOptions::default(),
+                        ))
+                    },
+                )))
+            }
+            serde_json::Value::Object(_) => {
+                pa_ai::faux::script::parse_faux_script(&serde_json::json!({
+                    "responses": [entry]
+                }))
+                .map(|parsed| {
+                    let mut steps = parsed.responses.into_iter();
+                    let first = steps
+                        .next()
+                        .expect("an object entry parses into one response step");
+                    debug_assert!(steps.next().is_none());
+                    first
+                })
+            }
+            _ => Ok(pa_ai::faux::FauxResponseStep::Message(
+                pa_ai::faux::faux_assistant_text_message(
+                    "",
+                    pa_ai::faux::FauxAssistantMessageOptions::default(),
+                ),
+            )),
+        })
+        .collect()
 }
 
 #[cfg(test)]

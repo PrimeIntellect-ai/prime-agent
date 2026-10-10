@@ -991,6 +991,8 @@ impl AgentSessionEngine {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
+            // The worker session runs under the daemon scheduler and its wake-ups.
+            daemonless: false,
             model_info: Some(model.clone()),
             // Prewarm; the depth gate keeps subagent workers lazy.
             prewarm_ipython_kernel: Some(true),

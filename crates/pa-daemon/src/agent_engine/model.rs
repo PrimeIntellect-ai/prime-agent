@@ -1,11 +1,9 @@
 //! The agent-session engine's model concern: the startup/restore
 //! model-resolution cluster (the TS `createAgentSession` chain), the
-//! session's live-model and thinking-level surfaces, the request API-key
-//! seam, and the persisted max-depth read.
+//! session's live-model and thinking-level surfaces, and the request
+//! API-key seam.
 
-use super::{
-    AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine, Value,
-};
+use super::{AgentSessionEngine, EngineModelSelection, Model, RestoredSessionModel, SessionEngine};
 
 impl AgentSessionEngine {
     /// The startup chain: the saved settings default, then the featured
@@ -405,40 +403,9 @@ impl AgentSessionEngine {
 /// session re-seeds its depth bound from. `None` when absent or unreadable.
 /// Same contract as the reference oracle (`agent_engine/tests.rs`): whole
 /// file valid UTF-8, newest-first, malformed lines skip.
+#[cfg(test)]
 pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    let path = std::path::Path::new(path?);
-    let mut bytes = Vec::new();
-    std::io::Read::read_to_end(
-        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
-        &mut bytes,
-    )
-    .ok()?;
-    let content = std::str::from_utf8(&bytes).ok()?;
-    content
-        .lines()
-        .rev()
-        // The exact union gate: a matching row's raw text carries either the
-        // `customType` literal or a `\u`-escape (serde never letter-escapes),
-        // so the union admits every line the reference could match;
-        // `rlm_max_depth_row` judges the candidates by the decoded fields.
-        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
-        .find_map(rlm_max_depth_row)
-}
-
-/// One candidate line's depth bound: `Some(depth)` for a matching custom
-/// row with a parseable `data.maxDepth`, `None` otherwise.
-fn rlm_max_depth_row(line: &str) -> Option<u64> {
-    let value: Value = serde_json::from_str(line.trim()).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("custom") {
-        return None;
-    }
-    if value.get("customType").and_then(Value::as_str) != Some("rlm_max_depth_state") {
-        return None;
-    }
-    value
-        .get("data")
-        .and_then(|data| data.get("maxDepth"))
-        .and_then(Value::as_u64)
+    pa_core::session_engine::rlm_host::persisted_rlm_max_depth(path)
 }
 
 /// The saved model context of a session file: the pinned `(provider,
