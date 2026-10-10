@@ -1,7 +1,8 @@
 //! Headless perf verifier for mouse drag-selection: the per-frame cost of a drag is independent of
 //! the session size (a drag frame restyles the visible cached rows' selection diff, never the
 //! transcript geometry). The budget compares a 100-drag burst vs. a no-drag baseline and a small
-//! session.
+//! session; each session size samples several (baseline, drag) pairs, and the budget compares
+//! the least load-contaminated sample of each size (see `drag_excess`).
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -269,48 +270,77 @@ fn baseline() -> Vec<HeadlessStep> {
     vec![HeadlessStep::ScrollTop]
 }
 
+/// How many (baseline, drag) pairs each session size samples after its discarded warm-up pair.
+const MEASURED_PAIRS: usize = 3;
+
+/// One session size's drag-burst cost: the minimum excess across `MEASURED_PAIRS` measured
+/// (baseline, drag) pairs, preceded by one discarded warm-up pair.
+///
+/// A single pair's excess is the true drag-burst cost plus the pair's differential wall-clock
+/// noise, and the large session's ~40MB attach makes that differential spike hundreds of ms to
+/// seconds on loaded shared runners — the CI flake class (identical failures on pure main and
+/// on PRs with no drag-path commits). A one-pair budget flakes on the load spike, not the drag.
+/// The minimum over several pairs rejects the positive spikes; its residual error is a negative
+/// differential bounded by one baseline run's own noise, an order of magnitude below the signal
+/// the guard exists to catch. The guard stays real: a session-size regression inflates every
+/// pair (a burst that resolves the transcript once per frame adds seconds to each), so the
+/// minimum still trips the bounds.
+fn drag_excess(messages: usize) -> (Duration, Vec<Duration>, String) {
+    // The warm-up pair primes the page cache and allocator arenas (the process's first run
+    // reads about 2x its steady state); its numbers are discarded.
+    let _ = run_plan(messages, baseline());
+    let _ = run_plan(messages, drag_burst());
+
+    let mut excesses = Vec::with_capacity(MEASURED_PAIRS);
+    let mut extracted = String::new();
+    for pair in 0..MEASURED_PAIRS {
+        let (_, _, baseline) = run_plan(messages, baseline());
+        let (frames, copies, drag) = run_plan(messages, drag_burst());
+        // The headless capture renders per change: the drag frames flowed.
+        assert!(!frames.is_empty(), "the drag burst rendered frames");
+        assert_eq!(copies.len(), 1, "each drag burst copies once");
+        assert!(
+            copies[0].starts_with("row 0"),
+            "the copy reads the pressed row: {:?}",
+            &copies[0][..copies[0].len().min(40)]
+        );
+        if pair == 0 {
+            extracted = copies.concat();
+        }
+        excesses.push(drag.saturating_sub(baseline));
+    }
+    let best = *excesses.iter().min().expect("at least one measured pair");
+    (best, excesses, extracted)
+}
+
 #[test]
 fn drag_select_frame_cost_is_independent_of_session_size() {
     let small = 40usize;
     let large = 4000usize;
 
-    let (_, _, small_baseline) = run_plan(small, baseline());
-    let (_, copies_small, small_drag) = run_plan(small, drag_burst());
-    let (_, _, large_baseline) = run_plan(large, baseline());
-    let (frames_large_drag, copies_large, large_drag) = run_plan(large, drag_burst());
+    let (small_excess, small_samples, small_copy) = drag_excess(small);
+    let (large_excess, large_samples, large_copy) = drag_excess(large);
 
-    // The copies are the same text both sizes: the drag extracts the spanned rows through the same
-    // coordinates on either session.
-    assert_eq!(copies_small.len(), 1, "the small drag copies once");
+    // The copies read the same text both sizes: the drag extracts the spanned rows through the
+    // same coordinates on either session.
     assert_eq!(
-        copies_large, copies_small,
+        large_copy, small_copy,
         "the large session drags the same rows"
     );
-    assert!(
-        copies_large[0].starts_with("row 0"),
-        "the copy reads the pressed row: {:?}",
-        &copies_large[0][..copies_large[0].len().min(40)]
-    );
 
-    // The drag path's own cost (burst minus baseline) stays in the same band on either session: no
-    // per-frame geometry resolve scales it with the transcript.
-    let small_excess = small_drag.saturating_sub(small_baseline);
-    let large_excess = large_drag.saturating_sub(large_baseline);
+    // The drag path's own cost (burst minus baseline, minimum over the sampled pairs) stays in
+    // the same band on either session: no per-frame geometry resolve scales it with the
+    // transcript.
     assert!(
         large_excess < small_excess + Duration::from_millis(250),
-        "the large session's drag excess ({large_excess:?}) must stay within \
-         250ms of the small session's ({small_excess:?})"
+        "the large session's drag excess (best of {large_samples:?}) must stay within \
+         250ms of the small session's (best of {small_samples:?})"
     );
     assert!(
         large_excess < Duration::from_millis(500),
-        "100 drag frames on a ~40MB session cost {large_excess:?} — the \
-         per-frame cost is not session-size independent (the pre-fix \
-         release alone resolved the full geometry once per copy)"
-    );
-    // The headless capture renders per change: the drag frames flowed.
-    assert!(
-        !frames_large_drag.is_empty(),
-        "the drag burst rendered frames"
+        "100 drag frames on a ~40MB session cost {large_excess:?} \
+         (samples {large_samples:?}) — the per-frame cost is not session-size independent \
+         (the pre-fix release alone resolved the full geometry once per copy)"
     );
 }
 
