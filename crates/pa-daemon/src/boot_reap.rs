@@ -232,7 +232,7 @@ async fn stop_target_within(
                         native_identity.as_ref(),
                         signal,
                         crate::lease::get_process_start_id,
-                        |identity, signal| identity.signal(signal),
+                        pa_core::platform::process::NativeSignalIdentity::signal,
                     )
                 },
                 term_grace,
