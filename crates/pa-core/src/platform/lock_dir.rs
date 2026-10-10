@@ -1881,7 +1881,20 @@ impl LockDir {
                     None,
                 ) {
                     Ok((_handle, identity)) => Some(identity),
-                    Err(_) => return InodeRelease::Failed,
+                    Err(error) => {
+                        // An ordinary setup failure (a pin errno, a note
+                        // write or close through the pinned handle)
+                        // happens to THIS pass's own created placeholder:
+                        // remove it through the pinned, fd-relative
+                        // helper so a failed release does not leak a
+                        // live-owned `.b...` residue beside the lock. A
+                        // fresh-name swap refusal PRESERVES the
+                        // substituted entry untouched.
+                        if !is_fresh_name_swap(&error) {
+                            let _ = remove_candidate_dir(&placeholder);
+                        }
+                        return InodeRelease::Failed;
+                    }
                 };
                 match rename_noreplace::exchange(&location, &placeholder) {
                     Ok(()) => {
