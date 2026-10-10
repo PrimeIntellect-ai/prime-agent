@@ -190,6 +190,24 @@ fn drain_child_stream<R: std::io::Read + Send + 'static>(
     })
 }
 
+/// The guard stack every bootstrap child spawns under: the child leads
+/// its own process group on Unix so the bound's group kill reaches its
+/// descendants (Windows keeps the hidden window shape - the creation
+/// flags replace each other - and `taskkill /T` walks the tree), and on
+/// Linux it also dies with the process that spawned it: its own group
+/// shields it from a terminal's interrupt, so without the parent-death
+/// signal a parent lost mid-boot strands `uv` with the kernel venv lock
+/// held. The wait that follows keeps the forking thread alive for as
+/// long as the child runs, so the signal only fires on the parent's
+/// real death.
+fn configure_bootstrap_child_spawn(spawn: &mut std::process::Command) {
+    #[cfg(unix)]
+    crate::platform::process::set_new_process_group(spawn);
+    crate::platform::process::set_no_window(spawn);
+    #[cfg(target_os = "linux")]
+    crate::platform::process::set_parent_death_signal(spawn);
+}
+
 /// Spawn one bootstrap child: stdin is null, stdout and stderr are piped
 /// and forwarded through the progress reporter, and the wait is bounded -
 /// a child that never exits is tree-killed at the bound and reported.
@@ -209,13 +227,7 @@ async fn run_async(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // The child leads its own process group on Unix so the bound's
-        // group kill reaches its descendants; Windows keeps the hidden
-        // window shape (the creation flags replace each other) and
-        // `taskkill /T` walks the tree.
-        #[cfg(unix)]
-        crate::platform::process::set_new_process_group(&mut spawn);
-        crate::platform::process::set_no_window(&mut spawn);
+        configure_bootstrap_child_spawn(&mut spawn);
         let mut child = spawn
             .spawn()
             .with_context(|| format!("failed to spawn {command}"))?;

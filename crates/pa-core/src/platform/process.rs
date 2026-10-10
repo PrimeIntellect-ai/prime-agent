@@ -29,6 +29,37 @@ pub fn set_new_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+/// On Linux the child dies with the process that spawned it: an
+/// interrupted parent must not leave `uv` running with the kernel venv
+/// lock held. The parent here is the forking thread, and a thread cannot
+/// exit while it still waits on the child - so the kernel's own
+/// parent-death signal only fires on the parent's real death. Darwin has
+/// no prctl, so the guard is a Linux-only hardening there.
+#[cfg(target_os = "linux")]
+pub fn set_parent_death_signal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // Captured on the spawning side: if the parent dies between the fork
+    // and the prctl below, the child is already reparented and the death
+    // signal would never fire - the ppid check closes that window.
+    let parent_pid = std::process::id() as libc::pid_t;
+    // SAFETY: the hook runs in the forked child before exec and only
+    // calls prctl(2) and getppid(2), which are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "the parent died before the death signal was armed",
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Start the spawned child in a new session with no controlling terminal
 /// (`setsid`): the child cannot open `/dev/tty`, and job-control signals
 /// from the parent's terminal never reach it. A new process group alone

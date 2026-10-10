@@ -1262,6 +1262,81 @@ async fn a_short_line_spanning_fills_is_forwarded_whole() {
     );
 }
 
+/// A parent's death takes its bootstrap children down: they run in
+/// their own process group (the bound's group kill needs it), which also
+/// shields them from a terminal's interrupt - so the guard stack itself
+/// must arm the parent-death signal that reaches them when the parent
+/// exits. The signal follows the spawning thread, and the bootstrap
+/// keeps that thread waiting for as long as the child runs - so here
+/// the child survives until the spawning thread's exit, then it must
+/// die by the stack's own kill.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parent_death_kills_the_bootstrap_child() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::{Arc, Mutex};
+    let child_slot: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let slot_for_thread = child_slot.clone();
+    let handle = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30");
+        // The stack the real bootstrap children spawn under: if the
+        // parent-death signal is dropped from it, this test goes red.
+        configure_bootstrap_child_spawn(&mut command);
+        let child = command.spawn().expect("spawn the child");
+        *slot_for_thread.lock().unwrap() = Some(child);
+    });
+    handle.join().expect("the spawning thread ran");
+    // The pid is read before the waiter takes the child: the failure
+    // branch below needs it to clean up.
+    let child_pid = child_slot
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("the spawned child")
+        .id() as i32;
+    // A blocking wait turns the child's death into a message, and the
+    // deadline bounds only the failure path: no polling, and the reaping
+    // happens in the waiter as part of the wait.
+    let (status_tx, status_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let status = match child_slot.lock().unwrap().take() {
+            Some(mut child) => child.wait(),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the child was never stored",
+            )),
+        };
+        let _ = status_tx.send(status);
+    });
+    let deadline = std::time::Duration::from_secs(10);
+    match status_rx.recv_timeout(deadline) {
+        Ok(Ok(status)) => {
+            // sleep(1) does not exit on its own inside the deadline:
+            // only the parent-death kill can end the child here.
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGKILL),
+                "the child must die by the parent-death SIGKILL"
+            );
+            waiter.join().expect("the waiter thread ran");
+        }
+        Ok(Err(err)) => {
+            waiter.join().expect("the waiter thread ran");
+            panic!("the child's wait failed: {err}");
+        }
+        Err(_) => {
+            // The death signal never fired: kill the stray child - the
+            // waiter's blocking wait reaps it - before failing the test.
+            unsafe {
+                libc::kill(child_pid, libc::SIGKILL);
+            }
+            waiter.join().expect("the waiter thread ran");
+            panic!("the child outlived its spawning thread");
+        }
+    }
+}
+
 /// A child that emits non-UTF-8 bytes mid-stream is forwarded mangled,
 /// never allowed to end the drain: the lines after the bad bytes still
 /// reach the reporter and the bootstrap still completes.
