@@ -404,6 +404,17 @@ impl Supervisor {
         connect_deadline: tokio::time::Instant,
         spawn_record_sync: TempSync,
     ) -> Result<Child> {
+        // No previous incarnation's process token may survive a spawn,
+        // including a spawn that fails before assigning its new PID.
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            if descriptor.rest.contains_key(crate::native_signal::KEY) {
+                let mut candidate = descriptor.clone();
+                crate::native_signal::reset(&mut candidate);
+                persist_worker_at(&resident.descriptor_path, &candidate, spawn_record_sync)?;
+                descriptor.rest = candidate.rest;
+            }
+        }
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env) = {
@@ -520,11 +531,13 @@ impl Supervisor {
         connect_deadline: tokio::time::Instant,
         auth_floor: bool,
     ) -> Result<()> {
-        let (socket_path, token) = {
+        let (socket_path, token, expected_pid, expected_instance) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 PathBuf::from(&descriptor.socket_path),
                 descriptor.authentication_token.clone(),
+                descriptor.pid,
+                descriptor.worker_instance_id.clone(),
             )
         };
         let stream = if auth_floor {
@@ -796,7 +809,7 @@ impl Supervisor {
                     "supervisorPid": std::process::id(),
                     "supervisorProcessStartId": crate::protocol::process_start_id(std::process::id()),
                     "supervisorSocketPath": self.options.socket_path.to_string_lossy(),
-                    "workerInstanceId": None::<String>,
+                    "workerInstanceId": if cfg!(target_os = "macos") { expected_instance.clone() } else { None },
                 }),
                 auth_budget_ms,
                 RouteAdmission::SupervisorInternal,
@@ -825,6 +838,31 @@ impl Supervisor {
                 "worker authentication failed: {}",
                 response.error.unwrap_or_default()
             ));
+        }
+        // A late auth reply must not grant stop authority for a newer
+        // descriptor or connection. Persist only the authenticated worker's
+        // own identity, while its PID and instance still match this handshake.
+        let native = crate::native_signal::parse(
+            response
+                .data
+                .as_ref()
+                .and_then(|data| data.get(crate::native_signal::KEY)),
+            expected_pid,
+            expected_instance.as_deref(),
+        )?;
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            if !resident.connection_is_current(connection_epoch)
+                || descriptor.pid != expected_pid
+                || descriptor.worker_instance_id != expected_instance
+            {
+                return Err(anyhow!("Worker authentication was superseded"));
+            }
+            crate::native_signal::store_durable(
+                &resident.descriptor_path,
+                &mut descriptor,
+                native.as_ref(),
+            )?;
         }
         // The handshake answered: install the channel for routing (TS
         // `worker.client = client`). A superseded connect never installs over it.

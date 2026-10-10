@@ -5,6 +5,8 @@
 
 use std::process::Command;
 
+pub use super::process_signal_identity::NativeSignalIdentity;
+
 /// Termination signal for [`kill_pid`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {

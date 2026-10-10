@@ -502,3 +502,98 @@ async fn a_lost_worker_connection_fails_its_in_flight_route() {
         .expect_err("the drained route fails");
     assert_eq!(error.to_string(), super::routing::WORKER_SOCKET_CLOSED);
 }
+
+/// A delayed authenticated answer cannot replace the native identity of a
+/// newer connection or worker incarnation, even when the numeric PID is equal.
+#[tokio::test]
+async fn superseded_auth_never_overwrites_native_worker_identity() {
+    for replace_instance in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("worker.sock");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .unwrap(),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version":2, "workerId":"w-native", "pid":4242,
+            "workerInstanceId":"original", "socketPath":socket_path.to_string_lossy(),
+            "recoveryJournalPath":"/tmp/none.jsonl", "supervisorSocketPath":"/tmp/none.sock",
+            "authenticationToken":"native-token", "rootActiveSessionId":"none",
+            "createdAt":"2026-09-23T00:00:00Z", "updatedAt":"2026-09-23T00:00:00Z",
+            "lifecycle":"ready", "createCommand":{}, "consecutiveFailures":0
+        }))
+        .unwrap();
+        let resident = ResidentWorker::new(
+            "w-native".to_string(),
+            descriptor,
+            dir.path().join("worker.json"),
+        );
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+        let listener = bind_fake_worker(&socket_path).await;
+        let connect = {
+            let supervisor = Arc::clone(&supervisor);
+            let resident = Arc::clone(&resident);
+            tokio::spawn(async move {
+                supervisor
+                    .connect_worker(&resident, worker_connect_deadline())
+                    .await
+            })
+        };
+        let mut fake = accept_fake_worker(listener).await;
+        let frame = read_supervisor_frame(&mut fake).await;
+        let request_id = frame
+            .header
+            .get("requestId")
+            .and_then(Value::as_str)
+            .unwrap();
+        let replacement =
+            json!({"version":1,"workerInstanceId":"replacement","identity":[0,0,0,0,0,4242,0,8]});
+        if replace_instance {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.worker_instance_id = Some("replacement".to_string());
+            descriptor
+                .rest
+                .insert(crate::native_signal::KEY.to_string(), replacement.clone());
+        } else {
+            resident.note_connection_live();
+        }
+        let payload = crate::protocol::response_line_bytes(&DaemonResponse {
+            id: None,
+            command: "worker_auth".to_string(),
+            success: true,
+            data: Some(json!({"capabilities":[], "nativeSignalIdentity":{
+                "version":1,"workerInstanceId":"original","identity":[0,0,0,0,0,4242,0,7]
+            }})),
+            error: None,
+            error_info: None,
+        });
+        write_frame(
+            &mut fake.write_half,
+            &json!({"kind":"outbound","requestId":request_id,"outboundType":"response"}),
+            &payload,
+            DEFAULT_PRIVATE_FRAME_LIMITS,
+        )
+        .await
+        .unwrap();
+        let error = connect
+            .await
+            .unwrap()
+            .expect_err("superseded auth must be rejected");
+        assert!(error.to_string().contains("superseded"), "{error:#}");
+        let descriptor = resident.descriptor.lock().await;
+        assert_eq!(
+            descriptor.rest.get(crate::native_signal::KEY),
+            if replace_instance {
+                Some(&replacement)
+            } else {
+                None
+            }
+        );
+        assert!(resident.cmd_tx.lock().await.is_none());
+    }
+}

@@ -163,14 +163,10 @@ impl Supervisor {
                 None => {
                     return Err(anyhow!(
                         "Invalid thinking level \"{level}\". Valid values: off, minimal, low, medium, high, xhigh, max"
-                    ))
+                    ));
                 }
             },
-            Some(_) => {
-                return Err(anyhow!(
-                    "Invalid thinking level: expected a string"
-                ))
-            }
+            Some(_) => return Err(anyhow!("Invalid thinking level: expected a string")),
         };
         let model_selection = EngineModelSelection {
             provider: config_object
@@ -753,11 +749,12 @@ impl Supervisor {
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
     ) -> bool {
-        let (pid, start_id, recovery_journal_path) = {
+        let (pid, start_id, native_identity, recovery_journal_path) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 descriptor.pid as u32,
                 descriptor.process_start_id.clone(),
+                crate::native_signal::recorded(&descriptor),
                 descriptor.recovery_journal_path.clone(),
             )
         };
@@ -767,7 +764,7 @@ impl Supervisor {
         let alive_unverified = (start_id.is_none()
             || crate::lease::get_process_start_id(pid).is_none())
             && crate::lease::is_process_alive(pid).unwrap_or(false);
-        match crate::boot_reap::stop_process(pid, start_id.clone()).await {
+        match crate::boot_reap::stop_process(pid, start_id.clone(), native_identity).await {
             crate::boot_reap::ReapOutcome::Survived => {
                 self.log_line(&format!(
                     "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",

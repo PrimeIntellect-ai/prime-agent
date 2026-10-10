@@ -7,6 +7,7 @@ pub mod fs;
 pub mod lock_dir;
 pub mod perms;
 pub mod process;
+mod process_signal_identity;
 pub mod shell;
 
 pub use fs::fsync;

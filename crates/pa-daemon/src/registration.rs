@@ -211,6 +211,13 @@ impl RegistrationTask {
         session_id: Option<&str>,
     ) -> Result<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
+        let mut rest = Map::default();
+        if let Some(identity) = crate::native_signal::report(&self.identity.worker_instance_id) {
+            rest.insert(
+                crate::native_signal::KEY.to_string(),
+                serde_json::to_value(identity)?,
+            );
+        }
         let command = DaemonCommand::WorkerRegister {
             id: Some(request_id.clone()),
             active_session_id: self.identity.active_session_id.clone(),
@@ -219,7 +226,7 @@ impl RegistrationTask {
             worker_instance_id: self.identity.worker_instance_id.clone(),
             token: self.identity.token.clone(),
             pid: u64::from(std::process::id()),
-            rest: Map::default(),
+            rest,
         };
         let envelope = json!({
             "type": "command",

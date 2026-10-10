@@ -1,0 +1,1 @@
+Fix macOS forced worker stops to use authenticated, persisted kernel process identities for TERM and KILL, retaining unverifiable legacy workers conservatively instead of risking termination of a reused PID. Preserve the existing processStartId format and Linux pidfd behavior.

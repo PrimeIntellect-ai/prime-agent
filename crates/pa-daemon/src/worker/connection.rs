@@ -619,11 +619,13 @@ impl Worker {
                 if !self.config.worker_instance_id.is_empty() {
                     capabilities.push("direct_peer_transport".to_string());
                 }
-                let success = response_success(
-                    Some(request_id),
-                    "worker_auth",
-                    Some(json!({ "capabilities": capabilities })),
-                );
+                let mut data = json!({ "capabilities": capabilities });
+                if let Some(identity) =
+                    crate::native_signal::report(&self.config.worker_instance_id)
+                {
+                    data[crate::native_signal::KEY] = json!(identity);
+                }
+                let success = response_success(Some(request_id), "worker_auth", Some(data));
                 *role.lock().unwrap() = ConnectionRole::Supervisor { generation };
                 self.supervisor_claims
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

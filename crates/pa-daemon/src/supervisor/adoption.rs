@@ -375,6 +375,7 @@ impl Supervisor {
             worker_instance_id,
             token,
             pid,
+            rest,
             ..
         } = command
         else {
@@ -389,6 +390,14 @@ impl Supervisor {
         }
         let worker_instance_id =
             (!worker_instance_id.is_empty()).then(|| worker_instance_id.clone());
+        let native = match crate::native_signal::parse(
+            rest.get(crate::native_signal::KEY),
+            *pid,
+            worker_instance_id.as_deref(),
+        ) {
+            Ok(native) => native,
+            Err(error) => return fail(&error.to_string()),
+        };
         let registration = WorkerRegistration {
             active_session_id: active_session_id.clone(),
             session_id: session_id
@@ -402,7 +411,10 @@ impl Supervisor {
         let guard = self.registry.adoption_guard(active_session_id).await;
         let resident = match self.registry.get(active_session_id).await {
             Some(resident) => resident,
-            None => match self.adopt_registered_worker(&registration, token).await {
+            None => match self
+                .adopt_registered_worker(&registration, token, native.as_ref())
+                .await
+            {
                 Ok(resident) => resident,
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -446,6 +458,15 @@ impl Supervisor {
             descriptor
                 .worker_instance_id
                 .clone_from(&worker_instance_id);
+            if let Err(error) = crate::native_signal::store_durable(
+                &resident.descriptor_path,
+                &mut descriptor,
+                native.as_ref(),
+            ) {
+                return fail(&format!(
+                    "Worker native signal identity could not persist: {error}"
+                ));
+            }
             if let Some(session_id) = &registration.session_id {
                 descriptor.root_session_id = Some(session_id.clone());
             }
@@ -457,8 +478,8 @@ impl Supervisor {
                 descriptor.root_session_id.as_deref(),
                 descriptor.session_file.as_deref(),
             );
-            // The registration refreshes the resident in memory only — no
-            // persist here. The spawn record already carries the
+            // Only a changed native identity needs a registration-time durable
+            // write. The spawn record already carries the
             // launch-time identity (pid, socket), and the create-completion
             // persist (`launch_worker`'s post-create write) owns the next
             // durable state — `Ready` with the session identity — as the
@@ -529,6 +550,7 @@ impl Supervisor {
         self: &Arc<Self>,
         registration: &WorkerRegistration,
         token: &str,
+        native: Option<&crate::native_signal::WorkerSignalIdentity>,
     ) -> Result<Arc<ResidentWorker>> {
         let descriptor_path = self
             .descriptor_dir
@@ -579,6 +601,7 @@ impl Supervisor {
             // registrant's live identity keeps the escalation tied to the live process.
             {
                 let mut descriptor = resident.descriptor.lock().await;
+                crate::native_signal::reset(&mut descriptor);
                 if descriptor.pid != registration.pid {
                     descriptor.pid = registration.pid;
                 }
@@ -586,7 +609,11 @@ impl Supervisor {
                 {
                     descriptor.process_start_id = Some(start_id);
                 }
-                let _ = crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor);
+                descriptor
+                    .worker_instance_id
+                    .clone_from(&registration.worker_instance_id);
+                crate::native_signal::store(&mut descriptor, native)?;
+                crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)?;
             }
             self.finish_tombstoned_stop(&resident, true).await;
             return Err(anyhow!(
