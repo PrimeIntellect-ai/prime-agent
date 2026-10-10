@@ -710,6 +710,12 @@ impl Supervisor {
                 );
                 self.lease_loss_fence(&mut boot_tasks).await;
                 adoption_fanout.wait_drained().await;
+                // The lease is consumed through its awaited SHUTDOWN, not a
+                // plain drop: a drop on the Tokio worker joins the refresh
+                // thread (and its up-to-350ms in-thread grace wait) right
+                // there, stalling signal_drain and catalog refresh work -
+                // the exact stall shutdown exists to avoid.
+                drop(socket_lease.shutdown().await);
                 return Err(anyhow!("daemon socket lease compromised"));
             }
             () = boot_ownership => {},
@@ -745,6 +751,10 @@ impl Supervisor {
             self.mark_supervisor_shutting_down();
             self.lease_loss_fence(&mut boot_tasks).await;
             adoption_fanout.wait_drained().await;
+            // The lease shutdown runs off the Tokio worker (the refresh
+            // thread's join and its in-thread grace wait would otherwise
+            // stall in-flight signal_drain and catalog work at the drop).
+            drop(socket_lease.shutdown().await);
             return Err(error);
         }
         // The archive-sweep and update-prepare-watchdog passes already

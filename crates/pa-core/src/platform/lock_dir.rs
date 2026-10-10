@@ -1137,16 +1137,13 @@ impl LockDir {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            match setup_private_dir(
+            let placeholder_identity = match setup_private_dir(
                 &placeholder,
                 0o700,
                 Some(&process_owner_record()),
                 Some(&note),
             ) {
-                Ok(_handle) => {
-                    // Setup complete: the notes live inside the pinned
-                    // inode; the exchange operates on pathnames.
-                }
+                Ok((_handle, identity)) => Some(identity),
                 Err(error) if is_fresh_name_swap(&error) => {
                     // A swapped entry at the fresh private name (ELOOP
                     // from the no-follow refusal, the emptiness or the
@@ -1164,7 +1161,7 @@ impl LockDir {
                     let _ = remove_candidate_dir(&placeholder);
                     return Err(error);
                 }
-            }
+            };
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
                     let claimed = identity_at(&placeholder);
@@ -1220,7 +1217,27 @@ impl LockDir {
                             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                                 return Err(error);
                             }
-                            Err(error) => return Err(error),
+                            Err(error) => {
+                                // The swap-home failed: the public path
+                                // may still hold THIS dance's own
+                                // live-owned placeholder, which a later
+                                // acquire in this very process would
+                                // judge a foreign live lock and wedge
+                                // behind until exit. Only a positive
+                                // identity match against the creation
+                                // witness proves the entry is this
+                                // dance's placeholder before its
+                                // removal - an ambiguous exchange may
+                                // have seated the LIVE lease home at
+                                // the public path instead, and that is
+                                // never this call's to remove.
+                                if placeholder_identity
+                                    .is_some_and(|expected| identity_at(path) == Some(expected))
+                                {
+                                    let _ = remove_candidate_dir(path);
+                                }
+                                return Err(error);
+                            }
                         }
                         return Ok(StaleClaim::Successor);
                     }
