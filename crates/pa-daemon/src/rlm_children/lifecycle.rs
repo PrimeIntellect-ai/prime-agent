@@ -655,6 +655,43 @@ impl SupervisorChildSessionsInner {
         error: String,
         arm: FailedArm,
     ) -> bool {
+        // The exit capture (the M4 seam): a child that dies without
+        // reporting still said something — the live worker's last
+        // assistant text when it is still reachable, else the durable
+        // session file's last assistant row. It lands on the record only
+        // when no answer was captured, so a positive verdict's capture
+        // stands; the parent-side reader (the factory's provisional
+        // answer) sees what the child last said instead of a bare
+        // failure row.
+        let (active_session_id, session_file) = {
+            let record = record.lock().await;
+            if record.answer_captured && record.answer_preview.is_some() {
+                (record.active_session_id.clone(), None)
+            } else {
+                (
+                    record.active_session_id.clone(),
+                    record.session_file.clone(),
+                )
+            }
+        };
+        let exit_text = self
+            .child_answer_raw(&active_session_id)
+            .await
+            .ok()
+            .flatten();
+        let exit_text = if exit_text.is_some() {
+            exit_text
+        } else {
+            match session_file.filter(|path| !path.is_empty()) {
+                Some(path) => {
+                    tokio::task::spawn_blocking(move || last_assistant_text_from_file(&path))
+                        .await
+                        .ok()
+                        .flatten()
+                }
+                None => None,
+            }
+        };
         let message = {
             let mut record = record.lock().await;
             let keep_verdict = match arm {
@@ -670,6 +707,13 @@ impl SupervisorChildSessionsInner {
             }
             record.settled_status = Some("error");
             record.notice_delivered = true;
+            if let Some(text) = exit_text {
+                if !record.answer_captured || record.answer_preview.is_none() {
+                    record.answer_preview = Some(compact_rlm_text(&text));
+                    record.answer_text = Some(cap_text(&text, ANSWER_TEXT_MAX_CHARS));
+                    record.answer_captured = true;
+                }
+            }
             let message = create_rlm_child_failure_message(
                 &record.rlm_child_id,
                 &record.session_name,
@@ -754,4 +798,108 @@ pub(super) enum FailedArm {
 /// stays the representation.
 pub(super) fn should_mark_unreachable_error(state: &ChildRecord) -> bool {
     !(state.closed_by_parent || state.notice_delivered || state.settled_status.is_some())
+}
+
+/// The child's last assistant text from its durable session file (the exit
+/// capture's fallback when the worker is already gone): the file is the
+/// record a worker replacement replays from, so its last assistant row is
+/// the child's final say even after a crash. The newest non-empty text row
+/// wins; a file with no assistant rows (the prompt arm's never-started
+/// turn) answers nothing.
+pub(super) fn last_assistant_text_from_file(session_file: &str) -> Option<String> {
+    let content = std::fs::read_to_string(session_file).ok()?;
+    for line in content.lines().rev() {
+        let Ok(pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(assistant),
+            ..
+        }) = serde_json::from_str::<pa_types::session::FileEntry>(line.trim())
+        else {
+            continue;
+        };
+        let text = assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect::<String>();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod exit_capture_tests {
+    use super::*;
+
+    /// One serialized assistant row with the given text.
+    fn assistant_row(text: &str) -> String {
+        let message = pa_types::session::AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: text.to_string(),
+                    text_signature: None,
+                    rest: Map::default(),
+                },
+            )],
+            api: "faux".to_string(),
+            provider: "faux".to_string(),
+            model: "faux-1".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 2,
+            rest: Map::default(),
+        });
+        let entry = pa_types::session::FileEntry::Message {
+            message,
+            base: pa_types::session::EntryBase {
+                id: Some("row-1".to_string()),
+                parent_id: None,
+                timestamp: None,
+                rest: Map::default(),
+            },
+        };
+        serde_json::to_string(&entry).expect("serialize the assistant row")
+    }
+
+    /// The exit capture reads the child's last say from its durable file
+    /// after the worker is gone: the newest non-empty assistant text wins.
+    #[test]
+    fn the_exit_capture_reader_takes_the_last_assistant_row() {
+        let file = std::env::temp_dir().join(format!(
+            "pa-rlm-exit-capture-{}.jsonl",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let user_row = r#"{"type":"message","role":"user","content":"the task"}"#;
+        std::fs::write(
+            &file,
+            format!(
+                "{user_row}\n{}\n{}\n",
+                assistant_row("an earlier turn's say"),
+                assistant_row("the final say")
+            ),
+        )
+        .expect("write the session file");
+        let text = last_assistant_text_from_file(&file.to_string_lossy())
+            .expect("the last assistant row is readable");
+        assert_eq!(text, "the final say");
+        // A file with no assistant rows (the prompt arm's never-started
+        // turn) answers nothing.
+        let bare = std::env::temp_dir().join(format!(
+            "pa-rlm-exit-capture-bare-{}.jsonl",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&bare, format!("{user_row}\n")).expect("write the bare file");
+        assert_eq!(last_assistant_text_from_file(&bare.to_string_lossy()), None);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(&bare);
+    }
 }

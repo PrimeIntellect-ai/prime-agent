@@ -1037,6 +1037,46 @@ async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently
     assert_eq!(again.subagent.status, "cancelled");
 }
 
+/// The exit capture (the M4 seam): an unreachable child settles `error`
+/// through the give-up, but its last assistant text still lands on the row —
+/// the live read first, the durable session file second — so the parent-side
+/// reader (the factory's provisional answer) sees the child's final say, not
+/// a bare failure row.
+#[tokio::test(start_paused = true)]
+async fn a_failed_settle_captures_the_childs_last_assistant_text() {
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+        }
+    });
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Unreachable)
+            .await;
+    let handle = spawn_child(&sessions).await;
+    let settled = sessions.settle_notified();
+    sessions.notify_turn_done();
+    tokio::time::timeout(Duration::from_secs(3_600), settled)
+        .await
+        .expect("the unreachable give-up settles the child as failed");
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the failed child");
+    assert_eq!(results[0].status, "error");
+    assert_eq!(
+        results[0].answer_preview.as_deref(),
+        Some("the child final answer"),
+        "the exit capture preserved the last assistant text on the failed row"
+    );
+    assert_eq!(
+        results[0].answer_text.as_deref(),
+        Some("the child final answer"),
+        "the binding lane carries the exit capture"
+    );
+}
+
 /// The collect envelope carries the settled child's full final answer as its
 /// binding lane (the factory's output capture binds the whole fenced JSON from
 /// it), while the roster preview stays the compact form; the deleted envelope's

@@ -1350,7 +1350,10 @@ class _NodeInstance:
     child_id: str | None = None
     spawned_at: float | None = None
     duration_ms: int | None = None
-    answer: str | None = None  # capped collect preview (ANSWER_CAPTURE_CAP)
+    answer: str | None = None  # the binding lane's captured answer (ANSWER_BINDING_CAP)
+    provisional: bool = False  # the answer came from a child EXIT, not a
+    # settle: the state reads needs-verify instead of silently counting the
+    # exit's last assistant text as delivered work (the M4 class).
     error: str | None = None
     tool_uses: int = 0
 
@@ -1374,6 +1377,10 @@ class _StateEntry:
     output_errors: dict[str, str] | None = None  # ports whose json capture failed
     is_settle: bool = False  # True once the entry settled (done or error)
     consumed: bool = False  # True once the settle's transitions were evaluated
+    needs_verify: bool = False  # a child exit carried a provisional answer
+    # (the M4 oversight mark): the entry failed, but the child's last
+    # assistant text is preserved as a provisional answer and the run
+    # surfaces the state in status()["needs_verify"].
 
 
 @dataclass
@@ -1436,6 +1443,10 @@ class FactoryRun:
     run_budget_ms: int | None = None
     budget_reported: bool = False
     pause_reason: str | None = None
+    # The last entry-failure reason (admission or binding): a paused run's
+    # status payload carries it with a one-line remedy (the M6 class), so
+    # an operator reads WHAT failed from status() instead of archaeology.
+    last_error: str | None = None
     states: dict[str, _StateRun] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
     transitions_from: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -1612,7 +1623,7 @@ class FactoryExecutor:
         for event in run.events:
             if event["stage"] in ("recorded", "arrived"):
                 event["stage"] = "delivered"
-        return {
+        payload: dict[str, Any] = {
             "run_id": run.run_id,
             "spec_id": run.spec_id,
             "name": run.name,
@@ -1622,6 +1633,29 @@ class FactoryExecutor:
             "elapsed_ms": int((self._now_fn() - run.started_at) * 1000),
             "usage": self._usage_report(run),
         }
+        # The M4 oversight signal: every state whose latest terminal entry
+        # carried a provisional answer (a child exit) needs verification —
+        # root-visible without ledger archaeology.
+        needs_verify = [
+            state_id
+            for state_id in run.order
+            if any(entry.needs_verify for entry in run.states[state_id].entries)
+        ]
+        if needs_verify:
+            payload["needs_verify"] = needs_verify
+        # A paused run carries the LAST failed admission/bind error and a
+        # one-line remedy (the M6 class), so the operator reads WHAT failed
+        # and what to do next from status() alone.
+        if run.state == "paused":
+            payload["pause_reason"] = run.pause_reason
+            if run.last_error is not None:
+                payload["last_error"] = run.last_error
+                payload["remedy"] = (
+                    f"resume with await rlm.factory.resume('{run.run_id}') to continue the "
+                    "remaining states; the failed state stays error - fix its subagent and "
+                    "start a fresh run to redo it"
+                )
+        return payload
 
     async def stop(self, run_id: str) -> dict[str, Any]:
         """Cancel every running child of the run and mark it stopped.
@@ -1711,8 +1745,7 @@ class FactoryExecutor:
             "entries_used": state.entries_used,
             "max_entries": state.max_entries,
             "entries": [
-                {"index": entry.index, "status": entry.status, "error": entry.error}
-                for entry in state.entries
+                self._entry_report(entry) for entry in state.entries
             ],
             "instances": [
                 {
@@ -1748,7 +1781,27 @@ class FactoryExecutor:
                 report["answer_preview"] = latest.answer[:ANSWER_CAPTURE_CAP]
         if state.error is not None:
             report["error"] = state.error
+        if any(entry.needs_verify for entry in state.entries):
+            report["needs_verify"] = True
         return report
+
+    def _entry_report(self, entry: _StateEntry) -> dict[str, Any]:
+        """One entry's report row: its status/error plus, for a needs-verify
+        entry, the provisional answer the child exit captured (compacted)."""
+        row: dict[str, Any] = {"index": entry.index, "status": entry.status, "error": entry.error}
+        if entry.needs_verify:
+            row["needs_verify"] = True
+            provisional = next(
+                (
+                    instance.answer
+                    for instance in reversed(entry.instances)
+                    if instance.provisional and instance.answer
+                ),
+                None,
+            )
+            if provisional is not None:
+                row["provisional_answer"] = provisional[:ANSWER_CAPTURE_CAP]
+        return row
 
     def _usage_report(self, run: FactoryRun) -> dict[str, Any]:
         """The usage block ``status()`` returns; the graph snapshot reuses it."""
@@ -2746,6 +2799,18 @@ class FactoryExecutor:
         elif result.status != "done":
             child_reason = f"child settled with unexpected status {result.status!r}"
         if child_reason is not None:
+            # The exit capture (the M4 class): an exited child's last
+            # assistant text — whatever the exit envelope carried — is a
+            # PROVISIONAL answer. The child may have finished its work and
+            # died without reporting; the answer is preserved on the
+            # instance and the state reads needs-verify instead of silently
+            # counting the exit as settled work.
+            exit_answer = (
+                (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+            )
+            if exit_answer:
+                instance.answer = exit_answer
+                instance.provisional = True
             # Child failures retry (same rendered prompt, attempts+1) while
             # attempts remain; then the entry failure_policy applies.
             await self._apply_instance_failure(run, state, entry, instance, child_reason, retry=True)
@@ -2773,6 +2838,7 @@ class FactoryExecutor:
         instance.answer = (
             (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
         )
+        instance.provisional = False  # a real settle supersedes any exit capture
         self._event(
             run,
             "settled",
@@ -2965,6 +3031,21 @@ class FactoryExecutor:
         entry.status = "error"
         entry.error = reason
         state.error = reason
+        run.last_error = f"state {state.state_id!r} failed: {reason}"
+        if any(instance.provisional and instance.answer for instance in entry.instances):
+            # An exit with a provisional answer is distinguishable from
+            # completed work only through the verify mark: the entry keeps
+            # its error verdict, but the preserved answer and the
+            # status-level needs_verify signal hand the operator the
+            # revival-race decision instead of a silent drop.
+            entry.needs_verify = True
+            self._event(
+                run,
+                "needs_verify",
+                node=state.state_id,
+                entry=entry.index,
+                detail="child exit captured a provisional answer - verify the remote state",
+            )
         self._event(run, "node_error", node=state.state_id, entry=entry.index, error=reason, detail=f"failure_policy {policy}")
         # The entry is terminal: its prepared-but-never-admitted instances
         # (a foreach queue behind max_parallel, or a rate-limit deferral)
@@ -4784,6 +4865,11 @@ status["events"]   # trailing ledger: spawned, settled, answer_captured,
                    # transition_fired, node_error, milestone, ...
 status["usage"]    # spawns, settled, tool_uses, max_parallel, max_children, running,
                     # transitions_fired
+status["needs_verify"]  # (when set) states whose child EXITED carrying a
+                        # provisional answer - verify the remote state; the
+                        # entry row carries the provisional_answer preview
+status["pause_reason"]  # (paused) why the run paused; with "last_error" (the
+status["last_error"]    # last admission/bind failure) and a one-line "remedy"
 ```
 
 `graph()` and `watch()` are the live monitoring views this namespace

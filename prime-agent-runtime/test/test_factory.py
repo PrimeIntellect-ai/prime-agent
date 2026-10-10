@@ -5763,6 +5763,83 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
 
     @async_test
+    async def test_child_exit_captures_a_provisional_answer_and_marks_needs_verify(self) -> None:
+        # M4: a child that dies without reporting is distinguishable from
+        # completed work. The exit envelope's last assistant text is
+        # captured as a PROVISIONAL answer, the state's entry row reports
+        # needs_verify with that answer, and status() carries the
+        # root-visible needs_verify signal — the exit never silently
+        # counts as settled work.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "worker exited mid-flight",
+            "answer": "The CI gate ran clean on lane A; the report is at /tmp/report.md.",
+        }
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "work", "entry": True, "subagent": "worker"},
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["needs_verify"], ["work"])
+        work = self.state_report(status, "work")
+        self.assertEqual(work["needs_verify"], True)
+        entry_row = work["entries"][0]
+        self.assertEqual(entry_row["status"], "error")
+        self.assertEqual(entry_row["needs_verify"], True)
+        self.assertIn("report is at /tmp/report.md", entry_row["provisional_answer"])
+        self.assertEqual(
+            [event["node"] for event in self.all_events_of(result, "needs_verify")],
+            ["work"],
+        )
+        # The exit is not silently counted as a settled answer: the usage
+        # stays a plain error settle and no answer_captured row lands.
+        self.assertEqual(self.all_events_of(result, "answer_captured"), [])
+        self.assertEqual(status["usage"]["settled"], 1)
+
+    @async_test
+    async def test_paused_run_status_carries_the_last_error_and_remedy(self) -> None:
+        # M6: a paused run carries the LAST failed admission/bind error and
+        # a one-line remedy in its status payload — no root-side
+        # archaeology over pending-state lists to learn what failed.
+        self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": "worker",
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data"}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(
+            status["pause_reason"],
+            "input 'data': no JSON object containing output 'data' in the upstream answer",
+        )
+        self.assertIn("state 'dep' failed", status["last_error"])
+        self.assertIn("no JSON object containing output 'data'", status["last_error"])
+        self.assertIn(f"rlm.factory.resume('{result['run_id']}')", status["remedy"])
+
+    @async_test
     async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
         # The boundary the authoring reference pins: "their required input
         # over the failed source then fails the dependent entry". Only the
