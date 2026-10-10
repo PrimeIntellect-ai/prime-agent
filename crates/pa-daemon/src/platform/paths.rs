@@ -1,17 +1,36 @@
 //! Per-OS daemon endpoint naming: Unix socket files under
-//! `<tmpdir>/prime-agent-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
-//! namespace (fixed daemon pipe, hashed worker pipes) - the TS product's
-//! exact split.
+//! `<tmpdir>/prime-agent-<uid>/`, with a short `/tmp` fallback on macOS;
+//! Windows named pipes in the `\\.\\pipe\\` namespace (fixed daemon pipe,
+//! hashed worker pipes).
 use std::path::{Path, PathBuf};
 
 use crate::paths::hash_key;
 
-/// Default directory holding daemon socket files (Unix).
+/// Default directory holding daemon socket files, reserving room for workers.
 #[cfg(unix)]
 pub fn socket_dir() -> PathBuf {
     let uid = pa_core::platform::process::current_user_id();
     let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    tmp.join(format!("prime-agent-{uid}"))
+    socket_dir_for_tmp(&tmp, uid)
+}
+
+/// Reserve room for the longest generated endpoint, not just daemon.sock.
+/// Linux re-anchors deep endpoints through directory descriptors. macOS
+/// cannot, so use a short per-user directory when TMPDIR would not fit.
+#[cfg(unix)]
+fn socket_dir_for_tmp(tmp: &Path, uid: u32) -> PathBuf {
+    let name = format!("prime-agent-{uid}");
+    let directory = tmp.join(&name);
+    #[cfg(target_os = "macos")]
+    {
+        let worker_name_bytes = "worker-".len() + 12 + 1 + 12 + ".sock".len();
+        if directory.as_os_str().len() + 1 + worker_name_bytes
+            > pa_types::platform::transport::MAX_UNIX_SOCKET_PATH_BYTES
+        {
+            return Path::new("/tmp").join(name);
+        }
+    }
+    directory
 }
 
 /// The socket-dir half of a discovery state root on Windows: TS computes
@@ -36,7 +55,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
     PathBuf::from(r"\\.\pipe\prime-agent-daemon")
 }
 
-/// Worker endpoint next to the supervisor's: hashed supervisor key plus the
+/// Worker endpoint in the socket directory: hashed supervisor key plus the
 /// worker id prefix (TS `workerSocketPath`).
 #[cfg(unix)]
 #[must_use]
@@ -77,10 +96,31 @@ mod tests {
             .unwrap();
         assert!(output.status.success());
         let uid = String::from_utf8(output.stdout).unwrap();
-        let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         assert_eq!(
-            socket_dir(),
-            tmp.join(format!("prime-agent-{}", uid.trim()))
+            socket_dir().file_name().unwrap(),
+            std::ffi::OsStr::new(&format!("prime-agent-{}", uid.trim()))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn socket_directory_reserves_space_for_workers_at_the_native_limit() {
+        use pa_types::platform::transport::MAX_UNIX_SOCKET_PATH_BYTES;
+        let uid = 501;
+        let worker_name = "worker-0123456789ab-0123456789ab.sock";
+        let user_directory = format!("prime-agent-{uid}");
+        let tmp_len = MAX_UNIX_SOCKET_PATH_BYTES - worker_name.len() - user_directory.len() - 2;
+        let tmp = PathBuf::from(format!("/{}", "t".repeat(tmp_len - 1)));
+        let directory = socket_dir_for_tmp(&tmp, uid);
+        assert_eq!(directory, tmp.join(&user_directory));
+        assert_eq!(
+            directory.join(worker_name).as_os_str().len(),
+            MAX_UNIX_SOCKET_PATH_BYTES
+        );
+        let too_long = PathBuf::from(format!("{}t", tmp.display()));
+        assert_eq!(
+            socket_dir_for_tmp(&too_long, uid),
+            Path::new("/tmp").join(user_directory)
         );
     }
 

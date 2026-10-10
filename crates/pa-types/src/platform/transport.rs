@@ -53,9 +53,13 @@ impl TransportListener for tokio::net::UnixListener {
     }
 }
 
-/// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
-#[cfg(unix)]
-const MAX_SUN_PATH: usize = 107;
+/// Maximum filesystem endpoint length, excluding the terminating NUL.
+/// macOS has a 104-byte `sun_path`; Linux has 108 bytes. Endpoint naming
+/// uses this transport contract to keep generated paths bindable.
+#[cfg(target_os = "macos")]
+pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = 103;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
 
 /// A kernel-valid `AF_UNIX` address for `bind`/`connect`. Paths within the limit pass through; a
 /// longer path is re-anchored through an `O_PATH` descriptor on its parent
@@ -79,7 +83,7 @@ impl UnixSocketAddress {
     /// Resolve `path` into a kernel-valid `AF_UNIX` address, or fail with the
     /// original path in the message.
     fn new(path: &Path) -> Result<Self> {
-        if path.as_os_str().len() <= MAX_SUN_PATH {
+        if path.as_os_str().len() <= MAX_UNIX_SOCKET_PATH_BYTES {
             return Ok(Self {
                 address: path.to_path_buf(),
                 _dir: None,
@@ -96,7 +100,7 @@ impl UnixSocketAddress {
         #[cfg(not(target_os = "linux"))]
         {
             anyhow::bail!(
-                "AF_UNIX socket path exceeds the {MAX_SUN_PATH}-byte limit: {}",
+                "AF_UNIX socket path exceeds the {MAX_UNIX_SOCKET_PATH_BYTES}-byte limit: {}",
                 path.display()
             )
         }
@@ -126,9 +130,9 @@ impl UnixSocketAddress {
             dir.as_raw_fd(),
             name.to_string_lossy()
         ));
-        if address.as_os_str().len() > MAX_SUN_PATH {
+        if address.as_os_str().len() > MAX_UNIX_SOCKET_PATH_BYTES {
             anyhow::bail!(
-                "AF_UNIX socket path exceeds the {MAX_SUN_PATH}-byte limit: {}",
+                "AF_UNIX socket path exceeds the {MAX_UNIX_SOCKET_PATH_BYTES}-byte limit: {}",
                 path.display()
             );
         }
@@ -364,6 +368,7 @@ pub fn connect_blocking(path: &Path) -> std::io::Result<Box<dyn BlockingTranspor
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::FileTypeExt;
 
     /// A directory whose full path length is exactly `target` bytes; falls
@@ -391,13 +396,16 @@ mod tests {
         dir
     }
 
+    // Only Linux supports the directory-descriptor re-anchor; macOS rejects
+    // over-limit explicit paths, and generated endpoints fall back at naming.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn over_limit_paths_bind_connect_and_land_in_place() {
         use tokio::io::AsyncReadExt;
         let dir = dir_of_exact_len("roundtrip", 120);
         let socket = dir.join("worker-test.sock");
         let _ = std::fs::remove_file(&socket);
-        assert!(socket.as_os_str().len() > MAX_SUN_PATH);
+        assert!(socket.as_os_str().len() > MAX_UNIX_SOCKET_PATH_BYTES);
 
         bind_transport(&socket)
             .await
@@ -435,9 +443,9 @@ mod tests {
     #[tokio::test]
     async fn paths_at_the_limit_bind_directly() {
         let dir = dir_of_exact_len("boundary", 96);
-        let name = "x".repeat(MAX_SUN_PATH - dir.as_os_str().len() - 1);
+        let name = "x".repeat(MAX_UNIX_SOCKET_PATH_BYTES - dir.as_os_str().len() - 1);
         let socket = dir.join(name);
-        assert_eq!(socket.as_os_str().len(), MAX_SUN_PATH);
+        assert_eq!(socket.as_os_str().len(), MAX_UNIX_SOCKET_PATH_BYTES);
         bind_transport(&socket)
             .await
             .expect("bind at exactly the limit");
@@ -448,7 +456,7 @@ mod tests {
     async fn over_limit_paths_without_a_short_name_error_clearly() {
         let dir = dir_of_exact_len("toolong", 120);
         let socket = dir.join("n".repeat(120));
-        assert!(socket.as_os_str().len() > MAX_SUN_PATH);
+        assert!(socket.as_os_str().len() > MAX_UNIX_SOCKET_PATH_BYTES);
         let error = bind_transport(&socket)
             .await
             .err()
