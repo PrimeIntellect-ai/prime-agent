@@ -400,6 +400,7 @@ class App:
         self._lines: list[str] | None = None
         self._state: str | None = None
         self._shot_size: tuple[float, float] | None = None
+        self._shot_cg: tuple[float, float, float, float] | None = None
         self._shot_rect: tuple[float, float, float, float] | None = None
         self._shot_window_id: int | None = None
 
@@ -478,23 +479,27 @@ class App:
                 {},
             )
         # the window-id capture renders the LIVE window whatever its current
-        # size, so the pixel-to-logical scale must divide by the live bounds -
-        # a resize between the observation and this capture would otherwise
-        # leave the scale stale and map image clicks to the wrong screen
-        # points. An unreadable live rect falls back to the observed one.
+        # size, so the pixel-to-logical scale must divide by the LIVE Quartz
+        # bounds - a resize between the observation and this capture would
+        # otherwise leave the scale stale. The Quartz frame at capture is
+        # stored SEPARATELY from the AX rect (a different coordinate
+        # provenance); an unreadable Quartz frame keeps _shot_rect as the AX
+        # rect for the capture's own fallback params, and image clicks fail
+        # closed while no Quartz baseline exists.
         live_bounds = capture._live_window_bounds(observation.window_id)
-        rect = live_bounds if live_bounds is not None else rect
+        capture_rect = live_bounds if live_bounds is not None else rect
         # screencapture blocks for up to its timeout, so it must not stall the
         # kernel's event loop; the observation is snapshotted once so a
         # concurrent re-observe cannot re-tag the image with another window
         result = await asyncio.to_thread(
             capture._screenshot_window,
-            (int(round(rect[0])), int(round(rect[1]))),
-            (int(round(rect[2])), int(round(rect[3]))),
+            (int(round(capture_rect[0])), int(round(capture_rect[1]))),
+            (int(round(capture_rect[2])), int(round(capture_rect[3]))),
             window_id=observation.window_id,
         )
         self._shot_size = (float(result["width"]), float(result["height"]))
         self._shot_rect = rect
+        self._shot_cg = live_bounds
         self._shot_window_id = observation.window_id
         if attach:
             await capture._attach_image_if_available(str(result["path"]))
@@ -1194,10 +1199,11 @@ class App:
             # a resized one rejects, and an unreadable frame fails closed
             # at any pixel ratio - a 1x capture just scales by one
             live = capture._live_window_bounds(self._shot_window_id)
-            if live is None:
+            if live is None or self._shot_cg is None:
                 # the stale AX rect cannot verify the window's current size,
-                # so an unreadable live frame fails closed: an unverifiable
-                # window never takes image-coordinate clicks
+                # so an unreadable Quartz frame fails closed - at the click or
+                # at the capture: an unverifiable window never takes
+                # image-coordinate clicks
                 raise ComputerUseError(
                     "TRANSPORT_ERROR",
                     "the focused window's current bounds are unreadable; take a fresh screenshot "
@@ -1205,7 +1211,7 @@ class App:
                     {},
                 )
             frame = live
-            if (float(frame[2]), float(frame[3])) != (float(self._shot_rect[2]), float(self._shot_rect[3])):
+            if (float(frame[2]), float(frame[3])) != (float(self._shot_cg[2]), float(self._shot_cg[3])):
                 # a resize reflows the UI: the stale image's points may stay
                 # in bounds yet target the wrong control, so only a same-size
                 # move keeps the image transferable - a resize needs a new
@@ -1213,14 +1219,14 @@ class App:
                 raise ComputerUseError(
                     "INVALID_ARGUMENT",
                     f"the window resized since the screenshot "
-                    f"({float(self._shot_rect[2]):.0f}x{float(self._shot_rect[3]):.0f} at capture, "
+                    f"({float(self._shot_cg[2]):.0f}x{float(self._shot_cg[3]):.0f} at capture, "
                     f"{float(frame[2]):.0f}x{float(frame[3]):.0f} now); take a fresh screenshot",
                     {"point": repr(point)[:64]},
                 )
-            if shot != (float(self._shot_rect[2]), float(self._shot_rect[3])):
+            if shot != (float(self._shot_cg[2]), float(self._shot_cg[3])):
                 scaled = (
-                    float(point[0]) * float(self._shot_rect[2]) / shot[0],
-                    float(point[1]) * float(self._shot_rect[3]) / shot[1],
+                    float(point[0]) * float(self._shot_cg[2]) / shot[0],
+                    float(point[1]) * float(self._shot_cg[3]) / shot[1],
                 )
             else:
                 scaled = (float(point[0]), float(point[1]))

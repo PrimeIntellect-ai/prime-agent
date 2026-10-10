@@ -1416,10 +1416,11 @@ class RetinaScaleTests(AppTestCase):
         env.live_window_bounds = (100.0, 50.0, 800.0, 600.0)
         await app.get_screenshot(attach=False)
         self.assertEqual(
-            app._shot_rect,
+            app._shot_cg,
             (100.0, 50.0, 800.0, 600.0),
-            "the pixel-to-logical scale must divide by the window's LIVE bounds",
+            "the pixel-to-logical scale must divide by the window's LIVE Quartz bounds",
         )
+        self.assertEqual(app._shot_rect, (100.0, 50.0, 400.0, 300.0), "the AX rect keeps its own provenance")
 
     async def test_an_image_click_after_a_resize_lands_on_the_live_element(self) -> None:
         env = self.make_env()
@@ -1483,6 +1484,20 @@ class RetinaScaleTests(AppTestCase):
         # probe fails: the stale AX rect would match the shot and the click
         # would land on a reflowed UI
         env.live_bounds_unreadable = True
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.click((400.0, 300.0))
+        self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
+        self.assertIn("fresh screenshot", caught.exception.message)
+        self.assertEqual(env.recorder.calls_named("click"), [])
+
+    async def test_a_capture_time_unreadable_live_frame_fails_image_clicks(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 800, "height": 600}
+        env.live_bounds_unreadable = True  # the Quartz read fails at capture time
+        await app.get_screenshot(attach=False)
+        env.live_bounds_unreadable = False  # ...and recovers before the click
         with self.assertRaises(errors.ComputerUseError) as caught:
             await app.click((400.0, 300.0))
         self.assertEqual(caught.exception.code, "TRANSPORT_ERROR")
