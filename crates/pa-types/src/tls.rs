@@ -22,9 +22,10 @@
 //!   named paths.
 //! - Both channels compose: `NODE_EXTRA_CA_CERTS` is appended to whatever
 //!   base the `SSL_CERT_*` variables leave.
-//! - A missing, unreadable, or invalid source behind an explicitly-set
-//!   variable is a loud [`TlsTrustError`] naming the variable and the path
-//!   — never a silently ignored trust change.
+//! - A missing, unreadable, invalid, or zero-certificate source behind an
+//!   explicitly-set variable is a loud [`TlsTrustError`] naming the
+//!   variable and the path — never a silently ignored trust change.
+//! - An empty value is unset (Node and OpenSSL both ignore it).
 //! - When none of the variables is set, nothing changes: the helpers report
 //!   `Ok(None)` and the caller keeps its existing default TLS behavior.
 
@@ -60,7 +61,8 @@ pub enum TlsTrustError {
         cause: String,
     },
     /// The platform's native root store — the base the extra certificate
-    /// authorities are appended to — could not be loaded.
+    /// authorities are appended to — loaded no roots at all and reported
+    /// errors (per-entry damage next to loaded roots is tolerated).
     #[error("the native/system root store cannot be loaded: {0}")]
     NativeStore(String),
 }
@@ -100,8 +102,9 @@ impl TlsAlpn {
 /// # Errors
 ///
 /// Returns [`TlsTrustError`] when an explicitly-set variable points at a
-/// source that cannot be loaded or parsed, or the platform's native root
-/// store cannot be loaded.
+/// source that cannot be loaded or parsed or loads no certificates, or the
+/// platform's native root store loaded no roots at all with errors (partial
+/// damage — errors next to loaded roots — is tolerated).
 pub fn extra_ca_store() -> Result<Option<RootCertStore>, TlsTrustError> {
     let extras = env_path(EXTRA_CA_CERTS_ENV);
     let ssl_file = env_path(SSL_CERT_FILE_ENV);
@@ -124,11 +127,7 @@ pub fn extra_ca_store() -> Result<Option<RootCertStore>, TlsTrustError> {
     } else {
         // The base the extras are appended to: the platform's native trust
         // store.
-        let result = rustls_native_certs::load_native_certs();
-        if let Some(error) = result.errors.first() {
-            return Err(TlsTrustError::NativeStore(error.to_string()));
-        }
-        store.add_parsable_certificates(result.certs);
+        store = native_base_store(rustls_native_certs::load_native_certs())?;
     }
     if let Some(path) = &extras {
         for certificate in load_extra_certificates(path)? {
@@ -162,9 +161,13 @@ pub fn extra_ca_client_config(alpn: TlsAlpn) -> Result<Option<ClientConfig>, Tls
     Ok(Some(config))
 }
 
-/// An explicitly-set variable's path (`None` when unset).
+/// An explicitly-set variable's path (`None` when unset or set to an empty
+/// value: Node and OpenSSL both treat an empty value as unset, the way
+/// `env_dirs` treats an empty list).
 fn env_path(variable: &str) -> Option<PathBuf> {
-    std::env::var_os(variable).map(PathBuf::from)
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// An explicitly-set directory list variable's non-empty entries (empty when
@@ -183,7 +186,11 @@ fn env_dirs(variable: &str) -> Vec<PathBuf> {
 /// Add the certificates at one named source to `store`, failing loud when
 /// the source cannot be read or parsed (the `rustls-native-certs` loader
 /// reports per-path I/O and PEM errors; valid-but-irrelevant sections are
-/// skipped, the OpenSSL loader's own tolerance).
+/// skipped, the OpenSSL loader's own tolerance). A source that loads zero
+/// certificates fails loud too: the named paths are the whole root store,
+/// and a source that adds nothing would silently shrink it (the loader
+/// itself skips non-PEM sections silently, so a wholly non-PEM file reads
+/// as zero certs and zero errors).
 fn add_cert_path(
     store: &mut RootCertStore,
     file: Option<&Path>,
@@ -198,8 +205,35 @@ fn add_cert_path(
             cause: error.to_string(),
         });
     }
+    if result.certs.is_empty() {
+        return Err(TlsTrustError::Source {
+            variable,
+            path: file.or(dir).unwrap_or(Path::new("")).to_path_buf(),
+            cause: "no PEM certificates found".to_string(),
+        });
+    }
     store.add_parsable_certificates(result.certs);
     Ok(())
+}
+
+/// The base the extras are appended to: the platform's native trust store.
+/// The loader reports per-entry damage as errors next to the roots it did
+/// load (system stores commonly hold a few unreadable entries), so the base
+/// is whatever loaded; only a load that produced no roots at all with
+/// errors is a loud failure. No roots and no errors is the platform's own
+/// answer (a container with no system store): extras-only trust stays
+/// available.
+fn native_base_store(
+    result: rustls_native_certs::CertificateResult,
+) -> Result<RootCertStore, TlsTrustError> {
+    if result.certs.is_empty() {
+        if let Some(error) = result.errors.first() {
+            return Err(TlsTrustError::NativeStore(error.to_string()));
+        }
+    }
+    let mut store = RootCertStore::empty();
+    store.add_parsable_certificates(result.certs);
+    Ok(store)
 }
 
 /// The extra certificate authorities one named PEM file holds. Loud on every
@@ -330,6 +364,17 @@ V1BRFUaQ1qcqy2T5dC3Irw==
     /// repo's restore-shared-state rule).
     type EnvSnapshot = [Option<std::ffi::OsString>; 3];
 
+    /// Restores the trust variables when the scope ends, panic included —
+    /// the trust variables are process state, and a failing assertion must
+    /// not leak them to later tests in the same process.
+    struct RestoreEnv(EnvSnapshot);
+
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            restore_env(std::mem::take(&mut self.0));
+        }
+    }
+
     fn snapshot_env() -> EnvSnapshot {
         [
             std::env::var_os(EXTRA_CA_CERTS_ENV),
@@ -364,7 +409,7 @@ V1BRFUaQ1qcqy2T5dC3Irw==
     /// race each other.
     #[tokio::test]
     async fn extra_ca_contract() {
-        let snapshot = snapshot_env();
+        let _guard = RestoreEnv(snapshot_env());
         let temp = tempfile::tempdir().expect("temp dir");
         let dir = temp.path();
         let ca = fixture_file(dir, "extra-ca.pem", TEST_CA_PEM);
@@ -460,6 +505,8 @@ V1BRFUaQ1qcqy2T5dC3Irw==
                     .contains(missing.to_string_lossy().as_ref())
         );
 
+        ssl_source_pins(dir, &no_certs);
+
         // The live-TLS pin: a loopback server presents the leaf signed by
         // the fixture CA. With the CA passed through NODE_EXTRA_CA_CERTS the
         // helper's config completes a real handshake; with the variable
@@ -487,8 +534,85 @@ V1BRFUaQ1qcqy2T5dC3Irw==
             handshake(server, default_config).await.is_err(),
             "today's default trust must keep refusing the custom-CA leaf"
         );
+    }
 
-        restore_env(snapshot);
+    /// The partial native store: the loader's errors ride next to the roots
+    /// it did load (system stores commonly hold a few unreadable entries),
+    /// so the base is what loaded; no roots at all with errors is a loud
+    /// failure, and no roots with no errors is the platform's own answer.
+    #[test]
+    fn native_base_store_tolerates_partial_loads() {
+        let certificate = CertificateDer::pem_slice_iter(TEST_CA_PEM.as_bytes())
+            .next()
+            .expect("the fixture certificate parses")
+            .expect("the fixture certificate parses");
+
+        let mut partial = rustls_native_certs::CertificateResult::default();
+        partial.certs.push(certificate);
+        partial.errors.push(missing_path_error());
+        let store = native_base_store(partial).expect("a partial load is usable");
+        assert_eq!(store.roots.len(), 1);
+
+        let mut broken = rustls_native_certs::CertificateResult::default();
+        broken.errors.push(missing_path_error());
+        assert!(matches!(
+            native_base_store(broken),
+            Err(TlsTrustError::NativeStore(_))
+        ));
+
+        let empty = rustls_native_certs::CertificateResult::default();
+        let store = native_base_store(empty).expect("an empty platform answer stands");
+        assert!(store.roots.is_empty());
+    }
+
+    /// One real loader error for the `CertificateResult` fixtures above (a
+    /// missing file's I/O error, the crate's own documented shape).
+    fn missing_path_error() -> rustls_native_certs::Error {
+        rustls_native_certs::load_certs_from_paths(
+            Some(Path::new("/nonexistent-extra-ca/extra-ca.pem")),
+            None,
+        )
+        .errors
+        .remove(0)
+    }
+
+    /// The SSL-source pins, one sequential phase of the contract (the trust
+    /// variables are process state, so the phases must not race each other):
+    /// an empty value is unset, and a named source that loads zero
+    /// certificates fails loud naming the variable and the path.
+    fn ssl_source_pins(dir: &std::path::Path, no_certs: &Path) {
+        // A set-but-empty value is unset (Node and OpenSSL both ignore an
+        // empty variable): the caller keeps today's default.
+        std::env::set_var(EXTRA_CA_CERTS_ENV, "");
+        std::env::set_var(SSL_CERT_FILE_ENV, "");
+        assert!(matches!(extra_ca_store(), Ok(None)));
+
+        // A readable file that holds no certificates fails loud here too:
+        // the named paths replace the whole root store, and a source that
+        // would replace it with nothing is misconfigured (the loader itself
+        // skips non-PEM sections silently, so this reads as zero certs and
+        // zero errors without the guard).
+        std::env::remove_var(EXTRA_CA_CERTS_ENV);
+        std::env::set_var(SSL_CERT_FILE_ENV, no_certs);
+        let error = extra_ca_store().expect_err("an empty ssl cert file fails");
+        let TlsTrustError::Source { variable, path, .. } = &error else {
+            panic!("the error names its source: {error}");
+        };
+        assert_eq!(*variable, SSL_CERT_FILE_ENV);
+        assert_eq!(path, no_certs);
+
+        // A directory that holds no certificates fails loud the same way.
+        let empty_dir = dir.join("empty-dir");
+        std::fs::create_dir(&empty_dir).expect("make the empty dir");
+        std::env::remove_var(SSL_CERT_FILE_ENV);
+        std::env::set_var(SSL_CERT_DIR_ENV, &empty_dir);
+        let error = extra_ca_store().expect_err("an empty ssl cert dir fails");
+        let TlsTrustError::Source { variable, path, .. } = &error else {
+            panic!("the error names its source: {error}");
+        };
+        assert_eq!(*variable, SSL_CERT_DIR_ENV);
+        assert_eq!(path, &empty_dir);
+        std::env::remove_var(SSL_CERT_DIR_ENV);
     }
 
     /// A loopback TLS listener presenting the fixture leaf: every accepted
