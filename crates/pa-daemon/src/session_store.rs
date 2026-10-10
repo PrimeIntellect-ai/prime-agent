@@ -123,7 +123,7 @@ pub struct SessionFile {
     pub(super) child_usage_pending: Vec<SessionEntry>,
     pub(super) child_usage_unconfirmed: std::collections::HashSet<String>,
     #[cfg(test)]
-    pub(super) child_usage_fault: Option<child_usage::AppendFault>,
+    child_usage_fault: Option<child_usage::AppendFault>,
     pub path: PathBuf,
     pub header: SessionHeader,
     pub(crate) entries: Vec<SessionEntry>,
