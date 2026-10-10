@@ -270,9 +270,9 @@ pub(crate) fn draw(
     // The frame's embedded OSC 8 sequences drive the paint backend's hyperlink injection; install
     // the ranges before the draw (which strips the sequences from the painted cells).
     crate::hyperlinks::install_frame(&frame);
-    // Zone markers ride on the composed rows; plan their emission before the cell paint
-    // (which strips them), then write the sequences at their rows after the frame is painted.
-    let emissions = view.take_osc_emissions(&frame);
+    // OSC 133 describes shell prompts, not alternate-screen rows. In iTerm2 it can
+    // disable soft alternate-screen mode and let cursor moves clear the painted grid.
+    // Keep those markers in the main-screen exit transcript only.
     // Fullscreen paint brackets the row diff in synchronized output so terminals never display
     // an intermediate, partly scrolled frame; a terminal without mode 2026 support ignores the
     // two escape sequences.
@@ -304,48 +304,13 @@ pub(crate) fn draw(
             }
         }
     }
-    let markers = if painted.is_ok() {
-        emit_zone_markers(&emissions, cursor)
-    } else {
-        Ok(())
-    };
     // Always release the terminal's pending update, including on paint errors.
     crossterm::execute!(stdout(), terminal::EndSynchronizedUpdate)?;
     painted?;
-    markers?;
     if mounting {
         // Mode setup flushes stdout, so it must follow the completed first paint.
         crate::enhanced_keys::enable(&mut stdout())?;
     }
-    Ok(())
-}
-
-/// Write OSC 133 zone-marker sequences at their frame rows. The sequences are zero-width: only
-/// the row flags the shell integration reads change; the frame cursor is restored afterwards.
-fn emit_zone_markers(
-    emissions: &[(usize, crate::osc133::RowMarkers)],
-    cursor: Option<(usize, usize)>,
-) -> Result<()> {
-    use crossterm::cursor::MoveTo;
-    use std::io::Write;
-    if emissions.is_empty() {
-        return Ok(());
-    }
-    let mut out = stdout();
-    for (row, markers) in emissions {
-        crossterm::queue!(out, MoveTo(0, *row as u16))?;
-        if markers.start {
-            out.write_all(crate::osc133::ZONE_START.as_bytes())?;
-        }
-        if markers.end {
-            out.write_all(crate::osc133::ZONE_END.as_bytes())?;
-            out.write_all(crate::osc133::ZONE_FINAL.as_bytes())?;
-        }
-    }
-    if let Some((row, col)) = cursor {
-        crossterm::queue!(out, MoveTo(col as u16, row as u16))?;
-    }
-    out.flush()?;
     Ok(())
 }
 
