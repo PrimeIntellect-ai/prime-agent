@@ -247,20 +247,22 @@ impl AgentSessionEngine {
         if let Some(agent) = agent {
             agent.set_model_override(None);
         }
+        // The cleared slot returns to the CURRENT session state: the
+        // freshly resolved model (a mid-episode switch is honored) with
+        // its chain-resolved auth — the create-config override or the
+        // configured fallback key included, exactly what a fresh session
+        // of this model would serve. The captured session target only
+        // backs a resolution that cannot rebuild the model at all.
         let mut target = match self.resolve_model() {
-            Ok(model) => match self.resolve_request_key_and_headers_and_store_health(&model) {
-                (api_key, headers, true) => Some(ProviderTarget {
+            Ok(model) => {
+                let (api_key, headers) = self.resolve_request_key_and_headers(&model);
+                Some(ProviderTarget {
                     service_tier: *self.service_tier.read().expect("service tier lock"),
                     api_key,
                     headers,
                     model,
-                }),
-                // A store with no live credential resolves the configured
-                // fallback key, which never replaces a serving pair
-                // (the reload's own gate): restore the captured session
-                // target instead.
-                _ => route.session_target,
-            },
+                })
+            }
             Err(_) => route.session_target,
         };
         if let Some(target) = target.take() {
