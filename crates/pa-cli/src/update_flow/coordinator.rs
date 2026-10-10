@@ -1,7 +1,14 @@
 //! The coordinator FSM driver (spec §4): the detached pa-cli process that
-//! owns the update from the adopted status to a terminal state; every state
-//! is written to the status file before acting, and `Rollback` is a
-//! first-class path, not an error.
+//! owns the update from the adopted status (the invoking CLI staged through
+//! `Staged`) to a terminal state. Every state is written to the status file
+//! before acting (spec §4); `Rollback` is a first-class path, not an error.
+//!
+//! The activation boundary (spec §7): the coordinator swaps the launcher
+//! symlinks, records `.activation-state`, and deletes it on `Complete`. The
+//! `Restoring` phase reports the successor's boot restore pass (spec §6,
+//! slice 5): the supervisor restores the roster rows (create-or-adopt,
+//! bottom-up) and the coordinator polls the `update_restore_status` RPC
+//! for the real per-session counts and failure records.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,11 +23,20 @@ use pa_types::daemon::update_flow::{
 use tokio::sync::Mutex;
 
 use super::status::{StatusHeartbeat, StatusWriter};
-use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
+use super::successor::{
+    capture_spawned_successor, identity_from_hello, spawn_supervisor, validate_replacement_daemon,
+    wait_for_exit, wait_for_hello,
+};
 use super::swap;
 
-/// The staged release directory, passed by the invoking CLI through the coordinator's environment.
+/// The staged release directory, passed by the invoking CLI through the
+/// coordinator's environment.
 pub const UPDATE_CANDIDATE_DIR_ENV: &str = "PRIME_AGENT_UPDATE_CANDIDATE_DIR";
+
+/// The coordinator's own fence-wait budget (TS
+/// `UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS`: 60 s, ten times the
+/// supervisor's own 10 s default).
+const UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS: u64 = 60_000;
 
 /// One coordinator run's fixed inputs.
 pub struct CoordinatorOptions {
@@ -31,10 +47,28 @@ pub struct CoordinatorOptions {
 }
 
 /// Why the driver left the success path. Before the stop the terminal is
-/// `Aborted`; after it, `Rollback` (spec §9) — the previous binary takes over.
+/// Where the prepare-time rollback-roster copy lives: beside the update's
+/// status record (the one artifact the successor's `boot_sweep` never
+/// deletes), so a rollback that must re-adopt a rejected child's workers
+/// still has the roster bytes.
+#[must_use]
+fn rollback_roster_path(status_path: &Path) -> PathBuf {
+    let mut name = status_path.file_name().unwrap_or_default().to_os_string();
+    name.push(".rollback-roster");
+    status_path.with_file_name(name)
+}
+
+/// `Aborted` (the daemon never stopped); after the stop it is a first-class
+/// `Rollback` attempt (spec §9) - the workers are gone and the previous
+/// binary must take over.
 struct PhaseFailure {
     message: String,
     after_stop: bool,
+    /// The successor this coordinator spawned and then refused (a
+    /// validation failure or a silent boot): still running when the
+    /// failure lands, so the rollback must stop it before it spawns onto
+    /// the socket the rejected daemon still owns.
+    rejected: Option<super::successor::SpawnedSuccessor>,
 }
 
 impl PhaseFailure {
@@ -42,6 +76,7 @@ impl PhaseFailure {
         Self {
             message: error.to_string(),
             after_stop: false,
+            rejected: None,
         }
     }
 
@@ -49,16 +84,73 @@ impl PhaseFailure {
         Self {
             message: error.to_string(),
             after_stop: true,
+            rejected: None,
         }
     }
+
+    /// An after-stop failure that leaves the named child running.
+    fn after_stop_rejected<E: std::fmt::Display>(
+        error: E,
+        rejected: super::successor::SpawnedSuccessor,
+    ) -> Self {
+        Self {
+            message: error.to_string(),
+            after_stop: true,
+            rejected: Some(rejected),
+        }
+    }
+}
+
+/// The stop-window generation baseline for the raced-shutdown check: the
+/// tracks drive's own admission observed at its acquire. The scope track
+/// advances on every window for THIS coordinator's socket (drive's own
+/// bump included); the root-reach tracks on every CLI shutdown pass that
+/// can stop this daemon (its own state root's, and any root whose
+/// default socket or shared socket dir names this socket).
+#[derive(Default)]
+struct RacedStopBaseline {
+    scope: std::sync::atomic::AtomicU64,
+    roots: std::sync::Mutex<Vec<u64>>,
+}
+
+/// Whether a concurrent stop raced the update's release-to-spawn window,
+/// judged from the generation tracks the acquisitions observed. The
+/// root-reach tracks: the rollback observes more than drive on any
+/// entry exactly when a CLI shutdown pass that can stop this daemon
+/// completed in between (its own root's pass, or a foreign root's pass
+/// over a shared default socket). The scope track: every acquire stores
+/// the counter value BEFORE its own bump, so with no foreign same-socket
+/// window the rollback's acquire observes exactly drive's own bump -
+/// one more than drive's observation; two or more mean another window
+/// for THIS socket completed in between. A window for a DIFFERENT
+/// daemon never registers on either track, so another daemon's update -
+/// or a shutdown of a root that cannot reach this daemon - never reads
+/// as this daemon's concurrent shutdown.
+fn raced_shutdown_detected(
+    baseline_scope: u64,
+    baseline_roots: &[u64],
+    rollback_scope: u64,
+    rollback_roots: &[u64],
+) -> bool {
+    baseline_roots
+        .iter()
+        .zip(rollback_roots)
+        .any(|(before, after)| after > before)
+        || rollback_scope > baseline_scope + 1
 }
 
 /// Run the FSM from the adopted status to a terminal state; the returned
 /// status is the terminal record (the caller prints the report).
 ///
 /// # Errors
-/// Returns an error when no status record exists at `status_path`, the state
-/// is not `Staged`, or a status write fails.
+/// Returns an error when no status record exists at `status_path`, when the
+/// recorded state is not `Staged` (only a staged update is adoptable), or
+/// when a status-record write fails.
+///
+/// # Panics
+/// Panics when the raced-baseline lock is poisoned (the task that filled
+/// the baseline died mid-write; the coordinator cannot run its raced
+/// check against a lost baseline).
 pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     let Some(existing) = super::status::read_status(&options.status_path) else {
         anyhow::bail!(
@@ -81,7 +173,37 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         &socket_lossy,
     )?));
     let heartbeat = StatusHeartbeat::start(Arc::clone(&writer));
-    match drive(&writer, options, &update_id, &socket_dir).await {
+    // The stop-window generation tracks DRIVE's own admission observed
+    // at its acquire (drive fills them at its first statement): the
+    // failure-arm raced-shutdown check compares the ROLLBACK acquire's
+    // observations against THIS baseline, so a shutdown that completed
+    // before drive's window (bumping the counters in drive's unbounded
+    // acquire wait) is the baseline itself, never mistaken for one that
+    // raced the update's release-to-spawn window.
+    let baseline = Arc::new(RacedStopBaseline::default());
+    // This update's state root and its raced-stop reach keys (the
+    // discovery's own root filter, never-touch excluded): a CLI pass
+    // that can stop this daemon's socket bumps one of them; a pass of a
+    // foreign root that cannot reach this socket never registers.
+    let state_root = crate::daemon_discovery::DaemonStateRoot {
+        agent_dir: options.agent_dir.clone(),
+        socket_dir: pa_daemon::platform::socket_dir(),
+        default_socket_path: pa_daemon::platform::default_daemon_socket_path(),
+    };
+    let reach_keys =
+        crate::daemon_discovery::shutdown_reach_keys(&options.socket_path, &state_root);
+    let reach_key_refs: Vec<&std::path::Path> =
+        reach_keys.iter().map(std::path::PathBuf::as_path).collect();
+    match drive(
+        &writer,
+        options,
+        &update_id,
+        &socket_dir,
+        &reach_key_refs,
+        &baseline,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(failure) if !failure.after_stop => {
             // `Aborted -> [*]: daemon never stopped; user retried later`.
@@ -90,12 +212,143 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             writer.set_message(Some(failure.message))?;
         }
         Err(failure) => {
-            finish_failure(&writer, options, failure).await?;
+            // The stop window closes again AT the failure boundary - the
+            // first statement after drive's handle drops, before any
+            // Rollback write or path work: in that gap a third-party
+            // supervisor sees no active admission, clears the dead
+            // predecessor fence, and can bind the socket the rollback
+            // still needs. A re-acquire failure is another window's
+            // socket: the rollback cannot run under it.
+            // A SINGLE-ATTEMPT re-close: drive released its window
+            // microseconds ago, so the record is either free NOW or a
+            // genuinely concurrent stop holds it - queuing behind that stop
+            // (even a fast shutdown of an already-stopped machine) would
+            // take the window right after the user's stop finished and
+            // spawn a daemon, undoing it. One guarded attempt; a busy
+            // window aborts the rollback beside the concurrent stop.
+            let rollback_admission =
+                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once(
+                    pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+                        socket: &options.socket_path,
+                        keys: reach_key_refs.clone(),
+                    },
+                ) {
+                    Ok(admission) => Some(admission),
+                    Err(error) => {
+                        // The rejected successor is retired FIRST, before
+                        // any fallible status write (the identity-pinned
+                        // crash kill, best-effort): a failed write must
+                        // not leave a timed-out detached child alive to
+                        // bind the socket after the concurrent shutdown
+                        // releases its window and restart the daemon
+                        // behind the verdict.
+                        if let Some(rejected) = &failure.rejected {
+                            let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+                                u32::try_from(rejected.pid).unwrap_or(0),
+                                rejected.process_start_id.as_deref(),
+                            );
+                        }
+                        let mut writer = writer.lock().await;
+                        // The rollback attempt is what failed: transition
+                        // through Rollback (the state the failure arm would
+                        // have written) - a direct Failed write from e.g.
+                        // Booting violates the status machine's
+                        // transition rules.
+                        let _ = writer.set_state(UpdateState::Rollback);
+                        writer.set_state(UpdateState::Failed)?;
+                        writer.set_message(Some(format!(
+                            "The rollback could not hold the stop window ({error}); the update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
+                            failure.message.trim_end_matches('.')
+                        )))?;
+                        None
+                    }
+                };
+            let Some(mut rollback_admission) = rollback_admission else {
+                return finish_run(&writer, options, &socket_lossy, heartbeat).await;
+            };
+            let raced = raced_shutdown_detected(
+                baseline.scope.load(std::sync::atomic::Ordering::SeqCst),
+                &baseline
+                    .roots
+                    .lock()
+                    .expect("the raced-baseline lock")
+                    .clone(),
+                rollback_admission.observed_scope_generation(),
+                &rollback_admission.observed_root_generations(),
+            );
+            if raced {
+                // The rejected successor this update spawned is retired the
+                // same way finish_failure retires it (best-effort
+                // identity-pinned crash kill): left alive beside the
+                // user's completed shutdown, it could boot after the stop
+                // and restart the daemon behind the Failed verdict.
+                if let Some(rejected) = &failure.rejected {
+                    let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+                        u32::try_from(rejected.pid).unwrap_or(0),
+                        rejected.process_start_id.as_deref(),
+                    );
+                }
+                {
+                    let mut status = writer.lock().await;
+                    let _ = status.set_state(UpdateState::Rollback);
+                    status.set_state(UpdateState::Failed)?;
+                    status.set_message(Some(format!(
+                        "A concurrent shutdown raced this update; the rollback refused to restart the daemon. The update failed ({}). Sessions persist on disk - prime-agent attach recovers them.",
+                        failure.message.trim_end_matches('.')
+                    )))?;
+                }
+                return finish_run(&writer, options, &socket_lossy, heartbeat).await;
+            }
+            // The rollback child gets the update's roster artifact (the
+            // same one the failed spawn booted with): the rejected
+            // successor's crash-oracle kill leaves its adopted workers'
+            // recovery journals on disk, and the rollback boot re-adopts
+            // them from the roster - a bare rollback spawn would strand
+            // those sessions.
+            let prepared_dir = update_prepared_dir(&socket_dir, &update_id);
+            let roster_path = update_roster_path(&prepared_dir);
+            // The successor's boot sweep has usually deleted the
+            // original already: the prepare-time copy beside the status
+            // record is the surviving artifact.
+            let backup = rollback_roster_path(&options.status_path);
+            let roster = if backup.is_file() {
+                Some(backup)
+            } else {
+                (roster_path.is_file()).then_some(roster_path)
+            };
+            finish_failure(
+                &writer,
+                options,
+                failure,
+                roster.as_deref(),
+                &mut rollback_admission,
+            )
+            .await?;
         }
     }
     heartbeat.stop();
-    // The terminal state owns the lock cleanup; the boot sweep is the last resort (spec §7).
+    // The terminal state owns the lock cleanup; the boot sweep is the last
+    // resort (spec §7).
     let _ = super::intent::release(&options.agent_dir, &socket_lossy);
+    // The prepare-time rollback-roster copy served its purpose (or was
+    // never needed); the original artifact is the successor's own.
+    let _ = std::fs::remove_file(rollback_roster_path(&options.status_path));
+    let final_status = writer.lock().await.current().clone();
+    Ok(final_status)
+}
+
+/// The shared tail of `run` (the terminal-status read after the heartbeat
+/// and lock cleanup): an early terminal exit from the failure arm lands on
+/// the same path as the natural end.
+async fn finish_run(
+    writer: &Arc<Mutex<StatusWriter>>,
+    options: &CoordinatorOptions,
+    socket_lossy: &str,
+    heartbeat: StatusHeartbeat,
+) -> Result<UpdateStatus> {
+    heartbeat.stop();
+    let _ = super::intent::release(&options.agent_dir, socket_lossy);
+    let _ = std::fs::remove_file(rollback_roster_path(&options.status_path));
     let final_status = writer.lock().await.current().clone();
     Ok(final_status)
 }
@@ -105,10 +358,32 @@ async fn drive(
     options: &CoordinatorOptions,
     update_id: &UpdateId,
     socket_dir: &Path,
+    reach_keys: &[&Path],
+    baseline: &Arc<RacedStopBaseline>,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
-    // `Preparing`: connect the old supervisor. An unreachable daemon means a
-    // daemon-less update: the successor boots without a roster.
+    // The stop window opens here (TS package-manager-cli.ts
+    // `runDaemonUpdateRestartCoordinator`: `acquireDaemonShutdownAdmission`
+    // before the probe; 5000 ms lease renewed every 1000 ms). While it is
+    // held, a third-party successor refuses its own boot ("Daemon shutdown
+    // is in progress"); the handle releases on drop, and a crashed holder
+    // stops renewing, so the window self-heals inside the lease.
+    let mut admission = pa_daemon::supervisor_ownership::ShutdownAdmission::acquire(
+        pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+            socket: &options.socket_path,
+            keys: reach_keys.to_vec(),
+        },
+    )
+    .map_err(PhaseFailure::before_stop)?;
+    baseline.scope.store(
+        admission.observed_scope_generation(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    *baseline.roots.lock().expect("the raced-baseline lock") =
+        admission.observed_root_generations();
+    // `Preparing`: connect the old supervisor. An unreachable daemon is a
+    // daemon-less update: an empty prepare is trivially durable and the
+    // successor boots without a roster (the workers are already gone).
     let daemon = match pa_tui::daemon_client::DaemonClient::connect(&options.socket_path).await {
         Ok((client, _events)) => Some(client),
         Err(_) => None,
@@ -122,7 +397,7 @@ async fn drive(
             .await
             .set_predecessor(identity.clone())
             .map_err(PhaseFailure::before_stop)?;
-        predecessor = Some(identity);
+        predecessor = Some(identity.clone());
         writer
             .lock()
             .await
@@ -133,16 +408,91 @@ async fn drive(
             .map_err(PhaseFailure::before_stop)?;
         let prepared_dir = update_prepared_dir(socket_dir, update_id);
         check_marker_fresh(&prepared_dir).map_err(PhaseFailure::before_stop)?;
+        // Pin the dying predecessor from its verified hello (TS
+        // `prepareConnectedDaemonUpdateRestart` ->
+        // `persistPreparedRestartFence`): the fence is what a third-party
+        // successor bows out against once this listener drops. A hello
+        // without a fixed identity leaves the window unfenced, exactly
+        // like TS's old-build daemons.
+        let hello_socket_path = client
+            .hello()
+            .get("supervisorSocketPath")
+            .and_then(serde_json::Value::as_str);
+        if let Some(fence) = pa_daemon::supervisor_ownership::FenceIdentity::from_verified_hello(
+            &identity,
+            &options.socket_path,
+            hello_socket_path,
+        ) {
+            pa_daemon::supervisor_ownership::persist_startup_fence(&options.socket_path, &fence)
+                .map_err(PhaseFailure::before_stop)?;
+        }
         // The roster artifact is the successor's input (consumed from the
         // env at its boot, spec §6 step 2); the coordinator never parses it.
         roster_path = Some(update_roster_path(&prepared_dir));
+        // The rollback's roster insurance: the
+        // successor's `boot_sweep` deletes the socket's WHOLE update
+        // directory - the roster included - before it greets, so a
+        // rollback that must re-adopt a rejected child's workers would
+        // find nothing at the original path. The roster BYTES are copied
+        // beside the status record (sweep-safe); the copy is opaque - the
+        // coordinator still never parses the roster. Removed at the end
+        // of the run.
+        if let Some(roster_path) = &roster_path {
+            // The backup is published ATOMICALLY (write beside, then
+            // rename) and its failure ABORTS the update before the stop:
+            // a partial backup could win over the intact original and the
+            // rollback would report completion without restoring sessions
+            // a session-losing rollback - and an update that cannot
+            // secure its own rollback insurance must not stop the daemon.
+            let backup = rollback_roster_path(&options.status_path);
+            let partial = {
+                let mut name = backup.file_name().unwrap_or_default().to_os_string();
+                name.push(".partial");
+                backup.with_file_name(name)
+            };
+            let insured = (|| -> Result<()> {
+                let bytes = std::fs::read(roster_path)?;
+                if let Some(parent) = backup.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                // The copy carries what the roster carries - queued prompts
+                // and worker authentication tokens - so it is created with
+                // the roster's own 0600 (never the process umask's wider
+                // default); the atomic rename below preserves the mode.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    let mut partial_file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(&partial)?;
+                    std::io::Write::write_all(&mut partial_file, &bytes)?;
+                }
+                #[cfg(not(unix))]
+                std::fs::write(&partial, &bytes)?;
+                pa_telemetry::rename_onto(&partial, &backup)?;
+                Ok(())
+            })();
+            insured.map_err(|error| {
+                PhaseFailure::before_stop(format!(
+                    "the rollback's roster insurance could not be written: {error}"
+                ))
+            })?;
+        }
         writer
             .lock()
             .await
             .set_state(UpdateState::Prepared)
             .map_err(PhaseFailure::before_stop)?;
-        // `Stopping`: the only consumption of the prepared artifact (spec §5) — the dispatch stops
-        // the workers in budget.
+        // `Stopping`: the only consumption of the prepared artifact (spec
+        // §5) - the slice-3 dispatch stops the workers in budget. The
+        // admission must still be ours at the stop (TS `assertOrRenew`
+        // before `shutdownConnectedDaemonAndWait`).
+        admission
+            .assert_or_renew()
+            .map_err(PhaseFailure::before_stop)?;
         writer
             .lock()
             .await
@@ -177,13 +527,27 @@ async fn drive(
             ));
         }
     }
+    // Wait the persisted fence out before anything takes the socket again
+    // (TS package-manager-cli.ts:1440, `UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS`):
+    // the record clears only when the pinned predecessor process is gone -
+    // either this wait's own dead-pin clear or the predecessor's exit.
+    // Bounded like TS (60 s), so a pinned survivor can never wedge the
+    // update.
+    pa_daemon::supervisor_ownership::wait_for_startup_fence(
+        &options.socket_path,
+        UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS,
+    )
+    .await
+    .map_err(PhaseFailure::after_stop)?;
     writer
         .lock()
         .await
         .set_state(UpdateState::Stopped)
         .map_err(PhaseFailure::after_stop)?;
-    // `Activating`: validate the staged candidate BEFORE the swap, then record
-    // `.activation-state` and repoint `bin/prime-agent` (spec §7).
+    // `Activating`: validate the staged candidate BEFORE the swap (a bad
+    // candidate never becomes the launcher), then record
+    // `.activation-state`, move the old target to `bin/previous`, and
+    // atomically repoint `bin/prime-agent` (spec §7).
     writer
         .lock()
         .await
@@ -204,51 +568,87 @@ async fn drive(
         update_id.as_ref(),
     )
     .map_err(PhaseFailure::after_stop)?;
-    // `Booting`: spawn the successor from the candidate release dir, roster via env (spec §6),
-    // hello within `T_boot`.
+    // Close the stop window right before the successor spawns (TS:
+    // `assertOrRenew` + `release` immediately before the spawn): the fence
+    // has confirmed the predecessor is gone, and the release must precede
+    // the spawn - the successor's own boot refuses while a shutdown
+    // admission is active ("Daemon shutdown is in progress"), so holding
+    // it through the spawn would refuse the very successor it guards. The
+    // residual release-to-hello race is adjudicated by the spawn pin
+    // below (the hello wait and the validation bind the answerer to the
+    // process this coordinator spawns): a competing daemon that wins the
+    // socket is skipped and refused, never adopted, and the update fails
+    // closed into the rollback.
+    admission
+        .assert_or_renew()
+        .map_err(PhaseFailure::after_stop)?;
+    admission.release();
+    // `Booting`: spawn the successor from the candidate release dir, roster
+    // via env (spec §6), hello within `T_boot`.
     writer
         .lock()
         .await
         .set_state(UpdateState::Booting)
         .map_err(PhaseFailure::after_stop)?;
     let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    spawn_supervisor(
-        &candidate.executable,
-        &options.socket_path,
-        roster_path.as_deref(),
-        &spawn_cwd,
-    )
-    .map_err(PhaseFailure::after_stop)?;
-    let successor = wait_for_hello(&options.socket_path, budget.boot_ms)
+    // Pin the spawned child to its process identity right after the
+    // spawn: the hello the coordinator waits for and adopts must come
+    // from THIS child, never from a third-party daemon that won the
+    // release-to-spawn bind race.
+    let spawned = capture_spawned_successor(
+        spawn_supervisor(
+            &candidate.executable,
+            &options.socket_path,
+            roster_path.as_deref(),
+            &spawn_cwd,
+        )
+        .map_err(PhaseFailure::after_stop)?,
+    );
+    let successor_hello = wait_for_hello(&options.socket_path, budget.boot_ms, &spawned)
         .await
         .ok_or_else(|| {
-            PhaseFailure::after_stop(
+            PhaseFailure::after_stop_rejected(
                 "the successor supervisor did not greet within its boot budget",
+                spawned.clone(),
             )
         })?;
-    writer
-        .lock()
-        .await
-        .set_successor(successor)
-        .map_err(PhaseFailure::after_stop)?;
-    // `Restoring`: the successor's restore pass reports real counts (the `update_restore_status`
-    // poll; spec §9).
-    writer
-        .lock()
-        .await
-        .set_state(UpdateState::Restoring)
-        .map_err(PhaseFailure::after_stop)?;
+    // The daemon that answered must be the activated candidate, not
+    // whatever else won the release-to-spawn race (TS
+    // `validateReplacementDaemon`): version, socket identity, identity
+    // fence, not-the-predecessor - and the spawned child's own pid +
+    // start id (the spawn pin): a surviving predecessor, a stale
+    // third-party daemon, or the bind race's winner fails the update and
+    // the rollback takes over.
+    let successor = validate_replacement_daemon(
+        &options.socket_path,
+        &successor_hello,
+        &candidate.version,
+        predecessor.as_ref(),
+        &spawned,
+    )
+    .map_err(|error| PhaseFailure::after_stop_rejected(error, spawned.clone()))?;
+    // From here on the successor is ADOPTED: the update has succeeded at
+    // the protocol level, the adopted child owns the socket and serves the
+    // restored sessions, and a trailing status write or marker cleanup
+    // must never undo it - a failure of these tail writes maps to the
+    // kill-and-rollback path and would destroy a fully restored update
+    // (TS `statusWriter.update` failures are ignored the same way: the
+    // flow's real errors end at validation).
+    if let Err(error) = writer.lock().await.set_successor(successor) {
+        eprintln!("pa-cli: could not record the adopted successor: {error}");
+    }
+    // `Restoring`: the successor's restore pass reports real counts
+    // (the `update_restore_status` poll; spec §9).
+    if let Err(error) = writer.lock().await.set_state(UpdateState::Restoring) {
+        eprintln!("pa-cli: could not record the restoring phase: {error}");
+    }
     let (counts, failures) = restore_report(&options.socket_path, budget).await;
-    writer
-        .lock()
-        .await
-        .set_counts(counts)
-        .map_err(PhaseFailure::after_stop)?;
-    writer
-        .lock()
-        .await
-        .set_failures(failures)
-        .map_err(PhaseFailure::after_stop)?;
+    if let Err(error) = writer.lock().await.set_counts(counts) {
+        eprintln!("pa-cli: could not record the restore counts: {error}");
+    }
+    if let Err(error) = writer.lock().await.set_failures(failures) {
+        eprintln!("pa-cli: could not record the restore failures: {error}");
+    }
     // The coordinator deletes the prepared dir after `Restoring` (spec §7;
     // idempotent with the supervisor's self-expiry and the boot sweep).
     if let Some(prepared_dir) = roster_path.as_ref().map(|roster_path| {
@@ -258,12 +658,17 @@ async fn drive(
     }) {
         let _ = std::fs::remove_dir_all(prepared_dir);
     }
-    swap::clear_activation_state(&candidate.root).map_err(PhaseFailure::after_stop)?;
-    writer
-        .lock()
-        .await
-        .set_state(UpdateState::Complete)
-        .map_err(PhaseFailure::after_stop)?;
+    // A stale activation marker is swept by later passes; its cleanup
+    // failure is logged, never a rollback trigger.
+    if let Err(error) = swap::clear_activation_state(&candidate.root) {
+        eprintln!(
+            "pa-cli: could not clear the activation state marker at {}: {error}",
+            candidate.root.display()
+        );
+    }
+    if let Err(error) = writer.lock().await.set_state(UpdateState::Complete) {
+        eprintln!("pa-cli: could not record the complete phase: {error}");
+    }
     let message = if counts.failed > 0 {
         format!(
             "Restarted the daemon with {} session restore failure{}",
@@ -273,31 +678,39 @@ async fn drive(
     } else {
         "Restarted the daemon after the update".to_string()
     };
-    writer
-        .lock()
-        .await
-        .set_message(Some(message))
-        .map_err(PhaseFailure::after_stop)?;
+    if let Err(error) = writer.lock().await.set_message(Some(message)) {
+        eprintln!("pa-cli: could not record the terminal message: {error}");
+    }
     Ok(())
 }
 
-/// The after-stop failure terminal (spec §9): `Rollback` is first-class — the
-/// previous binary takes over and still serves; a failed rollback boot is
-/// `Failed` (sessions persist on disk; `attach` recovers).
+/// The after-stop failure terminal (spec §9): `Rollback` is first-class -
+/// the previous binary takes over and still serves the sessions. A rollback
+/// boot that also fails is `Failed` (sessions persist on disk; `attach`
+/// recovers them).
 async fn finish_failure(
     writer: &Arc<Mutex<StatusWriter>>,
     options: &CoordinatorOptions,
     failure: PhaseFailure,
+    roster_path: Option<&Path>,
+    rollback_admission: &mut pa_daemon::supervisor_ownership::ShutdownAdmission,
 ) -> Result<()> {
     let reason = failure.message.trim_end_matches('.');
     writer.lock().await.set_state(UpdateState::Rollback)?;
-    // Every rollback-unavailable path records `Failed` — the status must reach a
-    // terminal state; the message is the diagnostic channel (stdio is detached).
+    // Every rollback-unavailable path records `Failed` - the status must
+    // reach a terminal state, and the failure message is the diagnostic
+    // channel (the coordinator's stdio is detached).
     let fail_hard = |message: String| async {
         let mut writer = writer.lock().await;
         let _ = writer.set_state(UpdateState::Failed);
         let _ = writer.set_message(Some(message));
     };
+    // The stop window is held by the caller from the failure boundary -
+    // `run` re-acquired it the moment drive's handle dropped, so every
+    // step below (the Rollback write, the restore, the fence wait, the
+    // spawn) runs inside it; TS keeps its `shutdownAdmission` held
+    // through every failure unwind the same way, releasing only in the
+    // `finally`.
     let root = match super::activation_root() {
         Ok(root) => root,
         Err(error) => {
@@ -338,31 +751,152 @@ async fn finish_failure(
         .await;
         return Ok(());
     }
+    // The successor this coordinator spawned - rejected or adopted - is
+    // stopped HERE, the moment the previous launcher is restored and
+    // before the fence wait and the spawn: an identity-verified DIRECT
+    // SIGKILL of the pid this coordinator spawned - never an RPC to the
+    // socket, and never a SIGTERM: both the graceful Shutdown and the
+    // TERM signal drain persist worker stop tombstones (a durable stop
+    // that kills the sessions), while the direct kill is the crash path
+    // the protocol already trusts - the adopted workers die with the
+    // supervisor, their recovery journals persist, and the roster'd
+    // rollback boot below re-adopts them while the socket frees for the
+    // rollback. The start-id check means a reused pid is never signaled,
+    // and a competing daemon that answered the socket is never touched -
+    // a live competitor keeps the rollback's honest Failed.
+    //
+    // The placement is deliberate: ABOVE this point, every abort
+    // (`activation_root`, the previous-install lookup, the launcher
+    // restore itself) leaves the launcher UNRESTORED - the child and the
+    // new binary are still the consistent pair, and an adopted successor
+    // keeps serving instead of the machine losing its daemon. Below it,
+    // the launcher already points at the previous binary, so the child
+    // must be dead before anything can proceed - and an UNCONFIRMED death
+    // aborts right here, never spawning the rollback against a
+    // possibly-live owner.
+    if let Some(rejected) = &failure.rejected {
+        let confirmed_dead = crate::daemon_discovery::kill::force_kill_identity_crash(
+            u32::try_from(rejected.pid).unwrap_or(0),
+            rejected.process_start_id.as_deref(),
+        );
+        if !confirmed_dead {
+            fail_hard(format!(
+                "The successor this update spawned could not be stopped; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            ))
+            .await;
+            return Ok(());
+        }
+    }
     writer.lock().await.set_state(UpdateState::Booting)?;
-    let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    if let Err(error) = spawn_supervisor(
-        previous.executable(),
+    // The rollback boot must not race the dying predecessor either: wait
+    // the prepare-time fence out exactly like the main flow's stopped
+    // state. The fence is a deadman record (a dead pin self-clears here;
+    // TS `waitForDaemonStartupFence`), so this only blocks while the
+    // pinned predecessor is a genuine survivor - and a surviving owner of
+    // the socket must surface as an explicit rollback failure, never as a
+    // silent boot refusal inside the spawned child.
+    if let Err(error) = pa_daemon::supervisor_ownership::wait_for_startup_fence(
         &options.socket_path,
-        None,
-        &spawn_cwd,
-    ) {
-        writer.lock().await.set_state(UpdateState::Failed)?;
-        writer.lock().await.set_message(Some(format!(
-            "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-        )))?;
+        UPDATE_RESTART_PREDECESSOR_FENCE_TIMEOUT_MS,
+    )
+    .await
+    {
+        fail_hard(format!(
+            "The rollback could not wait out the predecessor fence ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        ))
+        .await;
         return Ok(());
     }
-    if let Some(identity) = wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
-        writer.lock().await.set_successor(identity)?;
-        writer.lock().await.set_state(UpdateState::Restoring)?;
-        let (counts, _failures) = restore_report(&options.socket_path, &options.budget).await;
-        writer.lock().await.set_counts(counts)?;
-        writer.lock().await.set_state(UpdateState::Complete)?;
-        writer.lock().await.set_message(Some(format!(
-            "Rolled back to the previous Prime Agent version ({reason})"
-        )))?;
-        Ok(())
+    // Close the stop window right before the rollback child spawns,
+    // exactly like the happy path's release-to-spawn choreography: the
+    // child's own boot refuses while an admission is active, and the
+    // residual release-to-hello race is adjudicated by the spawn pin
+    // below (a competing daemon that wins the socket is refused, never
+    // adopted).
+    if let Err(error) = rollback_admission.assert_or_renew() {
+        fail_hard(format!(
+            "The rollback lost the stop window ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        ))
+        .await;
+        return Ok(());
+    }
+    rollback_admission.release();
+    let spawn_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    // The rollback spawn is pinned exactly like the main flow's: the
+    // adopted hello must come from the rollback child this coordinator
+    // spawned, never from a third-party daemon that won the bind race.
+    let spawned = match spawn_supervisor(
+        previous.executable(),
+        &options.socket_path,
+        roster_path,
+        &spawn_cwd,
+    ) {
+        Ok(pid) => capture_spawned_successor(pid),
+        Err(error) => {
+            writer.lock().await.set_state(UpdateState::Failed)?;
+            writer.lock().await.set_message(Some(format!(
+                "The rollback supervisor could not spawn ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+            )))?;
+            return Ok(());
+        }
+    };
+    // The rollback boot greets under the same successor contract as the
+    // main flow (TS `validateReplacementDaemon`, applied to the Rust
+    // rollback path too - the TS coordinator has no rollback spawn): the
+    // expected version is the rollback installation's, the
+    // not-the-predecessor check reads the status record's predecessor
+    // (`drive` pinned it there from the verified predecessor hello before
+    // the stop), and the spawn pin binds the hello to the rollback child.
+    let predecessor = writer.lock().await.current().predecessor.clone();
+    // A rollback child that fails its boot or validation is killed the
+    // same way the main flow's rejected successor is: this coordinator
+    // spawned it, and a Failed rollback must not leave it owning the
+    // socket or leaking unbound (the crash kill is best-effort here - the
+    // terminal Failed state is already recorded, and an unconfirmed death
+    // leaves the same honest status as before).
+    let retire_rollback_child = |spawned: &super::successor::SpawnedSuccessor| {
+        let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+            u32::try_from(spawned.pid).unwrap_or(0),
+            spawned.process_start_id.as_deref(),
+        );
+    };
+    if let Some(hello) =
+        wait_for_hello(&options.socket_path, options.budget.boot_ms, &spawned).await
+    {
+        match validate_replacement_daemon(
+            &options.socket_path,
+            &hello,
+            previous.version(),
+            predecessor.as_ref(),
+            &spawned,
+        ) {
+            Ok(identity) => {
+                writer.lock().await.set_successor(identity)?;
+                writer.lock().await.set_state(UpdateState::Restoring)?;
+                let (counts, failures) =
+                    restore_report(&options.socket_path, &options.budget).await;
+                writer.lock().await.set_counts(counts)?;
+                // The per-session restore diagnostics ride the report too -
+                // the completed rollback must say WHICH sessions failed and
+                // why, never silently drop them.
+                writer.lock().await.set_failures(failures)?;
+                writer.lock().await.set_state(UpdateState::Complete)?;
+                writer.lock().await.set_message(Some(format!(
+                    "Rolled back to the previous Prime Agent version ({reason})"
+                )))?;
+                Ok(())
+            }
+            Err(error) => {
+                retire_rollback_child(&spawned);
+                writer.lock().await.set_state(UpdateState::Failed)?;
+                writer.lock().await.set_message(Some(format!(
+                    "The rollback supervisor failed validation ({error}); the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+                )))?;
+                Ok(())
+            }
+        }
     } else {
+        retire_rollback_child(&spawned);
         writer.lock().await.set_state(UpdateState::Failed)?;
         writer.lock().await.set_message(Some(format!(
             "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
@@ -371,8 +905,8 @@ async fn finish_failure(
     }
 }
 
-/// The candidate activation plan: the staged release directory and the launcher targets the swap
-/// writes.
+/// The candidate activation plan: the staged release directory and the
+/// launcher targets the swap writes.
 struct ActivationPlan {
     root: PathBuf,
     executable: PathBuf,
@@ -401,4 +935,41 @@ fn activation_plan() -> Result<ActivationPlan> {
         version,
         root,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rollback_own_bump_never_counts_as_a_raced_stop() {
+        // The rollback's acquire directly follows drive's: it observes
+        // exactly drive's own socket bump on the scope track (the reach
+        // tracks untouched) and must proceed.
+        assert!(!raced_shutdown_detected(0, &[0], 1, &[0]));
+        assert!(!raced_shutdown_detected(3, &[7], 4, &[7]));
+    }
+
+    #[test]
+    fn a_foreign_stop_between_the_windows_counts_as_raced() {
+        // A stop that opened in the release-to-spawn gap: a CLI pass of
+        // a root that can stop this daemon advances the reach tracks
+        // past drive's observation, and a same-socket window leaves two
+        // or more past drive's on the scope track.
+        assert!(raced_shutdown_detected(0, &[0], 0, &[1, 1]));
+        assert!(raced_shutdown_detected(0, &[0, 0], 0, &[1, 2]));
+        assert!(raced_shutdown_detected(0, &[7], 0, &[9]));
+        assert!(raced_shutdown_detected(0, &[5, 0], 0, &[5, 1]));
+    }
+
+    #[test]
+    fn another_daemons_window_never_counts_as_a_raced_stop() {
+        // An update for a different socket, or a shutdown pass of a
+        // root that cannot reach this daemon, acquires in the gap:
+        // neither advances this socket's scope track nor its reach
+        // tracks. The rollback still observes exactly drive's own
+        // scope bump.
+        assert!(!raced_shutdown_detected(0, &[0], 1, &[0]));
+        assert!(!raced_shutdown_detected(5, &[2], 6, &[2]));
+    }
 }

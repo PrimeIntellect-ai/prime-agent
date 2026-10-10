@@ -14,7 +14,9 @@ use pa_types::daemon::DaemonCommand;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use super::successor::{identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello};
+use super::successor::{
+    capture_spawned_successor, identity_from_hello, spawn_supervisor, wait_for_exit, wait_for_hello,
+};
 
 pub(super) async fn run(
     socket: &Path,
@@ -395,13 +397,14 @@ async fn boot_roster(
         Some(roster_path),
         &std::env::current_dir()?,
     )?;
-    let successor = wait_for_hello(socket, budget.boot_ms)
+    // The spawn pin (the coordinator's own hello contract): the adopted
+    // hello must come from the child THIS migration spawned, never from a
+    // different daemon that won the socket - the pin replaces the legacy
+    // pid assertion with the same identity check the main flow uses.
+    let spawned = capture_spawned_successor(spawned_pid);
+    let successor = wait_for_hello(socket, budget.boot_ms, &spawned)
         .await
         .context("replacement daemon did not start")?;
-    anyhow::ensure!(
-        successor.pid == spawned_pid,
-        "a different daemon won the socket during migration"
-    );
     let (replacement, _events) = pa_tui::daemon_client::DaemonClient::connect(socket).await?;
     let replacement_hello = replacement.hello().clone();
     replacement.close();
@@ -409,7 +412,11 @@ async fn boot_roster(
     {
         let mut value = status.lock().await;
         value["phase"] = json!("restoring");
-        value["successor"] = json!(successor);
+        // The status record carries the validated IDENTITY (pid, start id,
+        // generation, owner token) - the shape the main flow's record and
+        // the legacy readers expect - never the raw hello frame.
+        let identity = identity_from_hello(&successor);
+        value["successor"] = json!(identity);
         persist(status_path, &value)?;
     }
     let (counts, failures) = super::phases::restore_report(socket, budget).await;

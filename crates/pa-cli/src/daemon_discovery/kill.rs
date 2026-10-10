@@ -17,7 +17,60 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// process is confirmed gone (zombies count as dead — [`is_process_alive`]).
 /// Deliberate TS divergence (TS fires SIGKILL and returns without verifying):
 /// a stop path must not claim a stop a D-state process never performed.
-pub(super) fn force_kill_daemon(pid: u32) -> bool {
+/// The crash-oracle kill for a process whose identity this caller holds:
+/// a DIRECT SIGKILL, never a SIGTERM first (the supervisor's signal drain
+/// handles TERM as a graceful stop that persists worker stop tombstones -
+/// the adopted sessions would be stopped permanently instead of left for
+/// the crash recovery), verified against the process start id so a reused
+/// pid is never killed (the crash-oracle rollback path). Returns `true`
+/// when the named process is confirmed dead (already gone, killed and
+/// death-polled, or its pid visibly reused by another process); `false`
+/// when the death could not be confirmed. A liveness probe ERROR counts
+/// as alive (the conservative doctrine): an unprobeable process is never
+/// presumed dead, and the caller must refuse to spawn against it.
+pub(crate) fn force_kill_identity_crash(pid: u32, start_id: Option<&str>) -> bool {
+    // Already gone: the child is confirmed dead without a signal.
+    if !is_alive(pid) {
+        return true;
+    }
+    // A READABLE start-id mismatch is a VISIBLE pid reuse: the process at
+    // this pid is somebody else's, so this coordinator's child - which
+    // owned the pid - has exited. Confirmed dead, never signaled. An
+    // UNREADABLE start id on a live process is not evidence of reuse: the
+    // conservative verdict is unconfirmed, never "gone" - the caller must
+    // refuse to spawn against it.
+    if let Some(expected) = start_id {
+        match process_start_id(pid) {
+            Some(observed) if observed != expected => return true,
+            Some(_) => {}
+            None => return false,
+        }
+    }
+    let _ = kill_pid(pid as i32, Signal::Kill);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        // Confirmed death when the process is gone, or its identity
+        // READABLY changed under the pid (the pid was reused after the
+        // kill); an unreadable identity keeps polling to the deadline -
+        // never a false confirmation.
+        if !is_alive(pid) {
+            return true;
+        }
+        if let Some(expected) = start_id {
+            if let Some(observed) = process_start_id(pid) {
+                if observed != expected {
+                    return true;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+pub(crate) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {
@@ -45,8 +98,11 @@ pub(super) fn kill_daemon(pid: u32) {
     }
 }
 
+/// Conservative liveness (the lane doctrine: an unprobeable process is
+/// never presumed dead): a probe error counts as ALIVE - a stop path that
+/// cannot observe the process must not claim its death.
 pub(super) fn is_alive(pid: u32) -> bool {
-    is_process_alive(pid).unwrap_or(false)
+    is_process_alive(pid).unwrap_or(true)
 }
 
 /// Remove a socket file if present; false when the unlink fails. Never-touch
@@ -67,12 +123,17 @@ pub(super) fn remove_socket_file(socket_path: &Path) -> bool {
 pub(super) fn force_stop_tracked_workers(
     supervisor_socket_path: &Path,
     agent_dir: &Path,
-) -> Vec<String> {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<Vec<String>> {
     let mut failures = Vec::new();
     for worker in super::find_all_tracked_workers(agent_dir) {
         if worker.supervisor_socket_path != supervisor_socket_path {
             continue;
         }
+        // The stop window must still be ours at every worker stop (TS
+        // `forceStopTrackedWorkers` threads `assertAdmission` through the
+        // same loop).
+        assert()?;
         if !stop_tracked_process(worker.pid, worker.process_start_id.as_deref()) {
             failures.push(format!("could not safely stop worker (pid {})", worker.pid));
             continue;
@@ -81,7 +142,7 @@ pub(super) fn force_stop_tracked_workers(
         let _ = std::fs::remove_file(&worker.descriptor_path);
         let _ = std::fs::remove_file(&worker.recovery_journal_path);
     }
-    failures
+    Ok(failures)
 }
 
 /// Identity-gated stop: SIGTERM the worker (it exits keeping its resume entry),
@@ -126,7 +187,8 @@ pub(super) fn terminate_verified_residuals(
     stopped: &mut Vec<(String, String)>,
     failed: &mut Vec<(String, String)>,
     handled_pids: &std::collections::HashSet<u32>,
-) {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let started = std::time::Instant::now();
     let mut previous_signature: Option<String> = None;
     let mut quiet_since: Option<u128> = None;
@@ -139,7 +201,7 @@ pub(super) fn terminate_verified_residuals(
             previous_signature = None;
             quiet_since = quiet_since.or(Some(now));
             if evaluate_shutdown_quiet_period(now, quiet_since) {
-                return;
+                return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
@@ -148,11 +210,11 @@ pub(super) fn terminate_verified_residuals(
         let signature = listener_signature(&listeners);
         if started.elapsed().as_millis() >= SHUTDOWN_CONVERGENCE_TIMEOUT_MS {
             record_residuals(&listeners, failed, "kept respawning during shutdown");
-            return;
+            return Ok(());
         }
         if previous_signature.as_deref() == Some(signature.as_str()) {
             record_residuals(&listeners, failed, "remained after shutdown");
-            return;
+            return Ok(());
         }
         previous_signature = Some(signature);
         let mut seen_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -160,6 +222,10 @@ pub(super) fn terminate_verified_residuals(
             if !seen_pids.insert(listener.pid) {
                 continue;
             }
+            // The stop window must still be ours at every residual kill
+            // (TS `terminateVerifiedResiduals` threads `assertAdmission`
+            // into the listener termination).
+            assert()?;
             let already_reported = handled_pids.contains(&listener.pid);
             if terminate_verified_listener(listener) && !already_reported {
                 stopped.push((
@@ -254,11 +320,13 @@ mod tests {
     fn residual_sweep_over_an_empty_fixture_root_reports_nothing() {
         // No product daemon is spawned here: the sweep over an empty listener
         // set completes after the quiet period and reports nothing.
+        let assert = || Ok(());
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = fixture_root(tmp.path());
         let mut stopped: Vec<(String, String)> = Vec::new();
         let mut failed: Vec<(String, String)> = Vec::new();
-        terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new());
+        terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new(), &assert)
+            .expect("the sweep over an empty root completes");
         assert!(stopped.is_empty());
         assert!(failed.is_empty());
     }
@@ -273,9 +341,17 @@ mod tests {
                 socket_dir: PathBuf::from(dir),
                 default_socket_path: PathBuf::from(dir).join("daemon.sock"),
             };
+            let assert = || Ok(());
             let mut stopped: Vec<(String, String)> = Vec::new();
             let mut failed: Vec<(String, String)> = Vec::new();
-            terminate_verified_residuals(&root, &mut stopped, &mut failed, &HashSet::new());
+            terminate_verified_residuals(
+                &root,
+                &mut stopped,
+                &mut failed,
+                &HashSet::new(),
+                &assert,
+            )
+            .expect("the sweep never fails on the never-touch dirs");
             assert!(
                 stopped.is_empty(),
                 "sweep rooted at {dir} must stop nothing"
@@ -333,6 +409,53 @@ mod tests {
         let pid = child.id();
         let _ = child.wait();
         assert!(force_kill_daemon(pid));
+    }
+
+    /// The crash-oracle rollback kill's contract: a matching start id
+    /// confirms the death, a MISMATCHED
+    /// start id never signals (a reused pid is never killed), and a dead
+    /// pid is reported dead without a signal.
+    #[test]
+    fn force_kill_identity_crash_kills_only_the_pinned_identity() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let start_id = process_start_id(pid);
+        // A wrong start id is a VISIBLE pid reuse: never signaled, the
+        // child lives, and the coordinator's own child is confirmed dead
+        // (the pid belongs to somebody else now).
+        assert!(
+            force_kill_identity_crash(pid, Some("bogus-start-id")),
+            "a mismatched start id is confirmed dead without a signal"
+        );
+        let alive = child.try_wait().expect("the child is not reaped").is_none();
+        assert!(alive, "the mismatched-identity child is never signaled");
+        // The pinned identity dies.
+        assert!(
+            force_kill_identity_crash(pid, start_id.as_deref()),
+            "the pinned identity is killed and its death confirmed"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn force_kill_identity_crash_confirms_a_dead_pid_without_signaling() {
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a true child");
+        let pid = child.id();
+        let _ = child.wait();
+        // An already-dead pid is confirmed dead without a signal.
+        assert!(
+            force_kill_identity_crash(pid, process_start_id(pid).as_deref()),
+            "a dead pid is confirmed dead, never signaled"
+        );
     }
 
     #[test]
