@@ -169,9 +169,9 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
     }
 }
 
-/// Whether the pid still names the discovered process (the identity gate: a
-/// recycled pid is never signaled). An UNVERIFIABLE identity never signals -
-/// safe for lease retention, not for termination.
+/// Whether the current identity snapshot agrees with the discovered process.
+/// This preflight check cannot itself bind a later numeric signal to an instance.
+/// An UNVERIFIABLE identity never signals - safe for lease retention, not for termination.
 fn identity_current(target: &ReapTarget) -> bool {
     match &target.start_id {
         Some(expected) => {
@@ -184,6 +184,14 @@ fn identity_current(target: &ReapTarget) -> bool {
 /// Stop one target on the boot reap's fast budgets.
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
     stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
+}
+
+struct PidfdGuard(i32);
+
+impl Drop for PidfdGuard {
+    fn drop(&mut self) {
+        pa_core::platform::process::close_pidfd(self.0);
+    }
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
@@ -200,15 +208,14 @@ async fn stop_target_within(
         // The fd opens before the identity check and is held across it and
         // every signal, so only the pinned process can receive one.
         Ok(pidfd) => {
-            let outcome = escalate(
+            let pidfd = PidfdGuard(pidfd);
+            escalate(
                 target,
-                |signal| pa_core::platform::process::pidfd_signal(pidfd, signal),
+                |signal| pa_core::platform::process::pidfd_signal(pidfd.0, signal),
                 term_grace,
                 kill_verify,
             )
-            .await;
-            pa_core::platform::process::close_pidfd(pidfd);
-            outcome
+            .await
         }
         Err(error) if cfg!(unix) && error.kind() == std::io::ErrorKind::Unsupported => {
             escalate(
