@@ -2438,4 +2438,77 @@ mod shutdown_admission_tests {
             "a timer registered behind the one-shot fence drain"
         );
     }
+
+    /// The serving exit closes admission BEFORE any lease probe settles:
+    /// with the lease's lock path displaced, the async probe parks in its
+    /// displacement grace, and the admission flags must already be up
+    /// while it parks. Red-first: reverting to probe-then-close leaves
+    /// the flags down for the whole grace (the parked probe holds the
+    /// helper before its close) and the immediate assertion fails.
+    #[tokio::test(start_paused = true)]
+    async fn the_serving_exit_closes_admission_before_any_lease_probe_settles() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        );
+        let socket_path = dir.path().join("daemon.sock");
+        let lease = crate::socket::SocketLease::acquire(&socket_path)
+            .await
+            .expect("lease");
+        // Displace the lease: the lock directory the lease pins is gone
+        // from its public path, so the async probe takes the
+        // displacement-grace arm instead of answering at once.
+        let lock_dir_moved = dir.path().join("displaced.lock");
+        std::fs::rename(
+            pa_core::platform::LockDir::path_for(&socket_path),
+            &lock_dir_moved,
+        )
+        .expect("displace the lease lock directory");
+        // Pin the seam future and MANUALLY poll it once (noop waker): a
+        // single poll deterministically runs the admission close and
+        // parks the lease probe in its displacement grace - no scheduler
+        // assumption about a spawned task's first poll.
+        let mut probe = {
+            let supervisor = Arc::clone(&supervisor);
+            std::pin::pin!(async move {
+                supervisor
+                    .serving_exit_closes_admission_then_samples(&lease)
+                    .await
+            })
+        };
+        {
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match std::future::Future::poll(probe.as_mut(), &mut cx) {
+                std::task::Poll::Ready(result) => {
+                    panic!("the seam settled at once: {result:?} (the displaced probe must park)")
+                }
+                std::task::Poll::Pending => {}
+            }
+        }
+        // The probe is parked in its (paused) grace; the admission flags
+        // are ALREADY up - no lease probe may delay the close.
+        assert!(
+            supervisor.shutting_down.load(Ordering::SeqCst),
+            "admission did not close before the lease probe settled"
+        );
+        assert!(
+            supervisor.accept_exit.load(Ordering::SeqCst),
+            "accept-exit did not close before the lease probe settled"
+        );
+        // Let the grace elapse: the displacement persists, so the verdict
+        // is a lost lease. The SAME pinned future is awaited - its next
+        // poll re-reads the elapsed grace deadline.
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let lost = tokio::time::timeout(std::time::Duration::from_secs(5), probe.as_mut())
+            .await
+            .expect("the serving-exit probe never settled");
+        assert!(lost, "the displaced lease must read as lost");
+        drop(lock_dir_moved);
+    }
 }

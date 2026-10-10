@@ -355,6 +355,32 @@ impl Supervisor {
         self.log.append(reason);
     }
 
+    /// The serving exit's admission close: on EVERY terminal serving
+    /// exit (healthy accept-exhaustion included) the admission flags
+    /// close FIRST - synchronously, before ANY lease probe runs. The
+    /// probe that follows is the ASYNC grace form (the blocking one
+    /// would sleep the worker for the whole displacement grace on a
+    /// displaced lease, landing the flags late exactly when new stops
+    /// or owner-cleanup timers could still admit). A lost-lease verdict
+    /// appends the compromise record on top of the already-closed
+    /// admission. Returns the loss verdict for the caller's logging and
+    /// exit decision.
+    #[cfg(unix)]
+    async fn serving_exit_closes_admission_then_samples(
+        &self,
+        socket_lease: &crate::socket::SocketLease,
+    ) -> bool {
+        self.close_supervisor_admission("daemon serving ended; closing supervisor admission");
+        let lease_lost = socket_lease.assert_held_async().await.is_err();
+        if lease_lost {
+            // The serving-end close above already stands; the loss
+            // verdict adds its compromise record.
+            self.log
+                .append("daemon socket lease compromised; relinquishing supervisor ownership");
+        }
+        lease_lost
+    }
+
     /// The lease-loss fence: with the flags already up, EVERY tracked
     /// handle - owner-cleanup timers AND boot passes - is aborted FIRST
     /// (a handle caught in an unpreemptible step must not strand the
@@ -782,29 +808,29 @@ impl Supervisor {
                 // arm is gone once serving ends; a loss landing inside
                 // the join window is caught there and takes the same
                 // shutdown path).
-                // EVERY terminal serving exit closes admission - the
-                // healthy accept-exhaustion exit included: the fence
-                // below is a one-shot snapshot of the tracked timers and
-                // passes, and a live client handler could otherwise
-                // start a stop or arm a fresh timer behind it while the
-                // exit flush and the lease release below run. A lost
-                // lease logs the compromise; the healthy exit logs the
-                // serving-end close.
-                let mut lease_lost = socket_lease.assert_held().is_err();
-                if lease_lost {
-                    self.mark_supervisor_shutting_down();
-                } else {
-                    self.close_supervisor_admission(
-                        "daemon serving ended; closing supervisor admission",
-                    );
-                }
+                // EVERY terminal serving exit closes admission FIRST - the
+                // healthy accept-exhaustion exit included - and with NO
+                // probe ahead of the flags: the lease sample below is
+                // the ASYNC grace probe (the blocking form would sleep
+                // this worker for the whole displacement grace on a
+                // displaced lease, landing the flags late exactly when
+                // new stops or owner-cleanup timers could still admit).
+                // The fence below is a one-shot snapshot of the tracked
+                // timers and passes, and a live client handler could
+                // otherwise start a stop or arm a fresh timer behind it
+                // while the exit flush and the lease release below run.
+                let mut lease_lost = self
+                    .serving_exit_closes_admission_then_samples(&socket_lease)
+                    .await;
                 // The fence runs in EVERY outcome - a healthy exit also
                 // releases the lease, so the same timers, boot passes,
                 // and in-flight stop transitions must not outlive it.
                 self.lease_loss_fence(&mut boot_tasks).await;
-                if !lease_lost && socket_lease.assert_held().is_err() {
+                if !lease_lost && socket_lease.assert_held_async().await.is_err() {
                     lease_lost = true;
-                    self.mark_supervisor_shutting_down();
+                    self.log.append(
+                        "daemon socket lease compromised; relinquishing supervisor ownership",
+                    );
                 }
                 if lease_lost {
                     Err(anyhow!("daemon socket lease compromised"))
