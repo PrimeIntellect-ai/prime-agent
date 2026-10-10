@@ -101,6 +101,17 @@ impl PhaseFailure {
     }
 }
 
+/// Whether a concurrent stop raced the update's release-to-spawn window,
+/// judged from the generation the two admissions observed: every acquire
+/// stores the counter value BEFORE its own bump, so with no foreign stop
+/// the rollback's acquire observes exactly drive's own bump - one more
+/// than drive's observation. TWO or more bumps mean a foreign stop
+/// acquired in between (while drive held, the only possible window is
+/// after its release), completed, and released.
+fn raced_shutdown_detected(drive_generation: u64, rollback_observed: u64) -> bool {
+    rollback_observed > drive_generation + 1
+}
+
 /// Run the FSM from the adopted status to a terminal state; the returned
 /// status is the terminal record (the caller prints the report).
 ///
@@ -195,17 +206,8 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 }
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
-            // A concurrent stop raced the update's release-to-spawn
-            // window. The arithmetic: every acquire observes the counter
-            // BEFORE its own bump, so with no foreign stop the rollback's
-            // acquire observes exactly drive's own bump - one more than
-            // drive's observation. TWO or more means a foreign stop
-            // acquired in between (while drive held, the only possible
-            // window is after its release), completed, and released. The
-            // user's shutdown has reported success by now - the rollback
-            // refuses to spawn a daemon behind it.
             let drive_generation = drive_generation.load(std::sync::atomic::Ordering::SeqCst);
-            if rollback_admission.observed_generation() > drive_generation + 1 {
+            if raced_shutdown_detected(drive_generation, rollback_admission.observed_generation()) {
                 // The rejected successor this update spawned is retired the
                 // same way finish_failure retires it (best-effort
                 // identity-pinned crash kill): left alive beside the
@@ -856,4 +858,25 @@ fn activation_plan() -> Result<ActivationPlan> {
         version,
         root,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rollback_own_bump_never_counts_as_a_raced_stop() {
+        // The rollback's acquire directly follows drive's: it observes
+        // exactly drive's own bump and must proceed.
+        assert!(!raced_shutdown_detected(0, 1));
+        assert!(!raced_shutdown_detected(7, 8));
+    }
+
+    #[test]
+    fn a_foreign_stop_between_the_windows_counts_as_raced() {
+        // A stop that opened in the release-to-spawn window adds its own
+        // bump on top of drive's: two or more past the baseline.
+        assert!(raced_shutdown_detected(0, 2));
+        assert!(raced_shutdown_detected(7, 9));
+    }
 }
