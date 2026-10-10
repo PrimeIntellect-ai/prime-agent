@@ -180,9 +180,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let cwd = config.cwd.clone();
     // Session persistence first: the conversation-log path and the resume
     // context both come from the session manager.
-    let session_manager = config
+    let mut session_manager = config
         .session_manager
         .unwrap_or_else(|| SessionManager::in_memory(&cwd));
+    let owns_resume_settings =
+        session_manager.is_persisted() || config.conversation_log_path.is_none();
     let conversation_log = {
         let session = &session_manager;
         session
@@ -195,6 +197,22 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .map(|path| path.display().to_string())
             })
     };
+    let (settings, trace_consent) =
+        crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
+    let traces = session_manager
+        .is_persisted()
+        .then(|| {
+            crate::agent_traces::ContinuousTraceUpload::install(
+                &cwd,
+                &config.agent_dir,
+                session_manager.get_session_file(),
+                trace_consent,
+            )
+        })
+        .flatten();
+    if let Some(traces) = traces {
+        session_manager.on_persist(Box::new(move |path| traces.persisted(path)));
+    }
     let wiring = super::runtime_wiring::wire_session_runtime(
         session_manager,
         &config.agent_dir,
@@ -207,8 +225,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         config.cron_store.clone(),
     );
 
-    let settings = crate::settings::SettingsManager::create(&cwd, &config.agent_dir);
     let service_tier_preference = settings.get_default_service_tier();
+    // Captured before `settings` moves into the resource loader: whether the
+    // decision-api skill's settings gate is set (the prompt and the kernel's
+    // pre-import filter read it below).
+    let decision_api_configured = super::decision_api::decision_api_configured(settings.settings());
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
@@ -312,6 +333,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     crate::mcp::McpManager::register_host_handlers(&mcp_manager, &mut handlers);
     let turn_boundary = Arc::new(super::turn_boundary::TurnBoundaryRequests::new());
     turn_boundary.register_model_info_handler(&mut handlers, model_info.clone());
+    super::decision_api::register_decision_api_handler(
+        &mut handlers,
+        cwd.clone(),
+        config.agent_dir.clone(),
+    );
     let keep_recent_tokens = compaction_settings
         .keep_recent_tokens
         .unwrap_or(super::compaction::DEFAULT_KEEP_RECENT_TOKENS);
@@ -395,10 +421,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         )
             as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
+    let preimport_filter =
+        super::decision_api::decision_api_preimport_filter(decision_api_configured);
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
         handlers,
         python_skills,
+        preimport_filter,
         cwd.clone(),
         &config.agent_dir,
         session_artifact_dir,
@@ -455,36 +484,66 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
 
     let prompt_guidelines = config.prompt_guidelines.clone();
 
-    let prompt_model_selector = Some(format!("{}/{}", model_info.provider, model_info.id));
+    let prompt_model_selector = format!("{}/{}", model_info.provider, model_info.id);
     let prompt_vision_capable = Some(model_info.input.contains(&pa_types::ai::ModelInput::Image));
-    let system_prompt = crate::prompts::system_prompt::build_system_prompt(
-        &crate::prompts::system_prompt::BuildSystemPromptOptions {
-            custom_prompt: resources.system_prompt.clone(),
-            model: prompt_model_selector.as_deref(),
-            vision_capable: prompt_vision_capable,
-            cwd: cwd.display().to_string(),
-            messages_path: conversation_log.clone(),
-            context_files: resources
-                .agents_files
-                .iter()
-                .map(|file| (file.path.display().to_string(), file.content.clone()))
-                .collect(),
-            skills: resources.skills.clone(),
-            selected_tools: Some(
-                active_tool_names
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            ),
-            allow_recursion: config.allow_recursion,
-            // A spawned child's prompt must read "depth: N (not root)" with
-            // the child-agent reply doctrine, never the root identity.
-            rlm_depth: config.rlm_depth,
-            generic_mcp_servers,
-            prompt_guidelines: Some(prompt_guidelines),
-            ..Default::default()
-        },
+    let model_prompts = crate::prompts::model_prompts::load_model_prompts(
+        Some(&prompt_model_selector),
+        &config.agent_dir,
     );
+    if !model_prompts.errors.is_empty() {
+        boot_notice_rows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(crate::prompts::model_prompts::model_prompt_error_message(
+                &model_prompts.errors,
+            ));
+    }
+    // The settings gate decides the prompt's decision-api skill: the skill
+    // rides the prompt only while decisionApi.systemOneModel is set.
+    let mut prompt_options = crate::prompts::system_prompt::BuildSystemPromptOptions {
+        custom_prompt: resources.system_prompt.clone(),
+        model_prompt_extras: model_prompts.extras.as_deref(),
+        vision_capable: prompt_vision_capable,
+        cwd: cwd.display().to_string(),
+        messages_path: conversation_log.clone(),
+        context_files: resources
+            .agents_files
+            .iter()
+            .map(|file| (file.path.display().to_string(), file.content.clone()))
+            .collect(),
+        skills: resources.skills.clone(),
+        selected_tools: Some(
+            active_tool_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        ),
+        allow_recursion: config.allow_recursion,
+        // A spawned child's prompt must read "depth: N (not root)" with
+        // the child-agent reply doctrine, never the root identity.
+        rlm_depth: config.rlm_depth,
+        daemonless: config.rlm_subagent_host.is_none(),
+        generic_mcp_servers,
+        prompt_guidelines: Some(prompt_guidelines),
+        ..Default::default()
+    };
+    if !decision_api_configured {
+        prompt_options
+            .skills
+            .retain(|skill| skill.name != super::decision_api::DECISION_API_SKILL_NAME);
+    }
+    let system_prompt = crate::prompts::system_prompt::build_system_prompt(&prompt_options);
+    // While the gate is off the skill is unreachable: the prompt omits it
+    // and `/skill:` cannot invoke it; while it is on, the skill is an
+    // ordinary session skill.
+    let session_skills: Vec<crate::skills::Skill> = resources
+        .skills
+        .iter()
+        .filter(|skill| {
+            decision_api_configured || skill.name != super::decision_api::DECISION_API_SKILL_NAME
+        })
+        .cloned()
+        .collect();
 
     // Captured before the digest context moves the local harness dir and
     // the loop wiring moves the session model: the factory host bridge's
@@ -504,6 +563,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 && skill.name == crate::prompts::system_prompt::REFINE_SKILL_NAME
         }),
     };
+
     let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
         let messages = super::compact_session::rebuilt_context_after_compaction(&session);
@@ -517,10 +577,10 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         if existing_messages.is_empty() {
             session.append_model_change(&model.provider, &model.id)?;
             session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
-        } else if !has_thinking_entry {
+        } else if owns_resume_settings && !has_thinking_entry {
             session.append_thinking_level_change(&format!("{thinking_level:?}").to_lowercase())?;
         }
-        if existing_messages.is_empty() || !has_service_tier_entry {
+        if existing_messages.is_empty() || (owns_resume_settings && !has_service_tier_entry) {
             session.append_service_tier_change(Some(service_tier_preference))?;
         }
     }
@@ -660,7 +720,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         std::sync::Arc::downgrade(&provisioner),
     ));
     session.set_kernel_state_probe(Some(kernel_state_probe));
-    session.set_skills(resources.skills.clone());
+    session.set_skills(session_skills.clone());
     session.set_image_model_router(config.image_model_router.clone());
     // The semantic-edge handoff: the daemon's child registry and retry
     // park read the recorder; the side question keeps the pre-semantic
@@ -753,7 +813,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         });
     Ok(SessionEngine {
         session,
-        skills: resources.skills,
+        skills: session_skills,
         skill_diagnostics: resources.skill_diagnostics,
         prompt_templates: resources.prompts,
         agents_files: resources.agents_files,

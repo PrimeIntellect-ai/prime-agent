@@ -25,6 +25,13 @@ list; rows carry their session's `◷ N` heartbeat count from the
 ## Non-goals
 No session logic, no providers, no loop policy. The interactive UI renders daemon events and sends user intents (prompts, abort, switch) as daemon commands; the session loop itself lives in the pa-daemon worker. It never computes agent behavior and never spawns the supervisor (launch semantics live in pa-cli).
 
+The `/decision-api` switch is a daemon session command; the TUI only
+submits it. `chrome::ChromeState::decision_api` and
+`snapshot::Reconstructed::decision_api` extend the existing rendering/snapshot
+data with the session's enabled flag (seeded from the attach state, kept live
+by its `decision_api_status` rows); the footer component itself remains
+crate-internal.
+
 The client commands of the clipboard/auth/update group: `/copy` (the last assistant text through the platform clipboard tool chain with the OSC 52 fallback — `clipboard.rs` + `osc52.rs`, the same emitter the selection-copy work can reuse; the daemon `get_last_assistant_text` supplies the text), `/import` (the path argument parse, the TS confirm, the typed error surfaces — the missing file, the missing session cwd with its fallback-cwd retry — and the post-import transcript rebuild through the daemon's `import_jsonl`), `/login` + `/logout` (the TS providers selector — `provider_auth.rs`, the panel `showConfigurationMenu("providers")` mounts: the tab bar, the search, the status indicators, the in-panel API-key prompt — over the composition root's auth flows), `/traces` (the TS status block and settings writes; the upload subsystem stays unported, its arms keep the TS state shapes and report the unavailability), and `/update` (the TS busy guard, the split-CLI child mapping — packages then the binary — and the self-update relaunch through the composition root's hook).
 
 ## Public API

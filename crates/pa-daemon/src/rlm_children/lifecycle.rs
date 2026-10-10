@@ -80,6 +80,17 @@ impl SupervisorChildSessionsInner {
             "rlmDepth": depth,
             "rlmMaxDepth": identity.rlm_max_depth,
         });
+        // The decision child's runtime kind reaches the worker through the
+        // create config: it builds the decision engine instead of the agent
+        // engine.
+        if runtime_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("kind"))
+            .and_then(Value::as_str)
+            == Some("decision")
+        {
+            config["decisionChild"] = json!(true);
+        }
         if let Some((provider, id)) = model.split_once('/') {
             config["provider"] = json!(provider);
             config["model"] = json!(id);

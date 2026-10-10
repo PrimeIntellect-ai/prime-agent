@@ -214,6 +214,7 @@ pub fn kernel_provisioner(
     session_id: String,
     handlers: HostRequestHandlers,
     python_skills: Vec<KernelPythonSkill>,
+    preimport_filter: crate::kernel::provisioner::PythonSkillPreimportFilter,
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
     snapshot_dir: Option<std::path::PathBuf>,
@@ -237,6 +238,7 @@ pub fn kernel_provisioner(
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,
+            preimport_filter: Some(preimport_filter),
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir,
