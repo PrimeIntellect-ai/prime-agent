@@ -141,34 +141,47 @@ mod tests {
         /// Observes cancellation the only way an aborted task can be seen:
         /// the guard's Drop runs when the job's own task is cancelled -
         /// a detached job stays parked in its sleep and never drops it.
-        struct CancellationObserved(std::sync::Arc<AtomicUsize>);
+        /// The Drop also SIGNALS the test over the channel (the readiness
+        /// witness itself - no polling).
+        struct CancellationObserved(std::sync::Arc<tokio::sync::mpsc::Sender<()>>);
         impl Drop for CancellationObserved {
             fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
+                let _ = self.0.try_send(());
             }
         }
-        let entered = std::sync::Arc::new(AtomicUsize::new(0));
-        let cancelled = std::sync::Arc::new(AtomicUsize::new(0));
+        // Readiness by CHANNEL, not by polling: each job signals its
+        // entry, and its cancellation guard signals the drop; the test
+        // awaits the exact counts (the timeout bounds only failure).
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::channel::<()>(4);
+        let (cancelled_tx, mut cancelled_rx) = tokio::sync::mpsc::channel::<()>(4);
         let pass = tokio::spawn(run_bounded(
             (0..4)
                 .map(|_| {
-                    let entered = std::sync::Arc::clone(&entered);
-                    let cancelled = std::sync::Arc::clone(&cancelled);
-                    move || async move {
-                        let _observed = CancellationObserved(std::sync::Arc::clone(&cancelled));
-                        entered.fetch_add(1, Ordering::SeqCst);
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    let entered_tx = entered_tx.clone();
+                    let cancelled_tx = cancelled_tx.clone();
+                    move || {
+                        let entered_tx = entered_tx.clone();
+                        let cancelled_tx = cancelled_tx.clone();
+                        async move {
+                            let _observed =
+                                CancellationObserved(std::sync::Arc::new(cancelled_tx.clone()));
+                            entered_tx
+                                .send(())
+                                .await
+                                .expect("the entry channel stays open");
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
                     }
                 })
                 .collect(),
             4,
             FanoutDrain::new(),
         ));
-        // Wait until all four jobs are parked inside the sleep.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while entered.load(Ordering::SeqCst) < 4 {
-            assert!(std::time::Instant::now() < deadline, "jobs never started");
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for _ in 0..4 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx.recv())
+                .await
+                .expect("a job never entered its sleep")
+                .expect("the entry channel closed early");
         }
         pass.abort();
         pass.await.unwrap_err();
@@ -176,13 +189,11 @@ mod tests {
         // job's cancellation guard runs. (A detached fan-out keeps the
         // guards alive inside the parked sleeps - this is the assertion
         // that fails without the abort-on-drop fan-out.)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while cancelled.load(Ordering::SeqCst) < 4 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the in-flight fan-out was not cancelled with the pass"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for _ in 0..4 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx.recv())
+                .await
+                .expect("the in-flight fan-out was not cancelled with the pass")
+                .expect("the cancellation channel closed early");
         }
     }
 
