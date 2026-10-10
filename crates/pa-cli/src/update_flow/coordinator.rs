@@ -192,12 +192,14 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     };
     let reach_keys =
         crate::daemon_discovery::shutdown_reach_keys(&options.socket_path, &state_root);
+    let reach_key_refs: Vec<&std::path::Path> =
+        reach_keys.iter().map(std::path::PathBuf::as_path).collect();
     match drive(
         &writer,
         options,
         &update_id,
         &socket_dir,
-        &reach_keys,
+        &reach_key_refs,
         &baseline,
     )
     .await
@@ -228,7 +230,7 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once(
                     pa_daemon::supervisor_ownership::ShutdownScope::Socket {
                         socket: &options.socket_path,
-                        keys: reach_keys.to_vec(),
+                        keys: reach_key_refs.clone(),
                     },
                 ) {
                     Ok(admission) => Some(admission),

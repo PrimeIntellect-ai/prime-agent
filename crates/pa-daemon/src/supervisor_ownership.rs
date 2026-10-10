@@ -551,29 +551,34 @@ fn scope_paths_for(registry_dir: &Path, scope: ShutdownScope<'_>) -> ScopePaths 
     }
 }
 
-/// Read the current generation (0 when no acquire ever happened; a
-/// read error is 0 - the conservative "no concurrent window" answer, the
-/// same answer an absent file gives).
-fn read_shutdown_admission_generation(path: &Path) -> u64 {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| raw.trim().parse().ok())
-        .unwrap_or(0)
+/// Read the current generation. Only an absent file reads as 0 (no
+/// acquire ever happened - the first bump writes the counter); every
+/// other read or parse failure is an ERROR, never a silent 0: a failed
+/// read must fail the acquisition instead of hiding a completed stop
+/// window behind a fabricated baseline, which would let the raced check
+/// pass and restart the daemon behind the user's shutdown.
+fn read_shutdown_admission_generation(path: &Path) -> Result<u64> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => raw.trim().parse::<u64>().with_context(|| {
+            let _ = path;
+            format!("parse {}", path.display())
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(anyhow!("read {}: {error}", path.display())),
+    }
 }
 
 /// Bump the scope's generation under the caller's registry guard (acquire
-/// only). A write failure FAILS THE ACQUISITION: the concurrent-stop
-/// detection would silently miss a raced shutdown and the caller would
-/// spawn behind the user's completed stop.
+/// only). The write is the atomic temp-and-rename (the record writer's),
+/// so an interrupted bump leaves the prior counter intact, and the
+/// per-socket subdirectory is created by the writer itself. A write
+/// failure FAILS THE ACQUISITION: the concurrent-stop detection would
+/// silently miss a raced shutdown and the caller would spawn behind the
+/// user's completed stop.
 fn bump_shutdown_admission_generation_at(path: &Path) -> Result<u64> {
-    let observed = read_shutdown_admission_generation(path);
-    // The first bump of a scope track writes its directory into being
-    // (the per-socket files live in a subdirectory the guard only
-    // ensures the root of); a missing parent would fail the acquisition,
-    // which fails the update - not a stop-window answer at all.
-    crate::paths::ensure_dir(path.parent().unwrap_or(Path::new(".")))?;
-    std::fs::write(path, (observed + 1).to_string())
-        .with_context(|| format!("write {}", path.display()))?;
+    let observed = read_shutdown_admission_generation(path)?;
+    crate::descriptor::write_file_atomic_unsynced(path, &(observed + 1).to_string())
+        .with_context(|| format!("bump {}", path.display()))?;
     Ok(observed)
 }
 
@@ -908,7 +913,10 @@ impl ShutdownAdmission {
                             // so an aborted pass leaves no phantom stop
                             // windows for a raced check to read.
                             for (file, observed) in &advanced {
-                                let _ = std::fs::write(file, observed.to_string());
+                                let _ = crate::descriptor::write_file_atomic_unsynced(
+                                    file,
+                                    &observed.to_string(),
+                                );
                             }
                             return Err(error);
                         }
@@ -920,13 +928,13 @@ impl ShutdownAdmission {
                     }
                     ScopePaths::Socket { socket_file, reach } => {
                         state.observed_scope_generation.store(
-                            read_shutdown_admission_generation(socket_file),
+                            read_shutdown_admission_generation(socket_file)?,
                             std::sync::atomic::Ordering::SeqCst,
                         );
                         let observed: Vec<u64> = reach
                             .iter()
                             .map(|path| read_shutdown_admission_generation(path))
-                            .collect();
+                            .collect::<Result<Vec<_>>>()?;
                         *state
                             .observed_root_generations
                             .lock()
@@ -1608,6 +1616,44 @@ mod tests {
             "the freed window acquires at once"
         );
     }
+    /// A generation file that cannot be read or parsed fails the
+    /// acquisition instead of fabricating a 0 baseline: a failed read
+    /// hiding a completed stop window would let the raced check pass
+    /// and restart the daemon behind the user's shutdown.
+    #[test]
+    fn an_unreadable_generation_file_fails_the_acquisition() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let socket = registry.path().join("daemon.sock");
+        let socket_file = shutdown_admission_generation_file(registry.path(), &socket);
+        std::fs::create_dir_all(socket_file.parent().expect("the generations dir"))
+            .expect("mkdir the generations dir");
+        std::fs::write(&socket_file, "not-a-counter").expect("write the garbage counter");
+        assert!(
+            ShutdownAdmission::acquire_in(
+                registry.path(),
+                ShutdownScope::Socket {
+                    socket: &socket,
+                    keys: vec![],
+                },
+            )
+            .is_err(),
+            "a garbage counter fails the window, never a silent 0"
+        );
+        // The absent-file case stays the honest first counter: 0.
+        std::fs::remove_file(&socket_file).expect("remove the garbage");
+        assert!(
+            ShutdownAdmission::acquire_in(
+                registry.path(),
+                ShutdownScope::Socket {
+                    socket: &socket,
+                    keys: vec![],
+                },
+            )
+            .is_ok(),
+            "an absent counter is the first window, not an error"
+        );
+    }
+
     /// The admission handle reports the generations OBSERVED at its
     /// acquire (under the guard, before its own bump): a caller comparing
     /// a later acquire against this baseline detects exactly the foreign

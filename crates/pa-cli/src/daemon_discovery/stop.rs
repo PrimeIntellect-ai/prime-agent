@@ -217,8 +217,11 @@ fn run_shutdown_with_admission(json: bool, force: bool, root: &DaemonStateRoot) 
     // never-touch keys excluded - which are the reach keys a
     // coordinator whose daemon this pass can stop compares against.
     let pass_keys = super::shutdown_pass_keys(root);
+    let pass_key_refs: Vec<&Path> = pass_keys.iter().map(std::path::PathBuf::as_path).collect();
     let mut admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire(
-        pa_daemon::supervisor_ownership::ShutdownScope::Root { keys: pass_keys },
+        pa_daemon::supervisor_ownership::ShutdownScope::Root {
+            keys: pass_key_refs,
+        },
     ) {
         Ok(admission) => admission,
         Err(error) => {

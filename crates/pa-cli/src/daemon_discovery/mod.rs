@@ -147,39 +147,53 @@ fn inside(directory: Option<&Path>, parent: &Path) -> bool {
     }
 }
 
-/// The raced-stop reach keys of a daemon socket in this state root: the
-/// root's default socket, socket dir, and agent dir counters its socket
-/// actually matches (`state_root_matches`'s own predicates), with the
-/// never-touch exclusion applied first - a stop that can never touch
+/// The raced-stop reach keys of a daemon socket: the generation files a
+/// stop window that can reach this socket bumps. `state_root_matches`
+/// accepts a socket from any of three root entries, and a shutdown can
+/// run rooted at ANY directory containing the socket, so the keys are
+/// the default socket and the shared socket dir (when the socket is
+/// one of them) plus EVERY containing directory of the socket - a
+/// daemon at /srv/agents/a/deep/daemon.sock watches /srv/agents/a/deep,
+/// /srv/agents/a, /srv/agents, /srv and /, and a pass rooted at any of
+/// them bumps its own root and is seen. A pass whose agent dir is not
+/// among them cannot match the socket at all, so it never registers.
+/// The never-touch exclusion applies first - a stop that can never touch
 /// this socket registers on nothing, so a daemon in a protected dir
 /// never reads a CLI pass as its concurrent shutdown.
 #[must_use]
-pub(crate) fn shutdown_reach_keys<'a>(
-    socket_path: &Path,
-    root: &'a DaemonStateRoot,
-) -> Vec<&'a Path> {
+pub(crate) fn shutdown_reach_keys(socket_path: &Path, root: &DaemonStateRoot) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         // Windows daemons share one named pipe per machine, so every
         // stop window can stop every daemon: the one reach key is the
         // pipe (the default path) itself.
         let _ = socket_path;
-        vec![root.default_socket_path.as_path()]
+        vec![root.default_socket_path.clone()]
     }
     #[cfg(not(windows))]
     {
         if is_never_touch(socket_path) {
             return Vec::new();
         }
-        let mut keys = Vec::new();
+        let mut keys: Vec<PathBuf> = Vec::new();
+        let mut push = |key: &Path| {
+            if !keys.iter().any(|seen| seen == key) {
+                keys.push(key.to_path_buf());
+            }
+        };
         if socket_path == root.default_socket_path {
-            keys.push(root.default_socket_path.as_path());
+            push(&root.default_socket_path);
         }
         if socket_path.parent() == Some(&root.socket_dir) {
-            keys.push(root.socket_dir.as_path());
+            push(&root.socket_dir);
         }
-        if inside(socket_path.parent(), &root.agent_dir) {
-            keys.push(root.agent_dir.as_path());
+        // Every containing directory: a shutdown rooted at any of them
+        // can stop this socket (`inside` accepts any ancestor of the
+        // socket's parent), and each pass bumps its own root's key.
+        let mut dir = socket_path.parent();
+        while let Some(directory) = dir {
+            push(directory);
+            dir = directory.parent();
         }
         keys
     }
@@ -190,18 +204,18 @@ pub(crate) fn shutdown_reach_keys<'a>(
 /// never-touch key is itself never-touch, so no coordinator observes the
 /// key and the pass can stop nothing behind it).
 #[must_use]
-pub(crate) fn shutdown_pass_keys<'a>(root: &'a DaemonStateRoot) -> Vec<&'a Path> {
+pub(crate) fn shutdown_pass_keys(root: &DaemonStateRoot) -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         // The Windows pass stops the one shared pipe.
-        vec![root.default_socket_path.as_path()]
+        vec![root.default_socket_path.clone()]
     }
     #[cfg(not(windows))]
     {
         [
-            root.default_socket_path.as_path(),
-            root.socket_dir.as_path(),
-            root.agent_dir.as_path(),
+            root.default_socket_path.clone(),
+            root.socket_dir.clone(),
+            root.agent_dir.clone(),
         ]
         .into_iter()
         .filter(|key| !is_never_touch(key))
@@ -652,7 +666,7 @@ mod tests {
     /// pass barred from a key) registers on nothing - the raced check
     /// never reads a stop it cannot receive.
     #[test]
-    fn shutdown_reach_keys_mirror_the_root_filter() {
+    fn shutdown_reach_keys_cover_every_containing_shutdown_root() {
         let root = DaemonStateRoot {
             agent_dir: PathBuf::from("/home/agent"),
             socket_dir: PathBuf::from("/tmp/sockets"),
@@ -661,24 +675,36 @@ mod tests {
         assert_eq!(
             shutdown_reach_keys(&root.default_socket_path, &root),
             vec![
-                root.default_socket_path.as_path(),
-                root.socket_dir.as_path()
+                root.default_socket_path.clone(),
+                root.socket_dir.clone(),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/")
             ],
-            "the default socket matches its default and socket-dir keys"
+            "the default socket matches its default, socket-dir, and every containing dir"
         );
         assert_eq!(
             shutdown_reach_keys(Path::new("/tmp/sockets/other.sock"), &root),
-            vec![root.socket_dir.as_path()],
-            "a socket-dir socket matches the socket-dir key"
+            vec![
+                root.socket_dir.clone(),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/")
+            ],
+            "a socket-dir socket matches the socket-dir and containing dirs"
         );
+        // The nested-root case the reviewer pinned: a shutdown rooted at
+        // /srv/agents can stop a daemon at /srv/agents/a/deep/daemon.sock
+        // (`inside` accepts any ancestor), so the daemon's keys must
+        // include /srv/agents, not only its own agent dir /srv/agents/a.
         assert_eq!(
-            shutdown_reach_keys(Path::new("/home/agent/deep/agent.sock"), &root),
-            vec![root.agent_dir.as_path()],
-            "an agent-dir socket matches the agent-dir key"
-        );
-        assert!(
-            shutdown_reach_keys(Path::new("/tmp/elsewhere/daemon.sock"), &root).is_empty(),
-            "a socket of no key registers on nothing"
+            shutdown_reach_keys(Path::new("/srv/agents/a/deep/daemon.sock"), &root),
+            vec![
+                PathBuf::from("/srv/agents/a/deep"),
+                PathBuf::from("/srv/agents/a"),
+                PathBuf::from("/srv/agents"),
+                PathBuf::from("/srv"),
+                PathBuf::from("/")
+            ],
+            "an agent-dir socket watches every containing shutdown root"
         );
     }
 
@@ -711,7 +737,7 @@ mod tests {
         };
         assert_eq!(
             shutdown_pass_keys(&protected),
-            vec![protected.agent_dir.as_path()],
+            vec![protected.agent_dir.clone()],
             "only the unprotected keys are bumped"
         );
         let free = DaemonStateRoot {
@@ -722,9 +748,9 @@ mod tests {
         assert_eq!(
             shutdown_pass_keys(&free),
             vec![
-                free.default_socket_path.as_path(),
-                free.socket_dir.as_path(),
-                free.agent_dir.as_path(),
+                free.default_socket_path.clone(),
+                free.socket_dir.clone(),
+                free.agent_dir.clone(),
             ],
             "an unprotected root bumps its whole trio"
         );
