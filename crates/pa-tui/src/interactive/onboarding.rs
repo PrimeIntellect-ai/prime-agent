@@ -737,6 +737,7 @@ mod tests {
             width: 80,
             height: 24,
             frames: Vec::new(),
+            renders: 0,
         };
         let exit_guard = ExitGuard::new();
         let mut headless_done = false;

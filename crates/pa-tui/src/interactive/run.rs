@@ -973,9 +973,11 @@ async fn run_interactive_surface(
                 }
             } else if let Some(input) = pending.pop_front() {
                 // Timing markers observe the previous frame without dirtying the view or
-                // adding a select/render iteration to the measured input sequence.
+                // adding a select/render iteration to the measured input sequence. The render
+                // count rides along: the frame capture dedupes on plain text, so restyle-only
+                // renders need a separate witness.
                 if let UiInput::Timestamp(sender) = input {
-                    sender.send(Instant::now())?;
+                    sender.send((Instant::now(), renderer.headless_renders()))?;
                     continue;
                 }
                 session.dirty = true;
