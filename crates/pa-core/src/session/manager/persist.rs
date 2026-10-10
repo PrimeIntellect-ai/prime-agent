@@ -79,6 +79,9 @@ impl SessionManager {
             std::fs::create_dir_all(parent)?;
         }
         atomic_write(session_file, &content)?;
+        if self.pending_child_usage.is_none() {
+            self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
+        }
         self.notify_persist_listeners();
         Ok(())
     }
@@ -107,6 +110,7 @@ impl SessionManager {
     /// already-flushed managers never touch the disk.
     pub fn flush_now(&mut self) -> std::io::Result<()> {
         self.reconcile_child_usage()?;
+        self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
         if !self.persist || self.session_file.is_none() {
             return Ok(());
         }
@@ -134,9 +138,17 @@ impl SessionManager {
         if self.window.is_none() && (!self.flushed || !file_exists) {
             // Recover from the session file disappearing under a live session:
             // append would recreate a headerless stub.
-            self.try_rewrite_file()?;
+            self.capture_child_usage_original()?;
+            self.write_child_usage_bootstrap()?;
+            self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
             self.flushed = true;
         } else {
+            #[cfg(test)]
+            if self.child_usage_write_fault.is_some() {
+                self.write_child_usage_rows(&[self.file_entries[index].clone()])?;
+                self.notify_persist_listeners();
+                return Ok(());
+            }
             let entry = serialize_entry(&self.file_entries[index]);
             if let Some(session_file) = &self.session_file {
                 let mut line = entry.into_bytes();

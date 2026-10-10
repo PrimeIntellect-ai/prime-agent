@@ -17,6 +17,16 @@ use crate::session_engine::rlm_usage::{
 pub(super) enum WriteFault {
     Partial(usize),
     Sync,
+    RewriteBefore,
+    RewriteAfter,
+}
+
+#[derive(Clone)]
+pub(super) enum OriginalSnapshot {
+    Unneeded,
+    // No physical rewrite has been attempted; a read failure may retry capture.
+    Uncaptured,
+    Captured(Vec<FileEntry>),
 }
 
 impl SessionManager {
@@ -69,6 +79,21 @@ impl SessionManager {
                 ChildUsageAppendResult::Existing(aggregate)
             });
         }
+        if self.persist
+            && self.session_file.is_some()
+            && self.window.is_none()
+            && (!self.flushed
+                || self
+                    .session_file
+                    .as_ref()
+                    .is_some_and(|path| !path.exists()))
+        {
+            if let Err(error) = self.capture_child_usage_original() {
+                // No attribution intent or physical write exists at this boundary.
+                self.child_usage_original = OriginalSnapshot::Unneeded;
+                return Err(error);
+            }
+        }
         let mut aggregate = aggregate;
         attribute_child_usage(&mut aggregate, &child_usage);
         let mut base = self.next_base()?;
@@ -113,7 +138,7 @@ impl SessionManager {
             self.unconfirmed_child_usage.insert(row_id.to_owned());
             // Healthy writes never scan old history; strict reconciliation is an error path.
             let result = if bootstrap {
-                self.try_rewrite_file()
+                self.write_child_usage_bootstrap()
             } else {
                 self.write_child_usage_rows(std::slice::from_ref(&self.file_entries[index].clone()))
             };
@@ -122,6 +147,7 @@ impl SessionManager {
                 return Err(error);
             }
             self.pending_child_usage = None;
+            self.child_usage_original = OriginalSnapshot::Unneeded;
             self.unconfirmed_child_usage.remove(row_id);
             self.flushed = true;
             if !bootstrap {
@@ -131,15 +157,82 @@ impl SessionManager {
         Ok(ChildUsageAppendResult::Created(aggregate))
     }
 
+    pub(super) fn write_child_usage_bootstrap(&mut self) -> io::Result<()> {
+        #[cfg(test)]
+        if matches!(
+            self.child_usage_write_fault,
+            Some(WriteFault::RewriteBefore)
+        ) {
+            self.child_usage_write_fault = None;
+            return Err(io::Error::other("injected pre-rewrite error"));
+        }
+        self.try_rewrite_file()?;
+        #[cfg(test)]
+        if matches!(self.child_usage_write_fault, Some(WriteFault::RewriteAfter)) {
+            self.child_usage_write_fault = None;
+            return Err(io::Error::other(
+                "injected completed-rewrite acknowledgment error",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn capture_child_usage_original(&mut self) -> io::Result<()> {
+        if self.pending_child_usage.is_some()
+            && matches!(self.child_usage_original, OriginalSnapshot::Captured(_))
+        {
+            return Ok(());
+        }
+        self.child_usage_original = OriginalSnapshot::Uncaptured;
+        let path = self
+            .session_file
+            .as_ref()
+            .ok_or_else(|| io::Error::other("missing session path"))?;
+        let original = match std::fs::read(path) {
+            Ok(bytes) => {
+                let (rows, incomplete) = strict_rows(&bytes)?;
+                if incomplete.is_some()
+                    || !matches!(rows.first(), Some(FileEntry::Header { header }) if header.id == self.session_id)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "bootstrap source is incomplete or replaced",
+                    ));
+                }
+                rows
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error),
+        };
+        self.child_usage_original = OriginalSnapshot::Captured(original);
+        Ok(())
+    }
+
     pub(super) fn retain_deferred_child_usage_row(&mut self, index: usize) {
+        let entry = &self.file_entries[index];
+        if let Some(id) = entry.id() {
+            self.recovered_history_ids.insert(id.to_owned());
+        }
         if let Some(pending) = &mut self.pending_child_usage {
-            let entry = &self.file_entries[index];
             if !pending.iter().any(|row| row.id() == entry.id()) {
                 pending.push(entry.clone());
-                if let Some(id) = entry.id() {
-                    self.recovered_history_ids.insert(id.to_owned());
-                }
             }
+        } else {
+            // A retained target can fail before attribution exists. Its durable
+            // intent must fence later attribution just like an uncertain usage row.
+            self.pending_child_usage = Some(
+                if self.window.is_none()
+                    && (!self.flushed
+                        || self
+                            .session_file
+                            .as_ref()
+                            .is_some_and(|path| !path.exists()))
+                {
+                    self.file_entries.clone()
+                } else {
+                    vec![entry.clone()]
+                },
+            );
         }
     }
 
@@ -167,6 +260,11 @@ impl SessionManager {
         let Some(pending) = self.pending_child_usage.clone() else {
             return Ok(());
         };
+        if matches!(self.child_usage_original, OriginalSnapshot::Uncaptured) {
+            // Capture failed before any rewrite; retrying this read cannot replace
+            // an original frozen before an uncertain physical operation.
+            self.capture_child_usage_original()?;
+        }
         let Some(path) = self.session_file.clone() else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -204,6 +302,22 @@ impl SessionManager {
                 "recovery session identity changed",
             ));
         }
+        // Atomic bootstrap may leave the original transcript or the intended
+        // rewritten transcript. Select the original alternative only when its
+        // entire frozen prefix matches, never by mixing rowwise alternatives.
+        let original = match &self.child_usage_original {
+            OriginalSnapshot::Captured(original)
+                if !original.is_empty()
+                    && rows.len() >= original.len()
+                    && serde_json::to_value(&rows[..original.len()])?
+                        == serde_json::to_value(original)? =>
+            {
+                Some(original)
+            }
+            OriginalSnapshot::Unneeded
+            | OriginalSnapshot::Uncaptured
+            | OriginalSnapshot::Captured(_) => None,
+        };
         let by_id: HashMap<&str, (usize, &FileEntry)> = rows
             .iter()
             .enumerate()
@@ -227,8 +341,11 @@ impl SessionManager {
                 }
                 last_confirmed = Some(*disk_index);
                 // Compare the same JSON decoding on both sides, including parent and aggregate.
+                let expected_row = original
+                    .and_then(|rows| rows.iter().find(|row| row.id() == Some(id)))
+                    .unwrap_or(intended);
                 let expected: serde_json::Value =
-                    serde_json::from_str(&serde_json::to_string(intended)?)?;
+                    serde_json::from_str(&serde_json::to_string(expected_row)?)?;
                 let actual: serde_json::Value = serde_json::to_value(existing)?;
                 if actual != expected {
                     return Err(io::Error::new(
@@ -270,6 +387,7 @@ impl SessionManager {
 
     fn finish_child_usage_recovery(&mut self) {
         self.pending_child_usage = None;
+        self.child_usage_original = OriginalSnapshot::Unneeded;
     }
 
     fn sync_child_usage(&self) -> io::Result<()> {
@@ -281,7 +399,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn write_child_usage_rows(&mut self, entries: &[FileEntry]) -> io::Result<()> {
+    pub(super) fn write_child_usage_rows(&mut self, entries: &[FileEntry]) -> io::Result<()> {
         let path = self
             .session_file
             .as_ref()

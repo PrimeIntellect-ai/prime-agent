@@ -161,18 +161,7 @@ impl SessionFile {
                 }
                 Err(error) => return Err(error.into()),
             };
-            if !header_seen {
-                ensure!(
-                    value.get("type").and_then(serde_json::Value::as_str) == Some("session"),
-                    "invalid recovery header"
-                );
-                let header: pa_types::session::SessionHeader = serde_json::from_value(value)?;
-                ensure!(
-                    header.id == self.header.id,
-                    "recovery session identity mismatch"
-                );
-                header_seen = true;
-            } else {
+            if header_seen {
                 // Validate known schemas too: the normal daemon reader intentionally is lenient.
                 let typed: pa_types::session::FileEntry = serde_json::from_value(value.clone())?;
                 ensure!(
@@ -213,6 +202,17 @@ impl SessionFile {
                 );
                 by_id.insert(entry.id.clone(), disk.len());
                 disk.push(entry);
+            } else {
+                ensure!(
+                    value.get("type").and_then(serde_json::Value::as_str) == Some("session"),
+                    "invalid recovery header"
+                );
+                let header: pa_types::session::SessionHeader = serde_json::from_value(value)?;
+                ensure!(
+                    header.id == self.header.id,
+                    "recovery session identity mismatch"
+                );
+                header_seen = true;
             }
             offset += line.len();
             valid_end = offset;

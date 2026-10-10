@@ -78,6 +78,7 @@ pub struct SessionManager {
     leaf_id: Option<String>,
     persist_listeners: Vec<SessionPersistListener>,
     pending_child_usage: Option<Vec<FileEntry>>,
+    child_usage_original: child_usage::OriginalSnapshot,
     unconfirmed_child_usage: std::collections::HashSet<String>,
     recovered_history_ids: std::collections::HashSet<String>,
     #[cfg(test)]

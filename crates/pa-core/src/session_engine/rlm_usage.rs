@@ -671,8 +671,8 @@ mod tests {
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(2, 2, 0, 0, 4, 0.0))],
             })
             .await;
-        // A report racing the adoption's bases copy (base dropped to simulate):
-        // the fold starts from the retired side's frozen handoff base.
+        // A report racing the adoption's bases copy (base dropped to simulate)
+        // must use the store's current aggregate, preserving every earlier report.
         let target_of_second_for_base = fresh
             .children
             .lock()
@@ -698,8 +698,8 @@ mod tests {
             .collect();
         assert_eq!(
             base_race.last().unwrap()["aggregateUsage"]["input"],
-            1_015,
-            "the raced report folds onto the frozen retired base, not the default"
+            1_025,
+            "the raced report preserves all usage already confirmed by the store"
         );
         // A registration the adoption copy raced (inserted on the
         // retired side directly): the fallback consult adopts it.
@@ -731,8 +731,14 @@ mod tests {
             6,
             "the forwarded spawn, the base race, and the raced registration all attribute"
         );
-        // Continues the same cumulative chain: the raced 1,015 + 3 input.
-        assert_eq!(raced[5]["aggregateUsage"]["input"], 1_018);
+        assert_eq!(
+            raced
+                .iter()
+                .map(|row| row["aggregateUsage"]["input"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1_010, 1_017, 1_018, 1_020, 1_025, 1_028],
+            "handoff and stale producer caches cannot discard confirmed usage"
+        );
     }
 
     #[tokio::test]

@@ -406,20 +406,21 @@ async fn canceled_interval_keeps_identity_and_drains_new_rows_before_forget() {
     writeln!(append, "{}", serde_json::to_string(&later).unwrap()).unwrap();
     sessions.inner.emit_child_usage(&record).await;
     sessions.inner.forget_child_usage(&record).await;
-    let attempts = sink.attempts.lock().unwrap();
-    assert_eq!(
-        attempts.len(),
-        3,
-        "canceled attempt, same-ID retry, then fresh interval"
-    );
-    assert_eq!(attempts[0].report_id, pending.0.report_id);
-    assert_eq!(attempts[1].report_id, pending.0.report_id);
-    assert_eq!(attempts[0].batches, attempts[1].batches);
-    assert_ne!(attempts[2].report_id, pending.0.report_id);
-    assert_eq!(attempts[2].batches.len(), 1);
-    assert_eq!(attempts[2].batches[0].1.input, 70);
-    assert!(sink.forgotten.load(std::sync::atomic::Ordering::SeqCst));
-    drop(attempts);
+    {
+        let attempts = sink.attempts.lock().unwrap();
+        assert_eq!(
+            attempts.len(),
+            3,
+            "canceled attempt, same-ID retry, then fresh interval"
+        );
+        assert_eq!(attempts[0].report_id, pending.0.report_id);
+        assert_eq!(attempts[1].report_id, pending.0.report_id);
+        assert_eq!(attempts[0].batches, attempts[1].batches);
+        assert_ne!(attempts[2].report_id, pending.0.report_id);
+        assert_eq!(attempts[2].batches.len(), 1);
+        assert_eq!(attempts[2].batches[0].1.input, 70);
+        assert!(sink.forgotten.load(std::sync::atomic::Ordering::SeqCst));
+    }
     assert!(record.lock().await.pending_usage_report.is_none());
     assert_eq!(
         record.lock().await.attributed_rows,

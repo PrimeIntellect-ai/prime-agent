@@ -153,7 +153,7 @@ impl SessionFile {
             header,
             entries: Vec::new(),
             child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: Default::default(),
+            child_usage_unconfirmed: std::collections::HashSet::default(),
             #[cfg(test)]
             child_usage_fault: None,
             by_id: HashMap::new(),
@@ -216,7 +216,7 @@ impl SessionFile {
             header,
             entries: Vec::new(),
             child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: Default::default(),
+            child_usage_unconfirmed: std::collections::HashSet::default(),
             #[cfg(test)]
             child_usage_fault: None,
             by_id: HashMap::new(),
@@ -330,7 +330,7 @@ impl SessionFile {
             header,
             entries: Vec::new(),
             child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: Default::default(),
+            child_usage_unconfirmed: std::collections::HashSet::default(),
             #[cfg(test)]
             child_usage_fault: None,
             by_id: HashMap::new(),

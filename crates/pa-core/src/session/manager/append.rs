@@ -26,6 +26,8 @@ impl SessionManager {
             self.file_entries.pop();
             self.has_assistant_entry = was_assistant;
             self.flushed = was_flushed;
+            // This fallible append rolled back; it owns no retained queue.
+            self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
             return Err(error);
         }
         let entry = self.file_entries[index].clone();

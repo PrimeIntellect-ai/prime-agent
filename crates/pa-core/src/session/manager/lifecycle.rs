@@ -128,6 +128,7 @@ impl SessionManager {
             leaf_id: None,
             persist_listeners: Vec::new(),
             pending_child_usage: None,
+            child_usage_original: super::child_usage::OriginalSnapshot::Unneeded,
             unconfirmed_child_usage: std::collections::HashSet::new(),
             recovered_history_ids: std::collections::HashSet::new(),
             #[cfg(test)]
@@ -296,6 +297,7 @@ impl SessionManager {
         mut window: super::window::WindowedSessionStore,
     ) -> std::io::Result<()> {
         self.before_history_replacement(window.entries())?;
+        self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
         // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
         // window stays attached for its snapshot/settings/metadata state, and
         // `active_context` walks `file_entries` with the window's settings overlay.
@@ -354,22 +356,26 @@ impl SessionManager {
                 }
             } else if session_file.exists() {
                 let bytes = std::fs::read(&session_file)?;
-                let (mut entries, incomplete) = super::child_usage::strict_rows(&bytes)?;
-                if incomplete.is_some()
-                    || (same_path
-                        && !matches!(entries.first(), Some(FileEntry::Header { header }) if header.id == self.session_id))
-                {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "fresh owned history is incomplete or replaced",
-                    ));
-                }
-                crate::session::apply_child_usage_attributions(&mut entries);
-                let same_session = entries.iter().any(|entry| matches!(entry, FileEntry::Header { header } if header.id == self.session_id));
+                let header = bytes
+                    .split(|byte| *byte == b'\n')
+                    .find(|line| !line.iter().all(u8::is_ascii_whitespace))
+                    .and_then(|line| serde_json::from_slice::<FileEntry>(line).ok());
+                let same_session = matches!(header, Some(FileEntry::Header { header }) if header.id == self.session_id);
                 if same_path || same_session {
+                    let (mut entries, incomplete) = super::child_usage::strict_rows(&bytes)?;
+                    if incomplete.is_some()
+                        || !matches!(entries.first(), Some(FileEntry::Header { header }) if header.id == self.session_id)
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "fresh owned history is incomplete or replaced",
+                        ));
+                    }
+                    crate::session::apply_child_usage_attributions(&mut entries);
                     self.before_history_replacement(&entries)?;
+                    preloaded_entries = Some(entries);
                 }
-                preloaded_entries = Some(entries);
+                // Unrelated sessions retain the normal repair/migration loader.
             } else if same_path {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -379,6 +385,7 @@ impl SessionManager {
         }
         self.set_session_file_unchecked(session_file, preloaded_entries);
         self.recovered_history_ids.clear();
+        self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
         if self.session_id != previous_session_id {
             self.unconfirmed_child_usage.clear();
         }
@@ -446,6 +453,7 @@ impl SessionManager {
         self.reconcile_child_usage()?;
         let path = self.new_session_unchecked(options);
         self.recovered_history_ids.clear();
+        self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
         self.unconfirmed_child_usage.clear();
         Ok(path)
     }
@@ -588,6 +596,7 @@ impl SessionManager {
     /// Returns recovery errors or asks the caller to reload a branch predating recovery.
     pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) -> std::io::Result<()> {
         self.before_history_replacement(&entries)?;
+        self.child_usage_original = super::child_usage::OriginalSnapshot::Unneeded;
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;
         let header = self

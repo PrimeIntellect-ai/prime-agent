@@ -45,6 +45,14 @@ fn rows(manager: &SessionManager) -> Vec<serde_json::Value> {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
+fn jsonl(rows: &[serde_json::Value]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for row in rows {
+        serde_json::to_writer(&mut bytes, row).unwrap();
+        bytes.push(b'\n');
+    }
+    bytes
+}
 fn usage(manager: &SessionManager, id: &str) -> Usage {
     match manager.get_entry_by_id(id).unwrap() {
         FileEntry::Message {
@@ -53,6 +61,224 @@ fn usage(manager: &SessionManager, id: &str) -> Usage {
         } => message.usage,
         _ => panic!("assistant expected"),
     }
+}
+
+#[test]
+fn retained_assistant_failure_is_durable_before_attribution_acknowledgment() {
+    let (_dir, mut manager, previous) = fixture();
+    let path = manager.get_session_file().unwrap().to_owned();
+    let original = std::fs::read(&path).unwrap();
+    let FileEntry::Message { message, .. } = manager.get_entry_by_id(&previous).unwrap() else {
+        panic!("assistant expected");
+    };
+    let message = message.clone();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (target, error) = manager.append_message_retained(message);
+    assert!(error.is_some());
+    let (later, error) = manager.append_message_retained(user());
+    assert!(error.is_some());
+    assert!(manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, original).unwrap();
+    assert!(matches!(
+        manager
+            .append_child_usage_once("stable", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Created(_)
+    ));
+    let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &path);
+    assert_eq!(usage(&reopened, &target).input, 1010);
+    assert_eq!(
+        reopened.get_entry_by_id(&later).unwrap().parent_id(),
+        Some(target.as_str())
+    );
+    assert_eq!(
+        reopened.get_entry_by_id("stable").unwrap().parent_id(),
+        Some(later.as_str())
+    );
+    assert_eq!(rows(&manager).len(), 5);
+    assert!(matches!(
+        manager
+            .append_child_usage_once("stable", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Existing(_)
+    ));
+    assert_eq!(rows(&manager).len(), 5);
+}
+
+#[test]
+fn retained_partial_write_recovers_target_before_attribution() {
+    let (_dir, mut manager, previous) = fixture();
+    let FileEntry::Message { message, .. } = manager.get_entry_by_id(&previous).unwrap() else {
+        panic!("assistant expected");
+    };
+    let message = message.clone();
+    manager.child_usage_write_fault = Some(WriteFault::Partial(23));
+    let (target, error) = manager.append_message_retained(message);
+    assert!(error.is_some());
+    manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .unwrap();
+    let reopened = SessionManager::open(
+        manager.get_cwd(),
+        manager.get_session_dir(),
+        manager.get_session_file().unwrap(),
+    );
+    assert_eq!(usage(&reopened, &target).input, 1010);
+    assert_eq!(rows(&manager).len(), 4);
+}
+
+#[test]
+fn bootstrap_original_and_completed_rewrite_remain_distinct_frozen_outcomes() {
+    for fault in [WriteFault::RewriteBefore, WriteFault::RewriteAfter] {
+        let (_dir, mut manager, target) = fixture();
+        manager
+            .append_child_usage_once("prior", &target, child(), None)
+            .unwrap();
+        let path = manager.get_session_file().unwrap().to_owned();
+        let original = std::fs::read(&path).unwrap();
+        assert_eq!(rows(&manager)[1]["message"]["usage"]["input"], 1000);
+        // Exercise the full-history bootstrap writer with an already-folded target.
+        manager.flushed = false;
+        manager.child_usage_write_fault = Some(fault);
+        assert!(manager
+            .append_child_usage_once("next", &target, child(), None)
+            .is_err());
+        let valid = std::fs::read(&path).unwrap();
+        let mut changed = rows(&manager);
+        changed[1]["message"]["usage"]["input"] = serde_json::json!(1001);
+        std::fs::write(&path, jsonl(&changed)).unwrap();
+        let bad = std::fs::read(&path).unwrap();
+        assert!(manager
+            .append_child_usage_once("next", &target, child(), None)
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bad);
+        assert!(manager.pending_child_usage.is_some());
+        std::fs::write(&path, valid).unwrap();
+        manager
+            .append_child_usage_once("next", &target, child(), None)
+            .unwrap();
+        let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &path);
+        assert_eq!(usage(&reopened, &target).input, 1020);
+        assert_eq!(rows(&manager).len(), 4);
+        manager
+            .append_child_usage_once("next", &target, child(), None)
+            .unwrap();
+        assert_eq!(rows(&manager).len(), 4);
+        assert!(matches!(
+            manager.child_usage_original,
+            OriginalSnapshot::Unneeded
+        ));
+        assert!(!original.is_empty());
+    }
+}
+
+#[test]
+fn unowned_capture_failure_cannot_poison_a_later_retained_partial_write() {
+    let (_dir, mut manager, previous) = fixture();
+    let path = manager.get_session_file().unwrap().to_owned();
+    let original = std::fs::read(&path).unwrap();
+    manager.flushed = false;
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(manager
+        .append_child_usage_once("unused", &previous, child(), None)
+        .is_err());
+    assert!(manager.pending_child_usage.is_none());
+    assert!(matches!(
+        manager.child_usage_original,
+        OriginalSnapshot::Unneeded
+    ));
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, original).unwrap();
+    manager.flush_now().unwrap();
+    let FileEntry::Message { message, .. } = manager.get_entry_by_id(&previous).unwrap() else {
+        panic!("assistant expected");
+    };
+    let message = message.clone();
+    manager.child_usage_write_fault = Some(WriteFault::Partial(23));
+    let (target, error) = manager.append_message_retained(message);
+    assert!(error.is_some());
+    manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .unwrap();
+    let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &path);
+    assert_eq!(usage(&reopened, &target).input, 1010);
+    assert!(reopened.get_entry_by_id("unused").is_none());
+}
+
+#[test]
+fn bootstrap_capture_failure_precedes_write_and_recovers_owned_retained_intent() {
+    let (_dir, mut manager, previous) = fixture();
+    manager
+        .append_child_usage_once("prior", &previous, child(), None)
+        .unwrap();
+    let path = manager.get_session_file().unwrap().to_owned();
+    let original = std::fs::read(&path).unwrap();
+    let FileEntry::Message { message, .. } = manager.get_entry_by_id(&previous).unwrap() else {
+        panic!("assistant expected");
+    };
+    let message = message.clone();
+    manager.flushed = false;
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let (target, error) = manager.append_message_retained(message);
+    assert!(error.is_some());
+    assert!(path.is_dir());
+    assert!(matches!(
+        manager.child_usage_original,
+        OriginalSnapshot::Uncaptured
+    ));
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, original).unwrap();
+    manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .unwrap();
+    let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &path);
+    assert_eq!(usage(&reopened, &target).input, 1020);
+    assert_eq!(rows(&manager).len(), 5);
+}
+
+#[test]
+fn unrelated_legacy_torn_history_retains_normal_repair_and_migration() {
+    let (_dir, mut manager, target) = fixture();
+    manager.child_usage_write_fault = Some(WriteFault::Sync);
+    assert!(manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .unwrap();
+    assert!(!manager.recovered_history_ids.is_empty());
+    let unrelated = manager
+        .get_session_file()
+        .unwrap()
+        .with_file_name("legacy.jsonl");
+    let mut entries = rows(&manager);
+    entries.truncate(2);
+    entries[0]["id"] = serde_json::json!("unrelated-session");
+    entries[0]["version"] = serde_json::json!(1);
+    entries[1].as_object_mut().unwrap().remove("id");
+    entries[1].as_object_mut().unwrap().remove("parentId");
+    let mut bytes = jsonl(&entries);
+    bytes.push(b'{');
+    std::fs::write(&unrelated, bytes).unwrap();
+    manager.set_session_file(unrelated.clone(), None).unwrap();
+    assert_eq!(manager.get_session_file(), Some(unrelated.as_path()));
+    assert_eq!(manager.session_id, "unrelated-session");
+    assert!(manager.recovered_history_ids.is_empty());
+    let values = rows(&manager);
+    assert_eq!(values.len(), 2);
+    assert_eq!(
+        values[0]["version"],
+        crate::session::CURRENT_SESSION_VERSION
+    );
+    assert!(!values[1]["id"].as_str().unwrap().is_empty());
+    let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &unrelated);
+    assert_eq!(reopened.get_leaf_id(), manager.get_leaf_id());
 }
 
 #[test]
@@ -209,10 +435,7 @@ fn stale_preloaded_history_cannot_replace_recovered_intents() {
         } else {
             altered.retain(|row| row["id"] != "stable");
         }
-        let bytes = altered
-            .iter()
-            .map(|row| format!("{row}\n"))
-            .collect::<String>();
+        let bytes = jsonl(&altered);
         std::fs::write(&path, &bytes).unwrap();
         assert_eq!(
             manager
@@ -224,7 +447,7 @@ fn stale_preloaded_history_cannot_replace_recovered_intents() {
         assert_eq!(manager.get_session_file(), Some(path.as_path()));
         assert_eq!(manager.get_leaf_id(), Some("stable"));
         assert_eq!(serde_json::to_value(&manager.file_entries).unwrap(), live);
-        assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
     std::fs::remove_file(&path).unwrap();
     assert_eq!(
@@ -295,15 +518,12 @@ fn header_or_identity_changes_fail_closed_without_touching_bytes() {
     let original = std::fs::read(&path).unwrap();
     let mut repeated_header = rows(&manager);
     repeated_header.push(repeated_header[0].clone());
-    let repeated_bytes = repeated_header
-        .iter()
-        .map(|row| format!("{row}\n"))
-        .collect::<String>();
+    let repeated_bytes = jsonl(&repeated_header);
     std::fs::write(&path, &repeated_bytes).unwrap();
     assert!(manager
         .append_child_usage_once("stable", &target, child(), None)
         .is_err());
-    assert_eq!(std::fs::read(&path).unwrap(), repeated_bytes.as_bytes());
+    assert_eq!(std::fs::read(&path).unwrap(), repeated_bytes);
     std::fs::write(&path, &original).unwrap();
     let mut values = rows(&manager);
     values[0]["id"] = serde_json::json!("different-session");
