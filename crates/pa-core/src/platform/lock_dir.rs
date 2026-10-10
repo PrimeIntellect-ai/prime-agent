@@ -71,13 +71,27 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
 /// non-error.
 #[cfg(unix)]
 pub fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
-    if !fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+    // The FIRST stat both proves the entry is a directory and CAPTURES
+    // its identity in one syscall: the pinned cleanup below must hold
+    // THIS inode, never whatever a pre-pin swap may have seated at
+    // the name (a fresh stat taken after the pin would name the
+    // swapped successor and pass a same-inode comparison against it).
+    let expected = {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(candidate).ok().and_then(|metadata| {
+            metadata
+                .file_type()
+                .is_dir()
+                .then_some((metadata.dev(), metadata.ino()))
+        })
+    };
+    let Some(expected) = expected else {
         // A missing candidate is the racing-reclaimer non-error; a
         // symlink or file at the name is a swap that must NOT be
         // followed or removed.
         return Ok(());
-    }
-    remove_candidate_notes_pinned(candidate)?;
+    };
+    remove_candidate_notes_pinned(candidate, expected)?;
     fs::remove_dir(candidate)
 }
 
@@ -90,7 +104,7 @@ pub fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
 /// syscall semantics, so a swapped symlink cannot be followed, and a
 /// swapped empty directory is the accepted-risk pre-created residual.
 #[cfg(target_os = "linux")]
-fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
+fn remove_candidate_notes_pinned(candidate: &Path, expected: (u64, u64)) -> io::Result<()> {
     use std::os::fd::FromRawFd;
     use std::os::unix::io::AsRawFd;
     let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
@@ -112,16 +126,16 @@ fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
     let pin = unsafe { std::fs::File::from_raw_fd(fd) };
     {
         use std::os::unix::fs::MetadataExt;
-        // The pinned inode must still be the lstat-proven candidate: a
-        // swap between the lstat and the pin seats a different inode.
-        let lstat_identity = fs::symlink_metadata(candidate)
-            .ok()
-            .map(|metadata| (metadata.dev(), metadata.ino()));
+        // The pinned inode must be the FIRST stat's captured identity:
+        // a swap between that stat and this pin seats a different
+        // inode at the name, and the notes of the substituted
+        // directory are never this call's to unlink. A pre-first-stat
+        // swap has no user-space witness - the ruled accepted residual.
         let pinned_identity = pin
             .metadata()
             .ok()
             .map(|metadata| (metadata.dev(), metadata.ino()));
-        if pinned_identity.is_none() || pinned_identity != lstat_identity {
+        if pinned_identity != Some(expected) {
             return Err(io::Error::other(
                 "Candidate was replaced before its removal could be pinned",
             ));
@@ -143,7 +157,7 @@ fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
 /// The non-Linux floor: the lstat-proven directory's notes are removed
 /// by pathname (the same verify-then-act floor the TS release takes).
 #[cfg(all(unix, not(target_os = "linux")))]
-fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
+fn remove_candidate_notes_pinned(_candidate: &Path, _expected: (u64, u64)) -> io::Result<()> {
     for note in ["owner", "claimed-at", "released"] {
         match fs::remove_file(candidate.join(note)) {
             Ok(()) => {}
