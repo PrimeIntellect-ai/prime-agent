@@ -113,8 +113,15 @@ impl RlmChildUsageStore for SessionUsageStore {
         Box::pin(async move {
             let mut session = session.lock().await;
             // The thin idempotency check: a row this id already wrote is
-            // confirmed, whatever the caller's last attempt returned.
-            if let Some(entry) = session.get_entry_by_id(&row_id) {
+            // confirmed, whatever the caller's last attempt returned. The
+            // retained scan is the same view `last_assistant` reads, so a
+            // windowed manager answers instead of asserting full history.
+            let existing = session
+                .retained_entries()
+                .iter()
+                .rev()
+                .find(|entry| entry.id() == Some(row_id.as_str()));
+            if let Some(entry) = existing {
                 let pa_types::session::FileEntry::ChildUsageAttributed { payload, .. } = entry
                 else {
                     return Err(attribution_id_collision());
@@ -147,18 +154,27 @@ fn attribution_id_collision() -> std::io::Error {
 }
 
 /// The target assistant row's current usage: the running aggregate, since
-/// every attribution append folds its aggregate back into the row.
+/// every attribution append folds its aggregate back into the row. The
+/// retained scan answers on a windowed manager too, where the by-id
+/// lookup's full-history assertion would panic.
 fn target_assistant_usage(session: &SessionManager, target_id: &str) -> std::io::Result<Usage> {
-    match session.get_entry_by_id(target_id) {
-        Some(pa_types::session::FileEntry::Message {
-            message: pa_types::session::AgentMessage::Assistant(assistant),
-            ..
-        }) => Ok(assistant.usage),
-        _ => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Assistant message entry {target_id} not found"),
-        )),
-    }
+    session
+        .retained_entries()
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::Assistant(assistant),
+                ..
+            } if entry.id() == Some(target_id) => Some(assistant.usage),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Assistant message entry {target_id} not found"),
+            )
+        })
 }
 
 /// Per-origin batches in first-seen order.
