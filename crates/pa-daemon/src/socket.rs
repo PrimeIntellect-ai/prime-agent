@@ -804,9 +804,15 @@ fn release_lock_dir_identity(
                 // The notes go through the pinned setup handle
                 // (fd-relative, never the substitutable `.l...` name);
                 // the rmdir then removes only the entry the proof just
-                // matched to this created inode.
-                let removed = pa_core::platform::remove_notes_through(&placeholder_handle)
-                    .and_then(|()| std::fs::remove_dir(&placeholder));
+                // matched to this created inode. The pin CLOSES before
+                // the rmdir: an open directory fd pins the inode and
+                // makes rmdir return EBUSY on the no-rename mounts
+                // (NFS/FUSE/CIFS) this error path serves.
+                let removed = {
+                    let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                    drop(placeholder_handle);
+                    notes.and_then(|()| std::fs::remove_dir(&placeholder))
+                };
                 if removed.is_err() {
                     // The failed removal targeted the PRIVATE placeholder
                     // P (an inert dotname no judge reads - no public
@@ -849,9 +855,15 @@ fn release_lock_dir_identity(
                     // PUBLIC entry for a symlink cannot redirect the
                     // unlink into a foreign directory (the rmdir
                     // refuses to follow it; a swapped empty directory
-                    // is the documented accepted residual).
-                    let removed = pa_core::platform::remove_notes_through(&placeholder_handle)
-                        .and_then(|()| std::fs::remove_dir(lock_path));
+                    // is the documented accepted residual). The pin
+                    // CLOSES before the rmdir: an open directory fd
+                    // makes rmdir EBUSY on the no-rename mounts this
+                    // floor serves.
+                    let removed = {
+                        let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                        drop(placeholder_handle);
+                        notes.and_then(|()| std::fs::remove_dir(lock_path))
+                    };
                     if removed.is_err() {
                         pa_core::platform::mark_released_at(lock_path, placeholder_identity);
                         let error = removed.err().unwrap_or_else(|| {
@@ -880,9 +892,12 @@ fn release_lock_dir_identity(
                         // setup handle, never the substitutable private
                         // name (which now holds the swapped-home
                         // placeholder again); only that entry is
-                        // rmdir'd.
-                        let _ = pa_core::platform::remove_notes_through(&placeholder_handle);
-                        let _ = std::fs::remove_dir(&placeholder);
+                        // rmdir'd, with the pin CLOSED first (an open
+                        // directory fd makes rmdir EBUSY on the
+                        // no-rename mounts this floor serves).
+                        let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                        drop(placeholder_handle);
+                        let _ = notes.and_then(|()| std::fs::remove_dir(&placeholder));
                     }
                 }
                 drop(guarded);
@@ -2040,5 +2055,72 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!socket.exists(), "stale socket file must be unlinked");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn release_choreography_closes_the_placeholder_pin_before_its_rmdir() {
+        // The release choreography driven end to end. The two mount
+        // classes carry different contracts, so the exchange primitive
+        // is PROBED first and the assertions follow the arm that runs:
+        // - RENAME_EXCHANGE mounts: the placeholder artifact the
+        //   exchange seats at the public path must be fully removed,
+        //   with its notes unlinked THROUGH the pinned setup handle and
+        //   the pin CLOSED before the pathname rmdir - on the
+        //   EBUSY-prone mounts (NFS/FUSE/CIFS) an open directory fd
+        //   makes that rmdir fail, the residue class the pin-close
+        //   order exists to prevent.
+        // - no-rename mounts: the release intentionally PRESERVES the
+        //   public lock (it expires through the stale window) - the
+        //   public path must still stand, and the inert `.l...`
+        //   placeholder residue must still be removed on BOTH arms.
+        // (On a plain local mount both pin orders rmdir cleanly, so
+        // the red-first property of the pin-close order lives on the
+        // EBUSY-prone mounts; this test pins the functional contract -
+        // a clean release with the right per-arm residue - that those
+        // mounts depend on.)
+        let dir = tempfile::TempDir::new().unwrap();
+        let probe_a = dir.path().join("probe-a");
+        let probe_b = dir.path().join("probe-b");
+        std::fs::write(&probe_a, "a").unwrap();
+        std::fs::write(&probe_b, "b").unwrap();
+        let exchange_supported = pa_core::platform::exchange_paths(&probe_a, &probe_b).is_ok();
+        drop(std::fs::remove_file(&probe_a));
+        drop(std::fs::remove_file(&probe_b));
+
+        let lock_path = dir.path().join("daemon.sock.lock");
+        std::fs::create_dir(&lock_path).unwrap();
+        let pin = std::fs::File::open(&lock_path).unwrap();
+        let identity = metadata_identity(&pin.metadata().unwrap());
+        std::fs::write(lock_path.join("owner"), "1 deadbeef\n").unwrap();
+        let released = release_lock_dir_identity(&lock_path, &identity, &pin);
+        assert!(
+            released.is_ok(),
+            "the release choreography failed: {released:?}"
+        );
+        if exchange_supported {
+            assert!(
+                !lock_path.exists(),
+                "the lock directory was left behind at the public path"
+            );
+        } else {
+            assert!(
+                lock_path.exists(),
+                "the no-rename fallback must preserve the public lock for the stale window"
+            );
+        }
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".l"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "placeholder residue left behind: {:?}",
+            residue
+                .iter()
+                .map(std::fs::DirEntry::file_name)
+                .collect::<Vec<_>>()
+        );
     }
 }

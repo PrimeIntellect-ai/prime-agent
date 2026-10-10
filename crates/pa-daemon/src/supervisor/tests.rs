@@ -2012,6 +2012,7 @@ proptest! {
 
 #[cfg(all(test, unix))]
 mod serving_exit_fence_tests {
+    use super::{Arc, Supervisor, SupervisorOptions};
 
     /// The serving-exit boot fence must abort EVERY handle before any
     /// join waits: a sequential abort-then-join per task would leave
@@ -2023,6 +2024,16 @@ mod serving_exit_fence_tests {
     /// cancellation is never observed and the await times out.
     #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
     async fn every_boot_handle_is_aborted_before_any_join_waits() {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let agent_dir = fixture.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: fixture.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        );
         let (dropped_tx, mut dropped_rx) = tokio::sync::mpsc::channel::<&'static str>(8);
         // Readiness gates: the fence must not run before both handles
         // sit inside their guarded steps (an abort landing before a
@@ -2067,7 +2078,7 @@ mod serving_exit_fence_tests {
         }
         let mut tasks = vec![a, b];
         let fence = tokio::spawn(async move {
-            super::abort_all_then_join_all(&mut tasks).await;
+            supervisor.lease_loss_fence(&mut tasks).await;
         });
         // The later task's cancellation MUST be observable while the
         // first handle is still held in its step (the failure bound
@@ -2105,6 +2116,326 @@ mod serving_exit_fence_tests {
             events,
             vec!["a-dropped"],
             "the first handle must settle after the fence's joins resolve"
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod shutdown_admission_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// The stop-admission boundary: the shutdown flags publish
+    /// SYNCHRONOUSLY at loss discovery (no await ahead of them), every
+    /// stop transition rechecks the flag INSIDE its gated persist, and
+    /// the lease-loss fence waits for already-admitted stops to finish
+    /// their durable persist before the lease can release. Red-first:
+    /// a fence without the gate wait completes while the gated persist
+    /// is parked (the probe below); a stop without the gated recheck
+    /// persists its tombstone instead of refusing (the last check).
+    #[tokio::test]
+    async fn the_shutdown_flip_cannot_race_a_stops_final_gate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        // A registered resident: a stop that wrongly admits persists its
+        // tombstone into this descriptor file.
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "w-admission",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-admission",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let descriptor_path = agent_dir.join("w-admission.descriptor.json");
+        let resident = Arc::new(ResidentWorker::new(
+            "w-admission".to_string(),
+            descriptor,
+            descriptor_path,
+        ));
+        supervisor.registry.insert(Arc::clone(&resident)).await;
+
+        // An admitted stop parks INSIDE the gate: hold the resident's
+        // descriptor mutex so a stop transition holds the stop-admission
+        // gate across its persist await.
+        let descriptor = resident.descriptor.lock().await;
+        let admitted_stop = {
+            let supervisor = Arc::clone(&supervisor);
+            let resident = Arc::clone(&resident);
+            tokio::spawn(async move {
+                let _ = supervisor.stop_worker(&resident).await;
+            })
+        };
+        // OBSERVABLE READINESS: the stop holds the gate exactly while it
+        // is parked on the descriptor mutex inside its gated persist - a
+        // try_lock that fails proves the gate is held. The loop is
+        // yield-bounded (no clock involved): the stop acquires the gate
+        // on its first poll, and the bound is only the never-ran
+        // failure guard.
+        let mut gate_held = false;
+        for _ in 0..10_000 {
+            if supervisor.stop_admission.try_lock().is_err() {
+                gate_held = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(gate_held, "the stop never acquired the stop-admission gate");
+
+        // The flip is SYNCHRONOUS: it publishes even while the gate is
+        // held by the admitted stop (no await ahead of the flags - a
+        // slow gated persist must never keep the admission window open
+        // after the loss is known).
+        supervisor.mark_supervisor_shutting_down();
+        assert!(
+            supervisor.shutting_down.load(Ordering::SeqCst),
+            "the shutdown flag did not publish synchronously"
+        );
+        assert!(
+            supervisor.accept_exit.load(Ordering::SeqCst),
+            "the accept-exit flag did not publish synchronously"
+        );
+
+        // Fence readiness WITNESS: the fence notifies once its timers
+        // and boot passes are joined and its gate acquire is next, so
+        // the pending assertion below runs against a fence that is
+        // PROVABLY at the gate (a fence missing the gate wait still
+        // notifies - and completes - so the probe catches the
+        // regression regardless of scheduling).
+        let at_gate = supervisor.fence_at_gate.notified();
+        let fenced = {
+            let supervisor = Arc::clone(&supervisor);
+            let mut no_boot_tasks = Vec::new();
+            tokio::spawn(async move {
+                supervisor.lease_loss_fence(&mut no_boot_tasks).await;
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), at_gate)
+            .await
+            .expect("the lease-loss fence never reached its stop-gate step");
+        tokio::task::yield_now().await;
+        // With the gate held by the admitted stop, the fence CANNOT
+        // complete (its final step acquires the same gate, which the
+        // descriptor hold keeps occupied until the persist ends).
+        assert!(
+            !fenced.is_finished(),
+            "the lease-loss fence completed while a gated stop persist was still in flight"
+        );
+        // Releasing the descriptor lets the persist finish and the gate
+        // drop; the fence then completes.
+        drop(descriptor);
+        tokio::time::timeout(std::time::Duration::from_secs(5), admitted_stop)
+            .await
+            .expect("the admitted stop never finished")
+            .expect("the admitted stop panicked");
+        tokio::time::timeout(std::time::Duration::from_secs(5), fenced)
+            .await
+            .expect("the lease-loss fence never completed")
+            .expect("the fence panicked");
+
+        // A stop transition after the flip refuses at its final gate.
+        let refused = supervisor.stop_worker(&resident).await;
+        let message = refused
+            .expect_err("a stop admitted after the shutdown flip")
+            .to_string();
+        assert!(
+            message.contains("shutting down"),
+            "unexpected refusal: {message}"
+        );
+    }
+
+    /// The tracked owner-cleanup timers die at the flip: a parked timer
+    /// never wakes to act after the supervisor relinquished its lease.
+    /// Red-first: without the teardown abort the parked timer wakes at the
+    /// auto-advanced deadline and clears its own slot - the slot stays
+    /// armed only when the timer died in its sleep.
+    #[tokio::test(start_paused = true)]
+    async fn an_armed_owner_cleanup_timer_dies_with_the_shutdown_flip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "w-timer",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-timer",
+            "ownerClientId": "owner-1",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = Arc::new(ResidentWorker::new(
+            "w-timer".to_string(),
+            descriptor,
+            agent_dir.join("w-timer.descriptor.json"),
+        ));
+        // The timer arms: the owner is recorded and no such client is
+        // connected.
+        supervisor.schedule_owned_worker_cleanup(&resident).await;
+        assert!(
+            resident.owner_cleanup.lock().unwrap().is_some(),
+            "the owner-cleanup timer never armed"
+        );
+        // The lease-loss flip publishes synchronously; the fence that
+        // follows aborts and joins every tracked timer.
+        supervisor.mark_supervisor_shutting_down();
+        let mut no_boot_tasks = Vec::new();
+        supervisor.lease_loss_fence(&mut no_boot_tasks).await;
+        // The parked timer died in its sleep: advancing past its grace
+        // never wakes it, and its slot stays armed instead of being
+        // self-cleared by a waking timer.
+        tokio::time::advance(std::time::Duration::from_secs(35)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            resident.owner_cleanup.lock().unwrap().is_some(),
+            "the parked timer woke and cleared its own slot: the teardown abort is missing"
+        );
+
+        // No timer arms once admission is closed: a late arm behind the
+        // one-shot registry drain would capture the supervisor for the
+        // whole disconnect grace past the lease release.
+        let late_resident = Arc::new(ResidentWorker::new(
+            "w-late".to_string(),
+            serde_json::from_value(serde_json::json!({
+                "version": 2,
+                "workerId": "w-late",
+                "pid": 0,
+                "socketPath": "/tmp/none.sock",
+                "recoveryJournalPath": dir.path().join("journal-late.jsonl").to_string_lossy(),
+                "supervisorSocketPath": "/tmp/none.sock",
+                "authenticationToken": "token",
+                "rootActiveSessionId": "w-late",
+                "ownerClientId": "owner-2",
+                "createdAt": "t",
+                "updatedAt": "t",
+                "lifecycle": "ready",
+                "createCommand": {},
+                "consecutiveFailures": 0,
+            }))
+            .expect("descriptor"),
+            agent_dir.join("w-late.descriptor.json"),
+        ));
+        supervisor
+            .schedule_owned_worker_cleanup(&late_resident)
+            .await;
+        assert!(
+            late_resident.owner_cleanup.lock().unwrap().is_none(),
+            "a timer armed after admission closed"
+        );
+    }
+
+    /// A schedule call that crossed the top guard before the flag flip
+    /// and parked on the descriptor mutex cannot register a timer behind
+    /// the one-shot fence drain: the registration recheck runs UNDER
+    /// the registry lock the fence drains. Red-first: without the
+    /// in-lock recheck the resumed schedule arms a 30s timer behind the
+    /// drained registry.
+    #[tokio::test]
+    async fn a_schedule_in_flight_cannot_arm_behind_the_fence_drain() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+            "version": 2,
+            "workerId": "w-race",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": dir.path().join("journal-race.jsonl").to_string_lossy(),
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-race",
+            "ownerClientId": "owner-race",
+            "createdAt": "t",
+            "updatedAt": "t",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = Arc::new(ResidentWorker::new(
+            "w-race".to_string(),
+            descriptor,
+            agent_dir.join("w-race.descriptor.json"),
+        ));
+        // The schedule call parks on the held descriptor mutex. Its first
+        // await IS that lock, so a single MANUAL poll - while the mutex
+        // is held - deterministically drives the future past its top
+        // guard and parks it at Pending (no scheduler assumption: the
+        // flip below provably runs with the guard already crossed).
+        let held = resident.descriptor.lock().await;
+        let mut schedule = {
+            let supervisor = Arc::clone(&supervisor);
+            let resident = Arc::clone(&resident);
+            std::pin::pin!(async move {
+                supervisor.schedule_owned_worker_cleanup(&resident).await;
+            })
+        };
+        {
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            match std::future::Future::poll(schedule.as_mut(), &mut cx) {
+                std::task::Poll::Ready(()) => {
+                    panic!("the schedule future completed without awaiting the descriptor")
+                }
+                std::task::Poll::Pending => {}
+            }
+        }
+        // The flip and the one-shot fence drain run while the schedule is
+        // parked.
+        supervisor.mark_supervisor_shutting_down();
+        let mut no_boot_tasks = Vec::new();
+        supervisor.lease_loss_fence(&mut no_boot_tasks).await;
+        // The schedule resumes: the registration recheck (under the
+        // registry lock) must kill the in-flight arm.
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), schedule.as_mut())
+            .await
+            .expect("the in-flight schedule never finished");
+        assert!(
+            resident.owner_cleanup.lock().unwrap().is_none(),
+            "a timer armed behind the one-shot fence drain"
+        );
+        assert!(
+            supervisor.owner_cleanup_timers.lock().unwrap().is_empty(),
+            "a timer registered behind the one-shot fence drain"
         );
     }
 }

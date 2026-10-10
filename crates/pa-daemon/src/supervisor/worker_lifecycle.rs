@@ -689,7 +689,20 @@ impl Supervisor {
         // The stop's durable intent persists BEFORE the worker is told (TS
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
         // survives the escalation, must never be adopted as healthy by a later boot.
+        // The admission gate and the persist run UNDER the shared
+        // stop-admission lock: the shutdown flags publish synchronously
+        // (no await ahead of them), and the lease-loss fence acquires
+        // this lock before the lease releases - so a detached
+        // owner-cleanup timer (or a client handler) that passed its own
+        // earlier gate either finishes its durable persist before the
+        // release or is refused here, and once the flag is up no stop
+        // transition admits at all.
+        let admission = self.stop_admission.lock().await;
+        if self.shutting_down.load(Ordering::SeqCst) {
+            anyhow::bail!("supervisor is shutting down: the stop is refused");
+        }
         self.persist_stop_tombstone_stop(resident).await?;
+        drop(admission);
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.

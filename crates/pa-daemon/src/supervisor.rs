@@ -221,21 +221,35 @@ pub struct Supervisor {
     /// cleared by a landed `compaction_end`.
     pub(crate) compaction_journal:
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
+    /// The stop-admission boundary: the shutdown flags publish
+    /// SYNCHRONOUSLY at loss discovery, and every stop transition takes
+    /// this lock for its final gate and durable tombstone persist - the
+    /// lease-loss fence then acquires the lock after the flip, so every
+    /// stop already past its final recheck finishes its durable persist
+    /// before the lease can release, and no later stop admits at all.
+    pub(crate) stop_admission: tokio::sync::Mutex<()>,
+    /// Every armed owner-cleanup timer's handle, pruned of finished
+    /// entries: the lease-loss teardown aborts and joins them, so no
+    /// parked or mid-gate timer outlives the supervisor's lease.
+    pub(crate) owner_cleanup_timers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Test-only witness: notified when a lease-loss fence reaches its
+    /// stop-gate step (the timers and boot passes are aborted and
+    /// joined; the gate acquire is next). Production builds carry no
+    /// such wake - tests use it as the fence's observable readiness.
+    #[cfg(all(test, unix))]
+    pub(crate) fence_at_gate: tokio::sync::Notify,
 }
 
-/// The serving-exit boot fence: EVERY handle is aborted FIRST, then
-/// every handle is joined. A sequential abort-then-join per task would
-/// leave the later passes (restore, archive sweep, watchdog) free to
-/// act against a successor - especially after the lease is already
-/// compromised - while an earlier join waits out a slow in-flight step.
-#[cfg(unix)]
-pub(crate) async fn abort_all_then_join_all(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
-    for task in tasks.iter() {
-        task.abort();
-    }
-    for task in tasks.drain(..) {
-        let _ = task.await;
-    }
+/// Register a boot pass in the shared slot. Every spawn registers in
+/// its own step (no await between the spawn and the registration), so
+/// a lease compromise firing while the boot block is still mid-flight
+/// fences every pass spawned so far - a handle left inside the
+/// cancelled future would detach its task to act against a successor.
+fn register_boot_task(
+    slot: &std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    slot.lock().expect("boot task slot lock").push(handle);
 }
 
 impl Supervisor {
@@ -302,7 +316,76 @@ impl Supervisor {
             passive_scan_pending: std::sync::atomic::AtomicBool::new(false),
             passive_catalog_epoch: std::sync::atomic::AtomicU64::new(0),
             compaction_journal: std::sync::Mutex::new(compaction_journal),
+            stop_admission: tokio::sync::Mutex::new(()),
+            owner_cleanup_timers: std::sync::Mutex::new(Vec::new()),
+            #[cfg(all(test, unix))]
+            fence_at_gate: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Close admission the moment a lease loss is KNOWN: the shutdown and
+    /// accept-exit flags plus the waiter notification must land BEFORE the
+    /// serving-exit fence waits out in-flight boot steps - client handlers
+    /// and owner-cleanup timers must not act on a lost lease while the
+    /// fence drains - with NO await ahead of the flag flip (a slow
+    /// gated stop persist must never hold the admission window open).
+    /// The tracked owner-cleanup timers are fenced by the lease-loss
+    /// fence that follows: parked ones never wake, and a mid-gate one
+    /// dies at its next await (its stop transition still faces the
+    /// gated recheck).
+    #[cfg(unix)]
+    fn mark_supervisor_shutting_down(&self) {
+        self.close_supervisor_admission(
+            "daemon socket lease compromised; relinquishing supervisor ownership",
+        );
+    }
+
+    /// Close admission - SYNCHRONOUSLY, with NO await ahead of the
+    /// flags (a slow gated stop persist must never hold the admission
+    /// window open): the shutdown and accept-exit flags plus the waiter
+    /// notification. Every TERMINAL serving exit closes admission
+    /// before its fence: live client handlers must not start a stop or
+    /// arm a fresh timer behind the one-shot fence while the exit
+    /// flush and the lease release run.
+    #[cfg(unix)]
+    fn close_supervisor_admission(&self, reason: &str) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.accept_exit.store(true, Ordering::SeqCst);
+        self.shutdown_notify.notify_waiters();
+        self.log.append(reason);
+    }
+
+    /// The lease-loss fence: with the flags already up, EVERY tracked
+    /// handle - owner-cleanup timers AND boot passes - is aborted FIRST
+    /// (a handle caught in an unpreemptible step must not strand the
+    /// other handles' aborts behind its join), and only then are the
+    /// joins awaited. The stop gate runs last: stop transitions already
+    /// past their final recheck complete their durable persist before
+    /// the lease can release, and every later stop is refused at the
+    /// gate (the flags are already up).
+    #[cfg(unix)]
+    async fn lease_loss_fence(&self, boot_tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+        let timers: Vec<_> = self
+            .owner_cleanup_timers
+            .lock()
+            .expect("owner-cleanup timer registry lock")
+            .drain(..)
+            .collect();
+        for timer in &timers {
+            timer.abort();
+        }
+        for task in boot_tasks.iter() {
+            task.abort();
+        }
+        for timer in timers {
+            let _ = timer.await;
+        }
+        for task in boot_tasks.drain(..) {
+            let _ = task.await;
+        }
+        #[cfg(all(test, unix))]
+        self.fence_at_gate.notify_waiters();
+        drop(self.stop_admission.lock().await);
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
@@ -423,6 +506,18 @@ impl Supervisor {
         // lease-compromise monitor and aborts the boot the moment
         // ownership is lost (the accept loop's select below is the same
         // monitor's steady-state arm).
+        //
+        // The spawned handles are registered in a slot the CANCELLED
+        // block's spawns still reach: the boot select's compromise arm
+        // fires while the block is mid-flight, and every pass spawned so
+        // far must be fenceable from there - a handle left inside the
+        // cancelled future would detach its task against the successor.
+        // The adoption fan-out drain is created outside for the same
+        // reason: the fence below awaits the nested jobs' actual settle.
+        let boot_tasks_slot = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+            tokio::task::JoinHandle<()>,
+        >::new()));
+        let adoption_fanout = crate::recovery_pacing::FanoutDrain::new();
         let boot_ownership = async {
             // The boot reap (the operator's same-socket predecessor rule):
             // this daemon now owns the socket's lineage, so leftover
@@ -462,19 +557,22 @@ impl Supervisor {
             // pass (both waiters observe the same signal).
             let (adoption_tx, adoption_signal) = tokio::sync::watch::channel(false);
             // The spawned passes stay detached (they run concurrently with
-            // serving by design), but their handles are returned to the
-            // monitor below: a lease compromise aborts them instead of
-            // letting ownership passes act against a successor.
-            let mut boot_tasks = Vec::new();
+            // serving by design), but their handles are registered in the
+            // shared slot IN THE SPAWN'S OWN STEP (no await between the
+            // spawn and its registration): a lease compromise aborts them
+            // instead of letting ownership passes act against a successor
+            // - from the serving-exit fences AND from a compromise that
+            // fires while this block is still mid-flight.
+            let boot_tasks_slot = std::sync::Arc::clone(&boot_tasks_slot);
             // The adoption pass's nested fan-out drain: the fence below
             // aborts and awaits the pass's own handle, but the JoinSet's
             // drop only abort-FLAGS the nested jobs - an in-flight job
             // step (a socket connect, a relaunch spawn) can still be
-            // executing after the handle is joined. The drain is created
-            // HERE, outside the spawned pass, so the fence can await the
-            // fan-out's actual settle before the socket cleanup and the
-            // lease release below.
-            let adoption_fanout = crate::recovery_pacing::FanoutDrain::new();
+            // executing after the handle is joined. The drain lives
+            // outside the spawned pass (created before the boot block),
+            // so the fence can await the fan-out's actual settle before
+            // the socket cleanup and the lease release below - even when
+            // the compromise fires while this block is mid-flight.
             let adoption = {
                 let supervisor = Arc::clone(&self);
                 let fanout = adoption_fanout.clone();
@@ -495,13 +593,17 @@ impl Supervisor {
                     let _ = adoption_tx.send(true);
                 })
             };
-            boot_tasks.push(adoption);
+            register_boot_task(&boot_tasks_slot, adoption);
             {
                 let supervisor = Arc::clone(&self);
                 let adoption_signal = adoption_signal.clone();
-                boot_tasks.push(tokio::spawn(async move {
-                    crate::update_restore::restore_pass(&supervisor, adoption_signal, roster).await;
-                }));
+                register_boot_task(
+                    &boot_tasks_slot,
+                    tokio::spawn(async move {
+                        crate::update_restore::restore_pass(&supervisor, adoption_signal, roster)
+                            .await;
+                    }),
+                );
             }
 
             // Warm the passive scheduled-jobs snapshot (the input-latency
@@ -523,10 +625,13 @@ impl Supervisor {
             {
                 let supervisor = Arc::clone(&self);
                 let mut adopted = adoption_signal;
-                boot_tasks.push(tokio::spawn(async move {
-                    Supervisor::wait_for_adoption_signal(&mut adopted).await;
-                    supervisor.spawn_passive_catalog_warmup();
-                }));
+                register_boot_task(
+                    &boot_tasks_slot,
+                    tokio::spawn(async move {
+                        Supervisor::wait_for_adoption_signal(&mut adopted).await;
+                        supervisor.spawn_passive_catalog_warmup();
+                    }),
+                );
             }
 
             // Session-archive sweep (roadmap: the sessions directory must
@@ -535,9 +640,12 @@ impl Supervisor {
             // gates serving.
             {
                 let supervisor = Arc::clone(&self);
-                boot_tasks.push(tokio::spawn(async move {
-                    crate::session_archive::archive_sweep_loop(&supervisor).await;
-                }));
+                register_boot_task(
+                    &boot_tasks_slot,
+                    tokio::spawn(async move {
+                        crate::session_archive::archive_sweep_loop(&supervisor).await;
+                    }),
+                );
             }
 
             // Update-prepare watchdog: aborts deadline- or
@@ -545,14 +653,16 @@ impl Supervisor {
             // command arrives to re-check.
             {
                 let supervisor = Arc::clone(&self);
-                boot_tasks.push(tokio::spawn(async move {
-                    supervisor.update_prepare_watchdog().await;
-                }));
+                register_boot_task(
+                    &boot_tasks_slot,
+                    tokio::spawn(async move {
+                        supervisor.update_prepare_watchdog().await;
+                    }),
+                );
             }
-            (boot_tasks, adoption_fanout)
         };
         #[cfg(unix)]
-        let (mut boot_tasks, adoption_fanout) = tokio::select! {
+        tokio::select! {
             // `biased` polls the monitor first, deterministically: an
             // already-compromised lease must win the tie against a boot
             // block that finishes on its first poll (no reap targets, the
@@ -560,28 +670,55 @@ impl Supervisor {
             // actions against a successor that took the socket over.
             biased;
             () = socket_lease.wait_compromised() => {
-                self.shutting_down.store(true, Ordering::SeqCst);
-                self.accept_exit.store(true, Ordering::SeqCst);
-                self.shutdown_notify.notify_waiters();
-                self.log
-                    .append("daemon socket lease compromised; relinquishing supervisor ownership");
+                // The shutdown/admission flags land FIRST - client
+                // handlers and owner-cleanup timers must not act on a
+                // lost lease while the fence below waits out in-flight
+                // boot steps - then the passes spawned so far (the
+                // shared slot, registered per-spawn) are aborted, joined,
+                // and the nested adoption fan-out drains before the
+                // lease can drop: nothing boot-spawned outlives this
+                // arm against the successor.
+                self.mark_supervisor_shutting_down();
+                let mut boot_tasks = std::mem::take(
+                    &mut *boot_tasks_slot.lock().expect("boot task slot lock"),
+                );
+                self.lease_loss_fence(&mut boot_tasks).await;
+                adoption_fanout.wait_drained().await;
                 return Err(anyhow!("daemon socket lease compromised"));
             }
-            tasks = boot_ownership => tasks,
+            () = boot_ownership => {},
         };
         #[cfg(not(unix))]
-        let (_boot_tasks, _adoption_fanout) = boot_ownership.await;
+        {
+            let () = boot_ownership.await;
+        }
+
+        // The boot block completed: take the registered passes for the
+        // fences below (the non-unix daemon has no lease choreography -
+        // its passes stay detached exactly as before).
+        #[cfg(unix)]
+        let mut boot_tasks =
+            std::mem::take(&mut *boot_tasks_slot.lock().expect("boot task slot lock"));
+        #[cfg(not(unix))]
+        drop(std::mem::take(
+            &mut *boot_tasks_slot.lock().expect("boot task slot lock"),
+        ));
 
         #[cfg(unix)]
         if let Err(error) = socket_lease.assert_held_async().await {
-            // The same fence the serving loop's compromise arm runs: the
+            // Admission closes FIRST - an adoption pass that already armed
+            // detached owner-cleanup timers must not have them act after
+            // this return (the boot fence below owns neither the timers
+            // nor anything else already past an earlier gate) - then the
+            // same fence the serving loop's compromise arm runs: the
             // spawned ownership passes must not outlive a lost lease on
-            // this exit path either - aborting them (not dropping the
-            // handles, which detaches) keeps none adopting or sweeping
-            // against a successor.
-            for task in &boot_tasks {
-                task.abort();
-            }
+            // this exit path either - aborting ALL and joining ALL (not
+            // dropping the handles, which detaches) and draining the
+            // nested adoption fan-out keeps none adopting or sweeping
+            // against a successor while the lease's release marks land.
+            self.mark_supervisor_shutting_down();
+            self.lease_loss_fence(&mut boot_tasks).await;
+            adoption_fanout.wait_drained().await;
             return Err(error);
         }
         // The archive-sweep and update-prepare-watchdog passes already
@@ -636,12 +773,40 @@ impl Supervisor {
                 // after a successor has opened them - the lease must
                 // not be releasable while any boot task still runs. The
                 // shared fence aborts EVERY task first, then joins all.
-                abort_all_then_join_all(&mut boot_tasks).await;
-                if socket_lease.assert_held().is_err() {
-                    self.shutting_down.store(true, Ordering::SeqCst);
-                    self.accept_exit.store(true, Ordering::SeqCst);
-                    self.shutdown_notify.notify_waiters();
-                    self.log.append("daemon socket lease compromised; relinquishing supervisor ownership");
+                //
+                // The loss verdict is sampled BEFORE the joins so the
+                // shutdown/admission flags close the moment the loss is
+                // known (client handlers and owner-cleanup timers must
+                // not act on a lost lease while the fence waits out
+                // in-flight steps), and re-sampled after (the monitor
+                // arm is gone once serving ends; a loss landing inside
+                // the join window is caught there and takes the same
+                // shutdown path).
+                // EVERY terminal serving exit closes admission - the
+                // healthy accept-exhaustion exit included: the fence
+                // below is a one-shot snapshot of the tracked timers and
+                // passes, and a live client handler could otherwise
+                // start a stop or arm a fresh timer behind it while the
+                // exit flush and the lease release below run. A lost
+                // lease logs the compromise; the healthy exit logs the
+                // serving-end close.
+                let mut lease_lost = socket_lease.assert_held().is_err();
+                if lease_lost {
+                    self.mark_supervisor_shutting_down();
+                } else {
+                    self.close_supervisor_admission(
+                        "daemon serving ended; closing supervisor admission",
+                    );
+                }
+                // The fence runs in EVERY outcome - a healthy exit also
+                // releases the lease, so the same timers, boot passes,
+                // and in-flight stop transitions must not outlive it.
+                self.lease_loss_fence(&mut boot_tasks).await;
+                if !lease_lost && socket_lease.assert_held().is_err() {
+                    lease_lost = true;
+                    self.mark_supervisor_shutting_down();
+                }
+                if lease_lost {
                     Err(anyhow!("daemon socket lease compromised"))
                 } else {
                     result
@@ -650,14 +815,14 @@ impl Supervisor {
             () = socket_lease.wait_compromised() => {
                 // The boot's ownership passes die with the lease: none may
                 // adopt or restore against a successor that holds the
-                // socket now. The shared fence aborts EVERY task first,
-                // then joins all, so the release below cannot land
-                // while a task's archive sweep is still moving files.
-                abort_all_then_join_all(&mut boot_tasks).await;
-                self.shutting_down.store(true, Ordering::SeqCst);
-                self.accept_exit.store(true, Ordering::SeqCst);
-                self.shutdown_notify.notify_waiters();
-                self.log.append("daemon socket lease compromised; relinquishing supervisor ownership");
+                // socket now. The shutdown/admission flags land FIRST -
+                // handlers and owner-cleanup timers must not act on a
+                // lost lease while the fence below waits - and the shared
+                // fence aborts EVERY task first, then joins all, so the
+                // release below cannot land while a task's archive sweep
+                // is still moving files.
+                self.mark_supervisor_shutting_down();
+                self.lease_loss_fence(&mut boot_tasks).await;
                 Err(anyhow!("daemon socket lease compromised"))
             }
         };
