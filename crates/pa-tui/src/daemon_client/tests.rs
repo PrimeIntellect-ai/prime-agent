@@ -556,14 +556,6 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
                         "expiresAt": "2999-01-01T00:00:00.000Z",
                     },
                 })
-            } else if command_type == "resume_queue" {
-                serde_json::json!({
-                    "type": "response",
-                    "id": id,
-                    "command": command_type,
-                    "success": true,
-                    "data": { "viaSupervisor": true },
-                })
             } else {
                 serde_json::json!({
                     "type": "response",
@@ -613,16 +605,6 @@ async fn direct_upgrade_routes_attach_and_streams_events() {
         .await
         .unwrap();
     assert_eq!(state["id"], "s1");
-    let resumed = client
-        .request_ok(DaemonCommand::ResumeQueue {
-            id: None,
-            active_session_id: "s1".to_string(),
-            rest: Map::default(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(resumed["viaSupervisor"], true);
-    assert_eq!(client.direct_session_id().as_deref(), Some("s1"));
     let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
         .await
         .unwrap()

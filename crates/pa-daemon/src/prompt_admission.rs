@@ -562,35 +562,17 @@ impl Worker {
             .and_then(Value::as_str)
             .unwrap_or_default();
         let cancel_owned = payload.get("cancelOwned").and_then(Value::as_bool) == Some(true);
-        let (status, dropped_queued, abort_running, cancelled_picked) = {
+        let (status, dropped_queued, abort_running) = {
             // The enqueue/commit transition holds this same lock. Decide
             // whether the owned admission is still queued atomically with
             // removing it; never abort a different in-flight turn.
             let mut core = self.core.lock().unwrap();
-            if core.shutdown_requested {
-                return response_failure(
-                    None,
-                    "cancel_prompt_admission",
-                    "Session is shutting down",
-                    None,
-                );
-            }
             let status = self.prompt_admissions.cancel(admission_id);
             let queued = core
                 .steering
                 .iter()
                 .chain(&core.follow_up)
                 .any(|item| item.admission_id.as_deref() == Some(admission_id));
-            // Restored rows retain their admission ID even though the
-            // process-local registry was rebuilt on worker restart.
-            let status = status.or_else(|| {
-                (queued
-                    || core
-                        .in_flight_input
-                        .iter()
-                        .any(|input| input.item.admission_id.as_deref() == Some(admission_id)))
-                .then_some(AdmissionStatus::Owned)
-            });
             let dropped_queued = matches!(status, Some(AdmissionStatus::Cancelled))
                 || (cancel_owned && status == Some(AdmissionStatus::Owned) && queued);
             if dropped_queued {
@@ -603,54 +585,18 @@ impl Worker {
             let abort_running = cancel_owned
                 && status == Some(AdmissionStatus::Owned)
                 && core.running_admission_ids.contains(admission_id);
-            let mut cancelled_picked = false;
-            if cancel_owned && status == Some(AdmissionStatus::Owned) {
-                for input in &mut core.in_flight_input {
-                    if input.item.admission_id.as_deref() == Some(admission_id) {
-                        input.cancelled = true;
-                        cancelled_picked = true;
-                    }
-                }
-            }
             if abort_running {
                 core.abort_requested = true;
-                core.cancel_handoffs_pending += 1;
             }
-            (status, dropped_queued, abort_running, cancelled_picked)
+            (status, dropped_queued, abort_running)
         };
+        if dropped_queued {
+            self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
+                operation: "queue_dropped",
+            });
+        }
         if abort_running {
-            // The runner cannot pick the next turn until this abort and its
-            // durable ownership decision finish.
             self.engine.abort_in_flight_turn();
-        }
-        if dropped_queued || cancelled_picked {
-            if let Err(error) =
-                crate::worker::checkpoint_owned_input(&self.recovery, &self.core, "queue_dropped")
-            {
-                {
-                    let mut core = self.core.lock().unwrap();
-                    if !core.shutdown_requested {
-                        core.recovery_hold = true;
-                        core.queued_input_suspended = true;
-                        if abort_running {
-                            core.abort_requested = true;
-                        }
-                    }
-                    if abort_running {
-                        core.cancel_handoffs_pending -= 1;
-                    }
-                }
-                return response_failure(
-                    None,
-                    "cancel_prompt_admission",
-                    &format!("Cancellation checkpoint uncertain: {error:#}"),
-                    None,
-                );
-            }
-        }
-        if abort_running {
-            self.core.lock().unwrap().cancel_handoffs_pending -= 1;
-            self.work_notify.notify_one();
         }
         let status = match status {
             None => "unknown",

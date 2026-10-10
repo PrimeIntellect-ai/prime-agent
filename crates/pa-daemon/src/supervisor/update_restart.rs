@@ -347,13 +347,6 @@ impl Supervisor {
                     for (resident, (_, verdict)) in residents.iter().zip(&verdicts) {
                         match verdict {
                             WorkerStopVerdict::Stopped => {
-                                // The old monitor may only now observe its child's
-                                // exit. Retire that watch before reopening supervision,
-                                // and serialize this replacement with registration and
-                                // the crash path through its ready publication.
-                                let _registration_guard =
-                                    self.registry.adoption_guard(&resident.worker_id).await;
-                                resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
                                 resident.intentional_stop.store(false, Ordering::SeqCst);
                                 match self.relaunch_worker(resident).await {
                                     Ok(child) => {
@@ -365,13 +358,6 @@ impl Supervisor {
                                             "worker {} abandon relaunch failed: {error:#}",
                                             resident.worker_id
                                         ));
-                                        // The superseded watch cannot retry this
-                                        // failed replacement. Give the crash path
-                                        // ownership of its remaining failure budget.
-                                        if !self.is_stopping(resident) {
-                                            resident.spawned_at_ms.store(0, Ordering::SeqCst);
-                                            self.spawn_monitor(Arc::clone(resident), None, 0);
-                                        }
                                     }
                                 }
                             }

@@ -72,14 +72,6 @@ impl Worker {
         let index = index as usize;
         let (status, queue_changed): (&'static str, bool) = {
             let mut core = self.core.lock().unwrap();
-            if core.shutdown_requested {
-                return response_failure(
-                    None,
-                    "mutate_queued_message",
-                    "Session is shutting down",
-                    None,
-                );
-            }
             let status = match lane {
                 Lane::Steering => mutate_lane(
                     &mut core.steering,
@@ -156,177 +148,14 @@ impl Worker {
 
     /// `resume_queue`: the queue's queued work resumes (the turn runner
     /// drains the lanes when idle); the failure string is TS-verbatim for the empty queue.
-    pub(crate) fn handle_resume_queue(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) fn handle_resume_queue(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("resume_queue") {
             return response;
         }
-        let attempt_id = payload
-            .get("resumeQueueAttemptId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty());
-        if self.core.lock().unwrap().recovery_hold && attempt_id.is_none() {
-            return response_failure(
-                None,
-                "resume_queue",
-                "Held recovery requires supervised resume_queue",
-                None,
-            );
-        }
-        let has_queued_work = if let Some(attempt_id) = attempt_id {
-            let mut recovery = self.recovery.lock().unwrap();
-            let (active_session_id, generation, session_id, session_file, held, busy, inputs) = {
-                let core = self.core.lock().unwrap();
-                if core.shutdown_requested {
-                    return response_failure(
-                        None,
-                        "resume_queue",
-                        "Session is shutting down",
-                        None,
-                    );
-                }
-                (
-                    core.active_session_id.clone(),
-                    core.generation.clone(),
-                    core.store
-                        .as_ref()
-                        .map(|store| store.session_id().to_string())
-                        .unwrap_or_default(),
-                    core.store
-                        .as_ref()
-                        .map(|store| store.path.to_string_lossy().to_string()),
-                    core.recovery_hold,
-                    core.busy,
-                    core.in_flight_input.clone(),
-                )
-            };
-            if held && busy {
-                return response_failure(
-                    None,
-                    "resume_queue",
-                    "Held input is still settling",
-                    None,
-                );
-            }
-            let result = (|| -> anyhow::Result<bool> {
-                let journal = if let Some(journal) = recovery.as_mut() {
-                    journal
-                } else {
-                    recovery.insert(crate::journal::WorkerRecoveryJournal::open(
-                        &self.config.recovery_journal_path,
-                    )?)
-                };
-                if held && !inputs.is_empty() {
-                    let path = session_file
-                        .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("picked input has no session file"))?;
-                    let landed = crate::worker::durable_input_ids(Some(path), &inputs)?;
-                    let mut core = self.core.lock().unwrap();
-                    anyhow::ensure!(
-                        core.recovery_hold && !core.busy && !core.shutdown_requested,
-                        "held input changed while reconciling"
-                    );
-                    anyhow::ensure!(
-                        core.active_session_id == active_session_id
-                            && core.generation == generation
-                            && core
-                                .store
-                                .as_ref()
-                                .map(crate::session_store::SessionFile::session_id)
-                                == Some(session_id.as_str())
-                            && core
-                                .store
-                                .as_ref()
-                                .map(|store| store.path.to_string_lossy().to_string())
-                                == session_file,
-                        "held input session changed while reconciling"
-                    );
-                    // Only picked ownership is reconstructed. Existing live
-                    // queue items keep their edits and completion senders.
-                    for input in std::mem::take(&mut core.in_flight_input).into_iter().rev() {
-                        if input.cancelled || landed.contains(&input.row_id) {
-                            continue;
-                        }
-                        let item = crate::worker::restore_queue_records(vec![input.item])
-                            .pop_front()
-                            .expect("one picked input");
-                        match input.lane {
-                            Lane::Steering => core.steering.push_front(item),
-                            Lane::FollowUp => core.follow_up.push_front(item),
-                        }
-                    }
-                    core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
-                }
-                #[cfg(test)]
-                {
-                    let gate = self.resume_checkpoint_gate.lock().unwrap().clone();
-                    if let Some(gate) = gate {
-                        gate.entered.notify_one();
-                        anyhow::ensure!(
-                            gate.release.lock().unwrap().recv().is_ok(),
-                            "resume checkpoint test gate closed"
-                        );
-                    }
-                }
-                // Eligibility, the fresh snapshot and release are one decision.
-                // A core transition during the fsync cannot turn its positive
-                // proof into a refusal that the supervisor later misreads.
-                let mut core = self.core.lock().unwrap();
-                anyhow::ensure!(
-                    !core.shutdown_requested && core.recovery_hold == held && (!held || !core.busy),
-                    "Session recovery changed or shutdown is in progress"
-                );
-                anyhow::ensure!(
-                    core.active_session_id == active_session_id
-                        && core.generation == generation
-                        && core
-                            .store
-                            .as_ref()
-                            .map(crate::session_store::SessionFile::session_id)
-                            == Some(session_id.as_str())
-                        && core
-                            .store
-                            .as_ref()
-                            .map(|store| store.path.to_string_lossy().to_string())
-                            == session_file,
-                    "resume input session changed while checkpointing"
-                );
-                let lanes = crate::worker::queue_lanes(&core);
-                journal.record_resume_checkpoint(
-                    &active_session_id,
-                    &session_id,
-                    session_file.as_deref(),
-                    attempt_id,
-                    &self.config.worker_instance_id,
-                    &lanes.steering,
-                    &lanes.follow_up,
-                )?;
-                let has_queued_work = !core.steering.is_empty() || !core.follow_up.is_empty();
-                core.recovery_hold = false;
-                core.queued_input_suspended = false;
-                Ok(has_queued_work)
-            })();
-            let has_queued_work = match result {
-                Ok(has_queued_work) => has_queued_work,
-                Err(error) => {
-                    return response_failure(None, "resume_queue", &error.to_string(), None);
-                }
-            };
-            drop(recovery);
-            self.work_notify.notify_one();
-            if let Some(engine) = self.agent_engine.as_ref() {
-                engine.retry_owed_goal_continuation();
-            }
-            has_queued_work
-        } else {
-            // Suspension clears even when the accepted resume has no queued work.
-            if !self.resume_queued_input() {
-                return response_failure(
-                    None,
-                    "resume_queue",
-                    "Session recovery is required or shutdown is in progress",
-                    None,
-                );
-            }
+        // The suspension clears first, so `resume_queue` is a resume
+        // site even when it answers "No queued work to resume".
+        self.resume_queued_input();
+        let has_queued_work = {
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
         };
@@ -336,12 +165,6 @@ impl Worker {
         self.work_notify.notify_one();
         response_success(None, "resume_queue", None)
     }
-}
-
-#[cfg(test)]
-pub(crate) struct ResumeCheckpointGate {
-    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
-    pub(crate) release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 /// Apply one mutation to a lane; the caller owns the cross-lane move a

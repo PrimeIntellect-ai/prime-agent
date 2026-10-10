@@ -148,7 +148,7 @@ impl Worker {
             "export_html" => self.exports.export_html(payload).await,
             "export_jsonl" => self.exports.export_jsonl(payload),
             "mutate_queued_message" => self.handle_mutate_queued_message(payload),
-            "resume_queue" => self.handle_resume_queue(payload),
+            "resume_queue" => self.handle_resume_queue(),
             "factory_activity" => self.handle_factory_activity(payload).await,
             "execute_bash" => self.handle_execute_bash(payload),
             "execute_bash_and_wait" => self.handle_execute_bash_and_wait(payload).await,
@@ -315,23 +315,19 @@ impl Worker {
     /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the queue
     /// whenever nothing is armable; here the abort resumes. Returns whether
     /// the queue was resumed.
-    pub(crate) fn abort_and_send_queued(&self) -> Result<bool> {
-        if self.core.lock().unwrap().recovery_hold {
-            self.request_abort()?;
-            anyhow::bail!("Session recovery is required before queued work can resume");
-        }
+    pub(crate) fn abort_and_send_queued(&self) -> bool {
         // TS `canResume`: no admission pause held — the arm only
         // fires in the send arm.
         let can_resume =
             !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
         if !can_resume {
-            self.request_abort()?;
-            return Ok(false);
+            self.request_abort();
+            return false;
         }
         self.arm_forced_all_steering();
         // The cancel sweep keeps only the queue-visible rows, so the emptiness
         // read below measures exactly the work the abort leaves behind.
-        self.request_abort()?;
+        self.request_abort();
         // The resumed pump — not this funnel — owns the delivery at
         // the settled turn's boundary.
         let queued_work = {
@@ -339,28 +335,29 @@ impl Worker {
             !core.steering.is_empty() || !core.follow_up.is_empty()
         };
         if !queued_work {
-            return Ok(false);
+            return false;
         }
-        anyhow::ensure!(
-            self.resume_queued_input(),
-            "Session recovery is required before queued work can resume"
-        );
-        Ok(true)
+        self.resume_queued_input();
+        true
     }
 
     /// The abort funnel behind both abort commands: suspend queued-input
     /// admission, cancel the queue-invisible turn actions, abort the in-flight
     /// compaction, and cancel the running turn.
-    fn request_abort(&self) -> Result<()> {
+    fn request_abort(&self) {
+        {
+            let mut core = self.core.lock().unwrap();
+            core.abort_requested = true;
+            // The queue parks and a plain prompt is rejected until a
+            // resume site fires.
+            core.queued_input_suspended = true;
+        }
         // Queue-INVISIBLE turn actions cancel: a direct prompt admitted on an idle
         // session never became a queue row, so the abort must resolve its waiting
         // response, not park it behind the suspension forever. Queue-visible lanes
         // survive parked — the suspension defers the pump, it never drops the queue.
         {
             let mut core = self.core.lock().unwrap();
-            anyhow::ensure!(!core.shutdown_requested, "Session is shutting down");
-            core.abort_requested = true;
-            core.queued_input_suspended = true;
             let cancel = |lane: &mut VecDeque<QueuedItem>| {
                 let mut kept = VecDeque::new();
                 while let Some(item) = lane.pop_front() {
@@ -382,9 +379,6 @@ impl Worker {
             };
             cancel(&mut core.steering);
             cancel(&mut core.follow_up);
-            for input in &mut core.in_flight_input {
-                input.cancelled = true;
-            }
         }
         // A withdrawn continuation's pending guard already released at ITS admission,
         // so the withdraw clears nothing (a mirror clear could drop an unrelated guard).
@@ -392,28 +386,17 @@ impl Worker {
         // The in-flight turn's fetch cancels now, not at its next
         // streamed event.
         self.engine.abort_in_flight_turn();
-        if let Err(error) =
-            super::queue::checkpoint_owned_input(&self.recovery, &self.core, "abort")
-        {
-            self.core.lock().unwrap().recovery_hold = true;
-            return Err(error);
-        }
-        Ok(())
     }
 
     fn handle_abort(&self) -> DaemonResponse {
-        if let Err(error) = self.request_abort() {
-            return response_failure(None, "abort", &error.to_string(), None);
-        }
+        self.request_abort();
         response_success(None, "abort", None)
     }
 
     fn handle_abort_and_send_queued(&self) -> DaemonResponse {
         // The response acknowledges the abort itself, never the
         // async deliveries the resumed pump runs at the settle.
-        if let Err(error) = self.abort_and_send_queued() {
-            return response_failure(None, "abort_and_send_queued", &error.to_string(), None);
-        }
+        self.abort_and_send_queued();
         response_success(None, "abort_and_send_queued", None)
     }
 
@@ -506,9 +489,6 @@ impl Worker {
             return response;
         }
         let mut core = self.core.lock().unwrap();
-        if core.shutdown_requested {
-            return response_failure(None, "clear_queue", "Session is shutting down", None);
-        }
         let drain_lane = |lane: &mut VecDeque<QueuedItem>| -> Vec<String> {
             lane.drain(..)
                 .map(|item| {
@@ -541,9 +521,13 @@ impl Worker {
         if !cleared.success {
             return cleared;
         }
-        if let Err(error) = self.request_abort() {
-            return response_failure(None, "abort_and_clear_queue", &error.to_string(), None);
-        }
+        let mut core = self.core.lock().unwrap();
+        core.abort_requested = true;
+        // The same TS `requestAbort()` suspension as the bare `abort`.
+        core.queued_input_suspended = true;
+        drop(core);
+        // And the same eager agent abort.
+        self.engine.abort_in_flight_turn();
         response_success(None, "abort_and_clear_queue", cleared.data)
     }
 

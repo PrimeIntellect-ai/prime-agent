@@ -178,7 +178,7 @@ async fn abort_and_send_idle_race_rate_harness() {
             )
             .await;
         assert!(follow.success, "rep {rep}: follow_up failed: {follow:?}");
-        let sent = worker.abort_and_send_queued().expect("abort checkpoint");
+        let sent = worker.abort_and_send_queued();
         assert!(
             sent,
             "rep {rep}: the armed steering batch sent with the abort"

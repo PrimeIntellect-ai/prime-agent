@@ -179,19 +179,6 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
     .expect("parse the spawn record");
     assert_eq!(persisted.lifecycle, DaemonWorkerLifecycle::Starting);
     assert!(persisted.pid > 0, "the spawned pid rides the record");
-    let instance = persisted
-        .worker_instance_id
-        .as_deref()
-        .expect("spawn identity");
-    assert!(
-        uuid::Uuid::parse_str(instance).is_ok(),
-        "the generated launch identity rides the record"
-    );
-    assert_eq!(
-        resident.descriptor.lock().await.worker_instance_id,
-        persisted.worker_instance_id,
-        "the watched in-memory identity matches the durable spawn record"
-    );
 }
 
 /// A fresh create's spawn record keeps the unsynced TS `persistWorker`

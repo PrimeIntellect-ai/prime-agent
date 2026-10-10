@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{
     anyhow, json, load_descriptors, response_failure, response_success, socket,
     worker_connect_deadline, Context, DaemonCommand, DaemonResponse, DaemonWorkerLifecycle,
-    Duration, Ordering, Path, PathBuf, ResidentWorker, Result, RouteAdmission, Supervisor, Value,
+    Duration, Ordering, Path, PathBuf, ResidentWorker, Result, Supervisor, Value,
     WorkerRegistration,
 };
 
@@ -210,8 +210,7 @@ impl Supervisor {
         // treats the recorded process as alive (the graceful IPC leg
         // below degrades to the same finalize a dead verdict runs).
         let tombstoned = descriptor.stop_requested_at.is_some();
-        let identity_guarded = tombstoned || crate::descriptor::has_shutdown_hold(&descriptor);
-        let recorded_process_alive = if identity_guarded {
+        let recorded_process_alive = if tombstoned {
             let pid = descriptor.pid as u32;
             let expected = descriptor.process_start_id.clone();
             tokio::task::spawn_blocking(move || {
@@ -226,7 +225,7 @@ impl Supervisor {
         } else {
             true
         };
-        let alive = (!identity_guarded || recorded_process_alive)
+        let alive = (descriptor.stop_requested_at.is_none() || recorded_process_alive)
             && socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
@@ -234,84 +233,6 @@ impl Supervisor {
         // The durable pending FIRST: a failed identity persist left a side record carrying the
         // moved-to identity — apply it before any routing or revival acts on the stale record.
         self.apply_identity_pending(&resident).await;
-        if let Err(error) = self.reconcile_shutdown_resume_hold(&resident).await {
-            self.log_line(&format!(
-                "session worker {worker_id} resume checkpoint could not be reconciled; shutdown hold retained: {error:#}"
-            ));
-        }
-        let shutdown_hold_owned = {
-            let descriptor = resident.descriptor.lock().await;
-            crate::descriptor::has_shutdown_hold(&descriptor)
-                && descriptor.archive_on_stop != Some(true)
-        };
-        if shutdown_hold_owned {
-            // A hold predates the routed shutdown and is intentionally separate
-            // from kill/per-session stop tombstones. A crash at any boundary must
-            // resolve it from the matching worker journal, not archive the session.
-            if resident.descriptor.lock().await.stop_requested_at.is_some() {
-                self.retire_worker_after_stop(&resident, true).await;
-            } else if alive {
-                // This is an already-restored, paused worker. Its hold remains
-                // until a durable explicit resume checkpoint supersedes it.
-                // Fall through to the ordinary live adoption below.
-            }
-            let held = resident.descriptor.lock().await.clone();
-            if !resident.descriptor_path.exists() {
-                return AdoptionOutcome::Stopped;
-            }
-            if held.stop_requested_at.is_some() {
-                return AdoptionOutcome::Failed;
-            }
-            if held.create_command.no_session == Some(true) {
-                // Memory-only history has no persisted conversation to replay.
-                return AdoptionOutcome::Stopped;
-            }
-            if !alive || tombstoned {
-                let pid = pid as u32;
-                let expected = held.process_start_id.clone();
-                let owner_gone = tokio::task::spawn_blocking(move || {
-                    super::worker_lifecycle::recovery_journal_owner_is_gone(
-                        crate::lease::is_process_alive(pid).ok(),
-                        expected.as_deref(),
-                        crate::lease::get_process_start_id(pid).as_deref(),
-                    )
-                })
-                .await
-                .unwrap_or(false);
-                if !owner_gone {
-                    return AdoptionOutcome::Failed;
-                }
-                if !resident.descriptor_path.exists() {
-                    return AdoptionOutcome::Stopped;
-                }
-                // A definite BusyContinued verdict removed the hold in the
-                // retirement pass; a Parked/Unknown verdict retains it, and
-                // relaunch_worker applies restoreQueueSuspended before wake.
-                if let Some(veto) =
-                    crate::revival_gate::revival_veto(&self.options.agent_dir, &held, true, None)
-                {
-                    self.log_line(&format!(
-                        "session worker {worker_id} shutdown hold not revived: {}",
-                        veto.log_reason()
-                    ));
-                    return AdoptionOutcome::SkippedIdle;
-                }
-                return match self.relaunch_worker(&resident).await {
-                    Ok(child) => {
-                        self.registry.insert(Arc::clone(&resident)).await;
-                        self.spawn_monitor(Arc::clone(&resident), Some(child), 0);
-                        self.refresh_roster_entry(&resident).await;
-                        AdoptionOutcome::Revived
-                    }
-                    Err(error) => {
-                        self.log_line(&format!(
-                            "could not restore session worker {worker_id} from shutdown hold: {error:#}"
-                        ));
-                        AdoptionOutcome::Failed
-                    }
-                };
-            }
-        }
         // The stop tombstone outranks liveness (TS's stop ownership: the stop was durable intent
         // BEFORE the worker was told): a supervisor that died between the tombstone and the
         // shutdown finishes the stop on the next boot — never adopts it as healthy.
@@ -479,10 +400,10 @@ impl Supervisor {
         };
         // Serialize against descriptor adoption for the same worker.
         let guard = self.registry.adoption_guard(active_session_id).await;
-        let (resident, newly_adopted) = match self.registry.get(active_session_id).await {
-            Some(resident) => (resident, false),
+        let resident = match self.registry.get(active_session_id).await {
+            Some(resident) => resident,
             None => match self.adopt_registered_worker(&registration, token).await {
-                Ok(resident) => (resident, true),
+                Ok(resident) => resident,
                 Err(error) => {
                     let message = format!("{error:#}");
                     // The definitive unknown-worker refusal is observable (log + telemetry)
@@ -501,7 +422,6 @@ impl Supervisor {
         // The registration's durable id is optional on the wire: a re-registering worker
         // that does not report it still owns its persisted descriptor. Both reads share
         // this one lock acquisition — a second one let the create path race into a stall.
-        let mut authenticate_handoff = false;
         let durable_session_id = {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
@@ -512,26 +432,9 @@ impl Supervisor {
             // BEFORE it is exposed anywhere: a predecessor's pull or frame still in flight must
             // meet the slot naming the replacement; a re-register keeps it untouched.
             if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
-                // A newly adopted resident has authenticated this registrant
-                // but remains unready until this descriptor update finishes.
-                // A known ready resident may still expose its predecessor's
-                // channel: close routing before the descriptor names the
-                // replacement, then authenticate the replacement below.
-                if !newly_adopted && resident.route_state().session_ready {
-                    resident.note_session_replaying();
-                    resident
-                        .mark_registration_handoff(worker_instance_id.clone().unwrap_or_default());
-                }
                 let replacement = worker_instance_id.clone().unwrap_or_default();
                 let mut roster = self.roster.lock().unwrap();
                 roster.note_worker_generation(&resident.worker_id, &replacement);
-            }
-            // A normal relaunch is also unready, but its create RPC is still
-            // pending. Only a displaced ready resident needs registration to
-            // reconnect; doing so during replay would clear the create reply.
-            if !newly_adopted && resident.registration_handoff().is_some() {
-                resident.mark_registration_handoff(worker_instance_id.clone().unwrap_or_default());
-                authenticate_handoff = true;
             }
             descriptor.pid = *pid;
             // Refresh the identity from the live registrant: a recycled pid must not keep
@@ -573,10 +476,7 @@ impl Supervisor {
             };
             durable_session_id
         };
-        let record = self
-            .registry
-            .record_registration(registration.clone())
-            .await;
+        let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it now (spec §10.4).
         // The settle lands after the registration is recorded, so a woken waiter's
         // re-resolve cannot miss it.
@@ -592,103 +492,10 @@ impl Supervisor {
             "session worker {active_session_id} {verb} (epoch {}, pid {pid})",
             record.epoch
         ));
-        // Keep the per-worker adoption guard through authentication and the
-        // ready publish. Otherwise an older registration could authenticate
-        // after a newer one changed the descriptor and reopen the new
-        // generation's gate on an unproved channel.
-        if authenticate_handoff {
-            if let Err(error) = self
-                .connect_worker(&resident, worker_connect_deadline())
-                .await
-            {
-                self.log_line(&format!(
-                    "session worker {active_session_id} replacement authentication failed: {error:#}"
-                ));
-                return fail("Session worker replacement authentication failed");
-            }
-        }
-        // Registration rebuilt the resident: pull its current state from the
-        // authenticated channel. A roster write alone accepts an empty object;
-        // readiness needs a created session identity on that channel.
-        let state = self
-            .route_command_typed(
-                &resident,
-                "get_state",
-                json!({}),
-                super::routing::ROUTE_TIMEOUT_MS,
-                RouteAdmission::SupervisorInternal,
-            )
-            .await;
-        let live_proof = if let Ok(DaemonResponse {
-            success: true,
-            data: Some(summary),
-            ..
-        }) = state
-        {
-            let refreshed = self
-                .write_roster_summary_for_resident(&resident, &summary)
-                .await
-                .is_some();
-            let descriptor = resident.descriptor.lock().await;
-            let session_id = summary
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty());
-            let session_file = summary
-                .get("sessionFile")
-                .and_then(Value::as_str)
-                .filter(|file| !file.is_empty());
-            let matching_claim = registration
-                .session_id
-                .as_deref()
-                .is_none_or(|claimed| session_id == Some(claimed));
-            let durable_session = session_id.is_some()
-                && session_file.is_some()
-                && matching_claim
-                && descriptor.root_session_id.as_deref() == session_id
-                && descriptor.session_file.as_deref() == session_file;
-            // A noSession create has an in-memory session ID but no file.
-            // The actual get_state passed require_created; this shape is
-            // accepted only for an explicit noSession create, never replayed.
-            let memory_session = descriptor.create_command.no_session == Some(true)
-                && session_id.is_some()
-                && session_file.is_none()
-                && matching_claim
-                && descriptor.root_session_id.as_deref() == session_id
-                && summary.get("id").and_then(Value::as_str)
-                    == Some(registration.active_session_id.as_str())
-                && summary.get("workerState").and_then(Value::as_str) == Some("ready");
-            refreshed
-                && summary.get("activeSessionId").and_then(Value::as_str)
-                    == Some(registration.active_session_id.as_str())
-                && summary.get("workerInstanceId").and_then(Value::as_str)
-                    == registration.worker_instance_id.as_deref()
-                && (durable_session || memory_session)
-        } else {
-            false
-        };
-        if newly_adopted && !live_proof {
-            return fail("Session worker adopted identity is not ready");
-        }
-        if authenticate_handoff && session_id.is_some() && !live_proof {
-            // Keep the route gate closed and ask the worker's registration
-            // retry to repeat the authenticated identity pull.
-            return fail("Session worker replacement identity is not ready");
-        }
-        if (newly_adopted || authenticate_handoff) && live_proof {
-            let expected_instance = worker_instance_id.clone().unwrap_or_default();
-            let same_generation = resident
-                .descriptor
-                .lock()
-                .await
-                .worker_instance_id
-                .as_deref()
-                == worker_instance_id.as_deref();
-            if !same_generation || !resident.finish_registration_handoff(&expected_instance) {
-                return fail("Session worker replacement generation changed");
-            }
-        }
         drop(guard);
+        // Registration rebuilt the resident: refresh its roster entry from
+        // the live worker so the roster reflects the re-registered state.
+        self.refresh_roster_entry(&resident).await;
         // A worker that registers after the boot seed publishes its passive ledger family in
         // the background: TS reseeds on the worker's first roster snapshot, and this port's
         // workers push only their own summary, so the daemon walks the family here.
@@ -802,12 +609,9 @@ impl Supervisor {
                 "session worker {worker_id}: the registration reconciliation pull failed; the resident is quarantined from routing until the live state lands"
             ));
         }
-        resident
-            .mark_registration_handoff(registration.worker_instance_id.clone().unwrap_or_default());
-        // Keep the new resident unready until handle_worker_register has
-        // updated its generation from this registrant. Publishing it ready
-        // here would briefly pair the new authenticated channel with the
-        // persisted predecessor identity.
+        // The self-registered worker's session already exists: routed
+        // client commands may reach it immediately.
+        resident.note_session_ready();
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
         self.log_line(&format!(

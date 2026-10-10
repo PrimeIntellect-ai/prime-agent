@@ -33,7 +33,7 @@ struct AcpChild {
     /// Held (never read) so the child's cwd directory outlives the process:
     /// dropping the tempdir deletes it and the child's `current_dir` fails.
     /// `None` for a second child sharing another child's home.
-    fixture_home: Option<tempfile::TempDir>,
+    _home: Option<tempfile::TempDir>,
     spawn_stderr: Option<std::process::ChildStderr>,
     /// The sandboxed supervisor socket the child spawned: the drop shuts
     /// the supervisor down with it (a killed child must not leak the
@@ -73,7 +73,7 @@ impl AcpChild {
             stdin: Some(stdin),
             lines,
             next_id: 0,
-            fixture_home: home,
+            _home: home,
             spawn_stderr: Some(stderr),
             socket,
         }
@@ -257,55 +257,6 @@ impl Drop for AcpChild {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(home) = self
-            .fixture_home
-            .as_ref()
-            .filter(|_| std::thread::panicking())
-        {
-            use std::io::{Read as _, Seek as _, SeekFrom};
-            let agent_dir = home.path().join(".prime/agent");
-            let daemon_log = pa_daemon::paths::daemon_log_path(&self.socket, &agent_dir);
-            let mut logs = vec![daemon_log];
-            if let Ok(entries) = std::fs::read_dir(pa_daemon::paths::logs_dir(&agent_dir)) {
-                // A flat, capped scan of only this fixture's known worker logs.
-                for entry in entries.take(64).flatten() {
-                    let name = entry.file_name();
-                    if name.to_str().is_some_and(|name| {
-                        name.starts_with("worker-") && name.ends_with(".stderr.log")
-                    }) {
-                        logs.push(entry.path());
-                        if logs.len() == 4 {
-                            break;
-                        }
-                    }
-                }
-            }
-            for path in logs {
-                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
-                    continue;
-                };
-                if !metadata.is_file() {
-                    continue;
-                }
-                let Ok(mut file) = std::fs::File::open(&path) else {
-                    continue;
-                };
-                if file
-                    .seek(SeekFrom::Start(metadata.len().saturating_sub(8192)))
-                    .is_err()
-                {
-                    continue;
-                }
-                let mut tail = Vec::new();
-                if file.take(8192).read_to_end(&mut tail).is_ok() {
-                    eprintln!(
-                        "ACP fixture log tail {}: {}",
-                        path.display(),
-                        String::from_utf8_lossy(&tail)
-                    );
-                }
-            }
-        }
         if let Some(mut stderr) = self.spawn_stderr.take() {
             use std::io::Read;
             let mut text = String::new();
@@ -1913,15 +1864,10 @@ fn daemon_request(socket: &std::path::Path, id: &str, command: &Value) -> Value 
     BufReader::new(reader)
         .lines()
         .map(|line| {
-            let line = line.unwrap_or_else(|error| {
-                panic!("daemon request {id} ({command}) read failed: {error}")
-            });
-            serde_json::from_str::<Value>(&line).unwrap_or_else(|error| {
-                panic!("daemon request {id} ({command}) returned invalid JSON: {error}")
-            })
+            serde_json::from_str::<Value>(&line.expect("daemon line")).expect("daemon JSON")
         })
         .find(|frame| frame["id"] == json!(id))
-        .unwrap_or_else(|| panic!("the daemon closed without answering {id} ({command})"))
+        .unwrap_or_else(|| panic!("the daemon closed without answering {id}"))
 }
 
 #[test]

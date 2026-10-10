@@ -3,19 +3,10 @@
 //! abort-and-send-queued flow, and the pump fixtures.
 use super::*;
 
-fn persisted_queue_runner(engine: Arc<dyn SessionEngine>) -> (TurnRunner, tempfile::TempDir) {
-    let dir = tempfile::TempDir::new().expect("queue runner directory");
-    let runner = burst_runner(engine);
-    let mut store = SessionFile::create(dir.path().to_str().unwrap(), None, 0);
-    store.set_path(dir.path().join("session.jsonl"));
-    runner.core.lock().unwrap().store = Some(store);
-    (runner, dir)
-}
-
 #[tokio::test]
 async fn suspended_runner_parks_a_queued_item_until_resumed() {
     let engine = ScriptedEngine::default();
-    let (runner, _fixture) = persisted_queue_runner(Arc::new(engine));
+    let runner = burst_runner(Arc::new(engine));
     let (done_tx, mut done_rx) = oneshot::channel();
     {
         let mut core = runner.core.lock().unwrap();
@@ -157,7 +148,7 @@ async fn steering_mode_all_batches_the_queued_prefix_into_one_turn() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         core.steering_mode = "all".to_string();
@@ -204,7 +195,7 @@ async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
         ScriptedEngine::from_value(&json!({ "responses": ["batched reply"] })).unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         assert_eq!(core.steering_mode, "all", "the default is the batched mode");
@@ -246,12 +237,13 @@ async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
 
 #[tokio::test]
 async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
-    // Two real durable turns read two scripted responses in order.
+    // The burst harness has no session store, so the scripted engine serves
+    // its first response for EVERY turn (prompt_index stays 0): the turns
+    // are discriminated by the agent_start count and the user-row order.
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(&json!({ "responses": ["settled reply", "settled reply"] }))
-            .unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["settled reply"] })).unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         core.steering_mode = "one-at-a-time".to_string();
@@ -290,10 +282,9 @@ async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
 #[tokio::test]
 async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(&json!({ "responses": ["batch reply", "batch reply"] }))
-            .unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["batch reply"] })).unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         core.steering_mode = "one-at-a-time".to_string();
@@ -341,10 +332,9 @@ async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
 #[tokio::test]
 async fn mode_all_never_batches_across_policy_classes() {
     let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(&json!({ "responses": ["lane reply", "lane reply"] }))
-            .unwrap_or_default(),
+        ScriptedEngine::from_value(&json!({ "responses": ["lane reply"] })).unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         core.steering_mode = "all".to_string();
@@ -385,7 +375,7 @@ async fn follow_up_mode_all_batches_the_follow_up_lane() {
         ScriptedEngine::from_value(&json!({ "responses": ["follow-up batch reply"] }))
             .unwrap_or_default(),
     );
-    let (runner, _fixture) = persisted_queue_runner(Arc::clone(&engine));
+    let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
         core.follow_up_mode = "all".to_string();
@@ -520,7 +510,7 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
         .await;
     assert!(follow.success, "follow_up failed: {follow:?}");
     // The funnel: arm the steering, abort the run, resume the pump.
-    let sent = worker.abort_and_send_queued().expect("abort checkpoint");
+    let sent = worker.abort_and_send_queued();
     assert!(sent, "the armed steering batch sent with the abort");
     let idle = tokio::time::timeout(
         std::time::Duration::from_secs(15),

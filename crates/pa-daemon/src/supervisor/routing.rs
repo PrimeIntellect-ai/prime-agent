@@ -201,20 +201,13 @@ impl Supervisor {
         admission: RouteAdmission,
     ) -> Result<WorkerReply> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
-        // A distinct client action cannot inherit an earlier release proof.
-        // Only this route's provably unsent retries share its private identity.
-        let resume_attempt =
-            (command_type == "resume_queue").then(|| uuid::Uuid::new_v4().to_string());
         loop {
             self.await_route_ready(resident, deadline).await?;
             let remaining_ms = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
-            let routed = if let Some(attempt) = resume_attempt.as_deref() {
-                self.route_ready_resume(resident, payload.clone(), attempt, remaining_ms, admission)
-                    .await
-            } else {
-                self.route_command(
+            match self
+                .route_command(
                     resident,
                     command_type,
                     payload.clone(),
@@ -222,8 +215,7 @@ impl Supervisor {
                     admission,
                 )
                 .await
-            };
-            match routed {
+            {
                 // The socket died before the send: the command never reached a worker, so
                 // waiting for the replacement and sending again cannot duplicate it.
                 Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
@@ -237,64 +229,6 @@ impl Supervisor {
                 other => return other,
             }
         }
-    }
-
-    /// Bind a resume intent to the command channel selected after readiness.
-    /// A replacement can arrive while `route_command_ready` waits; pinning the
-    /// channel and reading its descriptor generation together avoids storing
-    /// the predecessor's identity for a request sent to the replacement.
-    async fn route_ready_resume(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        mut payload: Value,
-        attempt: &str,
-        remaining_ms: u64,
-        admission: RouteAdmission,
-    ) -> Result<WorkerReply> {
-        let channel = resident.cmd_tx.lock().await;
-        let cmd_tx = channel
-            .clone()
-            .ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?;
-        let mut descriptor = resident.descriptor.lock().await;
-        let state = resident.route_state();
-        if !state.connected || !state.session_ready || state.retired || self.is_stopping(resident) {
-            return Err(anyhow!(WORKER_NOT_CONNECTED));
-        }
-        // Client rest fields cannot choose the private checkpoint identity.
-        if let Some(object) = payload.as_object_mut() {
-            object.remove("resumeQueueAttemptId");
-        }
-        if crate::descriptor::has_shutdown_hold(&descriptor) {
-            let mut hold = crate::descriptor::shutdown_hold(&descriptor)?
-                .ok_or_else(|| anyhow!("shutdown hold vanished"))?;
-            let instance = descriptor
-                .worker_instance_id
-                .clone()
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| anyhow!("Worker generation is missing for queue resume"))?;
-            // Bind this action to its actual receiving generation. A lost
-            // ACK remains recoverable through this persisted identity, but a
-            // newer action always supersedes it with a distinct attempt.
-            hold.resume_attempt_id = Some(attempt.to_string());
-            hold.resume_worker_instance_id = Some(instance);
-            let mut next = descriptor.clone();
-            next.rest
-                .insert(crate::descriptor::SHUTDOWN_HOLD_KEY.into(), json!(hold));
-            crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)?;
-            *descriptor = next;
-        }
-        payload["resumeQueueAttemptId"] = json!(attempt);
-        drop(descriptor);
-        drop(channel);
-        self.route_command_on(
-            resident,
-            cmd_tx,
-            "resume_queue",
-            payload,
-            remaining_ms,
-            admission,
-        )
-        .await
     }
 
     /// The typed [`Self::route_command`]: supervisor-internal forwards read the
@@ -668,10 +602,6 @@ impl Supervisor {
                 worker_command = "attach";
             }
         }
-        // Correlate a resume only once the ready route has selected a worker
-        // generation. Waiting for a replacement before this point can change
-        // the generation; the send loop below binds intent to its actual channel.
-        let supervised_resume = worker_command == "resume_queue";
         // `Kill` is the one client command with a durable pre-route side effect (its stop
         // tombstone), so it rides the never-refused control admission.
         let admission = match command {
@@ -706,14 +636,6 @@ impl Supervisor {
                     .await
             }
         };
-        if supervised_resume {
-            if let Err(error) = self.reconcile_shutdown_resume_hold(&resident).await {
-                self.log_line(&format!(
-                    "session worker {} queue resume hold remains pending: {error:#}",
-                    resident.worker_id
-                ));
-            }
-        }
         // The byte relay: a routed response the supervisor neither edits nor
         // inspects goes to the client as the worker's own payload bytes with
         // the client's command id spliced in front. The worker serializes

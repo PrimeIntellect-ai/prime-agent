@@ -18,58 +18,7 @@ use super::{
 use crate::lease::is_process_alive;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 
-/// A missing, malformed, or generation-mismatched checkpoint is unresolved,
-/// even if the routed response happened to report success.
-pub(super) fn shutdown_hold_verdict(
-    descriptor: &DaemonWorkerDescriptor,
-) -> Option<crate::journal::ShutdownVerdict> {
-    let hold = crate::descriptor::shutdown_hold(descriptor)
-        .ok()
-        .flatten()?;
-    crate::journal::WorkerRecoveryJournal::read_shutdown_checkpoint(
-        Path::new(&descriptor.recovery_journal_path),
-        &hold.attempt_id,
-        &hold.worker_instance_id,
-    )
-    .ok()
-    .flatten()
-}
-
 impl Supervisor {
-    /// A manual resume supersedes a paused shutdown hold only after the
-    /// worker's matching queue checkpoint is durable. This also repairs a
-    /// lost ACK or supervisor crash between that checkpoint and descriptor
-    /// clearing on the next boot.
-    pub(super) async fn reconcile_shutdown_resume_hold(
-        &self,
-        resident: &Arc<ResidentWorker>,
-    ) -> Result<bool> {
-        let mut descriptor = resident.descriptor.lock().await;
-        let Some(hold) = crate::descriptor::shutdown_hold(&descriptor)? else {
-            return Ok(false);
-        };
-        let (Some(attempt), Some(instance)) = (
-            hold.resume_attempt_id.as_deref(),
-            hold.resume_worker_instance_id.as_deref(),
-        ) else {
-            return Ok(false);
-        };
-        if !crate::journal::WorkerRecoveryJournal::read_resume_checkpoint(
-            Path::new(&descriptor.recovery_journal_path),
-            attempt,
-            instance,
-        )? {
-            return Ok(false);
-        }
-        let mut next = descriptor.clone();
-        next.rest.remove(crate::descriptor::SHUTDOWN_HOLD_KEY);
-        next.stop_requested_at = None;
-        next.archive_on_stop = None;
-        crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)?;
-        *descriptor = next;
-        Ok(true)
-    }
-
     /// Complete a tombstoned stop for a worker encountered at adoption: adoption
     /// finishes the stop, never adopts the worker as healthy. The `archive_on_stop`
     /// variant rides it: the kill stop is irreversible; the per-session stop keeps
@@ -737,25 +686,7 @@ impl Supervisor {
         // The stop's durable intent persists BEFORE the worker is told (TS
         // `persistWorkerStopTombstone`): a supervisor that dies mid-stop, or a worker that
         // survives the escalation, must never be adopted as healthy by a later boot.
-        let has_shutdown_hold = {
-            let descriptor = resident.descriptor.lock().await;
-            crate::descriptor::has_shutdown_hold(&descriptor)
-        };
-        if has_shutdown_hold {
-            // A later explicit per-session stop supersedes the older paused
-            // daemon-shutdown recovery. Drop the hold in the same durable
-            // tombstone write before telling this worker to stop.
-            let mut descriptor = resident.descriptor.lock().await;
-            let mut next = descriptor.clone();
-            next.rest.remove(crate::descriptor::SHUTDOWN_HOLD_KEY);
-            next.stop_requested_at = Some(util::now_iso());
-            next.archive_on_stop = Some(false);
-            crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)?;
-            *descriptor = next;
-            resident.intentional_stop.store(true, Ordering::SeqCst);
-        } else {
-            self.persist_stop_tombstone_stop(resident).await?;
-        }
+        self.persist_stop_tombstone_stop(resident).await?;
         resident.intentional_stop.store(true, Ordering::SeqCst);
         // The stop is intentional: routes waiting out a replacement must
         // fail fast instead of parking on this worker.
@@ -850,50 +781,7 @@ impl Supervisor {
                 ));
             }
             _ => {
-                let owner_gone = recovery_journal_owner_is_gone(
-                    crate::lease::is_process_alive(pid).ok(),
-                    start_id.as_deref(),
-                    crate::lease::get_process_start_id(pid).as_deref(),
-                );
-                let mut descriptor = resident.descriptor.lock().await;
-                let had_shutdown_hold = keep_interrupted_work
-                    && descriptor.archive_on_stop != Some(true)
-                    && crate::descriptor::has_shutdown_hold(&descriptor);
-                if had_shutdown_hold {
-                    // Neither a worker ACK nor its journal checkpoint is a
-                    // death certificate. Keep stop ownership until the old
-                    // writer is positively gone or replaced.
-                    if !owner_gone {
-                        return;
-                    }
-                    let verdict = shutdown_hold_verdict(&descriptor);
-                    // Even noSession keeps an uncertain descriptor and journal for
-                    // diagnosis; adoption must not replay its memory-only history.
-                    let retain = verdict != Some(crate::journal::ShutdownVerdict::Idle);
-                    if retain {
-                        let mut next = descriptor.clone();
-                        next.stop_requested_at = None;
-                        next.archive_on_stop = None;
-                        if !no_session
-                            && verdict == Some(crate::journal::ShutdownVerdict::BusyContinued)
-                        {
-                            next.rest.remove(crate::descriptor::SHUTDOWN_HOLD_KEY);
-                        }
-                        match crate::descriptor::persist_shutdown_boundary(
-                            &resident.descriptor_path, &next,
-                        ) {
-                            Ok(()) => *descriptor = next,
-                            Err(error) => self.log_line(&format!(
-                                "session worker {} shutdown hold remains tombstoned after descriptor write failed: {error:#}",
-                                resident.worker_id
-                            )),
-                        }
-                        return;
-                    }
-                }
-                drop(descriptor);
-                if !had_shutdown_hold
-                    && keep_interrupted_work
+                if keep_interrupted_work
                     && !no_session
                     && crate::journal::WorkerRecoveryJournal::read_interrupted(Path::new(
                         &journal_path,
@@ -910,7 +798,11 @@ impl Supervisor {
                     // Metadata retirement historically treats failed liveness probes
                     // as gone. Journal deletion needs positive owner-death evidence:
                     // an unobservable process may still be writing durable work.
-                    if owner_gone {
+                    if recovery_journal_owner_is_gone(
+                        crate::lease::is_process_alive(pid).ok(),
+                        start_id.as_deref(),
+                        crate::lease::get_process_start_id(pid).as_deref(),
+                    ) {
                         let _ = std::fs::remove_file(&journal_path);
                     }
                     let _ = std::fs::remove_file(&resident.descriptor_path);
@@ -925,7 +817,7 @@ impl Supervisor {
 
 /// A dead process or a verified replacement identity proves the old writer
 /// is gone. Failed probes and missing live identities preserve the journal.
-pub(super) fn recovery_journal_owner_is_gone(
+fn recovery_journal_owner_is_gone(
     process_alive: Option<bool>,
     expected_start_id: Option<&str>,
     current_start_id: Option<&str>,

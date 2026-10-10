@@ -1,5 +1,5 @@
 //! The live session's state block.
-use super::{Lane, QueuedItem};
+use super::QueuedItem;
 
 use std::collections::VecDeque;
 
@@ -18,9 +18,6 @@ pub(crate) struct SessionCore {
     pub(crate) cwd: String,
     pub(crate) steering: VecDeque<QueuedItem>,
     pub(crate) follow_up: VecDeque<QueuedItem>,
-    /// Picked rows remain owned until each matching session entry can be
-    /// confirmed durable. The running batch leaves the visible lanes.
-    pub(crate) in_flight_input: Vec<InFlightInput>,
     pub(crate) busy: bool,
     pub(crate) created: bool,
     pub(crate) attached_client_ids: Vec<String>,
@@ -30,10 +27,6 @@ pub(crate) struct SessionCore {
     /// gate's aborted-row exception stays closed while it settles its turn.
     pub(crate) suppress_aborted_row: bool,
     pub(crate) shutdown_requested: bool,
-    pub(crate) shutdown_interrupted_turn: bool,
-    pub(crate) cancel_handoffs_pending: usize,
-    #[cfg(test)]
-    pub(crate) pickup_checkpoint_gate: Option<std::sync::Arc<PickupCheckpointGate>>,
     /// True while a compaction run is in flight (TS `isCompacting`).
     pub(crate) compacting: bool,
     /// The turn's tool calls in flight, keyed by tool-call id: the
@@ -90,9 +83,6 @@ pub(crate) struct SessionCore {
     /// by the resume sites: `steer`/`follow_up`, `streamingBehavior`, `resume_queue`,
     /// a queued-message mutation, a cron/heartbeat fire, a compact with an active goal.
     pub(crate) queued_input_suspended: bool,
-    /// A supervisor-held shutdown needs an explicit, durable `resume_queue`;
-    /// ordinary steer/follow-up resume sites cannot release this fence.
-    pub(crate) recovery_hold: bool,
     /// Restored next-turn rows (TS `_pendingNextTurnMessages`,
     /// `restore_next_turn`): delivered as prefix rows with the next turn.
     pub(crate) pending_next_turn: Vec<Value>,
@@ -100,22 +90,6 @@ pub(crate) struct SessionCore {
     /// (`preparing` at pickup, `committing` at the first row, `running` at the
     /// first assistant frame) and clears it once the turn settles.
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
-}
-
-#[cfg(test)]
-pub(crate) struct PickupCheckpointGate {
-    pub(crate) entered: std::sync::Arc<tokio::sync::Notify>,
-    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
-}
-
-#[derive(Clone)]
-pub(crate) struct InFlightInput {
-    pub(crate) lane: Lane,
-    pub(crate) row_id: String,
-    pub(crate) item: crate::journal::WorkerQueueItemRecord,
-    pub(crate) attempted: bool,
-    pub(crate) committed: bool,
-    pub(crate) cancelled: bool,
 }
 
 impl SessionCore {
@@ -140,16 +114,12 @@ impl SessionCore {
             cwd,
             steering: VecDeque::new(),
             follow_up: VecDeque::new(),
-            in_flight_input: Vec::new(),
             busy: false,
             created: true,
             attached_client_ids: Vec::new(),
             abort_requested: false,
             suppress_aborted_row: false,
             shutdown_requested: false,
-            shutdown_interrupted_turn: false,
-            cancel_handoffs_pending: 0,
-            pickup_checkpoint_gate: None,
             last_activity_ms: 0,
             compacting: false,
             running_tool_calls: std::collections::HashSet::new(),
@@ -170,7 +140,6 @@ impl SessionCore {
             scoped_models: Vec::new(),
             retry_abort_requested: false,
             queued_input_suspended: false,
-            recovery_hold: false,
             pending_next_turn: Vec::new(),
             active_action: None,
         }

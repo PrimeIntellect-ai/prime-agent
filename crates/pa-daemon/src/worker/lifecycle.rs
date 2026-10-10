@@ -5,50 +5,13 @@ use super::{
     DaemonResponse, QueueCheckpoint, QueuePriority, QueuedItem, SessionFile, TurnPolicy, Value,
     Worker, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
-use crate::journal::{ShutdownVerdict, WorkerRecoveryJournal};
-use anyhow::{Context, Result};
-use std::collections::HashSet;
-
-/// Reconcile a sync-uncertain accepted row by its stable session entry ID.
-/// A missing or unreadable file cannot justify automatic replay.
-pub(crate) fn durable_input_ids(
-    session_file: Option<&str>,
-    inputs: &[super::session_core::InFlightInput],
-) -> Result<HashSet<String>> {
-    let uncertain: HashSet<&str> = inputs
-        .iter()
-        .filter(|input| !input.cancelled && input.attempted && !input.committed)
-        .map(|input| input.row_id.as_str())
-        .collect();
-    let mut found: HashSet<String> = inputs
-        .iter()
-        .filter(|input| !input.cancelled && input.committed)
-        .map(|input| input.row_id.clone())
-        .collect();
-    if uncertain.is_empty() {
-        return Ok(found);
-    }
-    let path = session_file.context("picked input has no session file")?;
-    crate::journal::sync_regular_file(std::path::Path::new(path))
-        .with_context(|| format!("sync session {path}"))?;
-    let text = std::fs::read_to_string(path).with_context(|| format!("read session {path}"))?;
-    for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let row: Value = serde_json::from_str(line).context("parse session row")?;
-        if let Some(id) = row.get("id").and_then(Value::as_str) {
-            if uncertain.contains(id) {
-                found.insert(id.to_string());
-            }
-        }
-    }
-    Ok(found)
-}
 
 impl Worker {
     /// `update_snapshot` (supervisor plane, update flow spec §8): a read-only
     /// capture; the queue lanes persist BEFORE replying, so the reported queue
     /// and the durable respawn state agree (`busy` is the continuation signal).
     pub(crate) fn handle_update_snapshot(&self) -> DaemonResponse {
-        let core_data = {
+        let (core_data, lanes) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let data = json!({
@@ -74,11 +37,14 @@ impl Worker {
                 "busy": core.busy,
                 "compacting": core.compacting,
             });
-            data
+            (data, queue_lanes(&core))
         };
         // Journal the lanes after releasing the core lock (record paths take
         // the locks in the opposite order).
-        self.persist_current_queue_snapshot();
+        self.persist_queue_snapshot(
+            core_data["activeSessionId"].as_str().unwrap_or_default(),
+            &lanes,
+        );
         response_success(None, "update_snapshot", Some(core_data))
     }
 
@@ -97,11 +63,6 @@ impl Worker {
     /// replying. The session's telemetry finalizes first.
     pub(crate) async fn handle_shutdown(&self, payload: &Value) -> DaemonResponse {
         let daemon_wide = payload.get("daemonShutdown").and_then(Value::as_bool) == Some(true);
-        let shutdown_attempt_id = payload
-            .get("shutdownAttemptId")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
         // The session is closing: the continuation mint sites and their
         // settle-hook retries bail, but unlike a kill the close KEEPS the
         // resume entry — the scheduled jobs survive for the later wake.
@@ -115,9 +76,7 @@ impl Worker {
             .await;
         let interrupted_turn = {
             let mut core = self.core.lock().unwrap();
-            let interrupted_turn =
-                core.shutdown_interrupted_turn || (core.busy && !core.abort_requested);
-            core.shutdown_interrupted_turn = interrupted_turn;
+            let interrupted_turn = core.busy && !core.abort_requested;
             // The shutdown gate closes FIRST: a racing execute_bash must see the
             // stop before the abort runs, or the fresh claim clears the abort and
             // spawns a child the exit leaves running.
@@ -138,6 +97,28 @@ impl Worker {
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_session_work_settled().await;
+        if daemon_wide && interrupted_turn {
+            {
+                let mut core = self.core.lock().unwrap();
+                core.steering.push_front(QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT.to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: false,
+                    policy: TurnPolicy::Direct,
+                    forced_batch: false,
+                });
+            }
+            self.checkpoint_queue(QueueCheckpoint::Admitted {
+                operation: "prompt_accepted",
+            });
+        }
         // The children close before the exit (an unreachable child must not
         // block the worker's own exit); their resume entries and scheduled
         // jobs survive.
@@ -158,109 +139,7 @@ impl Worker {
         // the process exit, and no late report reclaims the pane.
         let reporter = self.herdr.lock().unwrap().clone();
         reporter.release().await;
-        // Lock order is recovery then core, as on every queue checkpoint.
-        // The shutdown gate prevents new admission while the final pair is
-        // written. Never hold the core lock over disk syncs.
-        let mut recovery = self.recovery.lock().unwrap();
-        let (active_session_id, session_id, session_file, mut lanes, inputs, suspended) = {
-            let core = self.core.lock().unwrap();
-            (
-                core.active_session_id.clone(),
-                core.store
-                    .as_ref()
-                    .map(|store| store.session_id().to_string())
-                    .unwrap_or_default(),
-                core.store
-                    .as_ref()
-                    .map(|store| store.path.to_string_lossy().to_string()),
-                queue_lanes(&core),
-                core.in_flight_input.clone(),
-                core.queued_input_suspended || core.recovery_hold,
-            )
-        };
-        let result = (|| -> Result<ShutdownVerdict> {
-            let durable = durable_input_ids(session_file.as_deref(), &inputs)?;
-            let mut manual_hold = suspended;
-            for input in &inputs {
-                if input.cancelled {
-                    continue;
-                }
-                if durable.contains(&input.row_id) {
-                    lanes
-                        .steering
-                        .retain(|item| item.entry_id.as_deref() != Some(input.row_id.as_str()));
-                    lanes
-                        .follow_up
-                        .retain(|item| item.entry_id.as_deref() != Some(input.row_id.as_str()));
-                    continue;
-                }
-                // An interrupted slash command may have completed side
-                // effects without an accepted user row. Leave its exact
-                // input parked for an explicit user decision.
-                manual_hold |=
-                    crate::session_commands::parse_prompt_session_command(&input.item.message)
-                        .is_some();
-            }
-            let unaccepted_picked = lanes
-                .steering
-                .iter()
-                .chain(&lanes.follow_up)
-                .any(|item| item.entry_id.is_some());
-            if daemon_wide && interrupted_turn && !unaccepted_picked {
-                lanes.steering.insert(
-                    0,
-                    super::queue::queue_item_record(&QueuedItem {
-                        priority: QueuePriority::Human,
-                        preview: None,
-                        message: crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT
-                            .to_string(),
-                        custom_message: None,
-                        agent_message: None,
-                        queue_key: None,
-                        admission_id: None,
-                        images: Vec::new(),
-                        done: None,
-                        queue_visible: false,
-                        policy: TurnPolicy::Direct,
-                        forced_batch: false,
-                    }),
-                );
-            }
-            let pending = !lanes.steering.is_empty() || !lanes.follow_up.is_empty();
-            let verdict = if manual_hold && pending {
-                ShutdownVerdict::Parked
-            } else if pending {
-                ShutdownVerdict::BusyContinued
-            } else {
-                ShutdownVerdict::Idle
-            };
-            let journal = if let Some(journal) = recovery.as_mut() {
-                journal
-            } else {
-                recovery.insert(WorkerRecoveryJournal::open(
-                    &self.config.recovery_journal_path,
-                )?)
-            };
-            journal.record_shutdown_checkpoint(
-                &active_session_id,
-                &session_id,
-                session_file.as_deref(),
-                &shutdown_attempt_id,
-                &self.config.worker_instance_id,
-                verdict,
-                &lanes.steering,
-                &lanes.follow_up,
-            )?;
-            Ok(verdict)
-        })();
-        match result {
-            Ok(verdict) => response_success(
-                None,
-                "shutdown",
-                Some(json!({ "shutdownVerdict": verdict })),
-            ),
-            Err(error) => response_failure(None, "shutdown", &error.to_string(), None),
-        }
+        response_success(None, "shutdown", None)
     }
 
     /// Wait until no turn or compaction run is in flight: the kernel dispose
@@ -464,12 +343,9 @@ impl Worker {
 
     /// Clear the queued-input suspension and wake the turn runner so parked
     /// lanes drain; an owed continuation re-evaluates here too.
-    pub(crate) fn resume_queued_input(&self) -> bool {
+    pub(crate) fn resume_queued_input(&self) {
         {
             let mut core = self.core.lock().unwrap();
-            if core.shutdown_requested || core.recovery_hold {
-                return false;
-            }
             if core.queued_input_suspended {
                 core.queued_input_suspended = false;
             }
@@ -478,7 +354,6 @@ impl Worker {
         if let Some(engine) = self.agent_engine.as_ref() {
             engine.retry_owed_goal_continuation();
         }
-        true
     }
 
     /// Run one compaction and answer with the TS `CompactionResult` wire shape;

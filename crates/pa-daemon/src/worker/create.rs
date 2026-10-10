@@ -1,9 +1,9 @@
 //! Session creation and reuse on the worker: the create command's
 //! construction of the live session.
 use super::{
-    json, paths, response_failure, response_success, restore_queue_snapshot_reconciled,
-    session_file_name, Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine,
-    SessionFile, VecDeque, Worker,
+    json, paths, response_failure, response_success, restore_queue_snapshot, session_file_name,
+    Arc, EngineModelSelection, Result, RlmSessionIdentity, SessionEngine, SessionFile, VecDeque,
+    Worker,
 };
 
 use serde::Deserialize as _;
@@ -472,16 +472,7 @@ impl Worker {
         let (steering, follow_up) = {
             let guard = self.recovery.lock().unwrap();
             match guard.as_ref() {
-                Some(journal) => match restore_queue_snapshot_reconciled(
-                    journal,
-                    &self.config.active_session_id,
-                    &store.path,
-                ) {
-                    Ok(lanes) => lanes,
-                    Err(error) => {
-                        return response_failure(None, "create", &error.to_string(), None)
-                    }
-                },
+                Some(journal) => restore_queue_snapshot(journal, &self.config.active_session_id),
                 None => (VecDeque::new(), VecDeque::new()),
             }
         };
@@ -549,13 +540,6 @@ impl Worker {
             }
             core.created = true;
             core.abort_requested = false;
-            // A supervisor-held uncertain or parked shutdown restores the
-            // exact queue while keeping the runner closed until resume_queue.
-            core.queued_input_suspended = payload
-                .get("restoreQueueSuspended")
-                .and_then(Value::as_bool)
-                == Some(true);
-            core.recovery_hold = core.queued_input_suspended;
             // A fresh session starts live: the previous close's
             // `session_closed` marker clears with the new session.
             if let Some(agent_engine) = &self.agent_engine {
@@ -566,7 +550,7 @@ impl Worker {
             core.active_service_tier = clamped_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
-            core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
+            core.forced_all_steering = false;
             core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header: a resumed
