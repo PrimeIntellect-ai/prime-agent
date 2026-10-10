@@ -455,6 +455,52 @@ fn program_status_reports_no_idle_between_steps() {
     harness.assert_terminal_state_restored("the program-status between-steps route");
 }
 
+/// OSC 7501: an abort landing in a run's tool batch settles through the
+/// step's ORIGINAL `tool_use` turn_end (never an aborted row) and the run's
+/// `agent_end` carrying the abort marker — the report rests idle, not done.
+/// An Esc firing once outside the repeat window keeps the abort deterministic.
+#[test]
+fn program_status_aborts_during_a_tool_batch_settles_idle_not_done() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    // A run whose step ended on a still-running tool batch.
+    let mark = harness.mark();
+    harness.write(b"batch\r");
+    harness.wait_from(
+        mark,
+        STATUS_WORKING,
+        "the working report once the tools run opened",
+    );
+
+    // The abort settles the run between tools: the original turn_end
+    // (stopReason toolUse) and the marker-carrying agent_end.
+    let mark = harness.mark();
+    harness.write(b"\x1b[27u");
+    harness.wait_from(
+        mark,
+        STATUS_IDLE,
+        "the idle report after the aborted run settled",
+    );
+    let stream = harness.output();
+    let idle_at = mark + find_subsequence(&stream[mark..], STATUS_IDLE).expect("the idle report");
+    assert!(
+        find_subsequence(&stream[mark..idle_at], STATUS_DONE).is_none(),
+        "the aborted run never reports done: the between-tools abort keeps the run's own turn_end"
+    );
+
+    let mark = harness.mark();
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    let exit = harness.wait_child_exit(Duration::from_secs(20));
+    assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+
+    harness.assert_terminal_state_restored("the program-status tool-batch abort route");
+}
+
 /// OSC 7501: the force-quit watchdog's restore carries the exit clear — the
 /// abrupt exit path owes the terminal the same record removal.
 #[test]

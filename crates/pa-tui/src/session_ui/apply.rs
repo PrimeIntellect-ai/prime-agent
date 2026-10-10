@@ -630,15 +630,19 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => {
+            TurnUpdate::Idle { aborted } => {
                 self.end_run(view);
-                // The run's normal end settles the report's done: an
-                // aborted run already closed itself at its failed
-                // settle, and a goal's terminal outcome is kept.
+                // The run's normal end settles the report's done; an
+                // aborted one settles idle (a stream-time abort already
+                // closed the run at its failed turn_end, but one landing
+                // between steps and tools ends through the original
+                // toolUse settle), and a goal's terminal outcome is kept.
                 if self.run_open {
                     self.run_open = false;
-                    self.settled
-                        .get_or_insert(crate::program_status::Status::Done);
+                    if !aborted {
+                        self.settled
+                            .get_or_insert(crate::program_status::Status::Done);
+                    }
                 }
             }
             TurnUpdate::GoalUpdate(goal) => {
