@@ -1195,6 +1195,18 @@ class App:
             # at any pixel ratio, a 1x capture just scales by one
             live = capture._live_window_bounds(self._shot_window_id)
             frame = live if live is not None else rect
+            if (float(frame[2]), float(frame[3])) != (float(self._shot_rect[2]), float(self._shot_rect[3])):
+                # a resize reflows the UI: the stale image's points may stay
+                # in bounds yet target the wrong control, so only a same-size
+                # move keeps the image transferable - a resize needs a new
+                # capture
+                raise ComputerUseError(
+                    "INVALID_ARGUMENT",
+                    f"the window resized since the screenshot "
+                    f"({float(self._shot_rect[2]):.0f}x{float(self._shot_rect[3]):.0f} at capture, "
+                    f"{float(frame[2]):.0f}x{float(frame[3]):.0f} now); take a fresh screenshot",
+                    {"point": repr(point)[:64]},
+                )
             if shot != (float(self._shot_rect[2]), float(self._shot_rect[3])):
                 scaled = (
                     float(point[0]) * float(self._shot_rect[2]) / shot[0],

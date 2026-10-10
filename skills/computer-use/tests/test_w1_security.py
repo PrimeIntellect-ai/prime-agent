@@ -1457,6 +1457,22 @@ class RetinaScaleTests(AppTestCase):
         clicks = env.recorder.calls_named("click")
         self.assertEqual(clicks[0]["point"], (210.0, 110.0), "a 1x capture places clicks against the live frame too")
 
+    async def test_a_window_that_grew_after_the_capture_rejects_old_image_points(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()  # observed 400x300
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 800, "height": 600}  # 2x capture
+        await app.get_screenshot(attach=False)  # shot rect: (100, 50, 400, 300)
+        # the window grew after the capture; the stale image's points stay in
+        # bounds but the UI reflowed, so clicking them targets the wrong
+        # control
+        env.live_window_bounds = (100.0, 50.0, 800.0, 600.0)
+        with self.assertRaises(errors.ComputerUseError) as caught:
+            await app.click((400.0, 300.0))  # the old screenshot's center
+        self.assertEqual(caught.exception.code, "INVALID_ARGUMENT")
+        self.assertIn("take a fresh screenshot", caught.exception.message)
+        self.assertEqual(env.recorder.calls_named("click"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
