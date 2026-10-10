@@ -223,7 +223,7 @@ fn incomplete_utf8_suffix_heals_but_terminated_malformed_eof_is_preserved() {
 }
 
 #[test]
-fn recovery_evicts_same_generation_cache_and_preserves_window_derived_state() {
+fn recovery_preserves_same_generation_cached_content_and_window_derived_state() {
     use pa_core::session::window::WindowedSessionStore;
     let (_dir, mut full, _old_target) = fixture();
     full.append_entry("custom", json!({"customType":pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,"data":{"shown":true}}));
@@ -266,16 +266,56 @@ fn recovery_evicts_same_generation_cache_and_preserves_window_derived_state() {
         (metadata.len(), metadata.modified().unwrap()),
         (after.len(), after.modified().unwrap())
     );
-    assert!(
-        !WindowedSessionStore::open(&store.path)
-            .unwrap()
-            .unwrap()
-            .read_stats()
-            .cache_hit
-    );
+    // The unchanged-generation disk sidecar remains valid after live eviction.
+    // Judge its actual content rather than requiring a cold reconstruction.
+    let cached = WindowedSessionStore::open(&store.path).unwrap().unwrap();
+    assert_eq!(cached.leaf_id(), store.leaf_id().unwrap());
+    assert_eq!(cached.entries().iter().filter(|entry| matches!(entry,
+        pa_types::session::FileEntry::ChildUsageAttributed { base, .. } if base.id.as_deref() == Some("stable")
+    )).count(), 1);
     assert!(store.window.is_none());
     assert!(store.anthropic_warning_shown());
     let reopened = SessionFile::open(&store.path).unwrap();
+    let cached_context = cached.context();
+    let full_context = pa_core::session::build_session_context(
+        &reopened.branch_file_entries(),
+        reopened.leaf_id(),
+    );
+    assert_eq!(
+        (
+            &cached_context.messages,
+            &cached_context.thinking_level,
+            &cached_context.service_tier,
+            &cached_context.model
+        ),
+        (
+            &full_context.messages,
+            &full_context.thinking_level,
+            &full_context.service_tier,
+            &full_context.model
+        )
+    );
+    let cached_assistant_usage = cached_context
+        .messages
+        .iter()
+        .rev()
+        .find_map(|message| {
+            if let pa_types::session::AgentMessage::Assistant(message) = message {
+                Some(message.usage)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(cached_assistant_usage).unwrap(),
+        reopened.entry(&target).unwrap().fields["message"]["usage"]
+    );
+    assert_eq!(cached_assistant_usage.input, 10);
+    assert_eq!(
+        cached.anthropic_warning_shown(),
+        reopened.anthropic_warning_shown()
+    );
     assert_eq!(
         store.scan_message_scalars(),
         reopened.scan_message_scalars()
