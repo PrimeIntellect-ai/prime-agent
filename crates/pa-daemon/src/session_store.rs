@@ -129,6 +129,7 @@ pub struct SessionFile {
     pub(crate) by_id: HashMap<String, usize>,
     pub(crate) leaf_id: Option<String>,
     pub(crate) window: Option<SessionWindow>,
+    pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
     /// Rows the full reader skipped as unparsable (the TS loader's
     /// lenient skip): zero on a healthy file. A reopen that found damage

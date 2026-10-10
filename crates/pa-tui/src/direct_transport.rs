@@ -265,7 +265,7 @@ pub(crate) async fn connect_direct(
                 };
                 if header_type == "response" {
                     if let Ok(response) =
-                        serde_json::from_value::<pa_types::daemon::DaemonResponse>(payload.clone())
+                        serde_json::from_value::<pa_types::daemon::DaemonResponse>(payload)
                     {
                         let request_id = frame
                             .header

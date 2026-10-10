@@ -91,6 +91,7 @@ async fn worker_over(dir: &std::path::Path, path: &std::path::Path) -> std::sync
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker

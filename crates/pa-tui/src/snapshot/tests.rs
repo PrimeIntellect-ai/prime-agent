@@ -1208,6 +1208,24 @@ fn retry_outcome_row_collapses_the_superseded_attempts() {
 }
 
 #[test]
+fn model_prompt_error_row_is_a_warning_status_line() {
+    let message = json!({
+        "role": "custom",
+        "customType": "model_prompt_error",
+        "content": "[model-prompt-error]\n\nPer-model system prompt additions were not applied:\n- /x/model-prompts.toml: bad TOML",
+        "display": true,
+    });
+    let entries = transcript_to_entries(&[message]);
+    assert!(
+        matches!(
+            entries.as_slice(),
+            [ChatEntry::Status { text, kind: StatusKind::Warning }] if text.contains("[model-prompt-error]")
+        ),
+        "entries: {entries:?}"
+    );
+}
+
+#[test]
 fn a_lone_failed_attempt_without_an_outcome_row_stays() {
     let user = json!({"role": "user", "content": "hi"});
     let failed = json!({

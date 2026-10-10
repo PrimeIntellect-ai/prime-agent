@@ -49,10 +49,10 @@ curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 On Windows, install from PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/install.ps1 | iex
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 ```
 
-Windows builds ship on the beta channel for now; when the stable channel has no Windows build, the installer falls back to the beta channel and says so. Only this copy of `install.ps1` comes from GitHub — the version pointers, platform tarballs, and checksums it downloads come from the release channel's own base.
+The Windows installer downloads the latest stable Windows x64 build and verifies its checksum before installation.
 
 ## Why Prime Agent
 
@@ -97,6 +97,11 @@ prime-agent doctor [--fix]           # Inspect or repair background services
 prime-agent update [--force]         # Update Prime Agent
 prime-agent shutdown [--force]       # Stop every agent, worker, and background service
 ```
+
+The experimental Decision API (the `decisionApi.systemOneModel` setting)
+drives a decision model for real-time control tasks. See
+[Decision API setup and smoke checks](docs/decision-api.md) for the setting
+and verification in the persistent Python REPL.
 
 ## Built for Long-Running Work
 Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.

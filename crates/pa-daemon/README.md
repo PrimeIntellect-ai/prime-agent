@@ -242,7 +242,12 @@ boot), re-arms scheduled work (a boot scan of `scheduled-jobs.json`;
 due active jobs of sessionless files are woken once, never archived), and
 reports the pass over `update_restore_status` while `hello.update_resume`
 carries the settle state; client attaches to a not-yet-restored roster row
-queue behind the pass instead of failing. The heartbeat-catalog change
+queue behind the pass instead of failing.
+For historical TypeScript update manifests, the restore pass recreates parents
+before their children, remaps active parent IDs, and restores pending context
+and action queues explicitly because those manifests predate Rust's journals.
+Attaches remain gated until that replay completes.
+The heartbeat-catalog change
 broadcast owns its surface here too (the worker's cron-store
 `on_heartbeat_change` listener emits a `heartbeats_changed` outbound frame
 — TS daemon-mode's `broadcastGlobal` — and the supervisor re-broadcasts it
@@ -252,9 +257,31 @@ attached UIs daemon-wide).
 ## Non-goals
 No agent behavior inside workers beyond hosting a pa-core engine; no UI.
 
+The Decision API child (`rlm.spawn(kind="decision")`) runs the decision
+engine: one spawned session whose every message is one decision request —
+served by the `decisionApi.systemOneModel` model through the ordinary
+provider transports (the shared pa-core decision path), with the parent's
+tagged goal messages routed into its goal input (the newest seq wins) and
+each answer returned to the parent as a tagged `decision_api.decision`
+message the loop awaits. The spawn resolves the child's model through the
+registry and refuses with the setting's actionable message while it is
+unset or unresolvable.
+
 ## Public API
 Supervisor entrypoint, worker entrypoint, `mcp_login::{WorkerMcpLoginUi, wire_worker_mcp_login}` (the worker's browser+callback login behind `mcp.begin_login`; wired by the agent engine before sessions register host handlers), client connection API for pa-tui/pa-cli, `acp::daemon::{run_daemon_attached_acp_mode, DaemonAcpOptions}` (pa-cli dispatches `--mode acp` through it), `agent_messaging::LinkAgentMessageController` + `rlm_children::{SupervisorChildSessions, ParentIdentity, RlmChildIdentity}` (e2e verifiers construct the worker-side family controller and the children registry; the engine wires the same types), `agent_engine::AgentSessionEngine::dispose_kernel` (the session-end kernel teardown the worker invokes at kill/shutdown/orphan exit — the engine outlives the session, so the pa-core engine-drop teardown cannot run there), the worker's `get_mcp_connections` command (`mcp_connections.rs`: the `/mcp` view's roster from the session's MCP manager overlaid with the session kernel's per-server tool listing, plus the api-key credential rows the same response serves — Rust-native session-plane extension; the TS daemon has no counterpart). Supervision internals `pub(crate)`.
 
 
 ## Depends on
 pa-types, pa-core (one-way).
+
+Attach snapshots derive the Decision API state from the selected session-store
+branch, including the window's pre-compaction metadata. This private store getter
+runs before the lazy session engine builds and never resolves auth, models, or the
+kernel. Branch replacement changes the next snapshot immediately; explicit off
+and malformed status rows clear earlier state.
+
+The composition root initializes the packaged product version with
+`protocol::configure_app_version` before entering daemon or worker mode.
+`protocol::app_version` supplies that identity to both hello frames and update
+checkpoints; library embedders fall back to the compiled version. Release
+manifest restamping therefore remains consistent with CLI `--version`.
