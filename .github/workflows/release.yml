@@ -1009,14 +1009,20 @@ jobs:
             a="${1#v}"; b="${2#v}"
             [ "$a" = "$b" ] && return 1
             a_n="${a%%-*}"; b_n="${b%%-*}"
-            awk -v an="$a_n" -v bn="$b_n" 'BEGIN {
-              split(an, A, "."); split(bn, B, ".")
-              for (i = 1; i <= 3; i++) { if (A[i] + 0 > B[i] + 0) exit 0; if (A[i] + 0 < B[i] + 0) exit 1 }
-              exit 1
-            }' && return 0
-            # same numeric base: the prerelease ordering (beta.N)
+            if [ "$a_n" != "$b_n" ]; then
+              # A lower numeric version must not fall through to beta.N ordering.
+              awk -v an="$a_n" -v bn="$b_n" 'BEGIN {
+                split(an, A, "."); split(bn, B, ".")
+                for (i = 1; i <= 3; i++) { if (A[i] + 0 > B[i] + 0) exit 0; if (A[i] + 0 < B[i] + 0) exit 1 }
+                exit 1
+              }'
+              return $?
+            fi
+            # Same numeric base: stable sorts after prereleases, then compare beta.N.
             a_pre="${a#*-}"; b_pre="${b#*-}"
-            [ "$a_pre" != "$a" ] && [ "$(printf '%s\n' "$a_pre" "$b_pre" | sort -V | tail -1)" = "$a_pre" ] && [ "$a_pre" != "$b_pre" ]
+            [ "$a_pre" = "$a" ] && return 0
+            [ "$b_pre" = "$b" ] && return 1
+            [ "$(printf '%s\n' "$a_pre" "$b_pre" | sort -V | tail -1)" = "$a_pre" ]
           }
           publish_pointer_pair() {
             # $1 = the manifest name (latest.json | beta.json), $2 = the
