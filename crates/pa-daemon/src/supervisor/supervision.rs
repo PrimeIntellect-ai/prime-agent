@@ -420,6 +420,9 @@ impl Supervisor {
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env) = {
             let descriptor = resident.descriptor.lock().await;
+            if descriptor.worker_instance_id.as_deref() != Some(worker_instance_id.as_str()) {
+                return Err(anyhow!("Worker spawn was superseded"));
+            }
             (
                 PathBuf::from(&descriptor.socket_path),
                 descriptor
