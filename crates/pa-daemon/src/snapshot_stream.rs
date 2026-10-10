@@ -147,20 +147,23 @@ pub(crate) fn stream_attach(
         .get_mut("snapshot")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("Session worker did not provide a snapshot"))?;
-    let message_count = snapshot
-        .get("summary")
-        .and_then(|summary| summary.get("messageCount"))
-        .and_then(Value::as_u64)
-        .ok_or_else(|| anyhow!("Session snapshot is missing its message count"))?;
+    // The transcript leaves the response; the snapshot header keeps an
+    // empty `messages` array so the streamed shape matches the full one.
+    let messages = snapshot.remove("messages").unwrap_or(Value::Null);
+    snapshot.insert("messages".to_string(), Value::Array(Vec::new()));
+    // The stream's count is the transcript it carries: a windowed attach
+    // streams the tail alone, while `summary.messageCount` stays the
+    // session's total (the backfill cursor is `historyBefore`).
+    let message_count = match &messages {
+        Value::Array(messages) => messages.len() as u64,
+        // A missing or malformed transcript fails the transfer below.
+        _ => 0,
+    };
     let stream = SnapshotStream {
         id: snapshot_stream_id(active_session_id, &generation, last_event_sequence),
         message_count,
         target_chunk_bytes: SNAPSHOT_TARGET_CHUNK_BYTES as u64,
     };
-    // The transcript leaves the response; the snapshot header keeps an
-    // empty `messages` array so the streamed shape matches the full one.
-    let messages = snapshot.remove("messages").unwrap_or(Value::Null);
-    snapshot.insert("messages".to_string(), Value::Array(Vec::new()));
     // Legacy (non-slim) attach results duplicate the transcript at the top
     // level; the streamed form drops the copy instead of shipping it empty.
     match object.get_mut("messages") {
@@ -489,15 +492,6 @@ mod tests {
             error.to_string(),
             "Session worker did not provide a snapshot"
         );
-        let mut data = attach_result(&[]);
-        data["snapshot"]["summary"]
-            .as_object_mut()
-            .unwrap()
-            .remove("messageCount");
-        assert!(stream_attach(data, "s1", SnapshotPurpose::Attach)
-            .unwrap_err()
-            .to_string()
-            .contains("message count"));
         let mut data = attach_result(&[]);
         data.as_object_mut().unwrap().remove("lastEventCursor");
         data["snapshot"]
