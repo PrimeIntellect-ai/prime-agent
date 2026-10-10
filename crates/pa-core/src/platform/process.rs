@@ -29,6 +29,37 @@ pub fn set_new_process_group(command: &mut Command) {
     command.process_group(0);
 }
 
+/// On Linux the child dies with the process that spawned it: an
+/// interrupted parent must not leave `uv` running with the kernel venv
+/// lock held. The parent here is the forking thread, and a thread cannot
+/// exit while it still waits on the child - so the kernel's own
+/// parent-death signal only fires on the parent's real death. Darwin has
+/// no prctl, so the guard is a Linux-only hardening there.
+#[cfg(target_os = "linux")]
+pub fn set_parent_death_signal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // Captured on the spawning side: if the parent dies between the fork
+    // and the prctl below, the child is already reparented and the death
+    // signal would never fire - the ppid check closes that window.
+    let parent_pid = std::process::id() as libc::pid_t;
+    // SAFETY: the hook runs in the forked child before exec and only
+    // calls prctl(2) and getppid(2), which are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent_pid {
+                // No allocation or format here: the hook runs between
+                // fork and exec and must stay async-signal-safe. ESRCH
+                // is the honest code - the parent no longer exists.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Start the spawned child in a new session with no controlling terminal
 /// (`setsid`): the child cannot open `/dev/tty`, and job-control signals
 /// from the parent's terminal never reach it. A new process group alone
@@ -199,6 +230,16 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
 /// a bare `taskkill` name could resolve a planted CWD executable. True
 /// only when taskkill exited 0, the same proof TS's `result.status === 0`
 /// requires.
+///
+/// The wait on taskkill is bounded: a helper that misses the grace is
+/// killed and given one more grace, and a helper that survives both is
+/// parked on a reaper that owns its handle - the call never blocks on it.
+/// The caller parks the target child on the same contract, so a late kill
+/// can only ever meet its own target's reserved pid.
+/// Windows: `taskkill /F /T /PID <pid>` from the absolute System32 path -
+/// a bare `taskkill` name could resolve a planted CWD executable. True
+/// only when taskkill exited 0, the same proof TS's `result.status === 0`
+/// requires.
 #[cfg(windows)]
 #[must_use]
 pub fn kill_process_group_or_pid(pid: i32) -> bool {
@@ -219,6 +260,67 @@ pub fn kill_process_group_or_pid(pid: i32) -> bool {
     set_no_window(&mut command);
     command.status().is_ok_and(|status| status.success())
 }
+
+/// The bootstrap arm: like [`kill_process_group_or_pid`], and on the
+/// parked-helper path it also hands back the helper's done signal. The
+/// caller's target reaper holds the target's handle until that signal
+/// dies, so a helper that survives its own kill can only ever meet its
+/// own target's reserved pid, never a recycled one.
+#[cfg(windows)]
+#[must_use]
+pub fn kill_process_group_or_pid_pinned(pid: i32) -> (bool, Option<std::sync::mpsc::Receiver<()>>) {
+    if pid <= 0 {
+        return (false, None);
+    }
+    let system_root =
+        std::env::var_os("SystemRoot").unwrap_or_else(|| std::ffi::OsString::from("C:\\Windows"));
+    let taskkill = std::path::Path::new(&system_root)
+        .join("System32")
+        .join("taskkill.exe");
+    let mut command = Command::new(&taskkill);
+    command
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    set_no_window(&mut command);
+    let Ok(mut helper) = command.spawn() else {
+        return (false, None);
+    };
+    let deadline = std::time::Instant::now() + TASKKILL_GRACE;
+    loop {
+        match helper.try_wait() {
+            Ok(Some(status)) => return (status.success(), None),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                // The helper gets one kill and one more grace to take it;
+                // a helper that survives both is parked on a reaper that
+                // owns its handle and its done signal - this call never
+                // waits on it.
+                if helper.kill().is_ok() {
+                    let reap_deadline = std::time::Instant::now() + TASKKILL_GRACE;
+                    while std::time::Instant::now() < reap_deadline {
+                        match helper.try_wait() {
+                            Ok(Some(_)) => return (false, None),
+                            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        }
+                    }
+                }
+                let (done, released) = std::sync::mpsc::channel::<()>();
+                std::thread::spawn(move || {
+                    let _ = helper.wait();
+                    drop(done);
+                });
+                return (false, Some(released));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => return (false, None),
+        }
+    }
+}
+
+/// The bound the Windows helper gives its own taskkill child.
+#[cfg(windows)]
+const TASKKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(not(any(unix, windows)))]
 pub fn kill_process_group_or_pid(_pid: i32) -> bool {

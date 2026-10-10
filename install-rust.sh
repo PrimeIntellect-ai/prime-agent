@@ -663,6 +663,45 @@ tilde() {
 ts_takeover_from=""
 ts_takeover_undo=""
 migrated_note=""
+# The pre-warm's expiry path freezes the tree it kills: an exit inside that
+# window (an interrupt, or a kill that does not take) must not leave the
+# processes frozen with the kernel venv lock held. No-op whenever no walk
+# collected a tree. The tree is INITIALIZED to empty here - before any trap
+# can fire - so a caller-exported variable of the same name is never the
+# kill's target (the cleanup trap's own rule for `stage` and `dl`).
+prewarm_tree=""
+prewarm_tree_release() {
+  # KILLED FROZEN, never thawed first: a CONT would hand the launcher a
+  # respawn window, and SIGKILL reaches stopped processes. The walk
+  # covers what the registered pids spawned since registration, so an
+  # interrupt in the pre-warm's own window takes the whole provisioning
+  # down, not only the launcher.
+  if command -v pgrep >/dev/null 2>&1; then
+    prewarm_release_seen=""
+    prewarm_release_frontier="$prewarm_tree"
+    while [ -n "$prewarm_release_frontier" ]; do
+      prewarm_release_next=""
+      for prewarm_node in $prewarm_release_frontier; do
+        case " $prewarm_release_seen " in
+          *" $prewarm_node "*) continue ;;
+        esac
+        prewarm_release_seen="$prewarm_release_seen $prewarm_node"
+        kill -STOP "-$prewarm_node" 2>/dev/null || kill -STOP "$prewarm_node" 2>/dev/null || true
+        for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
+          prewarm_release_next="$prewarm_release_next $prewarm_child"
+        done
+      done
+      prewarm_release_frontier="$prewarm_release_next"
+    done
+    for prewarm_node in $prewarm_release_seen; do
+      kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+    done
+  else
+    for prewarm_node in ${prewarm_tree:-}; do
+      kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+    done
+  fi
+}
 # The renderer always restores the cursor and line wrap when it stops; the
 # trap stops it on every exit path (an INT/TERM exits through it too).
 # The pre-flights' exits sit far from the run's own success-path sweep
@@ -672,9 +711,9 @@ if [ "${PRIME_AGENT_ROLLBACK_CHECK:-}" = "1" ] || [ "${PRIME_AGENT_ARCHIVE_CHECK
   # The stage rides too (an abort during the archive check's extraction
   # must leave no staged tree under the prefix); `stage` is initialized
   # before the traps, so the sweep targets only what THIS script assigns.
-  trap 'ui_stop; rm -rf "${dl:-}" "${stage:-}"' EXIT
+  trap 'ui_stop; prewarm_tree_release; rm -rf "${dl:-}" "${stage:-}"' EXIT
 else
-  trap 'ui_stop; rm -rf "$dl"' EXIT
+  trap 'ui_stop; prewarm_tree_release; rm -rf "$dl"' EXIT
 fi
 stage=""
 publish_parked=""
@@ -715,6 +754,7 @@ ui_interrupted() {
   # environment is never the removal's target.
   if [ -n "$ui_step" ]; then step_fail "$ui_step" "interrupted"; fi
   ui_stop
+  prewarm_tree_release
   publish_window_restore
   rm -rf "$dl"
   if [ -z "${rollback_from:-}" ] && [ -n "${stage:-}" ]; then
@@ -3096,16 +3136,204 @@ if uv_on_path \
    || { [ -n "$uv_bin_dir" ] && [ -x "${uv_bin_dir}/${uv_name}" ]; } \
    || { [ "$uv_under_store" = "no" ] && [ -x "${HOME}/.local/bin/${uv_name}" ]; }; then
   step_start "Preparing the Python kernel"
-  if bootstrap_out="$("$install_probe_launcher" --prime-agent-bootstrap 2>&1)"; then
-    step_ok "Kernel ready"
+  # THE WATCHDOG: never the `timeout` command (on Windows it is
+  # timeout.exe, which waits for a keypress; macOS ships none) - the
+  # --version probe's own runner/marker/bound shape instead. The pre-warm
+  # is best-effort: never fatal, and on expiry the verdict only claims a
+  # stop that was observed.
+  prewarm_bound_s="${prewarm_bound_s:-300}"
+  case "$prewarm_bound_s" in
+    ''|*[!0-9]*) prewarm_bound_s=300 ;;
+  esac
+  [ "$prewarm_bound_s" -gt 0 ] || prewarm_bound_s=300
+  # The scratch is best-effort exactly like the pre-warm it serves: an
+  # unwritable TMPDIR must SKIP the step, never abort the install under
+  # `set -e` - at this point the payload is already published, so the
+  # verify and the summary below must still run.
+  if prewarm_scratch="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-prewarm.XXXXXX" 2>/dev/null)"; then
+  prewarm_out="$prewarm_scratch/out"
+  prewarm_done="$prewarm_scratch/done"
+  prewarm_pid_file="$prewarm_scratch/pid"
+  prewarm_status="$prewarm_scratch/status"
+  # The runner holds nothing of the installer: a runner stranded on an
+  # unkillable launcher must not hold the console, the detail fd 3, or the
+  # captured pipe a wrapper waits on past this script's exit.
+  (
+    "$install_probe_launcher" --prime-agent-bootstrap >"$prewarm_out" 2>&1 &
+    printf '%s\n' "$!" >"$prewarm_pid_file"
+    # The status rides a file (set -e would take a nonzero wait as an
+    # abort): the done marker, not the pid, is the loop's signal.
+    prewarm_status_val=0
+    wait "$!" || prewarm_status_val=$?
+    printf '%s\n' "$prewarm_status_val" >"$prewarm_status"
+    printf 'done\n' >"$prewarm_done"
+  ) </dev/null >/dev/null 2>&1 3>&- &
+  prewarm_runner=$!
+  # The launcher joins the release tree as soon as its pid is readable:
+  # an interrupt during the pre-warm must take the provisioning down,
+  # not leave it holding the bootstrap lock.
+  prewarm_launch_reads=0
+  while [ -z "${prewarm_tree:-}" ] && [ "$prewarm_launch_reads" -lt 40 ]; do
+    prewarm_tree="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
+    [ -n "$prewarm_tree" ] && break
+    prewarm_launch_reads=$((prewarm_launch_reads + 1))
+    # The sleep is best-effort on machines whose sleep rejects fractions:
+    # the poll is a bounded spin either way, and the watch loop below
+    # re-registers the pid if it lands later than the spin.
+    sleep 0.05 2>/dev/null || true
+  done
+  prewarm_waited=0
+  prewarm_timed_out=""
+  prewarm_pgrep="no"
+  command -v pgrep >/dev/null 2>&1 && prewarm_pgrep="yes"
+  while [ ! -f "$prewarm_done" ]; do
+    [ -z "${prewarm_tree:-}" ] && prewarm_tree="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
+    prewarm_waited=$((prewarm_waited + 1))
+    if [ "$prewarm_waited" -gt "$prewarm_bound_s" ]; then
+      prewarm_timed_out="yes"
+      prewarm_pid="$(cat "$prewarm_pid_file" 2>/dev/null || true)"
+      if [ -n "$prewarm_pid" ]; then
+        # The launcher joins the release tree BEFORE its freeze: a signal
+        # between the two must find the trap able to kill it.
+        prewarm_tree="$prewarm_pid"
+        # The launcher is FROZEN before anything else: still running, it
+        # can start another provisioning between the walk and the kill,
+        # and that one would escape the tree, the kill list, and the stop
+        # verdict. It thaws into the TERM below.
+        kill -STOP "-$prewarm_pid" 2>/dev/null || kill -STOP "$prewarm_pid" 2>/dev/null || true
+        # THE DESCENDANT WALK: collect the launcher's whole tree by parent
+        # links BEFORE killing anything (after the launcher dies its
+        # descendants reparent and no sweep can find them). A descendant
+        # that leads its own process group (the product's uv) is
+        # group-killed with its own subtree.
+        prewarm_seen=""
+        prewarm_frontier="$prewarm_pid"
+        if [ "$prewarm_pgrep" = "yes" ]; then
+          while [ -n "$prewarm_frontier" ]; do
+            prewarm_next=""
+            for prewarm_node in $prewarm_frontier; do
+              case " $prewarm_seen " in
+                *" $prewarm_node "*) continue ;;
+              esac
+              prewarm_seen="$prewarm_seen $prewarm_node"
+              for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
+                prewarm_next="$prewarm_next $prewarm_child"
+              done
+            done
+            prewarm_frontier="$prewarm_next"
+          done
+          prewarm_tree="$prewarm_pid$prewarm_seen"
+        fi
+        for prewarm_node in $prewarm_tree; do
+          kill -TERM "-$prewarm_node" 2>/dev/null || kill -TERM "$prewarm_node" 2>/dev/null || true
+        done
+        # The frozen launcher thaws straight into the pending TERM: the
+        # graceful stop the TERM buys still happens, without the respawn
+        # window a running launcher would get.
+        kill -CONT "-$prewarm_pid" 2>/dev/null || kill -CONT "$prewarm_pid" 2>/dev/null || true
+        sleep 1
+        # THE RE-WALK: a TERM-grace survivor or a late child of the
+        # launcher must not escape the KILL list. Anything that died is
+        # simply absent from it.
+        if [ "$prewarm_pgrep" = "yes" ]; then
+          prewarm_refrontier="$prewarm_tree"
+          prewarm_reseen=""
+          while [ -n "$prewarm_refrontier" ]; do
+            prewarm_renext=""
+            for prewarm_node in $prewarm_refrontier; do
+              case " $prewarm_reseen " in
+                *" $prewarm_node "*) continue ;;
+              esac
+              prewarm_reseen="$prewarm_reseen $prewarm_node"
+              # The node joins the release tree with its freeze: a signal
+              # between the two must find the trap able to kill it.
+              case " $prewarm_tree " in
+                *" $prewarm_node "*) ;;
+                *) prewarm_tree="$prewarm_tree $prewarm_node" ;;
+              esac
+              # Freeze BEFORE sampling: a node still running can spawn
+              # between its sampling and the KILL pass and escape the
+              # tree and the verdict.
+              kill -STOP "-$prewarm_node" 2>/dev/null || kill -STOP "$prewarm_node" 2>/dev/null || true
+              for prewarm_child in $(pgrep -P "$prewarm_node" 2>/dev/null); do
+                prewarm_renext="$prewarm_renext $prewarm_child"
+              done
+            done
+            prewarm_refrontier="$prewarm_renext"
+          done
+        fi
+        for prewarm_node in $prewarm_tree; do
+          kill -KILL "-$prewarm_node" 2>/dev/null || kill -KILL "$prewarm_node" 2>/dev/null || true
+        done
+      else
+        kill -9 "$prewarm_runner" 2>/dev/null || true
+      fi
+      break
+    fi
+    sleep 1
+  done
+  # A runner exit is only provable after a normal pre-warm: after expiry the
+  # runner can itself be stuck on an unkillable launcher, so waiting for it
+  # would trade the watchdog for a new hang.
+  if [ -z "$prewarm_timed_out" ]; then
+    wait "$prewarm_runner" 2>/dev/null || true
+  fi
+  if [ -n "$prewarm_timed_out" ]; then
+    # Only an OBSERVED whole-tree stop counts: without the walk the
+    # tree's state is unknown, and a survivor anywhere means provisioning
+    # may still be running.
+    prewarm_tree_stopped="yes"
+    if [ "$prewarm_pgrep" = "yes" ] && [ -n "${prewarm_tree:-}" ]; then
+      for prewarm_node in $prewarm_tree; do
+        # The ps state is sampled FIRST: a node that dies and reaps
+        # between two probes is stopped, and a zombie - a dead process
+        # whose parent has not reaped it yet, the runner owning the
+        # launcher's reap and never waited for on this path - is
+        # stopped too. ps showing a live state, or ps seeing nothing
+        # while kill -0 still can, is the only not-stopped.
+        prewarm_state="$(ps -o stat= -p "$prewarm_node" 2>/dev/null)" || true
+        case "$prewarm_state" in
+          '') if kill -0 "$prewarm_node" 2>/dev/null; then prewarm_tree_stopped="no"; fi ;;
+          Z*) ;;
+          *) prewarm_tree_stopped="no" ;;
+        esac
+      done
+    else
+      prewarm_tree_stopped="no"
+    fi
+    if [ "$prewarm_tree_stopped" = "yes" ]; then
+      step_fail "Preparing the Python kernel" "stopped at the ${prewarm_bound_s}s bound"
+      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and was stopped;"
+      note "  the first session bootstraps the kernel itself and needs the network once."
+    else
+      step_fail "Preparing the Python kernel" "could not be stopped at the ${prewarm_bound_s}s bound"
+      note "! The kernel pre-warm did not finish within ${prewarm_bound_s}s and could not be"
+      note "  stopped; provisioning may still be running - the first session bootstraps the"
+      note "  kernel itself and needs the network once."
+    fi
+  elif [ "$(cat "$prewarm_status" 2>/dev/null || true)" = "0" ]; then    step_ok "Kernel ready"
     say "kernel pre-warmed: the first session's Python kernel is ready"
-    say "$bootstrap_out"
+    say "$(cat "$prewarm_out" 2>/dev/null || true)"
   else
     step_fail "Preparing the Python kernel" "the first session retries it"
     note "! The kernel pre-warm failed; the install stands and the first session"
     note "  retries it online:"
-    note "$bootstrap_out"
+    note "$(cat "$prewarm_out" 2>/dev/null || true)"
   fi
+  # The sweep is best-effort too: a scratch a surviving pre-warm
+  # descendant still holds busy warns, never aborts a live install.
+  if ! rm -rf "$prewarm_scratch" 2>/dev/null; then
+    note "warning: could not remove the kernel pre-warm scratch ${prewarm_scratch}; remove it by hand"
+  fi
+  else
+    step_fail "Preparing the Python kernel" "skipped (no scratch directory)"
+    note "! The kernel pre-warm was skipped (its scratch directory could not be created);"
+    note "  the first session bootstraps the kernel itself and needs the network once."
+  fi
+  # The gate is over: its pids may be long gone when the exit trap fires,
+  # and a release that walks stale numbers could signal whatever recycled
+  # them. The trap's release exists for the gate's own freeze windows.
+  prewarm_tree=""
 else
   note "! The kernel pre-warm was skipped (no uv); the first session sets the"
   note "  kernel up itself and needs the network once."

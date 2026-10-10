@@ -767,11 +767,53 @@ if (-not $uvOnPath -and $uvAtTarget -and -not (Test-PathEntry $env:PATH $uvInsta
 }
 if ($uvKnown) {
     Write-Host 'kernel pre-warm: provisioning the Python kernel runtime'
-    & $launcher --prime-agent-bootstrap
-    if ($LASTEXITCODE -ne 0) {
-        Step-Fail 'preparing the Python kernel' 'the first session retries it online'
+    # THE WATCHDOG: the pre-warm runs as a WATCHED child - the payload
+    # exe directly (watching the .cmd shim would mean cmd.exe and its
+    # quoting). Best-effort: never fatal, and only an observed stop is
+    # called a stop.
+    $prewarmBoundSec = 300
+    $prewarmExe = Join-Path $share 'prime-agent.exe'
+    $prewarm = $null
+    try {
+        $prewarm = Start-Process -FilePath $prewarmExe -ArgumentList '--prime-agent-bootstrap' -NoNewWindow -PassThru
+    } catch {
+        $prewarm = $null
+    }
+    if ($null -eq $prewarm) {
+        Step-Fail 'preparing the Python kernel' 'the launcher did not start; the first session retries it online'
+    } elseif ($prewarm.WaitForExit($prewarmBoundSec * 1000)) {
+        if ($prewarm.ExitCode -ne 0) {
+            Step-Fail 'preparing the Python kernel' 'the first session retries it online'
+        } else {
+            Step-Ok 'kernel ready'
+        }
     } else {
-        Step-Ok 'kernel ready'
+        # The tree kill runs from the absolute System32 path (a bare name
+        # must never resolve a planted exe). Only the OBSERVED exit counts
+        # as stopped: a taskkill exit code is a request's receipt, not a
+        # dead tree. The taskkill itself is BOUNDED like the Rust helper's
+        # own: a stuck one is killed after the grace instead of blocking
+        # the install the watchdog exists to end.
+        try {
+            $taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\taskkill.exe') -ArgumentList '/PID', $prewarm.Id, '/T', '/F' -WindowStyle Hidden -PassThru
+            if (-not $taskkill.WaitForExit(5000)) {
+                $null = $taskkill.Kill()
+                $null = $taskkill.WaitForExit(5000)
+            }
+        } catch {
+            # The helper's death is not the install's: a helper that
+            # exited between the bound and the kill throws here, and
+            # the launcher's own observed exit below is the verdict.
+        }
+        $null = $prewarm.WaitForExit(15000)
+        $prewarmStopped = $prewarm.HasExited
+        $prewarmDetail = "the watchdog stopped it at ${prewarmBoundSec}s"
+        if (-not $prewarmStopped) { $prewarmDetail = 'the watchdog could not stop it (it may still be running)' }
+        Step-Fail 'preparing the Python kernel' $prewarmDetail
+        Write-Host "note: the kernel pre-warm did not finish within ${prewarmBoundSec}s; the first session bootstraps the kernel itself and needs the network once"
+        if (-not $prewarmStopped) {
+            Write-Host 'note: the launcher tree could not be stopped; it finishes on its own or ends with this console - the first session bootstraps the kernel itself and needs the network once'
+        }
     }
 } else {
     Write-Host 'note: uv was not found; the first session bootstraps the kernel itself and needs the network once'
