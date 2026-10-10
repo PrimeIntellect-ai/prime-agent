@@ -1,11 +1,7 @@
-//! The `/effort` inline picker: the session's thinking levels rendered
-//! through the inline-picker component. Enter applies the picked level
-//! through the caller; the picker itself owns only list state.
+//! The `/effort` command dispatch: the session's thinking levels and their
+//! descriptions, opened in the shared [`ChoicePicker`] or applied directly.
 
-use crate::config_selector::{ConfigSelector, SelectorAction, SelectorKind, SelectorRow};
-use crate::keybindings::KeybindingsManager;
-use crate::theme::Theme;
-use crate::Line;
+use crate::choice_picker::ChoicePicker;
 
 /// The reasoning-level descriptions the TS selector lists under each level.
 #[must_use]
@@ -22,22 +18,11 @@ pub fn level_description(level: &str) -> &'static str {
     }
 }
 
-/// One key press while the picker is open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EffortPickerAction {
-    /// Enter or Space on a level: the caller applies it.
-    Apply { level: String },
-    /// Esc or Ctrl+C: close without applying.
-    Cancel,
-    /// Navigation or filter editing only.
-    None,
-}
-
 /// The outcome of dispatching `/effort [level]`.
 #[derive(Debug)]
 pub(crate) enum EffortCommandOutcome {
     /// Open the picker over the session's levels.
-    Open(EffortPicker),
+    Open(ChoicePicker),
     /// The model cannot think: the TS status note.
     Unsupported,
     /// The requested level is not one of the model's: the TS error.
@@ -62,7 +47,7 @@ pub(crate) fn effort_command(
     }
     let requested = arg.trim().to_lowercase();
     if requested.is_empty() {
-        return EffortCommandOutcome::Open(EffortPicker::new(levels, current));
+        return EffortCommandOutcome::Open(ChoicePicker::effort(levels, current));
     }
     if !levels.iter().any(|level| level == &requested) {
         return EffortCommandOutcome::Unknown {
@@ -73,104 +58,9 @@ pub(crate) fn effort_command(
     EffortCommandOutcome::Apply { level: requested }
 }
 
-/// One picker over the session's thinking levels; the selector owns
-/// filtering, navigation, and rendering.
-#[derive(Debug)]
-pub struct EffortPicker {
-    selector: ConfigSelector,
-    levels: Vec<String>,
-}
-
-impl EffortPicker {
-    /// Build the picker: one item row per level (label = level, description
-    /// as the secondary filter field), the current level checked.
-    #[must_use]
-    pub fn new(levels: &[String], current: Option<&str>) -> Self {
-        let rows = levels
-            .iter()
-            .map(|level| SelectorRow::Item {
-                key: level.clone(),
-                label: level.clone(),
-                checked: current == Some(level.as_str()),
-                type_label: level_description(level).to_string(),
-                path: String::new(),
-            })
-            .collect();
-        EffortPicker {
-            selector: ConfigSelector::with_kind(rows, SelectorKind::Effort),
-            levels: levels.to_vec(),
-        }
-    }
-
-    /// One bracketed paste into the search (the config selector's own
-    /// paste path).
-    pub fn paste(&mut self, text: &str) {
-        self.selector.paste(text);
-    }
-
-    /// The session's levels the picker was built over.
-    #[must_use]
-    pub fn levels(&self) -> &[String] {
-        &self.levels
-    }
-
-    /// The checked state of one level's row.
-    #[must_use]
-    pub fn checked(&self, level: &str) -> Option<bool> {
-        self.selector.checked(level)
-    }
-
-    /// One key id. Cancel keys close without applying; Enter/Space apply
-    /// the level at the selection (single-select).
-    pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> EffortPickerAction {
-        if key == "ctrl+c" {
-            return EffortPickerAction::Cancel;
-        }
-        match self.selector.handle_key(key, kb) {
-            Some(SelectorAction::Close | SelectorAction::Exit) => EffortPickerAction::Cancel,
-            Some(SelectorAction::Toggle { key, .. }) => {
-                if self.levels.contains(&key) {
-                    EffortPickerAction::Apply { level: key }
-                } else {
-                    EffortPickerAction::None
-                }
-            }
-            None => EffortPickerAction::None,
-        }
-    }
-
-    /// The picker's rendered frame (the shared menu-panel grammar).
-    #[must_use]
-    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
-        self.selector.render(theme, width, kb)
-    }
-
-    /// The level rows the picker's list window renders (the click
-    /// surface's item-row span).
-    #[must_use]
-    pub fn visible_window(&self) -> (usize, usize) {
-        self.selector.visible_window()
-    }
-
-    /// Move the selection to one filtered row (the click grammar's row
-    /// select — the arrow keys' exact movement, no apply).
-    pub fn select_position(&mut self, position: usize) {
-        self.selector.select_position(position);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{ColorMode, Theme};
-
-    fn kb() -> KeybindingsManager {
-        KeybindingsManager::new()
-    }
-
-    fn theme() -> Theme {
-        Theme::builtin("prime", ColorMode::TrueColor)
-    }
 
     fn levels() -> Vec<String> {
         ["off", "low", "medium", "high"]
@@ -215,33 +105,5 @@ mod tests {
             }
             outcome => panic!("expected unknown, got {outcome:?}"),
         }
-    }
-
-    #[test]
-    fn enter_applies_the_selected_level_and_escape_cancels() {
-        let mut picker = EffortPicker::new(&levels(), None);
-        assert_eq!(picker.handle_key("down", &kb()), EffortPickerAction::None);
-        assert_eq!(
-            picker.handle_key("enter", &kb()),
-            EffortPickerAction::Apply {
-                level: "low".to_string()
-            }
-        );
-        assert_eq!(
-            picker.handle_key("escape", &kb()),
-            EffortPickerAction::Cancel
-        );
-    }
-
-    #[test]
-    fn the_frame_lists_levels_and_their_descriptions() {
-        let picker = EffortPicker::new(&levels(), None);
-        let frame = picker.render(&theme(), 60, &kb());
-        let text: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
-        assert!(text.iter().any(|row| row.contains("Thinking Level")));
-        assert!(text.iter().any(|row| row.contains("medium")));
     }
 }
