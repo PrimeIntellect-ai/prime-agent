@@ -116,10 +116,10 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
 }
 
 /// The background summarize flight: the in-flight summarize task, or a
-/// finished summary a boundary already validated as usable — the watermark
-/// band commits a `Ready` join without blocking, while anything less (an
-/// unfinished, failed, or unusable summarize) is discarded and retried in
-/// the background.
+/// finished summary that every band consult re-validates before it goes
+/// due — the watermark band commits a `Ready` join without blocking, while
+/// anything less (an unfinished, failed, or stale summarize) is discarded
+/// and retried in the background.
 pub(crate) enum BackgroundFlight {
     Summarizing(
         tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,

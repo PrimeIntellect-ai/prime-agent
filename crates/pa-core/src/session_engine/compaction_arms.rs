@@ -91,25 +91,31 @@ impl AgentSession {
         match self.context_pressure(run_model).await {
             compaction::ContextPressure::Reserve => true,
             compaction::ContextPressure::Background => {
-                // The band never blocks: a finished summarize resolves here
-                // (the await is immediate) and joins only when usable against
-                // `run_model` — the model that measured the pressure. A
-                // failed or unusable summary is discarded, and the restart
-                // below retries in the background; only the reserve crossing
-                // may block on a fresh summarize.
+                // The band never blocks: every consult resolves a finished
+                // summarize here (the await is immediate) and re-validates
+                // the candidate — fresh or carried over from an earlier
+                // consult — against the current transcript and the armed
+                // run model. A failed or stale join is discarded, and the
+                // restart below retries in the background; only the reserve
+                // crossing may block on a fresh summarize.
                 let due = match self.compaction_flight.try_lock() {
                     Ok(mut slot) => {
-                        *slot = match slot.take() {
+                        let resolved = match slot.take() {
                             Some(BackgroundFlight::Summarizing(handle)) if handle.is_finished() => {
-                                match handle.await.ok().and_then(Result::ok) {
-                                    Some(summary)
-                                        if self
-                                            .joined_summary_usable(&summary, run_model)
-                                            .await =>
-                                    {
-                                        Some(BackgroundFlight::Ready(Box::new(summary)))
-                                    }
-                                    _ => None,
+                                handle
+                                    .await
+                                    .ok()
+                                    .and_then(Result::ok)
+                                    .map(|summary| BackgroundFlight::Ready(Box::new(summary)))
+                            }
+                            other => other,
+                        };
+                        *slot = match resolved {
+                            Some(BackgroundFlight::Ready(summary)) => {
+                                if self.joined_summary_usable(&summary, run_model).await {
+                                    Some(BackgroundFlight::Ready(summary))
+                                } else {
+                                    None
                                 }
                             }
                             other => other,
