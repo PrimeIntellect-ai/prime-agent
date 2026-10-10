@@ -86,6 +86,38 @@ pub(crate) fn store_durable(
     Ok(())
 }
 
+/// Bind the exact launch incarnation durably before creating its process.
+pub(crate) fn begin_spawn(
+    path: &std::path::Path,
+    descriptor: &mut DaemonWorkerDescriptor,
+    instance: &str,
+    sync: crate::descriptor::TempSync,
+) -> Result<()> {
+    let mut candidate = descriptor.clone();
+    reset(&mut candidate);
+    candidate.worker_instance_id = Some(instance.to_string());
+    crate::descriptor::persist_worker_at(path, &candidate, sync)?;
+    *descriptor = candidate;
+    Ok(())
+}
+
+/// A registrant may already have published this launch's native token. Preserve
+/// it while assigning the child PID, and reject a superseding incarnation.
+pub(crate) fn bind_spawned_process(
+    descriptor: &mut DaemonWorkerDescriptor,
+    instance: &str,
+    pid: u32,
+    start_id: Option<String>,
+) -> Result<()> {
+    if descriptor.worker_instance_id.as_deref() != Some(instance) {
+        return Err(anyhow!("Worker spawn was superseded"));
+    }
+    descriptor.pid = u64::from(pid);
+    descriptor.process_start_id = start_id;
+    descriptor.lifecycle = pa_types::daemon::DaemonWorkerLifecycle::Starting;
+    Ok(())
+}
+
 pub(crate) fn recorded(descriptor: &DaemonWorkerDescriptor) -> Option<NativeSignalIdentity> {
     match parse(
         descriptor.rest.get(KEY),
@@ -177,5 +209,67 @@ mod tests {
         let persisted: DaemonWorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(recorded(&persisted).is_none());
+    }
+    #[test]
+    fn launch_incarnation_is_persisted_before_auth_and_keeps_early_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let path = blocked.join("worker.json");
+        let mut descriptor = fixture_descriptor();
+        let original = parse(Some(&report_value()), 42, Some("original")).unwrap();
+        store(&mut descriptor, original.as_ref()).unwrap();
+        let before = descriptor.clone();
+        assert!(begin_spawn(
+            &path,
+            &mut descriptor,
+            "launch",
+            crate::descriptor::TempSync::Synced
+        )
+        .is_err());
+        assert_eq!(
+            descriptor, before,
+            "failed prelaunch write must publish nothing"
+        );
+        std::fs::remove_file(&blocked).unwrap();
+        std::fs::create_dir(&blocked).unwrap();
+        begin_spawn(
+            &path,
+            &mut descriptor,
+            "launch",
+            crate::descriptor::TempSync::Synced,
+        )
+        .unwrap();
+        let persisted: DaemonWorkerDescriptor =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(persisted.worker_instance_id.as_deref(), Some("launch"));
+        assert!(recorded(&persisted).is_none());
+        let env =
+            crate::descriptor::worker_launch_env(dir.path(), "/tmp/s.sock", "launch", &descriptor);
+        assert_eq!(
+            env.get(crate::worker::WORKER_INSTANCE_ID_ENV)
+                .map(String::as_str),
+            descriptor.worker_instance_id.as_deref()
+        );
+        // This same launch registers before spawn's parent assigns its PID.
+        let early = json!({"version":1,"workerInstanceId":"launch","identity":[0,0,0,0,0,43,0,8]});
+        descriptor.pid = 43;
+        let reported = parse(Some(&early), 43, Some("launch")).unwrap();
+        store_durable(&path, &mut descriptor, reported.as_ref()).unwrap();
+        bind_spawned_process(&mut descriptor, "launch", 43, Some("new".to_string())).unwrap();
+        assert_eq!(
+            descriptor.rest.get(KEY),
+            Some(&early),
+            "parent must keep early launch authority"
+        );
+        descriptor.worker_instance_id = Some("replacement".to_string());
+        let replacement = descriptor.clone();
+        assert!(
+            bind_spawned_process(&mut descriptor, "launch", 43, Some("stale".to_string())).is_err()
+        );
+        assert_eq!(
+            descriptor, replacement,
+            "late parent cannot overwrite replacement"
+        );
     }
 }

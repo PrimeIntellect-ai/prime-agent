@@ -404,16 +404,17 @@ impl Supervisor {
         connect_deadline: tokio::time::Instant,
         spawn_record_sync: TempSync,
     ) -> Result<Child> {
-        // No previous incarnation's process token may survive a spawn,
-        // including a spawn that fails before assigning its new PID.
+        let worker_instance_id = uuid::Uuid::new_v4().to_string();
+        // The child's env and descriptor must name the same incarnation before
+        // any auth/registration can arrive. Failed writes publish neither.
         {
             let mut descriptor = resident.descriptor.lock().await;
-            if descriptor.rest.contains_key(crate::native_signal::KEY) {
-                let mut candidate = descriptor.clone();
-                crate::native_signal::reset(&mut candidate);
-                persist_worker_at(&resident.descriptor_path, &candidate, spawn_record_sync)?;
-                descriptor.rest = candidate.rest;
-            }
+            crate::native_signal::begin_spawn(
+                &resident.descriptor_path,
+                &mut descriptor,
+                &worker_instance_id,
+                spawn_record_sync,
+            )?;
         }
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
@@ -431,7 +432,7 @@ impl Supervisor {
                 crate::descriptor::worker_launch_env(
                     &self.options.agent_dir,
                     &self.options.socket_path.to_string_lossy(),
-                    &uuid::Uuid::new_v4().to_string(),
+                    &worker_instance_id,
                     &descriptor,
                 ),
             )
@@ -471,9 +472,17 @@ impl Supervisor {
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
             let child_pid = child.id().unwrap_or(0);
-            descriptor.pid = u64::from(child_pid);
-            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
-            descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
+            if let Err(error) = crate::native_signal::bind_spawned_process(
+                &mut descriptor,
+                &worker_instance_id,
+                child_pid,
+                crate::protocol::process_start_id(child_pid),
+            ) {
+                drop(descriptor);
+                let mut child = child;
+                let _ = child.kill().await;
+                return Err(error);
+            }
             // The spawn record's durability is per launch class
             // (`spawn_record_sync`): a fresh create rides the TS
             // `persistWorker` shape — the atomic rename without the
