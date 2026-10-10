@@ -293,6 +293,18 @@ fn header_or_identity_changes_fail_closed_without_touching_bytes() {
         .is_err());
     let path = manager.get_session_file().unwrap().to_owned();
     let original = std::fs::read(&path).unwrap();
+    let mut repeated_header = rows(&manager);
+    repeated_header.push(repeated_header[0].clone());
+    let repeated_bytes = repeated_header
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    std::fs::write(&path, &repeated_bytes).unwrap();
+    assert!(manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), repeated_bytes.as_bytes());
+    std::fs::write(&path, &original).unwrap();
     let mut values = rows(&manager);
     values[0]["id"] = serde_json::json!("different-session");
     let changed = values

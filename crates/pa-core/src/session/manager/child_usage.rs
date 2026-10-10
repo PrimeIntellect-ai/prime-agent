@@ -386,6 +386,12 @@ pub(super) fn strict_rows(bytes: &[u8]) -> io::Result<(Vec<FileEntry>, Option<u6
                 ));
             }
         } else {
+            if matches!(row, FileEntry::Header { .. }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "repeated session header in recovery transcript",
+                ));
+            }
             let id = row.id().filter(|id| !id.is_empty()).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "durable row missing ID")
             })?;
