@@ -30,7 +30,7 @@ prime-agent is a recursive harness. Each session builds a tree of agents, starti
 
 The following programmatic tools are available in the REPL for subagent management:
 
-- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short
+- `rlm.spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, kind: str | None = None) -> RLMSpawnHandle`: spawns a new subagent one level deeper than the caller; returns immediately; errors when the caller cannot create subagents; if not given, `model` and `thinking` are inherited from the parent; results never arrive as `rlm.spawn()` return values, they arrive only via agent_message; `name` must be unique among the spawned agent's siblings, and be meaningful and descriptive but short; `kind` selects a dedicated child kind — `kind="decision"` spawns the Decision API child (the model comes from the `decisionApi.systemOneModel` setting and the child answers every message with one decision)
 - `rlm.create_session(prompt: str, name: str | None = None, model: str | None = None, thinking: str | None = None, cwd: str | None = None) -> RLMCreateSessionHandle`: creates another depth-0 session; only available to agents at depth 0 backed by a daemon; returns after the session is successfully created and the first prompt sent
 - `rlm.find_models(query: str = '', limit: int = 8) -> list[RLMModel]`
 - `rlm.list_subagents() -> list[RLMSubagent]`: direct child handles
@@ -87,7 +87,7 @@ Memories are created by two mechanisms:
   - Effect:
     - The refinement event is always saved in the harness state's refinement history
     - A harness message is sent to the agent with the refinement result
-- Active memory management by the agent
+- Active memory management by the agent (the `rlm.harness.*` and `rlm.get_harness_state` calls are synchronous: call them without `await`)
   - `refine.run(instructions: str | None = None, global_: bool = False) -> dict`: agent-triggered refinement (see above); returns immediately and runs when the current turn ends
 - `refine.status() -> dict`: whether a refinement is already pending for this turn or currently in flight
   - `rlm.harness.create_memory(title: str, content: str, *, id: str | None = None, path: str = "general", metadata: dict | None = None, global_: bool = False) -> HarnessEntry`: creates a memory; use `global_=True` for cross-session entries (Python reserves `global`, so the parameter is spelled `global_`)

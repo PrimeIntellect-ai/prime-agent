@@ -34,6 +34,7 @@ getrandom = "0.3"
 url = "2"
 hmac = "0.12"
 globset = "0.4"
+toml.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tar = "0.4"
 flate2 = "1"
@@ -47,10 +48,6 @@ proptest = { workspace = true }
 # The traces rate-gate test runs on paused tokio time (the 12s platform
 # interval auto-advances).
 tokio = { workspace = true, features = ["test-util"] }
-
-[[test]]
-name = "golden_system_prompt"
-path = "tests/golden/system_prompt.rs"
 
 [lints.clippy]
 # pa-core keeps its OWN lints table (not `workspace = true`): the

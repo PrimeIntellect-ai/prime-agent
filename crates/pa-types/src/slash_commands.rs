@@ -11,7 +11,6 @@ pub const SESSION_SLASH_COMMAND_NAMES: [&str; 4] = ["compact", "refine", "goal",
 /// result, persisted in sessions and rendered by every surface.
 pub const SESSION_SLASH_COMMAND_CUSTOM_TYPE: &str = "session_slash_command";
 pub const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE: &str = "session_slash_command_result";
-
 #[must_use]
 pub fn is_session_slash_command_name(value: &str) -> bool {
     SESSION_SLASH_COMMAND_NAMES.contains(&value)

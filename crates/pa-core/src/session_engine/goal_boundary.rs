@@ -159,6 +159,13 @@ impl SessionEngine {
         self.goal_driver.lock().await.state_with_creation_elapsed()
     }
 
+    /// Take the armed no-progress backoff window's deadline while the goal
+    /// is Active: the settled boundary may outlast the window, so an overdue
+    /// deadline still yields, and the take consumes it — one wake per strike.
+    pub async fn take_goal_backoff_wake_at(&self) -> Option<u64> {
+        self.goal_driver.lock().await.take_backoff_wake_at()
+    }
+
     /// Release the pending-continuation guard: the surface admitted (or
     /// withdrew) the minted continuation, so the next boundary mints again.
     pub async fn clear_pending_goal_continuation(&self) {

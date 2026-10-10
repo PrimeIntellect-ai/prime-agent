@@ -154,6 +154,35 @@ fn read_entries(path: &std::path::Path) -> Vec<serde_json::Value> {
         .unwrap()
 }
 
+/// The goal cap's text-mode end state: the capped run exits 1 with the reason, and a later
+/// resume of the capped session answers normally — the persisted cap never swallows a run.
+#[test]
+fn print_mode_goal_cap_reports_the_reason_and_exits_one() {
+    let home = isolated_home();
+    let script = serde_json::json!({ "responses": [{}, {}, {}] });
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &["--goal", "finish the work", "-p", "work"],
+        &script,
+    );
+    assert_eq!(code, 1);
+    assert!(stderr.ends_with("Goal continuation cap reached: consecutive turns made no progress\n"));
+    assert!(stdout.is_empty());
+
+    let session_id = read_entries(&session_files(home.path())[0])[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let script = serde_json::json!({ "responses": ["follow-up answer"] });
+    let (stdout, stderr, code) = run_in_home(
+        home.path(),
+        &["--resume", &session_id[..8], "-p", "next"],
+        &script,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "follow-up answer\n");
+}
+
 /// The session files holding a runtime lease right now (the owner records
 /// under the agent dir's `session-leases`).
 fn leased_session_files(home: &std::path::Path) -> Vec<String> {
