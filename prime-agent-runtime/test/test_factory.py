@@ -5839,6 +5839,67 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(status["usage"]["settled"], 1)
 
     @async_test
+    async def test_late_sibling_exit_after_terminal_entry_still_marks_needs_verify(self) -> None:
+        # Review finding (Macroscope): a foreach sibling exiting with a
+        # provisional answer AFTER its entry already went terminal (a
+        # sibling failed it first) hit _apply_entry_failure_policy's
+        # terminal guard before the needs_verify mark: the exit capture
+        # kept the answer on the instance, but entry.needs_verify stayed
+        # unset and no needs_verify event fired -- the late exit's work
+        # vanished from every verify surface. The mark now runs before the
+        # terminal guard, independently of the entry's failure policy.
+        self.host.outcomes["src"] = {"status": "done", "answer": '{"items": ["a", "b"]}'}
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": "worker",
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 2},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        # src is child-1; the fan instances are child-2 (i0) and child-3
+        # (i1). i0 fails permanently with no answer: the entry goes error
+        # while i1 is still running.
+        self.host.child_outcomes["child-2"] = {"status": "error", "error": "boom-1"}
+        self.host.child_outcomes["child-3"] = {"status": "running"}
+        await self.wait_until(
+            lambda: any(entry.status == "error" for entry in run.states["fan"].entries)
+        )
+        # i1 exits NOW with a provisional answer; the entry is already
+        # terminal, so only a pre-guard verify mark can surface it.
+        self.host.child_outcomes["child-3"] = {
+            "status": "error",
+            "error": "worker exited mid-flight",
+            "answer": "Lane B finished; results staged at /tmp/lane-b.md.",
+        }
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["needs_verify"], ["fan"])
+        fan = self.state_report(status, "fan")
+        self.assertEqual(fan["needs_verify"], True)
+        entry_row = fan["entries"][0]
+        self.assertEqual(entry_row["status"], "error")
+        self.assertEqual(entry_row["needs_verify"], True)
+        self.assertIn("results staged at /tmp/lane-b.md", entry_row["provisional_answer"])
+        self.assertEqual(
+            [event["node"] for event in self.all_events_of(result, "needs_verify")],
+            ["fan"],
+        )
+        # i0 failed with no answer; the entry failed exactly once, so the
+        # needs_verify event stays one-shot and no retry was queued.
+        self.assertEqual(len(self.host.spawn_calls("fan")), 2)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+
+    @async_test
     async def test_paused_run_status_carries_the_last_error_and_remedy(self) -> None:
         # M6: a paused run carries the LAST failed admission/bind error and
         # a one-line remedy in its status payload — no root-side

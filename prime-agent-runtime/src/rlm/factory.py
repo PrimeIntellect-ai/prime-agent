@@ -3029,14 +3029,16 @@ class FactoryExecutor:
     async def _apply_entry_failure_policy(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, reason: str
     ) -> None:
-        if entry.status in TERMINAL_ENTRY_STATUSES:
-            return  # the policy already ran for this entry
-        policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
-        entry.status = "error"
-        entry.error = reason
-        state.error = reason
-        run.last_error = f"state {state.state_id!r} failed: {reason}"
-        if any(instance.provisional and instance.answer for instance in entry.instances):
+        # The verify mark is oversight, not failure-policy bookkeeping: a
+        # later foreach sibling can exit with a provisional answer AFTER
+        # the entry already went terminal (a sibling failed it first), so
+        # the check runs BEFORE the terminal guard -- the guard would
+        # otherwise swallow the late exit's signal, leaving the captured
+        # answer invisible in every needs_verify surface.
+        # entry.needs_verify keeps the mark and its event one-shot per entry.
+        if not entry.needs_verify and any(
+            instance.provisional and instance.answer for instance in entry.instances
+        ):
             # An exit with a provisional answer is distinguishable from
             # completed work only through the verify mark: the entry keeps
             # its error verdict, but the preserved answer and the
@@ -3050,6 +3052,13 @@ class FactoryExecutor:
                 entry=entry.index,
                 detail="child exit captured a provisional answer - verify the remote state",
             )
+        if entry.status in TERMINAL_ENTRY_STATUSES:
+            return  # the policy already ran for this entry
+        policy = state.spec.get("failure_policy", RUN_FAILURE_POLICY_DEFAULT)
+        entry.status = "error"
+        entry.error = reason
+        state.error = reason
+        run.last_error = f"state {state.state_id!r} failed: {reason}"
         self._event(run, "node_error", node=state.state_id, entry=entry.index, error=reason, detail=f"failure_policy {policy}")
         # The entry is terminal: its prepared-but-never-admitted instances
         # (a foreach queue behind max_parallel, or a rate-limit deferral)
