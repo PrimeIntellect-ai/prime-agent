@@ -397,6 +397,28 @@ impl Supervisor {
         Ok(child)
     }
 
+    /// Publish the planned launch and its roster generation in one descriptor
+    /// critical section, only after the durable launch write succeeds.
+    pub(super) async fn prepare_worker_spawn(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        instance: &str,
+        sync: TempSync,
+    ) -> Result<()> {
+        let mut descriptor = resident.descriptor.lock().await;
+        crate::native_signal::begin_spawn(
+            &resident.descriptor_path,
+            &mut descriptor,
+            instance,
+            sync,
+        )?;
+        self.roster
+            .lock()
+            .unwrap()
+            .note_worker_generation(&resident.worker_id, instance);
+        Ok(())
+    }
+
     pub(super) async fn spawn_worker_process(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
@@ -406,15 +428,8 @@ impl Supervisor {
         let worker_instance_id = uuid::Uuid::new_v4().to_string();
         // The child's env and descriptor must name the same incarnation before
         // any auth/registration can arrive. Failed writes publish neither.
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            crate::native_signal::begin_spawn(
-                &resident.descriptor_path,
-                &mut descriptor,
-                &worker_instance_id,
-                spawn_record_sync,
-            )?;
-        }
+        self.prepare_worker_spawn(resident, &worker_instance_id, spawn_record_sync)
+            .await?;
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env) = {

@@ -759,3 +759,79 @@ async fn registration_adoption_refuses_wrong_token_or_instance_before_dialing() 
         );
     }
 }
+
+/// Planning a launch publishes a roster generation even though registration
+/// later sees the same descriptor instance; failed writes publish neither.
+#[tokio::test]
+async fn planned_launch_and_registration_fence_predecessor_roster_frames() {
+    let (dir, supervisor, socket_path, _) = registration_adoption_fixture(4242);
+    let blocked = dir.path().join("blocked");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version":2,"workerId":"w-register","pid":4242,
+        "workerInstanceId":"previous","socketPath":socket_path.to_string_lossy(),
+        "recoveryJournalPath":dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath":supervisor.options.socket_path.to_string_lossy(),
+        "authenticationToken":"register-token","rootActiveSessionId":"w-register",
+        "createdAt":"now","updatedAt":"now","lifecycle":"ready",
+        "createCommand":{},"consecutiveFailures":0
+    }))
+    .unwrap();
+    let resident = ResidentWorker::new(
+        "w-register".to_string(),
+        descriptor,
+        blocked.join("worker.json"),
+    );
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    supervisor
+        .roster
+        .lock()
+        .unwrap()
+        .note_worker_generation("w-register", "previous");
+    assert!(supervisor
+        .prepare_worker_spawn(&resident, "planned", TempSync::Synced)
+        .await
+        .is_err());
+    {
+        let mut roster = supervisor.roster.lock().unwrap();
+        assert!(roster.accept_roster_pull("w-register", "previous", Some(9)));
+        assert!(!roster.accept_delta_sequence("w-register", "planned", 10));
+    }
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    supervisor
+        .prepare_worker_spawn(&resident, "planned", TempSync::Synced)
+        .await
+        .unwrap();
+    {
+        let mut roster = supervisor.roster.lock().unwrap();
+        assert!(!roster.accept_delta_sequence("w-register", "previous", 10));
+        assert!(!roster.accept_roster_pull("w-register", "previous", Some(10)));
+        assert!(roster.accept_delta_sequence("w-register", "planned", 7));
+    }
+    // The real registration handler must preserve the planned generation's
+    // watermark even though it now matches the prepublished descriptor.
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-register".to_string(),
+        session_id: None,
+        socket_path: socket_path.to_string_lossy().to_string(),
+        worker_instance_id: "planned".to_string(),
+        token: "register-token".to_string(),
+        pid: 4243,
+        rest: Map::default(),
+    };
+    let response = supervisor
+        .handle_worker_register("register", "worker_register", &command)
+        .await;
+    assert!(
+        response.success,
+        "planned registration failed: {response:?}"
+    );
+    {
+        let mut roster = supervisor.roster.lock().unwrap();
+        assert!(!roster.accept_roster_pull("w-register", "planned", Some(6)));
+        assert!(!roster.accept_delta_sequence("w-register", "previous", 100));
+        assert!(roster.accept_roster_pull("w-register", "planned", Some(8)));
+    }
+}

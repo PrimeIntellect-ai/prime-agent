@@ -439,15 +439,13 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
-            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
-            // A REPLACEMENT registration flips the roster's stale-delta slot to the replacement
-            // BEFORE it is exposed anywhere: a predecessor's pull or frame still in flight must
-            // meet the slot naming the replacement; a re-register keeps it untouched.
-            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
-                let replacement = worker_instance_id.clone().unwrap_or_default();
-                let mut roster = self.roster.lock().unwrap();
-                roster.note_worker_generation(&resident.worker_id, &replacement);
-            }
+            // The descriptor may already name this planned launch before spawn.
+            // Advance the independent roster slot idempotently: same-generation
+            // re-registration preserves its watermark; replacements reject old frames.
+            self.roster.lock().unwrap().note_worker_generation(
+                &resident.worker_id,
+                worker_instance_id.as_deref().unwrap_or_default(),
+            );
             descriptor.pid = *pid;
             // Refresh the identity from the live registrant: a recycled pid must not keep
             // the old holder's identity; an unobservable start id keeps the previous value.
