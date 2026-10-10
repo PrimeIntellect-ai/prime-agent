@@ -1434,6 +1434,18 @@ class RetinaScaleTests(AppTestCase):
         clicks = env.recorder.calls_named("click")
         self.assertEqual(clicks[0]["point"], (500.0, 350.0), "the click lands on the live window's center")
 
+    async def test_a_click_after_a_resize_without_reobserving_uses_the_live_scale(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()  # observed 400x300
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 1600, "height": 1200}
+        env.live_window_bounds = (100.0, 50.0, 800.0, 600.0)  # the window resized after the observe
+        await app.get_screenshot(attach=False)
+        # no re-observe: the AX rect is still the stale 400x300, but the shot is live
+        await app.click((800.0, 600.0))  # the image center
+        clicks = env.recorder.calls_named("click")
+        self.assertEqual(clicks[0]["point"], (500.0, 350.0), "the live-shot scale and origin place the click without a fresh observe")
+
 
 if __name__ == "__main__":
     unittest.main()

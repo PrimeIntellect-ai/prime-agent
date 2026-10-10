@@ -1190,19 +1190,26 @@ class App:
                     f"({shot[0]:.0f}x{shot[1]:.0f}); use coordinates from its screenshot",
                     {"point": repr(point)[:64]},
                 )
+            # the scale comes from the shot's own live bounds (the image
+            # depicts THAT window); the clip and the offset come from the
+            # window's CURRENT live bounds, falling back to the last
+            # observation when the live read fails: a moved window keeps its
+            # image logicals and moves the origin, a resized one rejects
+            live = capture._live_window_bounds(self._shot_window_id)
+            frame = live if live is not None else rect
             scaled = (
                 float(point[0]) * float(self._shot_rect[2]) / shot[0],
                 float(point[1]) * float(self._shot_rect[3]) / shot[1],
             )
-            if not 0 <= scaled[0] < float(rect[2]) or not 0 <= scaled[1] < float(rect[3]):
+            if not 0 <= scaled[0] < float(frame[2]) or not 0 <= scaled[1] < float(frame[3]):
                 raise ComputerUseError(
                     "INVALID_ARGUMENT",
-                    f"point {point!r} lands outside the observed window "
-                    f"({float(rect[2]):.0f}x{float(rect[3]):.0f}); the window changed since the "
+                    f"point {point!r} lands outside the window "
+                    f"({float(frame[2]):.0f}x{float(frame[3]):.0f}); the window changed since the "
                     "capture, so take a fresh screenshot",
                     {"point": repr(point)[:64]},
                 )
-            return (rect[0] + scaled[0], rect[1] + scaled[1])
+            return (frame[0] + scaled[0], frame[1] + scaled[1])
         if shot is not None and (not 0 <= float(point[0]) < shot[0] or not 0 <= float(point[1]) < shot[1]):
             raise ComputerUseError(
                 "INVALID_ARGUMENT",
