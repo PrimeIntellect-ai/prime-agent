@@ -1502,7 +1502,7 @@ mod tests {
         // The pacing is bounded arithmetic (a 10ms hold against a 50ms
         // budget), not a scheduler race.
         const BURST: usize = 32;
-        let mut children = Vec::new();
+        let mut children: Vec<ReapOnDrop> = Vec::new();
         let mut targets = Vec::new();
         for _ in 0..BURST {
             let child = std::process::Command::new("sleep")
@@ -1517,7 +1517,7 @@ mod tests {
                 worker_socket: None,
                 kind: ReapKind::Worker,
             });
-            children.push(child);
+            children.push(ReapOnDrop(Some(child)));
         }
         let exclusion_dir = tempfile::tempdir().unwrap();
         let socket_path = exclusion_dir.path().join("daemon.sock");
@@ -1554,9 +1554,11 @@ mod tests {
         // Reap the children BEFORE the assertion: the red regression
         // panics here, and leaked live sleeps would bleed into later
         // tests.
-        for mut child in children {
-            let _ = child.kill();
-            let _ = child.wait();
+        for mut child in children.drain(..) {
+            if let Some(mut child) = child.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
         assert!(
             starved.is_empty(),
