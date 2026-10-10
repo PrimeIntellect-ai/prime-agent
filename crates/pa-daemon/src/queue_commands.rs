@@ -172,7 +172,7 @@ impl Worker {
                 None,
             );
         }
-        if let Some(attempt_id) = attempt_id {
+        let has_queued_work = if let Some(attempt_id) = attempt_id {
             let mut recovery = self.recovery.lock().unwrap();
             let (active_session_id, generation, session_id, session_file, held, busy, inputs) = {
                 let core = self.core.lock().unwrap();
@@ -207,7 +207,7 @@ impl Worker {
                     None,
                 );
             }
-            let result = (|| -> anyhow::Result<()> {
+            let result = (|| -> anyhow::Result<bool> {
                 let journal = if let Some(journal) = recovery.as_mut() {
                     journal
                 } else {
@@ -256,10 +256,6 @@ impl Worker {
                     }
                     core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
                 }
-                let lanes = {
-                    let core = self.core.lock().unwrap();
-                    crate::worker::queue_lanes(&core)
-                };
                 #[cfg(test)]
                 {
                     let gate = self.resume_checkpoint_gate.lock().unwrap().clone();
@@ -271,6 +267,32 @@ impl Worker {
                         );
                     }
                 }
+                // Eligibility, the fresh snapshot and release are one decision.
+                // A core transition during the fsync cannot turn its positive
+                // proof into a refusal that the supervisor later misreads.
+                let mut core = self.core.lock().unwrap();
+                anyhow::ensure!(
+                    !core.shutdown_requested
+                        && core.recovery_hold == held
+                        && (!held || !core.busy),
+                    "Session recovery changed or shutdown is in progress"
+                );
+                anyhow::ensure!(
+                    core.active_session_id == active_session_id
+                        && core.generation == generation
+                        && core
+                            .store
+                            .as_ref()
+                            .map(crate::session_store::SessionFile::session_id)
+                            == Some(session_id.as_str())
+                        && core
+                            .store
+                            .as_ref()
+                            .map(|store| store.path.to_string_lossy().to_string())
+                            == session_file,
+                    "resume input session changed while checkpointing"
+                );
+                let lanes = crate::worker::queue_lanes(&core);
                 journal.record_resume_checkpoint(
                     &active_session_id,
                     &session_id,
@@ -279,35 +301,34 @@ impl Worker {
                     &self.config.worker_instance_id,
                     &lanes.steering,
                     &lanes.follow_up,
-                )
-            })();
-            if let Err(error) = result {
-                return response_failure(None, "resume_queue", &error.to_string(), None);
-            }
-            if held {
-                let mut core = self.core.lock().unwrap();
-                if core.shutdown_requested {
-                    return response_failure(
-                        None,
-                        "resume_queue",
-                        "Session is shutting down",
-                        None,
-                    );
-                }
+                )?;
+                let has_queued_work = !core.steering.is_empty() || !core.follow_up.is_empty();
                 core.recovery_hold = false;
+                core.queued_input_suspended = false;
+                Ok(has_queued_work)
+            })();
+            let has_queued_work = match result {
+                Ok(has_queued_work) => has_queued_work,
+                Err(error) => {
+                    return response_failure(None, "resume_queue", &error.to_string(), None);
+                }
+            };
+            drop(recovery);
+            self.work_notify.notify_one();
+            if let Some(engine) = self.agent_engine.as_ref() {
+                engine.retry_owed_goal_continuation();
             }
-        }
-        // The suspension clears first, so `resume_queue` is a resume
-        // site even when it answers "No queued work to resume".
-        if !self.resume_queued_input() {
-            return response_failure(
-                None,
-                "resume_queue",
-                "Session recovery is required or shutdown is in progress",
-                None,
-            );
-        }
-        let has_queued_work = {
+            has_queued_work
+        } else {
+            // Suspension clears even when the accepted resume has no queued work.
+            if !self.resume_queued_input() {
+                return response_failure(
+                    None,
+                    "resume_queue",
+                    "Session recovery is required or shutdown is in progress",
+                    None,
+                );
+            }
             let core = self.core.lock().unwrap();
             !core.steering.is_empty() || !core.follow_up.is_empty()
         };

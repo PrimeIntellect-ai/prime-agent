@@ -201,14 +201,24 @@ impl Supervisor {
         admission: RouteAdmission,
     ) -> Result<WorkerReply> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        // A distinct client action cannot inherit an earlier release proof.
+        // Only this route's provably unsent retries share its private identity.
+        let resume_attempt =
+            (command_type == "resume_queue").then(|| uuid::Uuid::new_v4().to_string());
         loop {
             self.await_route_ready(resident, deadline).await?;
             let remaining_ms = deadline
                 .saturating_duration_since(tokio::time::Instant::now())
                 .as_millis() as u64;
-            let routed = if command_type == "resume_queue" {
-                self.route_ready_resume(resident, payload.clone(), remaining_ms, admission)
-                    .await
+            let routed = if let Some(attempt) = resume_attempt.as_deref() {
+                self.route_ready_resume(
+                    resident,
+                    payload.clone(),
+                    attempt,
+                    remaining_ms,
+                    admission,
+                )
+                .await
             } else {
                 self.route_command(
                     resident,
@@ -243,6 +253,7 @@ impl Supervisor {
         &self,
         resident: &Arc<ResidentWorker>,
         mut payload: Value,
+        attempt: &str,
         remaining_ms: u64,
         admission: RouteAdmission,
     ) -> Result<WorkerReply> {
@@ -259,7 +270,7 @@ impl Supervisor {
         if let Some(object) = payload.as_object_mut() {
             object.remove("resumeQueueAttemptId");
         }
-        let attempt = if crate::descriptor::has_shutdown_hold(&descriptor) {
+        if crate::descriptor::has_shutdown_hold(&descriptor) {
             let mut hold = crate::descriptor::shutdown_hold(&descriptor)?
                 .ok_or_else(|| anyhow!("shutdown hold vanished"))?;
             let instance = descriptor
@@ -267,28 +278,17 @@ impl Supervisor {
                 .clone()
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| anyhow!("Worker generation is missing for queue resume"))?;
-            // Reuse a same-generation attempt after a lost ACK. A provably
-            // unsent request retried on a replacement gets a new binding.
-            let attempt = if hold.resume_worker_instance_id.as_deref() == Some(instance.as_str()) {
-                hold.resume_attempt_id
-                    .clone()
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-            } else {
-                uuid::Uuid::new_v4().to_string()
-            };
-            hold.resume_attempt_id = Some(attempt.clone());
+            // Bind this action to its actual receiving generation. A lost
+            // ACK remains recoverable through this persisted identity, but a
+            // newer action always supersedes it with a distinct attempt.
+            hold.resume_attempt_id = Some(attempt.to_string());
             hold.resume_worker_instance_id = Some(instance);
             let mut next = descriptor.clone();
             next.rest
                 .insert(crate::descriptor::SHUTDOWN_HOLD_KEY.into(), json!(hold));
             crate::descriptor::persist_shutdown_boundary(&resident.descriptor_path, &next)?;
             *descriptor = next;
-            attempt
-        } else {
-            // A live worker can also park after a session-file persist error
-            // without a descriptor hold. It still needs a supervised attempt.
-            uuid::Uuid::new_v4().to_string()
-        };
+        }
         payload["resumeQueueAttemptId"] = json!(attempt);
         drop(descriptor);
         drop(channel);

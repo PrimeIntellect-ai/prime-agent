@@ -1160,8 +1160,12 @@ async fn a_distinct_refused_resume_cannot_reuse_an_earlier_release_proof() {
     );
 }
 
-#[tokio::test]
-async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
+enum HeldResumeDelivery {
+    WaitForReady,
+    RetryUnsent,
+}
+
+async fn check_held_resume_replacement(delivery: HeldResumeDelivery) {
     let dir = tempfile::TempDir::new().unwrap();
     let supervisor = Arc::new(
         Supervisor::new(SupervisorOptions {
@@ -1199,7 +1203,9 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
     supervisor.registry.insert(Arc::clone(&resident)).await;
     resident.note_connection_live();
     resident.note_session_ready();
-    resident.note_session_replaying();
+    if matches!(delivery, HeldResumeDelivery::WaitForReady) {
+        resident.note_session_replaying();
+    }
     let (subscriber_tx, _subscriber_rx) = mpsc::channel::<Arc<Value>>(1);
     let attached = subscribers::ClientSubscriptions::new("client".into(), subscriber_tx);
     let command: DaemonCommand = serde_json::from_value(json!({
@@ -1214,14 +1220,22 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
         "resume_queue".into(),
         None,
     ));
-    // Poll the route against the old generation while its ready gate is
-    // closed. This is the deterministic boundary: the route has entered its
-    // wait before the replacement is published. A pre-ready generation bind
-    // therefore stores old-instance and cannot clear the hold below.
+    // Enter either the closed ready gate or the predecessor's pending
+    // command before publishing the replacement. No timing race chooses
+    // which worker receives the first attempted send.
     assert!(futures::poll!(routed.as_mut()).is_pending());
+    let unsent = match delivery {
+        HeldResumeDelivery::WaitForReady => None,
+        HeldResumeDelivery::RetryUnsent => Some(
+            tokio::time::timeout(Duration::from_secs(1), old_rx.recv())
+                .await
+                .expect("predecessor request arrives")
+                .expect("predecessor channel stays open"),
+        ),
+    };
 
-    // The pending route cannot send on the predecessor's channel. Publish a
-    // replacement generation and channel, then open the ready gate.
+    // The old request, if any, was queued but never written to a worker.
+    // Install the replacement before reporting that provably unsent result.
     {
         let mut descriptor = resident.descriptor.lock().await;
         descriptor.worker_instance_id = Some("new-instance".into());
@@ -1230,6 +1244,16 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
     *resident.cmd_tx.lock().await = Some(new_tx);
     resident.note_connection_live();
     resident.note_session_ready();
+    let first_attempt = if let Some(request) = unsent {
+        let attempt = request.payload["resumeQueueAttemptId"]
+            .as_str()
+            .expect("first private attempt")
+            .to_string();
+        routing::fail_unsent_request(&resident, &request.request_id).await;
+        Some(attempt)
+    } else {
+        None
+    };
     let journal_path = dir.path().join("worker.recovery.jsonl");
     let replacement = {
         let resident = Arc::clone(&resident);
@@ -1242,6 +1266,12 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
                 .as_str()
                 .expect("private resume attempt")
                 .to_string();
+            if let Some(first_attempt) = first_attempt {
+                assert_eq!(
+                    attempt, first_attempt,
+                    "a provably unsent retry remains the same logical resume action"
+                );
+            }
             let persisted_descriptor: DaemonWorkerDescriptor =
                 serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
             let hold = crate::descriptor::shutdown_hold(&persisted_descriptor)
@@ -1289,6 +1319,16 @@ async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
     assert!(!crate::descriptor::has_shutdown_hold(
         &*resident.descriptor.lock().await
     ));
+}
+
+#[tokio::test]
+async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
+    check_held_resume_replacement(HeldResumeDelivery::WaitForReady).await;
+}
+
+#[tokio::test]
+async fn a_provably_unsent_resume_retry_keeps_its_attempt_and_rebinds_generation() {
+    check_held_resume_replacement(HeldResumeDelivery::RetryUnsent).await;
 }
 
 /// The stop's only `Err` (tombstone persist) leaves the worker untouched and the kill
