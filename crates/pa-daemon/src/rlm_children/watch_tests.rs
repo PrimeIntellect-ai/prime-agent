@@ -963,16 +963,78 @@ async fn collect_answers_a_just_deleted_target_with_the_cancelled_envelope() {
         missing.to_string(),
         "No direct RLM child matches \"ghost\" in the current parent session"
     );
-    // The delete selector itself keeps its TS miss: the tombstone
-    // answers collect only.
-    let gone = sessions
+    // Retirement is idempotent (the M5 class): a re-delete of the same
+    // selector answers from the tombstone with the row's status at its
+    // delete, never the old "no longer resolves" miss.
+    let redeleted = sessions
         .delete_subagent("f20-worker".to_string())
         .await
-        .expect_err("the deleted child no longer resolves for a delete");
+        .expect("the re-delete of a retired child is idempotent");
+    assert_eq!(redeleted.outcome, Some("deleted"));
+    assert_eq!(redeleted.subagent.status, "completed");
+    assert_eq!(redeleted.subagent.session_name, "f20-worker");
+    // A genuinely unknown selector keeps its miss.
+    let gone = sessions
+        .delete_subagent("ghost".to_string())
+        .await
+        .expect_err("an unknown selector still errors");
     assert_eq!(
         gone.to_string(),
-        "No direct RLM subagent matches \"f20-worker\" in the current parent session"
+        "No direct RLM subagent matches \"ghost\" in the current parent session"
     );
+}
+
+/// The M5 pin: a settled (terminal) child's delete releases its name slot —
+/// a same-name spawn admits again — and the delete of a settled child
+/// returns the terminal row instead of erroring.
+#[tokio::test]
+async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    // The child settles before the delete (a terminal-status row).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sessions.list_subagents().await.expect("child roster");
+        if entries.iter().any(|entry| entry.status == "completed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never settled: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let deleted = sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("delete the settled child");
+    assert_eq!(deleted.subagent.status, "completed");
+
+    // The name slot is released: the supervisor admits a same-name spawn.
+    let respawned = spawn_child(&sessions).await;
+    assert_eq!(respawned.name, "f20-worker");
+
+    // Deleting a child whose run was cancelled (the factory's stop pass)
+    // reports the cancelled row, and a second delete of it is idempotent.
+    // The cancel lands before the turn-done notification, so the respawned
+    // child is provably still running when it is cut short.
+    assert!(
+        sessions.cancel_child_run(&respawned.rlm_child_id).await,
+        "cancel the respawned child"
+    );
+    let cancelled_delete = sessions
+        .delete_subagent(respawned.rlm_child_id.clone())
+        .await
+        .expect("delete the cancelled child");
+    assert_eq!(cancelled_delete.subagent.status, "cancelled");
+    let again = sessions
+        .delete_subagent(respawned.rlm_child_id.clone())
+        .await
+        .expect("the second delete of the cancelled child is idempotent");
+    assert_eq!(again.subagent.status, "cancelled");
 }
 
 /// The inactive delete (a settled retained child) leaves the same tombstone as the live delete, so

@@ -32,6 +32,7 @@ impl SupervisorChildSessionsInner {
             session_name: record.session_name.clone(),
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
+            status: record.roster_status(),
             answer_preview: record.answer_preview.clone(),
             error: record
                 .error

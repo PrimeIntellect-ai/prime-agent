@@ -533,10 +533,13 @@ def validate_factory_machine(machine: Any) -> list[str]:
             seen_ids.add(state_id)
             states_by_id[state_id] = state
 
-    # Configured inline subagent names label the spawned children verbatim,
-    # so two states sharing one name would collide on the supervisor's
-    # unique sibling-name requirement at spawn time; reject the duplicate at
-    # write time instead (the same reason duplicate state ids are rejected).
+    # Configured inline subagent names label the spawned children
+    # run-scoped (the spawn label prefixes the configured name with the run
+    # id), so two states sharing one name would still collide within a run
+    # on the supervisor's unique sibling-name requirement at spawn time
+    # (one common per-run prefix preserves the relative collision shape);
+    # reject the duplicate at write time instead (the same reason
+    # duplicate state ids are rejected).
     seen_subagent_names: dict[str, str] = {}
     for state_id, state in states_by_id.items():
         _validate_state_fields(
@@ -1103,20 +1106,34 @@ def _child_name(run_id: str, state_id: str, instance_index: int, attempt: int) -
     return "-".join(parts)
 
 
+def _run_prefix(run_id: str) -> str:
+    """The run-scoped label prefix (the generated label's third part)."""
+    return run_id[:6]
+
+
 def _spawn_label(
     configured: str | None, run_id: str, state_id: str, instance_index: int, attempt: int
 ) -> str:
     """Sibling label for one spawned instance: the state's configured inline
-    subagent ``name`` when it has one, else the generated label.
+    subagent ``name`` prefixed with the run id, else the generated label.
 
-    The configured name is used verbatim for the state's first instance on
-    its first attempt (agents message the child by exactly this label); the
-    SAME disambiguation suffixes as the generated label -- ``i<n>`` for
-    later instances (re-entry, foreach fan-out), ``a<n>`` for retries --
-    keep every admission unique: the supervisor rejects duplicate sibling
-    names, and one state's settled children stay registered for the
-    run's life, so a re-entering state (``max_entries`` > 1) would collide
-    with its own earlier child on a verbatim name.
+    Every machine child label is run-scoped: the supervisor's sibling
+    names are per-parent-session, and a parent session outlives its runs,
+    so a verbatim configured name would collide with a prior run's
+    settled children (they stay registered for the run's life) or with a
+    live agent of the same name -- the M1 unresolvable-pause class.
+    The ``<run6>-`` prefix (the same run slug the generated label
+    carries) keeps cross-run admissions unique; agents message the child
+    by the label the run reports (the ``spawned`` event's ``name`` and
+    the status node's instance rows), not by the configured name alone.
+
+    The SAME disambiguation suffixes as the generated label -- ``i<n>``
+    for later instances (re-entry, foreach fan-out), ``a<n>`` for retries
+    -- keep every admission within a run unique: the supervisor rejects
+    duplicate sibling names, and one state's settled children stay
+    registered for the run's life, so a re-entering state
+    (``max_entries`` > 1) would collide with its own earlier child on an
+    unprefixed repeat.
 
     A suffixed label never exceeds the host's 64-character spawn-name cap:
     an overflowing base shrinks to a digest-suffixed token of the full
@@ -1128,7 +1145,7 @@ def _spawn_label(
     if attempt > 1:
         suffix_parts.append(f"a{attempt}")
     suffix = "".join(f"-{part}" for part in suffix_parts)
-    base = configured
+    base = f"{_run_prefix(run_id)}-{configured}"
     if len(base) + len(suffix) > SUBAGENT_NAME_MAX_LENGTH:
         # The host caps spawn names at 64 characters, so a suffixed label
         # that would exceed it shrinks its base first -- and a bare
@@ -4496,14 +4513,17 @@ bind.
   content is the prompt template; `metadata.model`/`metadata.thinking` are
   spawn settings) or an inline `{"prompt": ...}` object with optional
   `name`/`model`/`thinking`. The optional `name` labels the spawned
-  children (at most 64 characters, unique across the machine's states —
-  a name another state's name can suffix onto, `foo` vs `foo-i1`, is
-  rejected at write time): the first instance is named exactly `name` —
-  the label to message the child by — and re-entries, foreach fan-out,
-  and retries disambiguate with the same `-i<n>`/`-a<n>` suffixes the
-  generated labels use; a suffixed label that would pass the host's
-  64-character cap shrinks its base with a digest of the full name, like
-  the generated labels do.
+  children run-scoped (at most 64 characters, unique across the
+  machine's states — a name another state's name can suffix onto, `foo`
+  vs `foo-i1`, is rejected at write time): the spawn label is
+  `<run6>-name` — the supervisor's sibling names are per-parent-session,
+  and a parent session outlives its runs, so the run prefix keeps two
+  runs of one machine from colliding; read the exact label from the
+  `spawned` event's `name` or the status node's instance rows — and
+  re-entries, foreach fan-out, and retries disambiguate with the same
+  `-i<n>`/`-a<n>` suffixes the generated labels use; a suffixed label
+  that would pass the host's 64-character cap shrinks its base with a
+  digest of the full name, like the generated labels do.
 - **Ports**: inputs and outputs of type `text` or `json`. An input binds
   `"from": "<state_id>.<output_name>"`; types must match, duplicates are
   rejected, and nothing can read from a resident. Bound values render into

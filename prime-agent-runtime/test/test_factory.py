@@ -32,8 +32,11 @@ races) plus the accepted review findings from both:
 - long state ids disambiguate their spawn names with a digest, so two
   states sharing a 20-character prefix never collide on the supervisor's
   unique sibling-name requirement;
-- a configured inline subagent name labels the spawned children verbatim
-  (the first instance), with the generated label's -i<n>/-a<n> suffixes on
+- a configured inline subagent name labels the spawned children
+  run-scoped: the spawn label prefixes the configured name with the run
+  id (the supervisor's sibling names are per-parent-session and a parent
+  outlives its runs, so a verbatim name would collide with a prior run's
+  children), with the generated label's -i<n>/-a<n> suffixes on
   re-entry, foreach fan-out, and retries; over-length names and names
   duplicated across states are rejected at write time (Macroscope review
   finding: the name was dropped, so children always got the generated
@@ -2330,23 +2333,38 @@ class ChildNameTest(unittest.TestCase):
 
 
 class SpawnLabelTest(unittest.TestCase):
-    """The configured inline subagent name labels spawned children.
+    """The configured inline subagent name labels spawned children run-scoped.
 
-    The first instance of a state spawns with the configured name verbatim
-    (the label agents message the child by); later instances and retries
-    keep the generated label's -i<n>/-a<n> suffixes, because one state's
-    settled children stay registered for the run's life and the supervisor
-    rejects duplicate sibling names. (Macroscope review finding: the name
-    was dropped, so every child got the generated label.)
+    Every machine child label carries the run id prefix: the supervisor's
+    sibling names are per-parent-session, and a parent session outlives
+    its runs, so a verbatim configured name would collide with a prior
+    run's settled children (they stay registered for the run's life) —
+    the M1 unresolvable-pause class. Later instances and retries keep the
+    generated label's -i<n>/-a<n> suffixes, because the supervisor rejects
+    duplicate sibling names. (Macroscope review finding: the name was
+    dropped, so every child got the generated label.)
     """
 
-    def test_configured_name_labels_the_first_instance_verbatim(self) -> None:
-        self.assertEqual(_spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1), "reviewer")
+    def test_configured_name_labels_the_first_instance_run_scoped(self) -> None:
+        self.assertEqual(
+            _spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1),
+            "012345-reviewer",
+        )
+
+    def test_two_runs_of_one_machine_never_share_a_label(self) -> None:
+        # M1: machine child names are supervisor-global across runs; the
+        # run prefix keeps two runs of the same machine from colliding on
+        # the supervisor's unique sibling-name requirement.
+        one = _spawn_label("impl-build", "0123456789abcdef", "implement", 0, 1)
+        two = _spawn_label("impl-build", "fedcba9876543210", "implement", 0, 1)
+        self.assertEqual(one, "012345-impl-build")
+        self.assertEqual(two, "fedcba-impl-build")
+        self.assertNotEqual(one, two)
 
     def test_configured_name_keeps_the_generated_suffixes_when_disambiguating(self) -> None:
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "reviewer-i1")
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "reviewer-a2")
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "reviewer-i2-a3")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "r-reviewer-i1")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "r-reviewer-a2")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "r-reviewer-i2-a3")
         self.assertNotEqual(
             _spawn_label("reviewer", "r", "reviewing", 0, 1), _spawn_label("reviewer", "r", "reviewing", 1, 1)
         )
@@ -2358,17 +2376,21 @@ class SpawnLabelTest(unittest.TestCase):
         )
 
     def test_suffixed_labels_stay_within_the_host_cap(self) -> None:
-        # A configured name at the 64-character cap still fits its first
-        # instance; a suffixed admission that would pass the cap shrinks
-        # its base with a digest of the full name, like the generated
-        # labels do (Macroscope and Cursor review findings: the overflow
-        # would fail every later spawn admission).
+        # The run prefix costs 7 characters of the 64-character cap, so a
+        # long configured name never appears verbatim: a label that would
+        # pass the cap shrinks its base with a digest of the full prefixed
+        # name, like the generated labels do (Macroscope and Cursor review
+        # findings: the overflow would fail every later spawn admission).
         long_name = "x" * SUBAGENT_NAME_MAX_LENGTH
-        self.assertEqual(_spawn_label(long_name, "r", "a", 0, 1), long_name)
+        prefixed_base = f"r-{long_name}"
+        digest = hashlib.sha256(prefixed_base.encode("utf-8")).hexdigest()[:16]
+        first = _spawn_label(long_name, "r", "a", 0, 1)
+        self.assertLessEqual(len(first), SUBAGENT_NAME_MAX_LENGTH)
+        self.assertIn(digest, first)
         second = _spawn_label(long_name, "r", "a", 1, 1)
         self.assertLessEqual(len(second), SUBAGENT_NAME_MAX_LENGTH)
         self.assertTrue(second.endswith("-i1"))
-        self.assertIn(hashlib.sha256(long_name.encode("utf-8")).hexdigest()[:16], second)
+        self.assertIn(digest, second)
         # Truncation alone could collide (two long names sharing the
         # prefix): the digest keeps them distinct.
         sharing_prefix = "x" * (SUBAGENT_NAME_MAX_LENGTH - 1) + "y"
@@ -2489,7 +2511,7 @@ class FactoryHelpTest(unittest.TestCase):
 
         # The configured inline subagent name contract.
         self.assertIn("The optional `name` labels the spawned children", flat)
-        self.assertIn("the first instance is named exactly `name`", flat)
+        self.assertIn("the spawn label is `<run6>-name`", flat)
         self.assertIn("unique across the machine's states", flat)
         self.assertIn("a name another state's name can suffix onto, `foo` vs `foo-i1`, is rejected at write time", flat)
 
@@ -2675,11 +2697,21 @@ def _node_of_name(name: str) -> str:
     """The factory node a spawn name belongs to.
 
     Generated labels are "sw-<node id>-<run>-..."; a state with a
-    configured inline subagent name spawns children named by it verbatim,
-    so such a name keys the node by the whole string.
+    configured inline subagent name spawns children labeled
+    "<run6>-<configured>" (run-scoped), so a leading 6-hex run prefix keys
+    the node by the configured base with any trailing -i<n>/-a<n>
+    disambiguation parts stripped (the test machines' configured names
+    never end in those shapes).
     """
     parts = name.split("-")
-    return parts[1] if parts[0] == "sw" and len(parts) > 2 else name
+    if parts[0] == "sw" and len(parts) > 2:
+        return parts[1]
+    if len(parts[0]) == 6 and all(char in "0123456789abcdef" for char in parts[0]):
+        base = parts[1:]
+        while len(base) > 1 and re.fullmatch(r"i[1-9][0-9]*|a[2-9][0-9]*", base[-1]):
+            base = base[:-1]
+        return "-".join(base)
+    return name
 
 
 class FakeHost:
@@ -2779,6 +2811,14 @@ class FakeHost:
             # current one, so rate_limit_first<n> fails exactly the first n.
             name = payload["kwargs"]["name"]
             node_id = _node_of_name(name)
+            # The supervisor rejects duplicate sibling names: a prior run's
+            # settled children stay registered, so a same-name admission
+            # fails exactly like the real host (the M1 class).
+            if any(child["name"] == name for child in self.children.values()):
+                raise RuntimeError(
+                    f'Agent name "{name}" is unavailable: an agent of that '
+                    "name already exists at depth 1 under this parent"
+                )
             attempted = len(
                 [
                     p
@@ -2835,12 +2875,15 @@ class FakeHost:
         if request_type == "rlm.delete_subagent":
             target = payload["target"]
             child = self.children.pop(target, None)
+            # The real host's delete receipt reports the row as cancelled
+            # (a live child's delete settles it cancelled), so the kernel's
+            # payload validation sees the same shape it sees in production.
             return {
                 "subagent": {
                     "rlm_child_id": target,
                     "session_name": child["name"] if child else "unknown",
                     "session_dir": f"/tmp/{target}",
-                    "status": "running",
+                    "status": "cancelled",
                 },
                 "outcome": "deleted",
             }
@@ -3219,9 +3262,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     async def test_inline_subagent_name_labels_the_spawned_child(self) -> None:
         # Macroscope review finding: the inline subagent name was dropped by
         # _resolve_subagents, so the child spawned with the generated label
-        # instead of the configured name agents message the child by. The
-        # name rides through run creation to the spawn call, and the spawned
-        # event's ledger entry carries the same label.
+        # instead of the configured name. The name rides through run creation
+        # to the spawn call (run-scoped: prefixed with the run id), and the
+        # spawned event's ledger entry carries the same label — the label
+        # agents message the child by.
         self.store_factory(
             {
                 "run": {"failure_policy": "continue"},
@@ -3233,14 +3277,67 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "done")
+        label = f"{result['run_id'][:6]}-reviewer"
         self.assertEqual(
             [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
-            ["reviewer"],
+            [label],
         )
         self.assertEqual(
             [event["name"] for event in self.all_events_of(result, "spawned")],
-            ["reviewer"],
+            [label],
         )
+
+    @async_test
+    async def test_two_runs_of_one_machine_do_not_collide_on_child_names(self) -> None:
+        # M1: machine child names are supervisor-global across runs — a
+        # prior run's settled children stay registered for the run's life
+        # (and forever when their delete failed), so a verbatim configured
+        # name made a fresh run's spawn admission fail with "Agent name ...
+        # is unavailable" and the machine paused at spawn-zero. The
+        # run-scoped label prefix keeps run 2's admissions unique; the
+        # FakeHost rejects duplicate sibling names exactly like the real
+        # supervisor, so this test fails without the prefix.
+        self.host.outcomes["impl"] = {"status": "done", "answer": "IMPL"}
+        self.host.outcomes["check"] = {"status": "done", "answer": "CHECK"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "impl",
+                        "entry": True,
+                        "subagent": {"prompt": "Build.", "name": "impl-build"},
+                        "outputs": [{"name": "built", "type": "text"}],
+                    },
+                    {
+                        "id": "check",
+                        "subagent": "worker",
+                        "inputs": [{"name": "built", "type": "text", "from": "impl.built"}],
+                    },
+                ],
+                "transitions": [{"from": "impl", "to": "check"}],
+            }
+        )
+        first = await self.start()
+        first_status = await self.settle(first)
+        self.assertEqual(first_status["state"], "done")
+        second = await self.start()
+        second_status = await self.settle(second)
+        self.assertEqual(second_status["state"], "done")
+        # Run 2's children spawn with distinct, run-scoped labels; neither
+        # admission collided with run 1's still-registered children.
+        first_label = f"{first['run_id'][:6]}-impl-build"
+        second_label = f"{second['run_id'][:6]}-impl-build"
+        self.assertNotEqual(first_label, second_label)
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(first, "spawned") if event["node"] == "impl"],
+            [first_label],
+        )
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(second, "spawned") if event["node"] == "impl"],
+            [second_label],
+        )
+        self.assertEqual(self.all_events_of(second, "node_error"), [])
 
     @async_test
     async def test_inline_subagent_name_disambiguates_reentry_and_foreach(self) -> None:
@@ -3265,9 +3362,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "done")
+        run_prefix = result["run_id"][:6]
         self.assertEqual(
             [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
-            ["worker", "worker-i1"],
+            [f"{run_prefix}-worker", f"{run_prefix}-worker-i1"],
         )
 
         self.host.outcomes["src"] = {
@@ -3293,18 +3391,19 @@ class FactoryExecutorTest(_ExecutorTestCase):
             },
             spec_id="fan",
         )
-        result = await self.start("fan")
-        status = await self.settle(result)
+        fan_result = await self.start("fan")
+        status = await self.settle(fan_result)
         self.assertEqual(status["state"], "done")
         # The first foreach instance keeps the configured name; the second
         # disambiguates with the instance suffix.
+        fan_prefix = fan_result["run_id"][:6]
         self.assertEqual(
             [
                 p["kwargs"]["name"]
                 for p in self.host.calls_of("rlm.run")
-                if p["kwargs"]["name"].startswith("expander")
+                if f"-expander" in p["kwargs"]["name"]
             ],
-            ["expander", "expander-i1"],
+            [f"{fan_prefix}-expander", f"{fan_prefix}-expander-i1"],
         )
 
     @async_test
@@ -4205,6 +4304,42 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(again, {"run_id": result["run_id"], "state": "stopped", "cancelled": []})
         run_stopped_events = [e for e in self.executor._runs[result["run_id"]].events if e["kind"] == "run_stopped"]
         self.assertEqual(len(run_stopped_events), 1)
+
+    @async_test
+    async def test_stop_delete_receipts_with_cancelled_status_complete_cleanly(self) -> None:
+        # M5: the host's delete receipt reports a cancelled row (a live
+        # child's delete settles it cancelled; a previously-cancelled
+        # settled child keeps the status verbatim), and the kernel's
+        # payload validation must accept it — the receipt raising
+        # "entry has invalid status" used to turn every factory stop into
+        # cancel_failed bookkeeping and make retirement look failed.
+        self.host.outcomes["a"] = {"status": "running"}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_factory(
+            {
+                "nodes": [
+                    {"id": "a", "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                ],
+            }
+        )
+        result = await self.start()
+        await self.wait_until(lambda: self.host.collects >= 1)
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(sorted(stopped["cancelled"]), ["a", "b"])
+        # The delete receipts were accepted: no cancel_failed ledger rows,
+        # and both children released their name slots on the fake host.
+        self.assertEqual(self.all_events_of(result, "cancel_failed"), [])
+        self.assertEqual(
+            [event.get("detail") for event in self.all_events_of(result, "cancelled")],
+            [None, None],
+        )
+        # A retire of the already-cancelled children (the operator's
+        # delete_subagent on a settled/cancelled row) does not raise.
+        for child_id in ("child-1", "child-2"):
+            deleted = await rlm_module.rlm.delete_subagent(child_id)
+            self.assertEqual(deleted.status, "cancelled")
 
     @async_test
     async def test_concurrent_stop_runs_one_cancellation_pass(self) -> None:
@@ -8005,11 +8140,13 @@ class ScriptedHost:
 
     @staticmethod
     def answer_for(name):
-        if name.startswith("files-source"):
+        # The spawn labels are run-prefixed (run-scoped names), so the
+        # configured name matches anywhere in the label.
+        if "files-source" in name:
             return "```json\n{\"files\": [\"sample.ts\"]}\n```"
-        if name.startswith("file-reviewer"):
+        if "file-reviewer" in name:
             return "sample.ts: clean"
-        if name.startswith("review-aggregator"):
+        if "review-aggregator" in name:
             return "```json\n{\"issues\": [], \"clean\": 1}\n```"
         return "done"
 

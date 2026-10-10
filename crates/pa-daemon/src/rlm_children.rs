@@ -256,6 +256,10 @@ struct DeletedChild {
     session_name: String,
     session_dir: String,
     started_at_ms: u64,
+    /// The roster status the row carried at its delete (the idempotent
+    /// re-delete receipt reports it verbatim, so a repeated retire reads
+    /// the same verdict as the first).
+    status: &'static str,
     answer_preview: Option<String>,
     /// The envelope's error: the child's own terminal error when one was
     /// recorded, else the delete reason.
