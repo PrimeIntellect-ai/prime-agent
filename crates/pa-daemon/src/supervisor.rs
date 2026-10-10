@@ -714,8 +714,15 @@ impl Supervisor {
                 // plain drop: a drop on the Tokio worker joins the refresh
                 // thread (and its up-to-350ms in-thread grace wait) right
                 // there, stalling signal_drain and catalog refresh work -
-                // the exact stall shutdown exists to avoid.
-                drop(socket_lease.shutdown().await);
+                // the exact stall shutdown exists to avoid. The shutdown
+                // join error surfaces in the daemon log (the compromise
+                // remains the primary returned error - nothing is
+                // swallowed).
+                if let Err(join_error) = socket_lease.shutdown().await {
+                    self.log.append(&format!(
+                        "daemon socket lease shutdown join failed: {join_error:#}"
+                    ));
+                }
                 return Err(anyhow!("daemon socket lease compromised"));
             }
             () = boot_ownership => {},
@@ -754,7 +761,13 @@ impl Supervisor {
             // The lease shutdown runs off the Tokio worker (the refresh
             // thread's join and its in-thread grace wait would otherwise
             // stall in-flight signal_drain and catalog work at the drop).
-            drop(socket_lease.shutdown().await);
+            // The shutdown join error surfaces in the daemon log - the
+            // assertion failure remains the primary returned error.
+            if let Err(join_error) = socket_lease.shutdown().await {
+                self.log.append(&format!(
+                    "daemon socket lease shutdown join failed: {join_error:#}"
+                ));
+            }
             return Err(error);
         }
         // The archive-sweep and update-prepare-watchdog passes already

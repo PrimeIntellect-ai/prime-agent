@@ -21,6 +21,63 @@ use std::time::Duration;
 /// Minimum staleness threshold, like proper-lockfile's floor.
 const MIN_STALE: Duration = Duration::from_secs(2);
 
+/// Test-only, PATH-SCOPED fault injection for the stale-reclaim dance:
+/// armed for exactly one lock path (parallel tests never interfere) and
+/// cleared by the arming guard's Drop (panic-safe). `heartbeat` makes the
+/// next successful first exchange simulate the live holder's heartbeat
+/// landing mid-dance (the exchanged incumbent reads fresh - the
+/// live-lease arm runs); `swap_mode` drives the swap-home attempts: 0
+/// real, 1 fail without exchanging, 2 perform the real exchange and
+/// THEN report EIO (the ambiguous completion).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static DANCE_FAULT: std::sync::Mutex<Vec<(std::path::PathBuf, bool, u8)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn dance_fault_arm(path: std::path::PathBuf, heartbeat: bool, swap_mode: u8) {
+    DANCE_FAULT
+        .lock()
+        .expect("dance fault table lock")
+        .push((path, heartbeat, swap_mode));
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn dance_fault_heartbeat(path: &Path) -> bool {
+    let Ok(mut armed) = DANCE_FAULT.lock() else {
+        return false;
+    };
+    let Some(entry) = armed
+        .iter_mut()
+        .find(|(armed_path, _, _)| armed_path == path)
+    else {
+        return false;
+    };
+    if entry.1 {
+        entry.1 = false;
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn dance_fault_swap_mode(path: &Path) -> u8 {
+    let Ok(armed) = DANCE_FAULT.lock() else {
+        return 0;
+    };
+    armed
+        .iter()
+        .find(|(armed_path, _, _)| armed_path == path)
+        .map_or(0, |(_, _, mode)| *mode)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn dance_fault_clear(path: &Path) {
+    if let Ok(mut armed) = DANCE_FAULT.lock() {
+        armed.retain(|(armed_path, _, _)| armed_path != path);
+    }
+}
+
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time
 /// that is "not on the second".
@@ -1164,6 +1221,14 @@ impl LockDir {
             };
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {
+                    // Test-only, path-scoped injection: simulate the live
+                    // holder's heartbeat landing mid-dance (the exchanged
+                    // incumbent reads fresh again - the live-lease arm
+                    // runs).
+                    #[cfg(test)]
+                    if dance_fault_heartbeat(path) {
+                        let _ = set_mtime(&placeholder, 4_102_444_800, 0);
+                    }
                     let claimed = identity_at(&placeholder);
                     let released = released_marker(&placeholder);
                     let still_stale = fs::symlink_metadata(&placeholder)
@@ -1210,36 +1275,92 @@ impl LockDir {
                         // swap failure the displaced inode stays where
                         // it is (an inert private dotname its holder can
                         // still reach through the pinned fd).
-                        match rename_noreplace::exchange(path, &placeholder) {
-                            Ok(()) => {
-                                let _ = remove_candidate_dir(&placeholder);
-                            }
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                                return Err(error);
-                            }
-                            Err(error) => {
-                                // The swap-home failed: the public path
-                                // may still hold THIS dance's own
-                                // live-owned placeholder, which a later
-                                // acquire in this very process would
-                                // judge a foreign live lock and wedge
-                                // behind until exit. Only a positive
-                                // identity match against the creation
-                                // witness proves the entry is this
-                                // dance's placeholder before its
-                                // removal - an ambiguous exchange may
-                                // have seated the LIVE lease home at
-                                // the public path instead, and that is
-                                // never this call's to remove.
-                                if placeholder_identity
-                                    .is_some_and(|expected| identity_at(path) == Some(expected))
-                                {
-                                    let _ = remove_candidate_dir(path);
+                        // The swap-home RESTORES the live incumbent under
+                        // the still-held guard. EVERY attempt - success OR
+                        // error - is verified by the inode actually sitting
+                        // at the public path: an exchange that completed
+                        // despite a reported error has already restored the
+                        // lease, and a blind retry would swap it away again
+                        // and its cleanup would DELETE the live lease. The
+                        // public path is never vacated while the fresh
+                        // incumbent remains private: a persistent failure
+                        // fails CLOSED with this dance's own live-owned
+                        // placeholder intact at the public path (a wedge
+                        // this process's exit and the stale window later
+                        // reclaim - never concurrent ownership, and the
+                        // holder's release still finds the private name
+                        // through the placeholder's claimed-at note).
+                        let mut last_error = None;
+                        let mut attempts_left = 4;
+                        // Test-only: the ambiguous-completion fault
+                        // applies to the FIRST attempt only (the
+                        // transient error once, the retry real).
+                        #[cfg(test)]
+                        let mut mode2_consumed = false;
+                        loop {
+                            let attempted = {
+                                #[cfg(test)]
+                                match dance_fault_swap_mode(path) {
+                                    // A synthetic failure that exchanges
+                                    // NOTHING: every attempt fails.
+                                    1 => Err::<(), io::Error>(io::Error::other(
+                                        "injected swap-home failure",
+                                    )),
+                                    // The REAL exchange completes and the
+                                    // error is reported anyway - the
+                                    // ambiguous completion, ONCE.
+                                    2 if !mode2_consumed => {
+                                        mode2_consumed = true;
+                                        let _ = rename_noreplace::exchange(path, &placeholder);
+                                        Err(io::Error::other("injected swap-home failure"))
+                                    }
+                                    _ => rename_noreplace::exchange(path, &placeholder),
                                 }
-                                return Err(error);
+                                #[cfg(not(test))]
+                                rename_noreplace::exchange(path, &placeholder)
+                            };
+                            if let Err(error) = attempted {
+                                if error.kind() == io::ErrorKind::NotFound {
+                                    return Err(error);
+                                }
+                                last_error = Some(error);
+                            }
+                            // The inode at the public path is the only
+                            // restoration truth.
+                            let at_public = identity_at(path);
+                            if incumbent.is_some_and(|expected| at_public == Some(expected)) {
+                                // The live lease is home. Clean this
+                                // dance's placeholder residue at the
+                                // private name ONLY on a positive match
+                                // against its creation witness - a
+                                // substituted entry at the private name
+                                // is never this call's to remove.
+                                if placeholder_identity.is_some_and(|expected| {
+                                    identity_at(&placeholder) == Some(expected)
+                                }) {
+                                    let _ = remove_candidate_dir(&placeholder);
+                                }
+                                return Ok(StaleClaim::Successor);
+                            }
+                            if at_public.is_none() {
+                                return Err(last_error.unwrap_or_else(|| {
+                                    io::Error::new(
+                                        io::ErrorKind::NotFound,
+                                        "the lock path vanished during the restore",
+                                    )
+                                }));
+                            }
+                            // The public path still holds this dance's own
+                            // placeholder (or an entry nothing here may
+                            // touch): retry a bounded count, then fail
+                            // closed with the path held.
+                            attempts_left -= 1;
+                            if attempts_left == 0 {
+                                return Err(last_error.unwrap_or_else(|| {
+                                    io::Error::other("the live lease restore never settled")
+                                }));
                             }
                         }
-                        return Ok(StaleClaim::Successor);
                     }
                     if claimed == incumbent {
                         // The judged stale incumbent, held at the private

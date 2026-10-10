@@ -748,3 +748,112 @@ fn unparseable_owned_lock_is_reclaimed_by_age() {
         LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
     next.ensure_owned().unwrap();
 }
+
+/// Arms the path-scoped dance fault table for one lock path; the guard's
+/// Drop clears it (panic-safe) and parallel tests on other paths never
+/// see the injection.
+#[cfg(target_os = "linux")]
+struct DanceFaultGuard(std::path::PathBuf);
+
+#[cfg(target_os = "linux")]
+impl DanceFaultGuard {
+    fn arm(lock_path: std::path::PathBuf, heartbeat: bool, swap_mode: u8) -> Self {
+        super::dance_fault_arm(lock_path.clone(), heartbeat, swap_mode);
+        DanceFaultGuard(lock_path)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for DanceFaultGuard {
+    fn drop(&mut self) {
+        super::dance_fault_clear(&self.0);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_live_lease_swap_home_never_vacates_the_public_path() {
+    // Fault-injected regression (synthetic failures that exchange
+    // NOTHING): the stale-reclaim dance exchanges a stale incumbent, the
+    // live holder's heartbeat lands mid-dance (the injected freshness),
+    // and every swap-home attempt fails. The claim must fail CLOSED with
+    // this dance's own placeholder intact at the public path - the path
+    // is never vacated while the fresh incumbent remains private (a new
+    // acquire would create a concurrent lock under the original live
+    // holder), and a fresh acquire in THIS process is refused by the
+    // wedged placeholder until the process exits and the stale window
+    // reclaims it.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.json");
+    std::fs::write(&file, "{}").unwrap();
+    let stale = lock_of(&file);
+    std::fs::create_dir(&stale).unwrap();
+    set_mtime(&stale, 1, 0).unwrap();
+    let _faults = DanceFaultGuard::arm(stale.clone(), true, 1);
+    let result = LockDir::acquire(&file, MIN_STALE);
+    let error = result.expect_err("the injected dance must fail closed");
+    assert_ne!(error.kind(), std::io::ErrorKind::WouldBlock);
+    // The public path was NOT vacated: the dance's own placeholder still
+    // holds it (live owner record of this process), so no concurrent
+    // holder can exist.
+    assert!(
+        stale.is_dir(),
+        "the public lock path was vacated - a concurrent lock could be created"
+    );
+    let refused = LockDir::acquire(&file, MIN_STALE).unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the wedged placeholder must refuse a fresh in-process acquire"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_ambiguous_swap_home_completion_restores_the_live_lease() {
+    // Fault-injected regression (the exchange completes and the error is
+    // reported anyway): the claim must resolve by INODE, never by the
+    // attempt's reported outcome - a blind retry would swap the restored
+    // live lease away and its cleanup would delete it. The live lease
+    // must end up home at the public path, this dance's placeholder
+    // residue cleaned, and the claim reported as plain contention.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("auth.json");
+    std::fs::write(&file, "{}").unwrap();
+    let stale = lock_of(&file);
+    std::fs::create_dir(&stale).unwrap();
+    set_mtime(&stale, 1, 0).unwrap();
+    let _faults = DanceFaultGuard::arm(stale.clone(), true, 2);
+    let result = LockDir::acquire(&file, MIN_STALE);
+    // Plain contention - the live lease was restored, nothing consumed.
+    let refused = result.expect_err("a restored live lease must read as contention");
+    assert_eq!(refused.kind(), std::io::ErrorKind::WouldBlock);
+    // The live lease is intact at the public path (an owner directory,
+    // not a deleted husk), and it is the ORIGINAL incumbent - this
+    // dance's placeholder carries an `owner` note the bare test
+    // incumbent never had (a blind retry would swap the restored lease
+    // away and delete it, seating the placeholder at the public path).
+    let metadata = std::fs::metadata(&stale).expect("the live lease must remain");
+    assert!(metadata.is_dir());
+    assert!(
+        !stale.join("owner").exists(),
+        "the public path holds the dance placeholder, not the restored lease"
+    );
+    // The dance's `.j...` placeholder residue is cleaned beside it.
+    let residue: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".j"))
+        .collect();
+    assert!(
+        residue.is_empty(),
+        "placeholder residue left behind: {:?}",
+        residue
+            .iter()
+            .map(std::fs::DirEntry::file_name)
+            .collect::<Vec<_>>()
+    );
+    // A fresh acquire still refuses (the live lease holds the path).
+    let still_refused = LockDir::acquire(&file, MIN_STALE).unwrap_err();
+    assert_eq!(still_refused.kind(), std::io::ErrorKind::WouldBlock);
+}
