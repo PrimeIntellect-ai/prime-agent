@@ -205,6 +205,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  discussion-notifier:
+    name: discussion notification contract
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/discussion-notifier/test_notify.py
+
   migration-packaging:
     name: historical upgrade packaging
     needs: trust
