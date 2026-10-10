@@ -115,14 +115,16 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
     Some(message)
 }
 
-/// The background summarize flight: the summarizer task plus its
-/// per-flight failure bit, set when the summarize errored. The watermark
-/// band drops a failed flight and retries in the background instead of
-/// blocking the boundary on a dead summary.
-pub(crate) struct BackgroundFlight {
-    pub(crate) handle:
+/// The background summarize flight: the in-flight summarize task, or a
+/// finished summary a boundary already validated as usable — the watermark
+/// band commits a `Ready` join without blocking, while anything less (an
+/// unfinished, failed, or unusable summarize) is discarded and retried in
+/// the background.
+pub(crate) enum BackgroundFlight {
+    Summarizing(
         tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,
-    pub(crate) failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ),
+    Ready(Box<compact_session::BackgroundSummary>),
 }
 
 /// The session-bound agent: admission rules + persistence over the loop.

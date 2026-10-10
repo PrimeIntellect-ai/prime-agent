@@ -91,19 +91,31 @@ impl AgentSession {
         match self.context_pressure(run_model).await {
             compaction::ContextPressure::Reserve => true,
             compaction::ContextPressure::Background => {
-                // A finished flight is due only when its summarize
-                // succeeded; a failed one is dropped — the restart below
-                // retries in the background, never blocking the band.
+                // The band never blocks: a finished summarize resolves here
+                // (the await is immediate) and joins only when usable against
+                // `run_model` — the model that measured the pressure. A
+                // failed or unusable summary is discarded, and the restart
+                // below retries in the background; only the reserve crossing
+                // may block on a fresh summarize.
                 let due = match self.compaction_flight.try_lock() {
                     Ok(mut slot) => {
-                        if slot.as_ref().is_some_and(|flight| {
-                            flight.handle.is_finished()
-                                && flight.failed.load(std::sync::atomic::Ordering::SeqCst)
-                        }) {
-                            *slot = None;
-                        }
+                        *slot = match slot.take() {
+                            Some(BackgroundFlight::Summarizing(handle)) if handle.is_finished() => {
+                                match handle.await.ok().and_then(Result::ok) {
+                                    Some(summary)
+                                        if self
+                                            .joined_summary_usable(&summary, run_model)
+                                            .await =>
+                                    {
+                                        Some(BackgroundFlight::Ready(Box::new(summary)))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            other => other,
+                        };
                         slot.as_ref()
-                            .is_some_and(|flight| flight.handle.is_finished())
+                            .is_some_and(|flight| matches!(flight, BackgroundFlight::Ready(_)))
                     }
                     // A compact holds the flight: not due.
                     Err(_) => false,
@@ -157,8 +169,8 @@ impl AgentSession {
         let model = model.clone();
         let auxiliary = self.auxiliary_model.clone();
         let started_at = std::time::Instant::now();
-        let failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let task_failed = std::sync::Arc::clone(&failed);
+        // A failed summarize resolves as the task's own error result — the
+        // band's boundary reads it, discards it, and retries here.
         let task = tokio::spawn(async move {
             let options = crate::session_engine::compact_session::CompactOptions {
                 model,
@@ -172,27 +184,17 @@ impl AgentSession {
                 semantic_edges,
             };
             let prepared =
-                match crate::session_engine::compact_session::summarize_attempt(&attempt, &options)
-                    .await
-                {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        // The watermark band retries in the background instead
-                        // of blocking the next boundary.
-                        task_failed.store(true, std::sync::atomic::Ordering::SeqCst);
-                        return Err(error);
-                    }
-                };
+                crate::session_engine::compact_session::summarize_attempt(&attempt, &options)
+                    .await?;
             Ok(crate::session_engine::compact_session::BackgroundSummary {
                 attempt,
                 prepared,
                 summarize_ms: started_at.elapsed().as_millis() as u64,
             })
         });
-        *slot = Some(BackgroundFlight {
-            handle: tokio_util::task::AbortOnDropHandle::new(task),
-            failed,
-        });
+        *slot = Some(BackgroundFlight::Summarizing(
+            tokio_util::task::AbortOnDropHandle::new(task),
+        ));
     }
 
     /// Remove the trailing assistant message from the loop context, so a
@@ -389,10 +391,7 @@ impl AgentSession {
         // interleave with the replace: it would duplicate in the rebuilt
         // view or vanish under it while staying durable either way.
         let mut flight = self.compaction_flight.lock().await;
-        let background = flight
-            .take()
-            .map(|flight| flight.handle)
-            .filter(|_| custom_instructions.is_none());
+        let background = flight.take().filter(|_| custom_instructions.is_none());
         let mut outcome = self
             .compaction_attempts(&options, relief_model, started_at, background)
             .await?;
@@ -443,18 +442,19 @@ impl AgentSession {
         options: &crate::session_engine::compact_session::CompactOptions<'_>,
         relief_model: &pa_types::ai::Model,
         started_at: std::time::Instant,
-        mut background: Option<
-            tokio_util::task::AbortOnDropHandle<
-                anyhow::Result<crate::session_engine::compact_session::BackgroundSummary>,
-            >,
-        >,
+        mut background: Option<BackgroundFlight>,
     ) -> anyhow::Result<CompactOutcome> {
         /// The conflict-retry bound: a branch that keeps changing under
         /// the compaction fails instead of re-summarizing forever.
         const MAX_COMPACTION_ATTEMPTS: usize = 3;
         for _ in 0..MAX_COMPACTION_ATTEMPTS {
             let mut joined = match background.take() {
-                Some(handle) => handle.await.ok().and_then(Result::ok),
+                // A finished flight's await is immediate; an in-flight one
+                // blocks — the reserve crossing's join.
+                Some(BackgroundFlight::Summarizing(handle)) => {
+                    handle.await.ok().and_then(Result::ok)
+                }
+                Some(BackgroundFlight::Ready(summary)) => Some(*summary),
                 None => None,
             };
             if let Some(summary) = joined.as_ref() {

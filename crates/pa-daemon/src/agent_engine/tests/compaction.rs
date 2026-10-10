@@ -1604,3 +1604,109 @@ fn a_routed_window_rejects_a_join_that_only_relieves_the_session_window() {
     );
     registration.unregister();
 }
+
+/// A finished background summary that would not relieve the context never
+/// blocks the band: the boundary discards it and restarts the summarize
+/// in the background — the blocking fresh compact stays reserved for the
+/// reserve crossing.
+#[test]
+fn an_unrelieving_finished_background_summary_never_blocks_the_watermark_band() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, _replaced) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    // The script registration above is replaced by one serving both lanes,
+    // with response chunks large enough that even the oversized summary
+    // streams in a few deltas. Every turn answers; every summarize
+    // returns a summary too big to relieve the context (the session turns
+    // carry tools, the summarize context does not).
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            provider: Some("faux".to_string()),
+            models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                id: "faux-1".to_string(),
+                name: Some("Faux Model".to_string()),
+                reasoning: Some(false),
+                input: Some(vec![
+                    pa_types::ai::ModelInput::Text,
+                    pa_types::ai::ModelInput::Image,
+                ]),
+                cost: None,
+                context_window: Some(128_000),
+                max_tokens: Some(16_384),
+            }]),
+            token_size_min: Some(50_000),
+            token_size_max: Some(50_000),
+            ..Default::default()
+        });
+    let route = |context: &pa_types::ai::Context,
+                 _: Option<&pa_ai::types::StreamOptions>,
+                 _: u64,
+                 _: &pa_types::ai::Model| {
+        let reply = if context.tools.is_none() {
+            format!("the oversized summary {}", "z".repeat(400_000))
+        } else {
+            "turn reply".to_string()
+        };
+        Ok(pa_ai::faux::faux_assistant_text_message(
+            &reply,
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ))
+    };
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(route)
+        );
+        12
+    ]);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    // The band's own consults (the real arm): each one resolves a finished
+    // flight, and this join never relieves, so every consult discards it
+    // and restarts the summarize in the background — the fourth call is
+    // that restart (the two turns and the first summarize are the other
+    // three), and no consult ever compacts.
+    let mut consult_events: Vec<EngineEvent> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while registration.call_count() < 4 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the band never restarted the discarded join: {} calls so far",
+            registration.call_count()
+        );
+        engine.run_auto_compaction(&mut |event| {
+            consult_events.push(event);
+            true
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        no_compaction_events(&consult_events),
+        "an unusable finished join never makes the band block"
+    );
+    // The restart never blocks the next turn either: the follow-up answers
+    // while the restarted summarize churns in the background.
+    let mut follow_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a small follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    assert_eq!(
+        assistant_texts(&follow_events),
+        vec!["turn reply".to_string()],
+        "the band's turn answered without blocking"
+    );
+    assert!(
+        no_compaction_events(&follow_events),
+        "the restarted flight never blocks the band"
+    );
+    registration.unregister();
+}

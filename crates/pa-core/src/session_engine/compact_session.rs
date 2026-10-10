@@ -459,7 +459,9 @@ pub(crate) async fn summarize_attempt(
     Ok(PreparedCompaction { result, entry })
 }
 
-/// Whether committing the joined summary brings the context under the blocking threshold.
+/// Whether a joined summary may commit: the prepared prefix is intact —
+/// the branch did not move under the flight — and committing the summary
+/// brings the context under the blocking threshold of the relief window.
 pub(crate) fn joined_summary_relieves(
     session: &SessionManager,
     attempt: &CompactionAttempt,
@@ -468,6 +470,9 @@ pub(crate) fn joined_summary_relieves(
     max_output_tokens: u64,
     settings: &super::compaction::CompactionSettings,
 ) -> bool {
+    if !session.compaction_prefix_intact(attempt.prefix_leaf.as_deref()) {
+        return false;
+    }
     let growth = context_tokens(session.retained_entries(), session.get_leaf_id())
         .saturating_sub(attempt.tokens_before);
     let summary_tokens = estimate_tokens(&AgentMessage::CompactionSummary(
