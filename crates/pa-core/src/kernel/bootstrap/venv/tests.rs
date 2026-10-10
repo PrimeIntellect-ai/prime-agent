@@ -1279,7 +1279,12 @@ fn a_parent_death_kills_the_bootstrap_child() {
     let slot_for_thread = child_slot.clone();
     let handle = std::thread::spawn(move || {
         let mut command = std::process::Command::new("sleep");
-        command.arg("30");
+        // Five seconds out, well inside the ten-second deadline: the
+        // child's own exit must lose the race to the parent-death kill,
+        // so only the kill can end it while the stack is intact - and a
+        // stack that lost its kill still dies (and gets reaped below)
+        // rather than leaking.
+        command.arg("5");
         // The stack the real bootstrap children spawn under: if the
         // parent-death signal is dropped from it, this test goes red.
         configure_bootstrap_child_spawn(&mut command);
@@ -1304,8 +1309,9 @@ fn a_parent_death_kills_the_bootstrap_child() {
     let deadline = std::time::Duration::from_secs(10);
     match status_rx.recv_timeout(deadline) {
         Ok(Ok(status)) => {
-            // sleep(1) does not exit on its own inside the deadline:
-            // only the parent-death kill can end the child here.
+            // The child self-exits only after five seconds, the verdict
+            // lands inside milliseconds: only the parent-death kill can
+            // end it with the kill wired.
             assert_eq!(
                 status.signal(),
                 Some(libc::SIGKILL),
@@ -1318,12 +1324,12 @@ fn a_parent_death_kills_the_bootstrap_child() {
             panic!("the child's wait failed: {err}");
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // The death signal never fired. The verdict below fails the
-            // test, and the child is self-bounded (`sleep 30`): the
-            // waiter's blocking wait still reaps it when it self-exits,
-            // so the failure path needs no kill - a kill by pid here
-            // could only reach a recycled pid, which is an unrelated
-            // process.
+            // The child cannot outlive the deadline on its own, so this
+            // arm is the wiring lost AND the natural exit unscheduled -
+            // the join below still reaps it before the verdict fails the
+            // test, and no kill is ever sent to a pid that might have
+            // been recycled.
+            waiter.join().expect("the waiter thread ran");
             panic!("the child outlived its spawning thread");
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
