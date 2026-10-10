@@ -47,6 +47,39 @@ impl AgentSession {
         )
     }
 
+    /// The relief window and request output budget `context_pressure`
+    /// measures `model` against — a joined summary must relieve the same
+    /// limits the pressure decision used.
+    async fn relief_limits(&self, model: &pa_types::ai::Model) -> (u64, u64) {
+        let thinking_level =
+            provider_adapter::model_thinking_level(self.agent.state().await.thinking_level);
+        (
+            model.context_window,
+            compaction::request_output_budget(model, thinking_level),
+        )
+    }
+
+    /// Whether a joined background summary may commit: its prepared prefix
+    /// is intact and the rebuilt context relieves `relief_model`'s blocking
+    /// threshold.
+    async fn joined_summary_usable(
+        &self,
+        summary: &crate::session_engine::compact_session::BackgroundSummary,
+        relief_model: &pa_types::ai::Model,
+    ) -> bool {
+        let (context_window, max_output_tokens) = self.relief_limits(relief_model).await;
+        let settings = self.compaction_settings();
+        let session = self.session.lock().await;
+        crate::session_engine::compact_session::joined_summary_relieves(
+            &session,
+            &summary.attempt,
+            &summary.prepared,
+            context_window,
+            max_output_tokens,
+            &settings,
+        )
+    }
+
     /// Whether the threshold compaction must run at this boundary; starts
     /// the background summarize at the watermark.
     pub async fn auto_compaction_now(
@@ -280,6 +313,48 @@ impl AgentSession {
         api_key: Option<String>,
         abort: Option<&pa_agent::abort::AbortSignal>,
     ) -> anyhow::Result<CompactOutcome> {
+        self.compact_with_relief_model(custom_instructions, model, model, api_key, abort)
+            .await
+    }
+
+    /// [`Self::compact`] with the relief window following `run_model` — the
+    /// model the pressure decision measured — while `model` still
+    /// summarizes. The pressure-driven arms call this; the manual paths
+    /// stay on [`Self::compact`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the abort error, or the summarizer/persist failure; a skip is a normal `Ok` outcome.
+    pub async fn compact_for_run_model(
+        &self,
+        custom_instructions: Option<&str>,
+        run_model: &pa_types::ai::Model,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+    ) -> anyhow::Result<CompactOutcome> {
+        self.compact_with_relief_model(custom_instructions, run_model, model, api_key, abort)
+            .await
+    }
+
+    /// The shared compaction body; `relief_model` is the window a joined
+    /// background summary must relieve.
+    ///
+    /// # Errors
+    ///
+    /// Returns the abort error, or the summarizer/persist failure; a skip is a normal `Ok` outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the compaction summary sink slot's mutex is poisoned.
+    async fn compact_with_relief_model(
+        &self,
+        custom_instructions: Option<&str>,
+        relief_model: &pa_types::ai::Model,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        abort: Option<&pa_agent::abort::AbortSignal>,
+    ) -> anyhow::Result<CompactOutcome> {
         compaction_trace::trace(
             "compact.enter",
             &serde_json::json!({
@@ -319,7 +394,7 @@ impl AgentSession {
             .map(|flight| flight.handle)
             .filter(|_| custom_instructions.is_none());
         let mut outcome = self
-            .compaction_attempts(&options, started_at, background)
+            .compaction_attempts(&options, relief_model, started_at, background)
             .await?;
         if matches!(outcome, CompactOutcome::Skipped(_)) {
             compaction_trace::trace("compact.skipped", &serde_json::Value::Null);
@@ -366,6 +441,7 @@ impl AgentSession {
     async fn compaction_attempts(
         &self,
         options: &crate::session_engine::compact_session::CompactOptions<'_>,
+        relief_model: &pa_types::ai::Model,
         started_at: std::time::Instant,
         mut background: Option<
             tokio_util::task::AbortOnDropHandle<
@@ -382,22 +458,7 @@ impl AgentSession {
                 None => None,
             };
             if let Some(summary) = joined.as_ref() {
-                let max_output_tokens = compaction::request_output_budget(
-                    &options.model,
-                    provider_adapter::model_thinking_level(self.agent.state().await.thinking_level),
-                );
-                let relieves = {
-                    let session = self.session.lock().await;
-                    crate::session_engine::compact_session::joined_summary_relieves(
-                        &session,
-                        &summary.attempt,
-                        &summary.prepared,
-                        options.model.context_window,
-                        max_output_tokens,
-                        &options.settings,
-                    )
-                };
-                if !relieves {
+                if !self.joined_summary_usable(summary, relief_model).await {
                     joined = None;
                 }
             }

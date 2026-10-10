@@ -1501,3 +1501,106 @@ fn a_failed_background_summarize_never_blocks_the_watermark_band() {
     );
     registration.unregister();
 }
+
+/// Arm a routed image-model target directly (the slot the boundary checks
+/// read): the routed model feeds the pressure decision while the session
+/// model keeps summarizing — no turn serves on it in this test.
+fn arm_routed_window(engine: &AgentSessionEngine, window: u64) {
+    let routed: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+        "id": "faux-routed", "name": "Faux Routed", "api": "faux", "provider": "faux",
+        "baseUrl": "http://localhost:0", "reasoning": false, "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": window, "maxTokens": 16_384,
+    }))
+    .expect("the routed model parses");
+    let route = crate::image_route::ImageRoute {
+        target: pa_core::session_engine::provider_adapter::ProviderTarget {
+            service_tier: None,
+            api_key: engine.resolve_request_api_key(&routed),
+            model: routed.clone(),
+            headers: None,
+        },
+        agent_override: pa_agent::agent::AgentModelOverride {
+            thinking_level: pa_core::session_engine::provider_adapter::map_thinking_level(
+                engine.effective_thinking(),
+            ),
+            model: pa_core::session_engine::provider_adapter::json_round_trip(&routed)
+                .expect("the routed agent model converts"),
+        },
+        session_target: None,
+    };
+    *engine
+        .image_route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(route);
+}
+
+/// The relief check follows the routed run model, not the session model: a
+/// joined summary that relieves the SESSION window but leaves the routed
+/// context over its own blocking threshold is discarded and re-summarized.
+#[test]
+fn a_routed_window_rejects_a_join_that_only_relieves_the_session_window() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Reserve 20_000 puts the session band at (51_616, 91_616] — the
+    // background flight starts there — while the 64k routed window's
+    // threshold sits at 27_616: the same context is Reserve on the routed
+    // model, and its kept tail alone already passes the session window's
+    // relief check.
+    let band_prompt = format!("band turn {}", "x".repeat(260_000));
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "band reply"},
+                {"text": "the join summary"},
+                {"text": "the fresh summary"},
+            ]
+        }),
+        20_000,
+    );
+    let engine = std::sync::Arc::new(engine);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    assert!(
+        no_compaction_events(&events),
+        "the session-window boundaries stay silent"
+    );
+    // The band crossing started the background summarize (the join).
+    wait_for_calls(&registration, 3);
+    // Arm the routed target: the boundary below measures the same context
+    // against the routed window.
+    arm_routed_window(&engine, 64_000);
+    let mut drive_events: Vec<EngineEvent> = Vec::new();
+    engine.run_auto_compaction(&mut |event| {
+        drive_events.push(event);
+        true
+    });
+    let starts = drive_events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .count();
+    assert_eq!(starts, 1, "one threshold pair: {drive_events:?}");
+    let EngineEvent::Compaction { event, .. } = drive_events
+        .iter()
+        .rev()
+        .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .expect("the routed reserve crossing compacted")
+    else {
+        unreachable!("matched above");
+    };
+    assert_eq!(event["reason"], serde_json::json!("threshold"));
+    assert_eq!(
+        event["result"]["summary"],
+        serde_json::json!("the fresh summary"),
+        "the join that only relieved the session window was discarded and re-summarized"
+    );
+    assert_eq!(
+        registration.call_count(),
+        4,
+        "the join summarized once and the fresh path once"
+    );
+    registration.unregister();
+}
