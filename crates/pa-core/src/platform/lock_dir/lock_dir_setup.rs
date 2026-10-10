@@ -43,11 +43,11 @@ pub fn mkdir_mode_0700(path: &Path) -> io::Result<()> {
     let _guard = PRIVATE_UMASK_LOCK.lock();
     let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
         .map_err(|_| io::Error::other("non-null-free directory path"))?;
-    // The umask only clears bits the request never sets under the
-    // toggle: 0700 stays exactly 0700 (the toggle's save/restore is
-    // belt-and-braces for an external umask that could otherwise
-    // strip owner bits).
-    let prior_umask = unsafe { libc::umask(0) };
+    // The umask only clears bits the request never sets: 0700 &
+    // ~0077 = 0700 exactly, and the NARROW toggle (0077, not 0000)
+    // keeps the process-wide window tight for unrelated concurrent
+    // creations (a 0000 toggle would let them create 0666 files).
+    let prior_umask = unsafe { libc::umask(0o077) };
     let code = unsafe { libc::mkdir(raw_path.as_ptr(), 0o700) };
     unsafe { libc::umask(prior_umask) };
     if code != 0 {
