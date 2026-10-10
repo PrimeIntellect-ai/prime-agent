@@ -397,19 +397,20 @@ impl AgentSessionEngine {
         Option<std::collections::BTreeMap<String, String>>,
         bool,
     ) {
-        let mut auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        // One read cycle answers both questions: the store's health AND
-        // whether it holds a credential for this provider (the same
-        // lookup the registry's resolution runs internally).
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let store_healthy = auth.load_error().is_none();
-        let stored_credential = auth
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
+        // The credential check runs AFTER the resolution: the registry's
+        // lookup may OAuth-refresh and store a fresh token, so a check
+        // before it would read the stale one and discard the fresh pair.
+        let stored_credential = registry
+            .auth
             .get_api_key_with_source_token(&model.provider, false)
             .api_key
             .is_some();
         let store_auth = store_healthy && stored_credential;
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
         if let Some(api_key) = &self.current_selection().api_key {
             // The create-config key override pins the key, never the headers:
             // the registry's merged headers still ship, exactly like the TS

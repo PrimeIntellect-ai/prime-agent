@@ -885,7 +885,11 @@ impl AgentSessionEngine {
                     // this match's scrutinee still holds.
                     Err(std::sync::TryLockError::Poisoned(poison)) => break poison.into_inner(),
                 }
-                tokio::task::yield_now().await;
+                // Park, never hot-spin: a reload holds the lock across
+                // auth-file I/O and a possible OAuth refresh, and
+                // yield_now would leave this task immediately runnable
+                // through all of it.
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             };
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
