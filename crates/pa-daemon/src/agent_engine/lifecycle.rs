@@ -870,12 +870,27 @@ impl AgentSessionEngine {
             // The build's resolve-and-install serializes with `/reload`'s
             // live-input refresh (the other slot writers' fence): a reload
             // landing between this resolution and the slot write must not
-            // be clobbered by the build's older pair. The guard never
-            // rides an await — the block is synchronous and scoped.
-            let _reload_serialized = self
-                .reload_lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // be clobbered by the build's older pair. The lock is
+            // acquired by yielding, never by blocking this worker: a
+            // reload holds the lock across auth-file I/O and a possible
+            // OAuth refresh, so a blocking acquire on an async path
+            // would stall the executor for that span.
+            let _reload_serialized = loop {
+                match self.reload_lock.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::WouldBlock) => {}
+                    // A poisoned lock is unlocked: the blocking acquire
+                    // below returns instantly (the panicking holder is
+                    // gone), so it never stalls this worker.
+                    Err(std::sync::TryLockError::Poisoned(_)) => {
+                        break self
+                            .reload_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    }
+                }
+                tokio::task::yield_now().await;
+            };
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
