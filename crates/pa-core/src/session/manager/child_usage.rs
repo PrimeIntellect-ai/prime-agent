@@ -43,6 +43,12 @@ impl SessionManager {
         child_usage: Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> io::Result<ChildUsageAppendResult> {
+        if row_id.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "attribution ID is empty",
+            ));
+        }
         self.reconcile_child_usage()?;
         let target_index = self.by_id.get(target_id).copied().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "missing child usage target")

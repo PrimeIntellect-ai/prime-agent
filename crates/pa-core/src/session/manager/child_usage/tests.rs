@@ -64,6 +64,103 @@ fn usage(manager: &SessionManager, id: &str) -> Usage {
 }
 
 #[test]
+fn materialization_replaces_only_the_header_and_preserves_owned_rows() {
+    let (dir, existing, original_target) = fixture();
+    let FileEntry::Message { message, .. } = existing.get_entry_by_id(&original_target).unwrap()
+    else {
+        panic!("assistant expected");
+    };
+    let mut manager = SessionManager::in_memory(dir.path());
+    if let FileEntry::Header { header } = &mut manager.file_entries[0] {
+        header.parent_session = Some("upstream-session".to_owned());
+        header.rlm_depth = Some(3);
+    }
+    let old_session = manager.session_id.clone();
+    manager.append_message(user()).unwrap();
+    let target = manager.append_message(message.clone()).unwrap();
+    manager
+        .append_custom_entry("fixture", Some(serde_json::json!({"kept":true})))
+        .unwrap();
+    manager.leaf_id = Some(target.clone());
+    let kept = manager
+        .file_entries
+        .iter()
+        .filter(|row| !matches!(row, FileEntry::Header { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let path = manager.materialize_session_file(Some(dir.path().join("materialized")));
+    assert_ne!(manager.session_id, old_session);
+    assert_eq!(manager.get_leaf_id(), Some(target.as_str()));
+    assert_eq!(
+        manager
+            .file_entries
+            .iter()
+            .filter(|row| matches!(row, FileEntry::Header { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        serde_json::to_value(&manager.file_entries[1..]).unwrap(),
+        serde_json::to_value(&kept).unwrap()
+    );
+    for row in &kept {
+        let id = row.id().unwrap();
+        assert_eq!(
+            serde_json::to_value(manager.get_entry_by_id(id).unwrap()).unwrap(),
+            serde_json::to_value(row).unwrap()
+        );
+    }
+    let header = manager.get_header().unwrap();
+    assert_eq!(header.parent_session.as_deref(), Some("upstream-session"));
+    assert_eq!(header.rlm_depth, Some(3));
+    assert_eq!(usage(&manager, &target).input, 1000);
+    manager.child_usage_write_fault = Some(WriteFault::Sync);
+    assert!(manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    manager
+        .append_child_usage_once("stable", &target, child(), None)
+        .unwrap();
+    let reopened = SessionManager::open(manager.get_cwd(), manager.get_session_dir(), &path);
+    assert_eq!(usage(&reopened, &target).input, 1010);
+    assert_eq!(
+        rows(&manager)
+            .iter()
+            .filter(|row| row["type"] == "session")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn empty_attribution_id_cannot_mutate_or_poison_the_store() {
+    let (_dir, mut manager, target) = fixture();
+    let path = manager.get_session_file().unwrap().to_owned();
+    let before = std::fs::read(&path).unwrap();
+    let live = serde_json::to_value(&manager.file_entries).unwrap();
+    let leaf = manager.leaf_id.clone();
+    manager.child_usage_write_fault = Some(WriteFault::Sync);
+    assert_eq!(
+        manager
+            .append_child_usage_once("", &target, child(), None)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(serde_json::to_value(&manager.file_entries).unwrap(), live);
+    assert_eq!(manager.leaf_id, leaf);
+    assert!(manager.pending_child_usage.is_none());
+    assert!(manager
+        .append_child_usage_once("valid", &target, child(), None)
+        .is_err());
+    manager
+        .append_child_usage_once("valid", &target, child(), None)
+        .unwrap();
+    assert_eq!(rows(&manager).len(), 3);
+}
+
+#[test]
 fn retained_assistant_failure_is_durable_before_attribution_acknowledgment() {
     let (_dir, mut manager, previous) = fixture();
     let path = manager.get_session_file().unwrap().to_owned();

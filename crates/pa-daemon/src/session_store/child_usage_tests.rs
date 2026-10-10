@@ -393,3 +393,40 @@ fn recovery_rejects_interior_headers_and_empty_ids_without_changing_bytes() {
         assert_eq!(store.child_usage_pending.len(), 1);
     }
 }
+
+#[test]
+fn empty_attribution_id_is_rejected_before_mutation_or_fault_consumption() {
+    let (_dir, mut store, target) = fixture();
+    let before_bytes = std::fs::read(&store.path).unwrap();
+    let before_entries = serde_json::to_value(store.entries()).unwrap();
+    let before_leaf = store.leaf_id().map(str::to_owned);
+    store.child_usage_fault = Some(AppendFault::AfterWrite);
+    assert!(store
+        .append_child_usage_once("", &target, child(), None)
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), before_bytes);
+    assert_eq!(
+        serde_json::to_value(store.entries()).unwrap(),
+        before_entries
+    );
+    assert_eq!(store.leaf_id(), before_leaf.as_deref());
+    assert!(store.child_usage_pending.is_empty());
+    assert!(store.child_usage_unconfirmed.is_empty());
+    // Validation cannot consume the backend fault: the valid attempt still fails after bytes land.
+    assert!(store
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    assert!(matches!(
+        store
+            .append_child_usage_once("stable", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Created(_)
+    ));
+    assert_eq!(
+        rows(&store)
+            .iter()
+            .filter(|row| row["id"] == "stable")
+            .count(),
+        1
+    );
+}

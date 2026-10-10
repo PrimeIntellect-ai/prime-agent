@@ -27,6 +27,7 @@ impl SessionFile {
         child_usage: Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> Result<ChildUsageAppendResult> {
+        ensure!(!row_id.is_empty(), "empty child attribution row ID");
         self.recover_child_usage()?;
         if let Some(entry) = self.entry(row_id) {
             ensure!(

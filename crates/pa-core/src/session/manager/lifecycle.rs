@@ -580,8 +580,14 @@ impl SessionManager {
                 }
             )
         });
+        let leaf = self.leaf_id.clone();
         self.file_entries = vec![header];
-        self.file_entries.extend(rest);
+        self.file_entries.extend(
+            rest.into_iter()
+                .filter(|entry| !matches!(entry, FileEntry::Header { .. })),
+        );
+        self.build_index();
+        self.leaf_id = leaf;
         self.has_assistant_entry = has_assistant;
         self.rewrite_file();
         self.flushed = true;
