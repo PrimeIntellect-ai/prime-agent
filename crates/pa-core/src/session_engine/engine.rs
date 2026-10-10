@@ -522,7 +522,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         // the child-agent reply doctrine, never the root identity.
         rlm_depth: config.rlm_depth,
         daemonless: config.daemonless,
-        inline_subagents: config.rlm_subagent_host.is_some(),
+        can_spawn: config.rlm_subagent_host.is_some(),
         generic_mcp_servers,
         prompt_guidelines: Some(prompt_guidelines),
         ..Default::default()

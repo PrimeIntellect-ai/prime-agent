@@ -398,16 +398,6 @@ impl AgentSessionEngine {
     }
 }
 
-/// The last persisted `rlm_max_depth_state` custom entry in a session
-/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a resumed
-/// session re-seeds its depth bound from. `None` when absent or unreadable.
-/// Same contract as the reference oracle (`agent_engine/tests.rs`): whole
-/// file valid UTF-8, newest-first, malformed lines skip.
-#[cfg(test)]
-pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
-    pa_core::session_engine::rlm_host::persisted_rlm_max_depth(path)
-}
-
 /// The saved model context of a session file: the pinned `(provider,
 /// model)` and the saved thinking level, present only when the file carries
 /// a `thinking_level_change` row. `None` when the file cannot be read (the

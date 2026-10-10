@@ -37,14 +37,6 @@ use tokio::sync::{Mutex, Notify};
 use crate::print_boundary::TurnBoundary;
 use crate::print_runtime::{ChildEngineOverrides, FauxChildQueue, HeadlessEmbedding};
 
-fn now_ms() -> u64 {
-    crate::util_time::now_ms()
-}
-
-fn now_iso() -> String {
-    crate::util_time::now_iso8601()
-}
-
 /// Everything a spawned child inherits from the print invocation: the
 /// invocation's own config (cwd, agent dir, prompt/skill paths) and the
 /// parsed faux script when the run is scripted.
@@ -63,7 +55,10 @@ pub(crate) struct InlineSessionNode {
     /// The session's directory (the spawn handle and roster rows carry it).
     pub(crate) session_dir: String,
     /// The recorded session name (children: the spawn name).
-    session_name: Mutex<Option<String>>,
+    session_name: std::sync::Mutex<Option<String>>,
+    /// Serializes same-parent spawn admissions (the name check through
+    /// the children push); host requests run as detached tasks.
+    spawn_gate: tokio::sync::Mutex<()>,
     pub(crate) depth: u32,
     pub(crate) max_depth: u32,
     /// The session's model selector (`provider/id`), inherited by children.
@@ -97,33 +92,32 @@ impl InlineSessionNode {
     fn mark_disposed(&self) {
         self.disposed
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.activity.notify_one();
+        self.activity.notify_waiters();
     }
 
-    pub(crate) async fn session_name(&self) -> Option<String> {
-        self.session_name.lock().await.clone()
+    pub(crate) fn session_name(&self) -> Option<String> {
+        self.session_name.lock().unwrap().clone()
     }
 
-    async fn set_session_name(&self, name: Option<String>) {
-        *self.session_name.lock().await = name;
+    fn set_session_name(&self, name: Option<String>) {
+        *self.session_name.lock().unwrap() = name;
     }
 
     /// The endpoint block a delivered row's `from`/`target` fields carry.
-    async fn endpoint(&self) -> Value {
+    fn endpoint(&self) -> Value {
         let mut endpoint = json!({
             "activeSessionId": self.session_id,
             "sessionId": self.session_id,
         });
-        if let Some(name) = self.session_name().await {
+        if let Some(name) = self.session_name() {
             endpoint["sessionName"] = json!(name);
         }
         endpoint
     }
 
     /// The session's own name for prompts (the recorded name, else the id).
-    async fn sender_name(&self) -> String {
+    fn sender_name(&self) -> String {
         self.session_name()
-            .await
             .unwrap_or_else(|| self.session_id.clone())
     }
 
@@ -142,7 +136,7 @@ impl InlineSessionNode {
         let children: Vec<Arc<InlineChild>> = self.children.lock().await.clone();
         let mut matches = Vec::new();
         for child in &children {
-            let name = child.node.session_name().await;
+            let name = child.node.session_name();
             if child.rlm_child_id == target
                 || child.node.session_id == target
                 || name.as_deref() == Some(target)
@@ -224,7 +218,8 @@ pub(crate) fn root_node(
             .get_session_file()
             .map(|path| path.display().to_string()),
         session_dir: session_manager.get_session_dir().display().to_string(),
-        session_name: Mutex::new(None),
+        session_name: std::sync::Mutex::new(None),
+        spawn_gate: tokio::sync::Mutex::new(()),
         depth: 0,
         max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),
         model_selector: std::sync::Mutex::new(None),
@@ -272,11 +267,26 @@ pub(crate) fn inline_subagent_wiring(
 
 // The quiescence drive
 
+/// Whether inline subagent work is unsettled (TS
+/// `_hasUnsettledRlmQuiescenceWork`): a running child, a delivered row
+/// waiting in a child's lane, or a row queued on the root's own agent.
+/// The goal/autonomous continuation gates and the drive's return read
+/// this one probe.
+pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> bool {
+    if node.has_unsettled_children().await {
+        return true;
+    }
+    node.engine
+        .get()
+        .and_then(Weak::upgrade)
+        .is_some_and(|engine| engine.session.agent().has_queued_messages())
+}
+
 /// Drive one inline session to quiescence: drain delivered messages as
 /// turns (through the print turn-boundary pair), wait out unsettled
 /// descendants, and return once the session is idle with an empty queue
-/// and a settled subtree. The activity notify is the one event source;
-/// the wake registers before every check so no notification is lost.
+/// and a settled subtree — `true` when any turn drained (the drive loop
+/// re-enters the boundary so the turns it armed drain).
 pub(crate) async fn drive_to_quiescence(
     node: &Arc<InlineSessionNode>,
     engine: &Arc<SessionEngine>,
@@ -284,11 +294,18 @@ pub(crate) async fn drive_to_quiescence(
     model: &Model,
     api_key: Option<String>,
     global_harness_dir: std::path::PathBuf,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut drained = false;
     loop {
         if node.is_disposed() {
-            return Ok(());
+            return Ok(drained);
         }
+        // The wake registers before the checks (the enable-then-check
+        // pattern): a settle or delivery that lands mid-scan still wakes
+        // the parked drive; `notify_waiters` is the one event source.
+        let notified = node.activity.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let agent = engine.session.agent();
         let streaming = agent.state().await.is_streaming;
         if !streaming && agent.has_queued_messages() {
@@ -303,16 +320,13 @@ pub(crate) async fn drive_to_quiescence(
             boundary
                 .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
                 .await?;
+            drained = true;
             continue;
         }
-        if !streaming && !agent.has_queued_messages() && !node.has_unsettled_children().await {
-            return Ok(());
+        if !streaming && !has_unsettled_rlm_work(node).await {
+            return Ok(drained);
         }
-        // One event source: a delivered message or a child's settle fires the
-        // activity notify. A stale notification from a delivered-since-consumed
-        // message parks here once and re-checks harmlessly (the notify flag
-        // lives until polled).
-        node.activity.notified().await;
+        notified.await;
     }
 }
 
@@ -339,25 +353,24 @@ async fn drive_child(child: Arc<InlineChild>) {
             return;
         }
         settle_child(&child, run_error).await;
-        // A settled child keeps listening: park until a delivered row is
-        // actually waiting (a stale notify flag parks and re-checks
-        // harmlessly).
+        // A settled child keeps listening: the enable-then-check park —
+        // a delivered row that lands mid-scan still wakes the driver.
         loop {
-            child.node.activity.notified().await;
+            let notified = child.node.activity.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if child.node.is_disposed() {
                 return;
             }
             if child.engine.session.agent().has_queued_messages() {
                 break;
             }
+            notified.await;
         }
         let mut state = child.state.lock().await;
         state.settled = false;
         state.status = "running";
-        state.started_at_ms = now_ms();
-        // A new task run: a child that stays silent this round still
-        // earns the no-reply notice.
-        state.replied_since_task = false;
+        state.started_at_ms = crate::util_time::now_ms();
     }
 }
 
@@ -369,7 +382,6 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
     let name = child
         .node
         .session_name()
-        .await
         .unwrap_or_else(|| child.rlm_child_id.clone());
     let notice = {
         let mut state = child.state.lock().await;
@@ -385,7 +397,7 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
                 &child.rlm_child_id,
                 &name,
                 &error,
-                now_ms(),
+                crate::util_time::now_ms(),
             ))
         } else {
             state.status = "done";
@@ -399,7 +411,7 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
                             .as_deref()
                             .map(compact_rlm_text),
                     },
-                    now_ms(),
+                    crate::util_time::now_ms(),
                 )
             })
         }
@@ -416,7 +428,7 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
                 eprintln!("pa-cli: RLM child notice was not delivered: {error:#}");
             }
         }
-        parent.activity.notify_one();
+        parent.activity.notify_waiters();
     }
 }
 
@@ -455,28 +467,34 @@ fn deliver_row(node: &Arc<InlineSessionNode>, row: Value) -> anyhow::Result<()> 
     let loop_row = custom_message_to_loop_row(&custom)
         .ok_or_else(|| anyhow::anyhow!("the delivered row failed its loop conversion"))?;
     engine.session.agent().steer(loop_row);
-    node.activity.notify_one();
+    node.activity.notify_waiters();
     Ok(())
 }
 
 // The exit disposal (TS `disposeHostedSubagentRuntimes`)
 
-/// Tear every inline descendant down: abort any running turn, dispose
-/// every kernel with a final namespace snapshot, and join every driver
-/// task. No child kernel may outlive the print process.
-pub(crate) async fn dispose_inline_subagents(root: &Arc<InlineSessionNode>) {
-    let mut pending = vec![Arc::clone(root)];
-    while let Some(node) = pending.pop() {
-        for child in std::mem::take(&mut *node.children.lock().await) {
-            child.node.mark_disposed();
-            child.engine.session.agent().abort();
-            child.engine.dispose_kernel().await;
-            if let Some(driver) = child.driver.lock().await.take() {
-                let _ = driver.await;
-            }
-            // The child's own subtree follows.
-            pending.push(Arc::clone(&child.node));
+/// Tear one inline child down, its subtree with it: mark it disposed,
+/// abort any running turn, dispose the kernel with a final namespace
+/// snapshot, and join the driver task. No child kernel may outlive the
+/// print process.
+async fn dispose_child(child: &Arc<InlineChild>) {
+    let mut pending = vec![Arc::clone(child)];
+    while let Some(current) = pending.pop() {
+        current.node.mark_disposed();
+        current.engine.session.agent().abort();
+        current.engine.dispose_kernel().await;
+        if let Some(driver) = current.driver.lock().await.take() {
+            let _ = driver.await;
         }
+        pending.extend(std::mem::take(&mut *current.node.children.lock().await));
+    }
+}
+
+/// Tear every inline descendant of the root down.
+pub(crate) async fn dispose_inline_subagents(root: &Arc<InlineSessionNode>) {
+    let children = std::mem::take(&mut *root.children.lock().await);
+    for child in children {
+        dispose_child(&child).await;
     }
 }
 
@@ -506,7 +524,7 @@ impl RlmSubagentHost for InlineHost {
             let mut entries = Vec::with_capacity(children.len());
             for child in &children {
                 let state = child.state.lock().await;
-                entries.push(roster_entry(child, &state).await);
+                entries.push(roster_entry(child, &state));
             }
             Ok(entries)
         })
@@ -516,25 +534,26 @@ impl RlmSubagentHost for InlineHost {
         let node = Arc::clone(&self.0);
         Box::pin(async move {
             let child = node.find_child(&target).await.map_err(anyhow::Error::msg)?;
+            let was_running = !child.state.lock().await.settled;
             // Cancel the subtree first (its own children observe their
-            // disposed flag and unwind), then the child's run and kernel.
-            dispose_inline_subagents(&child.node).await;
-            child.node.mark_disposed();
-            child.engine.session.agent().abort();
-            child.engine.dispose_kernel().await;
+            // disposed flag and unwind), then the child's run, kernel,
+            // and driver.
+            dispose_child(&child).await;
             let entry = {
                 let mut state = child.state.lock().await;
                 state.settled = true;
-                state.status = "cancelled";
-                state.error = Some("Deleted by parent orchestrator".to_string());
-                roster_entry(&child, &state).await
+                if was_running {
+                    state.status = "cancelled";
+                    state.error = Some("Deleted by parent orchestrator".to_string());
+                }
+                roster_entry(&child, &state)
             };
             node.children
                 .lock()
                 .await
                 .retain(|other| !Arc::ptr_eq(other, &child));
             // The settle that the parked parent drive waits for.
-            node.activity.notify_one();
+            node.activity.notify_waiters();
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),
@@ -556,17 +575,22 @@ impl RlmSubagentHost for InlineHost {
             };
             let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
             loop {
+                // The wake registers before the snapshot: a settle that
+                // lands mid-scan still wakes the collect.
+                let notified = node.activity.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let mut all_settled = true;
                 let mut results = Vec::with_capacity(children.len());
                 for child in &children {
                     let state = child.state.lock().await;
                     all_settled &= state.settled;
-                    results.push(collect_result(child, &state).await);
+                    results.push(collect_result(child, &state));
                 }
                 if all_settled || deadline <= tokio::time::Instant::now() {
                     return Ok(results);
                 }
-                let _ = tokio::time::timeout_at(deadline, node.activity.notified()).await;
+                let _ = tokio::time::timeout_at(deadline, notified.as_mut()).await;
             }
         })
     }
@@ -590,7 +614,7 @@ impl RlmSubagentHost for InlineHost {
                     by_ids = Some(Arc::clone(child));
                     break;
                 }
-                if child.node.session_name().await.as_deref() == Some(target.as_str()) {
+                if child.node.session_name().as_deref() == Some(target.as_str()) {
                     by_name = true;
                 }
             }
@@ -605,7 +629,6 @@ impl RlmSubagentHost for InlineHost {
                 );
             };
             rename_session(&child.node, &name).await?;
-            child.node.set_session_name(Some(name.clone())).await;
             Ok(name)
         })
     }
@@ -623,10 +646,11 @@ async fn rename_session(node: &Arc<InlineSessionNode>, name: &str) -> anyhow::Re
     session
         .append_session_info(name)
         .map_err(anyhow::Error::from)?;
+    node.set_session_name(Some(name.to_string()));
     Ok(())
 }
 
-async fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmSubagentEntry {
+fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmSubagentEntry {
     RlmSubagentEntry {
         rlm_child_id: child.rlm_child_id.clone(),
         active_session_id: Some(child.node.session_id.clone()),
@@ -634,7 +658,6 @@ async fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> Rlm
         session_name: child
             .node
             .session_name()
-            .await
             .unwrap_or_else(|| child.rlm_child_id.clone()),
         session_dir: child.node.session_dir.clone(),
         status: match state.status {
@@ -643,7 +666,7 @@ async fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> Rlm
         },
         activity: None,
         tool_use_count: None,
-        duration_ms: Some(now_ms().saturating_sub(state.started_at_ms)),
+        duration_ms: Some(crate::util_time::now_ms().saturating_sub(state.started_at_ms)),
         answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
         replied_since_task: Some(state.replied_since_task),
         progress_note: None,
@@ -653,14 +676,13 @@ async fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> Rlm
     }
 }
 
-async fn collect_result(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmChildResult {
+fn collect_result(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmChildResult {
     RlmChildResult {
         rlm_child_id: child.rlm_child_id.clone(),
         session_name: Some(
             child
                 .node
                 .session_name()
-                .await
                 .unwrap_or_else(|| child.rlm_child_id.clone()),
         ),
         session_dir: Some(child.node.session_dir.clone()),
@@ -669,7 +691,7 @@ async fn collect_result(child: &Arc<InlineChild>, state: &InlineChildState) -> R
         answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
         answer_text: state.answer_text.clone(),
         error: state.error.clone(),
-        duration_ms: Some(now_ms().saturating_sub(state.started_at_ms)),
+        duration_ms: Some(crate::util_time::now_ms().saturating_sub(state.started_at_ms)),
         tool_use_count: None,
         replied_since_task: Some(state.replied_since_task),
     }
@@ -683,7 +705,7 @@ async fn collect_result(child: &Arc<InlineChild>, state: &InlineChildState) -> R
 struct ChildModelInputs {
     selector: String,
     model: Model,
-    thinking: Option<pa_types::ai::ModelThinkingLevel>,
+    thinking: pa_types::ai::ModelThinkingLevel,
 }
 
 /// The registry resolution a real-provider child runs: the shared
@@ -729,7 +751,7 @@ fn real_child_inputs(
     let level = requested
         .or(*node.thinking.lock().unwrap())
         .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-    let thinking = Some(pa_ai::models::clamp_thinking_level(&model, level));
+    let thinking = pa_ai::models::clamp_thinking_level(&model, level);
     Ok(ChildModelInputs {
         selector,
         model,
@@ -808,12 +830,13 @@ async fn spawn_inline_child(
             &child_id,
         )
     });
-    // Name uniqueness among the node's own children (same-parent spawns
-    // serialize on the parent's kernel execution queue).
+    // Host requests run as detached tasks: same-parent spawns serialize
+    // on the node's spawn gate so the name check and the push are atomic.
+    let spawn_gate = node.spawn_gate.lock().await;
     {
         let children = node.children.lock().await.clone();
         for child in &children {
-            if child.node.session_name().await.as_deref() == Some(name.as_str()) {
+            if child.node.session_name().as_deref() == Some(name.as_str()) {
                 return Err(spawn_name_unavailable_error(&name, node.depth + 1));
             }
         }
@@ -830,9 +853,7 @@ async fn spawn_inline_child(
         (
             Some(inputs.model.clone()),
             inputs.selector,
-            inputs
-                .thinking
-                .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium),
+            inputs.thinking,
             None,
         )
     };
@@ -848,15 +869,22 @@ async fn spawn_inline_child(
             .as_deref(),
         &child_id,
     )?;
-    let mut child_manager =
-        pa_core::session::manager::SessionManager::persisted(&config.cwd, &child_dir);
-    if let Some(parent_file) = &node.session_file {
-        child_manager.new_session(&pa_core::session::manager::NewSessionOptions {
+    // A persisted parent gives the child its own file with the parent
+    // edge; a no-session parent keeps the child in memory (TS
+    // `_createInlineRlmSubagentRuntime`), still pinned to the child's
+    // dir for its artifacts.
+    let mut child_manager = if let Some(parent_file) = &node.session_file {
+        let mut manager =
+            pa_core::session::manager::SessionManager::persisted(&config.cwd, &child_dir);
+        manager.new_session(&pa_core::session::manager::NewSessionOptions {
             parent_session: Some(parent_file.clone()),
             rlm_depth: Some(u64::from(node.depth + 1)),
             ..Default::default()
         });
-    }
+        manager
+    } else {
+        pa_core::session::manager::SessionManager::in_memory_in_session_dir(&config.cwd, &child_dir)
+    };
     child_manager
         .append_session_info(&name)
         .map_err(anyhow::Error::from)?;
@@ -866,7 +894,8 @@ async fn spawn_inline_child(
             .get_session_file()
             .map(|path| path.display().to_string()),
         session_dir: child_dir.display().to_string(),
-        session_name: Mutex::new(Some(name.clone())),
+        session_name: std::sync::Mutex::new(Some(name.clone())),
+        spawn_gate: tokio::sync::Mutex::new(()),
         depth: node.depth + 1,
         max_depth: node.max_depth,
         model_selector: std::sync::Mutex::new(Some(selector.clone())),
@@ -881,7 +910,7 @@ async fn spawn_inline_child(
     let overrides = ChildEngineOverrides {
         node: Arc::clone(&child_node),
         model,
-        thinking: Some(thinking),
+        thinking,
         faux,
         semantic_parent_session_id: Some(node.session_id.clone()),
         spawned_by_request_id: request.spawned_by_request_id.clone(),
@@ -919,11 +948,12 @@ async fn spawn_inline_child(
             settled: false,
             answer_text: None,
             error: None,
-            started_at_ms: now_ms(),
+            started_at_ms: crate::util_time::now_ms(),
             replied_since_task: false,
         }),
     });
     node.children.lock().await.push(Arc::clone(&child));
+    drop(spawn_gate);
     // The kickoff: the task prompt rides the parent's `agent_message` row
     // (TS `spawnMessage`), delivered through the one steer path.
     let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
@@ -931,10 +961,10 @@ async fn spawn_inline_child(
         id: &format!("spawn:{child_id}"),
         prompt: &kickoff_content,
         message: &request.prompt,
-        from: &node.endpoint().await,
+        from: &node.endpoint(),
         from_relationship: Some(AgentFamilyRelationship::Parent),
         target: None,
-        timestamp: now_ms(),
+        timestamp: crate::util_time::now_ms(),
     });
     deliver_row(&child_node, kickoff_row)?;
     let driver = tokio::spawn(drive_child(Arc::clone(&child)));
@@ -962,7 +992,7 @@ impl AgentMessageController for InlineMessages {
             members.push(AgentFamilyMember {
                 relationship: AgentFamilyRelationship::Parent,
                 id: parent.session_id.clone(),
-                name: parent.session_name().await.filter(|name| !name.is_empty()),
+                name: parent.session_name().filter(|name| !name.is_empty()),
                 aliases: Vec::new(),
             });
             for sibling in parent.children.lock().await.clone() {
@@ -972,7 +1002,7 @@ impl AgentMessageController for InlineMessages {
                 siblings.push(AgentFamilyMember {
                     relationship: AgentFamilyRelationship::Sibling,
                     id: sibling.node.session_id.clone(),
-                    name: sibling.node.session_name().await,
+                    name: sibling.node.session_name(),
                     aliases: vec![sibling.rlm_child_id.clone()],
                 });
             }
@@ -983,7 +1013,7 @@ impl AgentMessageController for InlineMessages {
             children.push(AgentFamilyMember {
                 relationship: AgentFamilyRelationship::Child,
                 id: child.node.session_id.clone(),
-                name: child.node.session_name().await,
+                name: child.node.session_name(),
                 aliases: vec![child.rlm_child_id.clone()],
             });
         }
@@ -1012,7 +1042,7 @@ impl AgentMessageController for InlineMessages {
         }
         let prompt = create_agent_session_message_prompt(&AgentMessagePromptPayload {
             message: input.message.clone(),
-            sender_name: node.sender_name().await,
+            sender_name: node.sender_name(),
             from_relationship: Some(relationship),
         });
         let id = create_agent_session_message_id();
@@ -1020,10 +1050,10 @@ impl AgentMessageController for InlineMessages {
             id: &id,
             prompt: &prompt,
             message: &input.message,
-            from: &node.endpoint().await,
+            from: &node.endpoint(),
             from_relationship: Some(relationship),
-            target: Some(&target_node.endpoint().await),
-            timestamp: now_ms(),
+            target: Some(&target_node.endpoint()),
+            timestamp: crate::util_time::now_ms(),
         });
         let engine = target_node
             .engine
@@ -1035,19 +1065,29 @@ impl AgentMessageController for InlineMessages {
         // idle.
         let streaming = engine.session.agent().state().await.is_streaming;
         deliver_row(&target_node, row)?;
+        // A delivery to a child from its parent is a new task: a child
+        // that stays silent this round still earns the no-reply notice.
+        if relationship == AgentFamilyRelationship::Parent {
+            mark_child_task(node, &target_node).await;
+        }
         let (delivered_at, queued_at, status) = if streaming {
-            (None, Some(now_iso()), AgentMessageDeliveryStatus::Queued)
+            (
+                None,
+                Some(crate::util_time::now_iso8601()),
+                AgentMessageDeliveryStatus::Queued,
+            )
         } else {
-            (Some(now_iso()), None, AgentMessageDeliveryStatus::Delivered)
+            (
+                Some(crate::util_time::now_iso8601()),
+                None,
+                AgentMessageDeliveryStatus::Delivered,
+            )
         };
         Ok(AgentMessageReceipt {
             id,
             target: target_node.session_id.clone(),
             target_session_id: Some(target_node.session_id.clone()),
-            target_session_name: target_node
-                .session_name()
-                .await
-                .filter(|name| !name.is_empty()),
+            target_session_name: target_node.session_name().filter(|name| !name.is_empty()),
             target_runtime_kind: None,
             message: input.message.clone(),
             delivery_status: status,
@@ -1089,6 +1129,17 @@ async fn mark_child_reply(parent: &Arc<InlineSessionNode>, sender: &Arc<InlineSe
     for child in parent.children.lock().await.iter() {
         if Arc::ptr_eq(&child.node, sender) {
             child.state.lock().await.replied_since_task = true;
+        }
+    }
+}
+
+/// Mark one child's fresh task from its parent (the sender is the
+/// parent): the next settle without an intervening reply earns the
+/// no-reply notice.
+async fn mark_child_task(parent: &Arc<InlineSessionNode>, child: &Arc<InlineSessionNode>) {
+    for entry in parent.children.lock().await.iter() {
+        if Arc::ptr_eq(&entry.node, child) {
+            entry.state.lock().await.replied_since_task = false;
         }
     }
 }

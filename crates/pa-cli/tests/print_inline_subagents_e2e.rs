@@ -396,15 +396,11 @@ fn print_inline_subagents_enforce_the_depth_limit() {
     );
     // The kid never replied: the parent's transcript holds the no-reply
     // terminal notice (drained as a turn by the quiescence drive).
-    let parent_text = serde_json::to_string(&parent_entries(&parent_file)).unwrap();
+    let parent_text = serde_json::to_string(&PrintLane::entries(&parent_file)).unwrap();
     assert!(
         parent_text.contains("[child-exited: no-reply child:kid]"),
         "the parent read the no-reply notice: {parent_text}"
     );
-}
-
-fn parent_entries(parent_file: &Path) -> Vec<serde_json::Value> {
-    PrintLane::entries(parent_file)
 }
 
 /// A settled child re-tasked by its parent must keep the run open: the
@@ -470,5 +466,205 @@ fn print_inline_subagents_wait_for_a_retasked_child() {
         reply_rows,
         ["FIRST-RESULT", "SECOND-RESULT"],
         "the re-tasked child processed the follow-up and replied again"
+    );
+}
+
+/// The position of the first custom row of one type carrying a message
+/// detail (`goal_context` continuations, the child's `agent_message`
+/// reply) — the landing order of these rows is the deferral proof.
+fn custom_row_at(
+    entries: &[serde_json::Value],
+    custom_type: &str,
+    message: Option<&str>,
+) -> Option<usize> {
+    entries.iter().position(|entry| {
+        entry.get("type").and_then(|t| t.as_str()) == Some("custom_message")
+            && entry.get("customType").and_then(|t| t.as_str()) == Some(custom_type)
+            && message.is_none_or(|expected| {
+                entry.pointer("/details/message").and_then(|m| m.as_str()) == Some(expected)
+            })
+    })
+}
+
+/// The positions of every `goal_context` row: the seeded continuation
+/// rides the first prompt, so the row after the first one is the owed
+/// delivery's (the LAST row is not a proof — goal rows keep minting
+/// after the reply either way).
+fn goal_context_positions(entries: &[serde_json::Value]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.get("type").and_then(|t| t.as_str()) == Some("custom_message")
+                && entry.get("customType").and_then(|t| t.as_str()) == Some("goal_context")
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The position of the first persisted user row whose text starts with
+/// the autonomous continuation marker.
+fn autonomous_continuation_row_at(entries: &[serde_json::Value]) -> Option<usize> {
+    entries.iter().position(|entry| {
+        if entry.get("type").and_then(|t| t.as_str()) != Some("message")
+            || entry.pointer("/message/role").and_then(|r| r.as_str()) != Some("user")
+        {
+            return false;
+        }
+        serde_json::to_string(entry)
+            .unwrap_or_default()
+            .contains("[autonomous-continuation")
+    })
+}
+
+/// The goal continuation defers while an inline child is unsettled and
+/// delivers after its reply drains: the parent spawns `kid` and ends its
+/// turn mid-child-run; the owed continuation turn — the FIRST
+/// `goal_context` row after the seeded one — lands only AFTER the
+/// child's reply row, and its turn completes the goal, so the printed
+/// answer is the post-reply turn. No backoff sleeps: the continuation
+/// turn produces output and calls `goal.complete()`.
+#[test]
+fn print_inline_goal_continuation_waits_for_the_child_reply() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let complete_cell = "done = await goal.complete()\nprint(\"GOAL COMPLETED\")".to_string();
+    let script = serde_json::json!({
+        // Turn 1 spawns and ends ("WAITING"); the reply drains as turn 2;
+        // the owed goal continuation runs as the post-reply turn, calls
+        // `goal.complete()`, and ends deterministically.
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "kid = await rlm.spawn(\"run the kid task\", name=\"kid\")\nprint(\"KID\", kid.rlm_child_id)" } },
+            ] },
+            "WAITING",
+            "READ THE REPLY",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": complete_cell } },
+            ] },
+            "GOAL DONE AFTER REPLY",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "kid": { "responses": [
+                // The delayed reply holds the child open: the parent's
+                // goal gate sees it unsettled at the spawn turn's end.
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": reply_cell("KID") } },
+                ], "delayMs": 3000 },
+                "kid done",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(
+        &[
+            "--goal",
+            "finish the delegated work",
+            "-p",
+            "delegate then finish",
+        ],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        "GOAL DONE AFTER REPLY",
+        "the terminal answer is the post-reply goal continuation turn"
+    );
+
+    // The deferral proof: the first goal continuation row after the
+    // seeded one lands AFTER the child's reply row — no continuation
+    // turn interleaved before the reply.
+    let parent_file = lane.parent_session_file();
+    let entries = PrintLane::entries(&parent_file);
+    let goal_rows = goal_context_positions(&entries);
+    assert!(
+        goal_rows.len() >= 2,
+        "the seeded continuation and the owed delivery landed: {goal_rows:?}"
+    );
+    let reply_at = custom_row_at(&entries, "agent_message", Some("KID-RESULT"))
+        .expect("the child reply row landed in the parent transcript");
+    assert!(
+        goal_rows[1] > reply_at,
+        "the owed goal continuation (row {}) landed after the child reply (row {})",
+        goal_rows[1],
+        reply_at
+    );
+}
+
+/// The autonomous continuation holds behind unsettled inline-subagent
+/// work and delivers after the child's reply (no goal): the spawn turn's
+/// end holds a FLAG — nothing is spent on the pre-settle turn — and the
+/// continuation turn only runs once the reply drained: its user row
+/// lands after the reply row, and the printed answer is the post-reply
+/// turn. A passing gate ends the run deterministically.
+#[test]
+fn print_inline_autonomous_continuation_waits_for_the_child_reply() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let marker_cell = "open(\"gate-marker\", \"w\").write(\"done\")\nprint(\"MARKED\")".to_string();
+    let script = serde_json::json!({
+        // Turn 1 spawns and ends ("WAITING"); the reply drains as turn 2;
+        // the held continuation runs as the post-reply turn, writes the
+        // gate marker, and the now-passing gate stops the run.
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "kid = await rlm.spawn(\"run the kid task\", name=\"kid\")\nprint(\"KID\", kid.rlm_child_id)" } },
+            ] },
+            "WAITING",
+            "READ THE REPLY",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": marker_cell } },
+            ] },
+            "AUTONOMOUS CONTINUES",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "kid": { "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": reply_cell("KID") } },
+                ], "delayMs": 3000 },
+                "kid done",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(
+        &[
+            "--autonomous",
+            "--autonomous-gate",
+            "test -f gate-marker",
+            "-p",
+            "delegate then keep going",
+        ],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        "AUTONOMOUS CONTINUES",
+        "the terminal answer is the post-reply autonomous continuation turn"
+    );
+
+    // The hold proof: the autonomous continuation's user row lands AFTER
+    // the child's reply row — no continuation turn interleaved before it.
+    let parent_file = lane.parent_session_file();
+    let entries = PrintLane::entries(&parent_file);
+    let reply_at = custom_row_at(&entries, "agent_message", Some("KID-RESULT"))
+        .expect("the child reply row landed in the parent transcript");
+    let continuation_at = autonomous_continuation_row_at(&entries)
+        .expect("the autonomous continuation row landed in the parent transcript");
+    assert!(
+        continuation_at > reply_at,
+        "the held autonomous continuation (row {continuation_at}) landed after the child reply (row {reply_at})"
     );
 }

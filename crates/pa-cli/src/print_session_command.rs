@@ -373,6 +373,7 @@ mod tests {
             &model,
             &goal,
             &run,
+            None,
         );
         let autonomous = run.state_handle();
         Bed {

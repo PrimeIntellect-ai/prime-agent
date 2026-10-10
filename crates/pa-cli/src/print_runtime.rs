@@ -506,7 +506,7 @@ pub(crate) struct ChildEngineOverrides {
     /// The resolved child model (a real-provider child); a scripted child
     /// builds its model from its own faux registration.
     pub model: Option<Model>,
-    pub thinking: Option<pa_types::ai::ModelThinkingLevel>,
+    pub thinking: pa_types::ai::ModelThinkingLevel,
     pub faux: Option<FauxChildQueue>,
     pub semantic_parent_session_id: Option<String>,
     pub spawned_by_request_id: Option<String>,
@@ -656,10 +656,11 @@ pub(crate) async fn build_headless_engine_with(
 
     // Telemetry: the CLI's env/settings opt-out decides; depth 0 only, enforced by the engine.
     // A spawned child never reports (the engine's depth gate holds anyway).
-    let telemetry = matches!(
-        embedding,
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
-    )
+    let telemetry = (!config.telemetry_disabled
+        && matches!(
+            embedding,
+            HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc
+        ))
     .then(|| {
         let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
         pa_core::session_engine::telemetry::TelemetryWiring {
@@ -724,9 +725,7 @@ pub(crate) async fn build_headless_engine_with(
                 },
             ),
             Some(overrides.node.depth),
-            overrides
-                .thinking
-                .map(pa_core::session_engine::provider_adapter::map_thinking_level),
+            Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking)),
         ),
         _ => (
             Some(
@@ -1408,14 +1407,16 @@ async fn run_prompts_and_emit(
         None => HeadlessAutonomous::disabled(&options.config.cwd),
     });
     let accounting = autonomous.wire_accounting(engine.session.agent()).await;
-    // The composed natural-turn-end hook: the goal arm first (exclusive priority), the autonomous
-    // arm on the fall-through.
+    // The composed natural-turn-end hook: the goal arm first (exclusive priority), the
+    // autonomous arm on the fall-through; both arms defer while inline-subagent work is
+    // unsettled.
     crate::print_autonomous::wire_continuation_hook(
         engine,
         engine.session.agent(),
         model,
         &goal,
         &autonomous,
+        Some(root_node),
     );
     let global_harness_dir =
         pa_core::refinement::get_global_harness_state_dir(&options.config.agent_dir);
@@ -1533,17 +1534,88 @@ async fn run_prompts_and_emit(
     }
     // The #2270 fix: print waits for RLM quiescence — every admitted
     // descendant settles and its replies and notices drain as turns —
-    // BEFORE the terminal result is selected. json mode keeps streaming
-    // through these turns (the subscription lives until after the drive).
-    crate::print_rlm::drive_to_quiescence(
-        root_node,
-        engine,
-        &mut boundary,
-        model,
-        api_key.clone(),
-        global_harness_dir.clone(),
-    )
-    .await?;
+    // before the terminal result is selected (json mode keeps streaming;
+    // the subscription lives until after the drive). One drive loop then
+    // keeps the run alive while deferred work exists: the deferred
+    // goal/autonomous continuations deliver after the settle ("no
+    // front": the settling child's terminal notice is read first), and
+    // the boundary drain runs whatever turns it drained armed — a
+    // threshold continuation, a budget steer, more descendants — before
+    // a final quiescence pass closes the run.
+    loop {
+        if crate::print_rlm::drive_to_quiescence(
+            root_node,
+            engine,
+            &mut boundary,
+            model,
+            api_key.clone(),
+            global_harness_dir.clone(),
+        )
+        .await?
+        {
+            continue;
+        }
+        if let Some(continuation) = engine.take_owed_goal_continuation().await {
+            goal.publish_goal_update(engine).await;
+            goal.run_queued_turn(
+                engine,
+                &mut boundary,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+                &continuation,
+            )
+            .await?;
+            continue;
+        }
+        if autonomous
+            .deliver_rlm_continuation(
+                engine,
+                &mut boundary,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+            )
+            .await?
+        {
+            continue;
+        }
+        let goal_owns_boundary = goal
+            .drive_boundary(
+                engine,
+                &mut boundary,
+                model,
+                api_key.clone(),
+                global_harness_dir.clone(),
+            )
+            .await?;
+        if !goal_owns_boundary {
+            autonomous
+                .drive_boundary(
+                    engine,
+                    &mut boundary,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                )
+                .await?;
+        }
+        // The boundary's own turns may have armed more: the closing
+        // quiescence pass waits for whatever they left behind.
+        if crate::print_rlm::drive_to_quiescence(
+            root_node,
+            engine,
+            &mut boundary,
+            model,
+            api_key.clone(),
+            global_harness_dir.clone(),
+        )
+        .await?
+        {
+            continue;
+        }
+        break;
+    }
     goal_accounting.unsubscribe().await;
     accounting.unsubscribe().await;
     if let Some(subscription) = unsubscribe {
@@ -1673,9 +1745,9 @@ pub(crate) async fn build_faux_engine_with(
     }
     let model = registration.get_model();
     let thinking_level = match embedding {
-        HeadlessEmbedding::Child(overrides) => overrides
-            .thinking
-            .map(pa_core::session_engine::provider_adapter::map_thinking_level),
+        HeadlessEmbedding::Child(overrides) => {
+            Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking))
+        }
         _ => Some(resolve_thinking_level(config, &model)),
     };
     let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
@@ -1689,7 +1761,6 @@ pub(crate) async fn build_faux_engine_with(
     let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring with the real provider
     // path so binary-level tests can verify persistence without the network.
-    let session_manager = session_manager;
     let (rlm_subagent_host, extra_host_handlers, rlm_depth) = match embedding {
         HeadlessEmbedding::Rpc => (None, None, None),
         HeadlessEmbedding::Root { node } => {

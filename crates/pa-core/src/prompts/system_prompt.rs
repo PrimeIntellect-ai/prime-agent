@@ -92,10 +92,10 @@ pub struct BuildSystemPromptOptions<'a> {
     /// bash-completion wake-ups). The wake-up facts the daemonless line
     /// states must match the embedding's wiring.
     pub daemonless: bool,
-    /// Whether `rlm.spawn` children run in-process in this session (the
-    /// daemonless print host); a daemonless session without one cannot
-    /// spawn at all.
-    pub inline_subagents: bool,
+    /// Whether `rlm.spawn` can create children in this session (the
+    /// daemonless print host or a daemon worker); a daemonless session
+    /// without one cannot spawn at all.
+    pub can_spawn: bool,
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
 }
@@ -311,7 +311,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         if depth == 0 { " (root)" } else { " (not root)" }
     )];
     if options.daemonless {
-        lines.push(if options.inline_subagents {
+        lines.push(if options.can_spawn {
             "This session has no daemon: heartbeats never fire, and background `bash()` completions do not wake you, so await them before ending your turn. Subagent replies and exit notices still wake you, and the run waits for your subagents before it exits."
                 .to_string()
         } else {

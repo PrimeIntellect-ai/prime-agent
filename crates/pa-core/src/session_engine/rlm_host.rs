@@ -335,6 +335,10 @@ pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
     content
         .lines()
         .rev()
+        // The exact union gate: a matching row's raw text carries either the
+        // `customType` literal or a `\u`-escape (serde never letter-escapes),
+        // so the union admits every line the reference could match;
+        // `rlm_max_depth_row` judges the candidates by the decoded fields.
         .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
         .find_map(rlm_max_depth_row)
 }

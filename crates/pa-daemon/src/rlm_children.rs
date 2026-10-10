@@ -25,8 +25,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use pa_core::session_engine::rlm_host::{
-    rlm_child_session_dir, rlm_depth_limit_error,
-    spawn_name_unavailable_error as spawn_name_unavailable,
+    rlm_child_session_dir, rlm_depth_limit_error, spawn_name_unavailable_error,
 };
 
 use crate::rlm_child_model::{
@@ -895,7 +894,7 @@ impl SupervisorChildSessionsInner {
         let children = self.children.lock().await;
         for record in children.iter() {
             if record.lock().await.session_name == name {
-                return Err(spawn_name_unavailable(name, depth));
+                return Err(spawn_name_unavailable_error(name, depth));
             }
         }
         Ok(())

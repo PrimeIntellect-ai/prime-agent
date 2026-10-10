@@ -5,8 +5,8 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
     create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
-    rlm_depth_limit_error, spawn_name_unavailable, Arc, ChildCloseReason, ChildRecord, Context,
-    DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result, RlmChildResult,
+    rlm_depth_limit_error, spawn_name_unavailable_error, Arc, ChildCloseReason, ChildRecord,
+    Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result, RlmChildResult,
     RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
     RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
     RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
@@ -74,7 +74,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 .is_some()
                 .then(|| {
                     if !this.reserve_spawn_name(&name) {
-                        return Err(spawn_name_unavailable(&name, identity.rlm_depth + 1));
+                        return Err(spawn_name_unavailable_error(&name, identity.rlm_depth + 1));
                     }
                     Ok(SpawnNameReservationGuard {
                         inner: Arc::clone(&this),
