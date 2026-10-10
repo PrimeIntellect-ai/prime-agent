@@ -238,7 +238,9 @@ async fn fork_at(
             );
             let file =
                 session_dir.join(crate::session_store::session_file_name(forked.session_id()));
-            forked.set_path(file);
+            forked
+                .set_path(file)
+                .map_err(|error| format!("{error:#}"))?;
             if forked.rewrite().is_err() {
                 return Err("Failed to create forked session".to_string());
             }

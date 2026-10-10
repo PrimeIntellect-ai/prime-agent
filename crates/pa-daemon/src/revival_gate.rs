@@ -155,7 +155,7 @@ mod tests {
             let _ = session.append_session_state(state);
         }
         let path = dir.join(format!("{}.jsonl", session.session_id()));
-        session.set_path(path.clone());
+        session.set_path(path.clone()).unwrap();
         session.rewrite().unwrap();
         path
     }

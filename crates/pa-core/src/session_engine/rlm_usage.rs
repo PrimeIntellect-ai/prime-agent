@@ -31,32 +31,57 @@ fn add_cost(total: pa_types::JsNumber, usage: pa_types::JsNumber) -> pa_types::J
 
 /// Child work affects session-level billable totals, not the parent's
 /// model-facing context size, so the context tokens are restored after the fold.
-pub(crate) fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usage) {
+pub fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usage) {
     let parent_context_tokens = super::compaction::calculate_context_tokens(parent_usage);
     add_assistant_usage(parent_usage, child_usage);
     parent_usage.total_tokens = parent_context_tokens;
 }
 
+/// Compare the immutable attribution identity using the transcript's JSON number decoding.
+/// The aggregate is deliberately excluded: later children can advance it.
+///
+/// # Errors
+///
+/// Returns a serialization error if the supplied usage cannot use the wire representation.
+pub fn child_usage_identity_matches(
+    payload: &pa_types::session::ChildUsageAttributionEntry,
+    target_id: &str,
+    child_usage: Usage,
+    origin: Option<ChildUsageOrigin>,
+) -> std::io::Result<bool> {
+    let wire_usage: Usage = serde_json::from_str(&serde_json::to_string(&child_usage)?)?;
+    Ok(payload.target_id == target_id
+        && (payload.child_usage == child_usage || payload.child_usage == wire_usage)
+        && payload.origin == origin)
+}
+
 pub type RlmChildUsageFuture<'a, T> =
     std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// The durable-write boundary the attribution producer writes through: the
-/// parent session's transcript. Object-safe (stored behind `Arc<dyn ...>`),
-/// so implementations box their futures. `last_assistant` is the newest
-/// assistant row's id + usage (any stop reason); `append_attribution`
-/// durably appends one `child_usage_attributed` row against an existing
-/// assistant row, `Err` when the target row is missing or the write fails
-/// (nothing persisted).
+/// A confirmed store result, carrying the current authoritative aggregate.
+#[derive(Debug, Clone, Copy)]
+pub enum ChildUsageAppendResult {
+    /// First confirmed durable result for this owned attribution intent.
+    Created(Usage),
+    /// This ID was already confirmed; later children may have advanced the aggregate.
+    Existing(Usage),
+}
+
+/// The attribution producer's durable transcript boundary. Implementations serialize
+/// mutation under the session owner, compute aggregates from their authoritative state,
+/// and validate immutable row IDs on retry. An error may follow a complete write;
+/// neither an indexed intent nor a cached aggregate is a durable acknowledgment.
+/// Callers must preserve row ID, target, child usage and origin across retries.
 pub trait RlmChildUsageStore: Send + Sync {
     fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
 
     fn append_attribution(
         &self,
+        row_id: &str,
         target_id: &str,
         child_usage: Usage,
-        aggregate_usage: Usage,
         origin: Option<ChildUsageOrigin>,
-    ) -> RlmChildUsageFuture<'_, std::io::Result<()>>;
+    ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>>;
 }
 
 pub(crate) struct SessionUsageStore(pub(crate) std::sync::Arc<tokio::sync::Mutex<SessionManager>>);
@@ -76,19 +101,19 @@ impl RlmChildUsageStore for SessionUsageStore {
 
     fn append_attribution(
         &self,
+        row_id: &str,
         target_id: &str,
         child_usage: Usage,
-        aggregate_usage: Usage,
         origin: Option<ChildUsageOrigin>,
-    ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+    ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
         let session = std::sync::Arc::clone(&self.0);
         let target_id = target_id.to_string();
+        let row_id = row_id.to_string();
         Box::pin(async move {
             session
                 .lock()
                 .await
-                .append_child_usage_attribution(&target_id, child_usage, aggregate_usage, origin)
-                .map(|_| ())
+                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
         })
     }
 }
@@ -96,6 +121,8 @@ impl RlmChildUsageStore for SessionUsageStore {
 /// Per-origin batches in first-seen order.
 #[derive(Debug, Clone)]
 pub struct RlmChildUsageReport {
+    /// Frozen observation identity; clones and retries must preserve this ID.
+    pub report_id: String,
     pub rlm_child_id: String,
     pub batches: Vec<(ChildUsageOrigin, Usage)>,
 }
@@ -104,8 +131,8 @@ pub struct RlmChildUsageReport {
 /// plus the durable flush. One instance per session engine.
 pub struct RlmChildUsageAttributions {
     store: std::sync::Arc<dyn RlmChildUsageStore>,
-    /// The aggregate base per parent assistant row, shared by all its children;
-    /// held across the durable append so batches serialize in observation order.
+    /// Last confirmed aggregate per parent row; held to serialize report handoffs.
+    /// The store owns the authoritative aggregate calculation, including retries.
     bases: tokio::sync::Mutex<HashMap<String, Usage>>,
     /// The parent assistant row each child attributes to, captured at spawn;
     /// dropped in [`Self::forget_child`].
@@ -207,7 +234,7 @@ impl RlmChildUsageAttributions {
         };
         // A report racing the handoff can find the registration copied before the bases:
         // read the retired side's base BEFORE our bases lock.
-        let fallback_base = self.fallback_base(&target_id).await;
+        let _fallback_base = self.fallback_base(&target_id).await;
         let mut bases = self.bases.lock().await;
         // The forward re-check runs WITH the bases lock held: a handoff that armed
         // mid-report blocks its bases copy on this lock, so the adoption carries it.
@@ -219,26 +246,25 @@ impl RlmChildUsageAttributions {
             drop(bases);
             return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
-        for (origin, usage) in report.batches {
-            let base = bases
-                .get(&target_id)
-                .copied()
-                .or(fallback_base)
-                .unwrap_or_default();
-            let mut aggregate = base;
-            attribute_child_usage(&mut aggregate, &usage);
+        for (batch_index, (origin, usage)) in report.batches.into_iter().enumerate() {
+            let row_id = format!("{}-{batch_index}", report.report_id);
             match self
                 .store
-                .append_attribution(&target_id, usage, aggregate, Some(origin))
+                .append_attribution(&row_id, &target_id, usage, Some(origin))
                 .await
             {
-                Ok(()) => {
+                Ok(result) => {
+                    let (aggregate, created) = match result {
+                        ChildUsageAppendResult::Created(aggregate) => (aggregate, true),
+                        ChildUsageAppendResult::Existing(aggregate) => (aggregate, false),
+                    };
                     bases.insert(target_id.clone(), aggregate);
                     if let Some(telemetry) = self
                         .telemetry
                         .lock()
                         .expect("rlm usage telemetry lock")
                         .as_ref()
+                        .filter(|_| created)
                     {
                         telemetry.note_child_usage_attributed(
                             usage.input,
@@ -510,6 +536,7 @@ mod tests {
         producer.register_spawn("sub-abc12345").await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-abc12345".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, child)],
             })
@@ -561,6 +588,7 @@ mod tests {
         retired.register_spawn("sub-rebuild1").await;
         retired
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -571,6 +599,7 @@ mod tests {
         fresh.adopt_registrations(&retired).await;
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::AgentMessage,
@@ -590,6 +619,7 @@ mod tests {
         // The retired producer now FORWARDS: a late emission still lands on the adopted chain.
         retired
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::DirectUser,
@@ -607,6 +637,7 @@ mod tests {
         fresh.forget_child("sub-rebuild1").await;
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::DirectUser,
@@ -635,6 +666,7 @@ mod tests {
         );
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild2".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(2, 2, 0, 0, 4, 0.0))],
             })
@@ -651,6 +683,7 @@ mod tests {
         fresh.bases.lock().await.remove(&target_of_second_for_base);
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-rebuild2".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::AgentMessage,
@@ -683,6 +716,7 @@ mod tests {
         }
         fresh
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-raced".to_string(),
                 batches: vec![(ChildUsageOrigin::SpawnTask, usage_block(3, 3, 0, 0, 6, 0.0))],
             })
@@ -710,6 +744,7 @@ mod tests {
         producer.register_spawn("sub-two").await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-one".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -719,6 +754,7 @@ mod tests {
             .await;
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-two".to_string(),
                 batches: vec![
                     (
@@ -757,6 +793,7 @@ mod tests {
         let producer = producer(manager.clone());
         producer
             .record_child_usage(RlmChildUsageReport {
+                report_id: uuid::Uuid::new_v4().to_string(),
                 rlm_child_id: "sub-unknown".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::SpawnTask,
@@ -784,18 +821,18 @@ mod tests {
 
         fn append_attribution(
             &self,
+            row_id: &str,
             target_id: &str,
             child_usage: Usage,
-            aggregate_usage: Usage,
             origin: Option<ChildUsageOrigin>,
-        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+        ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
             if self.fail.load(std::sync::atomic::Ordering::Relaxed) {
                 return Box::pin(std::future::ready(Err(std::io::Error::other(
                     "append disabled",
                 ))));
             }
             self.store
-                .append_attribution(target_id, child_usage, aggregate_usage, origin)
+                .append_attribution(row_id, target_id, child_usage, origin)
         }
     }
 
@@ -812,6 +849,7 @@ mod tests {
         let producer = RlmChildUsageAttributions::new(store.clone());
         producer.register_spawn("sub-flaky").await;
         let report = || RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
             rlm_child_id: "sub-flaky".to_string(),
             batches: vec![(
                 ChildUsageOrigin::SpawnTask,
@@ -856,24 +894,26 @@ mod tests {
 
         fn append_attribution(
             &self,
+            row_id: &str,
             target_id: &str,
             child_usage: Usage,
-            aggregate_usage: Usage,
             origin: Option<ChildUsageOrigin>,
-        ) -> RlmChildUsageFuture<'_, std::io::Result<()>> {
+        ) -> RlmChildUsageFuture<'_, std::io::Result<ChildUsageAppendResult>> {
             let target_id = target_id.to_string();
+            let row_id = row_id.to_string();
             Box::pin(async move {
                 let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if matches!(self.point, FailurePoint::BeforeSecondAppend) && call == 1 {
                     return Err(std::io::Error::other("injected second append failure"));
                 }
-                self.store
-                    .append_attribution(&target_id, child_usage, aggregate_usage, origin)
+                let result = self
+                    .store
+                    .append_attribution(&row_id, &target_id, child_usage, origin)
                     .await?;
                 if matches!(self.point, FailurePoint::AfterFirstAppend) && call == 0 {
                     return Err(std::io::Error::other("injected lost append acknowledgment"));
                 }
-                Ok(())
+                Ok(result)
             })
         }
     }
@@ -890,6 +930,7 @@ mod tests {
             }));
         producer.register_spawn("sub-partial").await;
         let report = RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
             rlm_child_id: "sub-partial".to_string(),
             batches: vec![
                 (
@@ -937,6 +978,7 @@ mod tests {
             }));
         producer.register_spawn("sub-uncertain").await;
         let report = RlmChildUsageReport {
+            report_id: uuid::Uuid::new_v4().to_string(),
             rlm_child_id: "sub-uncertain".to_string(),
             batches: vec![(
                 ChildUsageOrigin::SpawnTask,

@@ -286,7 +286,7 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                             manager.new_session(&pa_core::session::manager::NewSessionOptions {
                                 parent_session: Some(parent.clone()),
                                 ..Default::default()
-                            });
+                            })?;
                             manager
                         }
                         None => {

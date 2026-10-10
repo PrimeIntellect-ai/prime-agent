@@ -84,7 +84,7 @@ fn legacy_sequence_file(
 ) -> std::path::PathBuf {
     let mut legacy = SessionFile::create("/tmp", None, 0);
     let path = session_dir.join(session_file_name(legacy.session_id()));
-    legacy.set_path(path.clone());
+    legacy.set_path(path.clone()).unwrap();
     legacy.rewrite().unwrap();
     append_creation_prefix(&mut legacy, &OffEngine, &dir.join("agent"), "/tmp", true);
     let _ = legacy.append_session_state("active");
@@ -238,7 +238,7 @@ async fn fresh_create_ignores_a_legacy_crash_orphan() {
     // bleed into the new file.
     let mut orphan = SessionFile::create("/tmp", None, 0);
     let orphan_path = session_dir.join(session_file_name(orphan.session_id()));
-    orphan.set_path(orphan_path.clone());
+    orphan.set_path(orphan_path.clone()).unwrap();
     orphan.rewrite().unwrap();
     let worker = worker_in(dir.path(), "collapse-orphan");
     let response = worker
@@ -284,7 +284,7 @@ async fn a_resume_is_append_only_and_never_deletes_rows() {
     std::fs::create_dir_all(&session_dir).unwrap();
     let mut store = SessionFile::create("/tmp", None, 0);
     let path = session_dir.join(session_file_name(store.session_id()));
-    store.set_path(path.clone());
+    store.set_path(path.clone()).unwrap();
     store.rewrite().unwrap();
     let mut last_id = String::new();
     for text in ["the first turn", "the second turn"] {

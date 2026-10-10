@@ -28,6 +28,10 @@ impl SessionEntry {
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
     pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
+        anyhow::ensure!(
+            self.child_usage_pending.is_empty(),
+            "unconfirmed child attribution requires recovery"
+        );
         let mut bytes = Vec::new();
         for entry in &self.entries[start..] {
             write_line(&mut bytes, entry)?;
@@ -59,6 +63,9 @@ impl SessionFile {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
         let id = entry.id.clone();
+        if !self.child_usage_pending.is_empty() {
+            self.child_usage_pending.push(entry.clone());
+        }
         self.push_index(entry);
         id
     }
@@ -101,6 +108,10 @@ impl SessionFile {
     /// Returns an error when the store only holds a window, or the write,
     /// flush, sync, or rename fails; an empty path answers `Ok(())`.
     pub fn rewrite(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.child_usage_pending.is_empty(),
+            "unconfirmed child attribution requires recovery"
+        );
         anyhow::ensure!(
             self.window.is_none(),
             "full history required before rewriting session"
@@ -194,6 +205,7 @@ impl SessionFile {
             self.window.is_none() || self.path.exists(),
             "window-backed session file is missing"
         );
+        self.recover_child_usage()?;
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
@@ -243,11 +255,17 @@ impl SessionFile {
     }
 
     /// Point the session at a concrete file path (after `create`), preserving entries.
-    pub fn set_path(&mut self, path: PathBuf) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if uncertain attribution writes cannot be recovered on the original path.
+    pub fn set_path(&mut self, path: PathBuf) -> Result<()> {
+        self.recover_child_usage()?;
         if self.path != path {
             self.lease = None;
         }
         self.path = path;
+        Ok(())
     }
 }
 

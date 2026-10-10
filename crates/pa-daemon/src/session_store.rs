@@ -28,6 +28,10 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
+mod child_usage;
+#[cfg(test)]
+#[path = "session_store/child_usage_tests.rs"]
+mod child_usage_tests;
 mod index;
 
 use index::fold_child_usage_attributions;
@@ -116,6 +120,10 @@ pub struct MessageWindowScalars {
 /// A loaded session: header plus the full entry chain, indexed by id.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
+    pub(super) child_usage_pending: Vec<SessionEntry>,
+    pub(super) child_usage_unconfirmed: std::collections::HashSet<String>,
+    #[cfg(test)]
+    pub(super) child_usage_fault: Option<child_usage::AppendFault>,
     pub path: PathBuf,
     pub header: SessionHeader,
     pub(crate) entries: Vec<SessionEntry>,

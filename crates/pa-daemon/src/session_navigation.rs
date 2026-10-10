@@ -138,7 +138,9 @@ impl SessionNavigation {
         };
         let mut fresh = SessionFile::create(&cwd, parent_session.as_deref(), rlm_depth);
         if let Some(session_dir) = session_dir {
-            fresh.set_path(session_dir.join(session_file_name(fresh.session_id())));
+            fresh
+                .set_path(session_dir.join(session_file_name(fresh.session_id())))
+                .map_err(|error| response_failure(None, "new_session", &error.to_string(), None))?;
             fresh.lease = self
                 .target_lease(&fresh.path)
                 .map_err(|error| response_failure(None, "new_session", &error.to_string(), None))?;
@@ -843,7 +845,7 @@ mod tests {
         // real file.
         let live = dir.join("live-session.jsonl");
         let mut live_file = SessionFile::create("/tmp", None, 0);
-        live_file.set_path(live.clone());
+        live_file.set_path(live.clone()).unwrap();
         live_file.rewrite().unwrap();
         let config = crate::worker::WorkerConfig {
             socket_path: dir.join("worker.sock"),
@@ -868,7 +870,7 @@ mod tests {
         let gone_cwd = dir.join("gone-cwd");
         // A well-formed session file whose stored cwd no longer exists.
         let mut file = SessionFile::create(&gone_cwd.to_string_lossy(), None, 0);
-        file.set_path(gone.clone());
+        file.set_path(gone.clone()).unwrap();
         file.rewrite().unwrap();
         let response = worker
             .dispatch(
@@ -920,7 +922,7 @@ mod trace_replacement_tests {
         )
         .unwrap();
         let mut store = SessionFile::create(dir.path().to_str().unwrap(), None, 0);
-        store.set_path(old_path.clone());
+        store.set_path(old_path.clone()).unwrap();
         store.trace_upload = Some(controller.clone());
         let core = Arc::new(Mutex::new(SessionCore::test_core(
             Some(store),

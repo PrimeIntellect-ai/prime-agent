@@ -127,11 +127,16 @@ impl SessionManager {
             label_timestamps_by_id: HashMap::new(),
             leaf_id: None,
             persist_listeners: Vec::new(),
+            pending_child_usage: None,
+            unconfirmed_child_usage: std::collections::HashSet::new(),
+            recovered_history_ids: std::collections::HashSet::new(),
+            #[cfg(test)]
+            child_usage_write_fault: None,
         };
         match session_file {
-            Some(file) => manager.set_session_file(file, None),
+            Some(file) => manager.set_session_file_unchecked(file, None),
             None => {
-                manager.new_session(&NewSessionOptions::default());
+                manager.new_session_unchecked(&NewSessionOptions::default());
             }
         }
         manager
@@ -225,16 +230,20 @@ impl SessionManager {
         let mut forked = Self::persisted(target_cwd, session_dir);
         // A fresh unique id + header: the fork's git context comes from the
         // TARGET cwd, and the source rides along as `parentSession`.
-        forked.new_session(&NewSessionOptions {
-            id: None,
-            parent_session: Some(source_path.display().to_string()),
-            rlm_depth: Some(rlm_depth),
-        });
+        forked
+            .new_session(&NewSessionOptions {
+                id: None,
+                parent_session: Some(source_path.display().to_string()),
+                rlm_depth: Some(rlm_depth),
+            })
+            .map_err(|error| error.to_string())?;
         let branch = forked_branch_entries(entries);
         // The copied rows' assistant entries keep the append path durable
         // from the first new entry: one predicate for the durable-append rule.
         forked.refresh_has_assistant_entry(&branch);
-        forked.adopt_entries(branch);
+        forked
+            .adopt_entries(branch)
+            .map_err(|error| error.to_string())?;
         forked.flush_now().map_err(|error| error.to_string())?;
         Ok(forked)
     }
@@ -270,7 +279,7 @@ impl SessionManager {
             manager.session_dir_backed = true;
             // The production adoption path: the test constructor rides the
             // same detach semantics the daemon's engine uses.
-            manager.adopt_window(window);
+            manager.adopt_window(window)?;
             Ok(manager)
         })
         .await?
@@ -278,7 +287,15 @@ impl SessionManager {
     /// Adopt a verified read-only window into an externally persisted
     /// manager: rows go straight to disk, never deferred behind the
     /// bootstrap rule.
-    pub fn adopt_window(&mut self, mut window: super::window::WindowedSessionStore) {
+    ///
+    /// # Errors
+    ///
+    /// Returns recovery errors or asks the caller to reload a snapshot predating recovery.
+    pub fn adopt_window(
+        &mut self,
+        mut window: super::window::WindowedSessionStore,
+    ) -> std::io::Result<()> {
+        self.before_history_replacement(window.entries())?;
         // One-copy adoption: the parsed trees move in (no `to_vec` clone); the
         // window stays attached for its snapshot/settings/metadata state, and
         // `active_context` walks `file_entries` with the window's settings overlay.
@@ -289,6 +306,7 @@ impl SessionManager {
         self.has_assistant_entry = true;
         self.flushed = true;
         self.window = Some(window);
+        Ok(())
     }
 
     /// Whether this manager's durable appends may certify the window cache
@@ -300,10 +318,65 @@ impl SessionManager {
     }
     /// Switch to a different session file (resume/branch).
     ///
+    /// # Errors
+    ///
+    /// Leaves the current session intact when attribution recovery fails or supplied history is stale.
+    ///
     /// # Panics
     ///
     /// The `unwrap` on the session file path is guarded by the existence check above.
     pub fn set_session_file(
+        &mut self,
+        session_file: PathBuf,
+        preloaded_entries: Option<Vec<FileEntry>>,
+    ) -> std::io::Result<()> {
+        self.reconcile_child_usage()?;
+        let previous_session_id = self.session_id.clone();
+        let mut preloaded_entries = preloaded_entries;
+        if !self.recovered_history_ids.is_empty() {
+            let same_path = self.session_file.as_ref().is_some_and(|owned| {
+                owned == &session_file
+                    || std::fs::canonicalize(owned)
+                        .ok()
+                        .zip(std::fs::canonicalize(&session_file).ok())
+                        .is_some_and(|(left, right)| left == right)
+            });
+            if let Some(entries) = &preloaded_entries {
+                let same_session = entries.iter().any(|entry| matches!(entry, FileEntry::Header { header } if header.id == self.session_id));
+                if same_path && !same_session {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "supplied owned history changed session identity",
+                    ));
+                }
+                if same_path || same_session {
+                    self.before_history_replacement(entries)?;
+                }
+            } else if session_file.exists() {
+                let bytes = std::fs::read(&session_file)?;
+                let (mut entries, incomplete) = super::child_usage::strict_rows(&bytes)?;
+                if incomplete.is_some()
+                    || (same_path
+                        && !matches!(entries.first(), Some(FileEntry::Header { header }) if header.id == self.session_id))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "fresh owned history is incomplete or replaced",
+                    ));
+                }
+                crate::session::apply_child_usage_attributions(&mut entries);
+                preloaded_entries = Some(entries);
+            }
+        }
+        self.set_session_file_unchecked(session_file, preloaded_entries);
+        self.recovered_history_ids.clear();
+        if self.session_id != previous_session_id {
+            self.unconfirmed_child_usage.clear();
+        }
+        Ok(())
+    }
+
+    fn set_session_file_unchecked(
         &mut self,
         session_file: PathBuf,
         preloaded_entries: Option<Vec<FileEntry>>,
@@ -318,7 +391,7 @@ impl SessionManager {
 
             if entries.is_empty() {
                 let explicit_path = path;
-                self.new_session(&NewSessionOptions::default());
+                self.new_session_unchecked(&NewSessionOptions::default());
                 self.session_file = Some(explicit_path);
                 self.rewrite_file();
                 self.flushed = true;
@@ -346,17 +419,29 @@ impl SessionManager {
             self.flushed = true;
         } else {
             let explicit_path = self.session_file.clone();
-            self.new_session(&NewSessionOptions::default());
+            self.new_session_unchecked(&NewSessionOptions::default());
             self.session_file = explicit_path;
         }
     }
 
     /// Create a new session; returns the session file path when persisting.
     ///
+    /// # Errors
+    ///
+    /// Leaves the current session intact when pending attribution recovery fails.
+    ///
     /// # Panics
     ///
     /// Panics when an explicit session id is requested while persisting and that id's file exists.
-    pub fn new_session(&mut self, options: &NewSessionOptions) -> Option<PathBuf> {
+    pub fn new_session(&mut self, options: &NewSessionOptions) -> std::io::Result<Option<PathBuf>> {
+        self.reconcile_child_usage()?;
+        let path = self.new_session_unchecked(options);
+        self.recovered_history_ids.clear();
+        self.unconfirmed_child_usage.clear();
+        Ok(path)
+    }
+
+    fn new_session_unchecked(&mut self, options: &NewSessionOptions) -> Option<PathBuf> {
         let mut session_id = options.id.clone().unwrap_or_else(create_session_id);
         let mut session_file: Option<PathBuf> = None;
         if self.persist {
@@ -488,7 +573,12 @@ impl SessionManager {
     /// Adopt a durable branch as this session's entries: keeps the header,
     /// replaces every entry with the given chain, and re-indexes so the leaf
     /// is the last adopted entry. In-memory only — the caller owns persistence.
-    pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns recovery errors or asks the caller to reload a branch predating recovery.
+    pub fn adopt_entries(&mut self, entries: Vec<FileEntry>) -> std::io::Result<()> {
+        self.before_history_replacement(&entries)?;
         // The caller supplies the complete selected branch after explicit navigation.
         self.window = None;
         let header = self
@@ -505,5 +595,6 @@ impl SessionManager {
             }
         }
         self.build_index();
+        Ok(())
     }
 }

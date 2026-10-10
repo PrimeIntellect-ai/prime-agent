@@ -363,7 +363,7 @@ impl AgentSession {
     ) -> anyhow::Result<()> {
         let rebuilt = {
             let mut session = self.session.lock().await;
-            session.adopt_entries(branch_entries);
+            session.adopt_entries(branch_entries)?;
             crate::session_engine::compact_session::rebuilt_context_after_compaction(&session)
         };
         self.agent

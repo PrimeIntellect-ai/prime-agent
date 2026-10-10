@@ -63,7 +63,7 @@ fn write_active_session(dir: &std::path::Path) -> (String, std::path::PathBuf) {
     let path = dir.join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     let _ = session.append_session_state("active");
     session.rewrite().unwrap();
     (session.session_id().to_string(), path)

@@ -26,51 +26,65 @@ impl SupervisorChildSessionsInner {
         // would deadlock the two.
         let emit_lock = record.lock().await.emit_lock.clone();
         let emit_guard = emit_lock.lock().await;
-        let (rlm_child_id, session_file, from) = {
-            let record_guard = record.lock().await;
-            (
-                record_guard.rlm_child_id.clone(),
-                record_guard
-                    .session_file
-                    .clone()
-                    .filter(|path| !path.is_empty()),
-                record_guard.attributed_rows,
-            )
-        };
-        let Some(session_file) = session_file else {
-            return;
-        };
-        // A reseeded row nothing has observed yet: nothing to bill until a delivery primes it.
-        let Some(from) = from else {
-            return;
-        };
-        // The open+parse is a blocking read of a file that can reach tens
-        // of megabytes: run it on the blocking pool, never the async
-        // worker (a slow file read must not stall unrelated tasks on the
-        // runtime).
-        let path = PathBuf::from(session_file);
-        let joined =
-            tokio::task::spawn_blocking(move || crate::session_store::SessionFile::open(&path))
+        let mut drain_fresh_interval = record.lock().await.pending_usage_report.is_some();
+        loop {
+            let pending = record.lock().await.pending_usage_report.clone();
+            let (report, next) = if let Some(pending) = pending {
+                pending
+            } else {
+                let (rlm_child_id, session_file, from) = {
+                    let record_guard = record.lock().await;
+                    (
+                        record_guard.rlm_child_id.clone(),
+                        record_guard
+                            .session_file
+                            .clone()
+                            .filter(|path| !path.is_empty()),
+                        record_guard.attributed_rows,
+                    )
+                };
+                let Some(session_file) = session_file else {
+                    return;
+                };
+                let Some(from) = from else {
+                    return;
+                };
+                let path = PathBuf::from(session_file);
+                let joined = tokio::task::spawn_blocking(move || {
+                    crate::session_store::SessionFile::open(&path)
+                })
                 .await
                 .ok();
-        let Some(Ok(store)) = joined else {
-            // Same failure contract as before: a torn or unreadable file
-            // leaves the cursor untouched — the next observation retries.
-            return;
-        };
-        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
-        if batches.is_empty() {
-            record.lock().await.attributed_rows = Some(next);
-            return;
-        }
-        let persisted = sink
-            .record(RlmChildUsageReport {
-                rlm_child_id,
-                batches,
-            })
-            .await;
-        if persisted {
-            record.lock().await.attributed_rows = Some(next);
+                let Some(Ok(store)) = joined else {
+                    return;
+                };
+                let (batches, next) =
+                    crate::rlm_child_usage::child_usage_batches(store.entries(), from);
+                if batches.is_empty() {
+                    record.lock().await.attributed_rows = Some(next);
+                    return;
+                }
+                let report = RlmChildUsageReport {
+                    report_id: uuid::Uuid::new_v4().to_string(),
+                    rlm_child_id,
+                    batches,
+                };
+                // Install before awaiting the sink. A canceled future leaves the immutable
+                // interval available; newer child rows wait behind this exact report.
+                record.lock().await.pending_usage_report = Some((report.clone(), next));
+                (report, next)
+            };
+            if sink.record(report).await {
+                let mut record = record.lock().await;
+                record.attributed_rows = Some(next);
+                record.pending_usage_report = None;
+                drop(record);
+                if drain_fresh_interval {
+                    drain_fresh_interval = false;
+                    continue;
+                }
+            }
+            break;
         }
         drop(emit_guard);
     }

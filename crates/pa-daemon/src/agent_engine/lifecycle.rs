@@ -509,7 +509,7 @@ impl AgentSessionEngine {
         }
         // Restore the retained context and certified metadata without loading discarded bodies.
         if let Some(window) = shared_window {
-            built.session.restore_windowed_context(window).await;
+            built.session.restore_windowed_context(window).await?;
             // This worker holds the runtime lease: exactly one writer per
             // lease certifies the window cache; the release flushes the
             // snapshot.

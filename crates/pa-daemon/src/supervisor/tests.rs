@@ -338,7 +338,7 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
     let path = dir.join(format!("{}.jsonl", session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     let mut info = crate::session_store::read_session_info(&path).unwrap();
     assert!(
@@ -367,7 +367,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
     let path = dir.join(format!("{}.jsonl", session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_model_change("p", "m");
     session.append_thinking_level_change("high");
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
@@ -384,7 +384,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     // draft, or a model that cannot think).
     let mut draft = crate::session_store::SessionFile::create("/tmp", None, 0);
     let draft_path = dir.join(format!("{}.jsonl", draft.session_id()));
-    draft.set_path(draft_path.clone());
+    draft.set_path(draft_path.clone()).unwrap();
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
     assert_eq!(draft_info.thinking_level, None);
@@ -404,7 +404,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
     let path = dir.join(format!("{}.jsonl", session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(&json!({
         "role": "assistant", "content": "done", "provider": "p", "model": "m",
         "timestamp": 1u64,
@@ -429,7 +429,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     // A draft with no billable work stays bare on both surfaces.
     let mut draft = crate::session_store::SessionFile::create("/tmp", None, 0);
     let draft_path = dir.join(format!("{}.jsonl", draft.session_id()));
-    draft.set_path(draft_path.clone());
+    draft.set_path(draft_path.clone()).unwrap();
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
     assert!(saved_session_row(&draft_info).get("usage").is_none());
@@ -445,7 +445,7 @@ fn saved_session_summaries_carry_the_parent_binding() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut bound = crate::session_store::SessionFile::create("/tmp", Some("/s/p.jsonl"), 1);
     let bound_path = dir.join(format!("{}.jsonl", bound.session_id()));
-    bound.set_path(bound_path.clone());
+    bound.set_path(bound_path.clone()).unwrap();
     bound.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     bound.rewrite().unwrap();
     let bound_info = crate::session_store::read_session_info(&bound_path).unwrap();
@@ -457,7 +457,7 @@ fn saved_session_summaries_carry_the_parent_binding() {
 
     let mut root = crate::session_store::SessionFile::create("/tmp", None, 0);
     let root_path = dir.join(format!("{}.jsonl", root.session_id()));
-    root.set_path(root_path.clone());
+    root.set_path(root_path.clone()).unwrap();
     root.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     root.rewrite().unwrap();
     let root_info = crate::session_store::read_session_info(&root_path).unwrap();

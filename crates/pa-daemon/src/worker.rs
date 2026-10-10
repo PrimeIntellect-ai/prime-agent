@@ -964,35 +964,24 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageStore for CoreUsageStore {
 
     fn append_attribution(
         &self,
+        row_id: &str,
         target_id: &str,
         child_usage: pa_types::ai::Usage,
-        aggregate_usage: pa_types::ai::Usage,
         origin: Option<pa_types::session::ChildUsageOrigin>,
-    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<'_, std::io::Result<()>> {
+    ) -> pa_core::session_engine::rlm_usage::RlmChildUsageFuture<
+        '_,
+        std::io::Result<pa_core::session_engine::rlm_usage::ChildUsageAppendResult>,
+    > {
         let core = Arc::clone(&self.0);
-        let target_id = target_id.to_string();
+        let row_id = row_id.to_owned();
+        let target_id = target_id.to_owned();
         Box::pin(async move {
             let mut core = core.lock().unwrap();
             let Some(store) = core.store.as_mut() else {
                 return Err(missing_usage_target(&target_id));
             };
-            if store
-                .entry(&target_id)
-                .and_then(assistant_message)
-                .is_none()
-            {
-                return Err(missing_usage_target(&target_id));
-            }
-            let fields = serde_json::to_value(pa_types::session::ChildUsageAttributionEntry {
-                target_id: target_id.clone(),
-                child_usage,
-                aggregate_usage,
-                origin,
-            })
-            .map_err(std::io::Error::from)?;
             store
-                .persist_entry("child_usage_attributed", fields)
-                .map(|_| ())
+                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
                 .map_err(|error| std::io::Error::other(format!("{error:#}")))
         })
     }

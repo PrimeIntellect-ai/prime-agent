@@ -71,7 +71,7 @@ impl SessionEngine for RecordingEngine {
 fn written_session_file(dir: &Path, name: &str) -> PathBuf {
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
     let path = dir.join(name);
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     path
 }
@@ -197,7 +197,7 @@ async fn a_switched_session_repairs_a_torn_tail_before_its_first_append() {
 
     let path = dir.path().join("torn.jsonl");
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(&json!({"role":"user","content":"before","timestamp":0}));
     session.rewrite().unwrap();
     {
@@ -280,7 +280,7 @@ async fn a_resumed_session_repairs_a_non_utf8_torn_tail_before_its_first_append(
     let worker = recording_worker(dir.path(), std::sync::Arc::clone(&events));
     let path = dir.path().join("resume-torn.jsonl");
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(&json!({"role":"user","content":"before","timestamp":0}));
     session.rewrite().unwrap();
     {
@@ -394,7 +394,7 @@ fn a_large_valid_last_row_stays_intact_during_tail_repair() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("large-last-row.jsonl");
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     let id = session.append_message(&json!({
         "role": "user",
         "content": "x".repeat(1024 * 1024 + 1),

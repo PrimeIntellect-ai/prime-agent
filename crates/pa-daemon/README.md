@@ -269,3 +269,11 @@ The composition root initializes the packaged product version with
 `protocol::app_version` supplies that identity to both hello frames and update
 checkpoints; library embedders fall back to the compiled version. Release
 manifest restamping therefore remains consistent with CLI `--version`.
+
+Child attribution append-once and its frozen uncertain-write queue remain private to
+`SessionFile`; the worker implements pa-core's existing usage-store boundary. A
+pending intent fences later physical writes until strict recovery confirms its
+stable IDs. `SessionFile::set_path` is now fallible and retains the original path
+and lease on recovery failure; supplied full-history installation rejects pending
+uncertainty so callers reload rather than adopting stale history. The queue adds
+no journal format, ledger, dependency or restart policy.

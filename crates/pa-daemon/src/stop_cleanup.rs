@@ -515,7 +515,7 @@ mod tests {
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         let path = dir.join(session_file_name(session.session_id()));
-        session.set_path(path.clone());
+        session.set_path(path.clone()).unwrap();
         // The live state a fresh session carries (the worker's create
         // appends it): the wake-scan gate requires it.
         let _ = session.append_session_state("active");

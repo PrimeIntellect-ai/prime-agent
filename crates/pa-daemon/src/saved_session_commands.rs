@@ -953,7 +953,7 @@ mod tombstone_usage_tests {
     fn write_child_with_usage(dir: &Path) -> PathBuf {
         let mut session = SessionFile::create("/work", None, 0);
         let path = dir.join(format!("{}.jsonl", session.session_id()));
-        session.set_path(path.clone());
+        session.set_path(path.clone()).unwrap();
         session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
         session.rewrite().unwrap();
         let usage_row = json!({

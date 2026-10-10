@@ -384,6 +384,7 @@ fn ledger_child_records(
             closed_by_parent: false,
             session_file: Some(edge.child),
             attributed_rows: None,
+            pending_usage_report: None,
             usage_watch_live: false,
             usage_rearm: false,
             emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),

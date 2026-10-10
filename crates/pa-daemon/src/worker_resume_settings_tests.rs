@@ -74,7 +74,7 @@ mod resume_settings_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("resume.jsonl");
         let mut file = SessionFile::create("/tmp", None, 0);
-        file.set_path(path.clone());
+        file.set_path(path.clone()).unwrap();
         file.append_model_change("old", "superseded");
         file.append_thinking_level_change("high");
         file.append_entry("service_tier_change", json!({"serviceTier":null}));
@@ -189,7 +189,7 @@ mod resume_settings_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("no-tier.jsonl");
         let mut file = SessionFile::create("/tmp", None, 0);
-        file.set_path(path.clone());
+        file.set_path(path.clone()).unwrap();
         file.append_entry(
             "model_change",
             json!({"provider":"saved","modelId":"pinned"}),

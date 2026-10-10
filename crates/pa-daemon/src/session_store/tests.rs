@@ -22,7 +22,7 @@ fn bounded_header_matches_the_line_read() {
     let mut session = SessionFile::create("/repo", None, 0);
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     assert_eq!(
         read_session_header_bounded(&path),
@@ -47,7 +47,7 @@ fn bounded_header_refuses_an_over_long_first_line() {
     // bound: the bounded read judges nothing; the line read still does.
     let mut session = SessionFile::create(&format!("/repo/{}", "x".repeat(600)), None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     assert_eq!(read_session_header_bounded(&path), None);
     assert!(read_session_header(&path).is_some());
@@ -58,7 +58,7 @@ fn bounded_header_reads_an_unterminated_first_line() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, header_line.trim_end()).unwrap();
@@ -73,7 +73,7 @@ fn bounded_header_strips_a_crlf_line_return() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/repo", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     let header_line = fs::read_to_string(&path).unwrap();
     fs::write(&path, format!("{}\r\n", header_line.trim_end())).unwrap();
@@ -263,7 +263,7 @@ fn marking_the_warning_persists_and_both_reopens_hydrate_it() {
     let mut session = SessionFile::create("/repo", None, 0);
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.rewrite().unwrap();
     assert!(
         !session.anthropic_warning_shown(),
@@ -293,7 +293,7 @@ fn marking_the_warning_persists_and_both_reopens_hydrate_it() {
     // A session that never warned stays closed through both opens.
     let mut fresh = SessionFile::create("/repo", None, 0);
     let fresh_path = dir.join(session_file_name(fresh.session_id()));
-    fresh.set_path(fresh_path.clone());
+    fresh.set_path(fresh_path.clone()).unwrap();
     fresh.rewrite().unwrap();
     assert!(!SessionFile::open(&fresh_path)
         .unwrap()
@@ -394,7 +394,7 @@ fn creates_and_loads_a_session() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_session_state("active");
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     session.append_message(&json!({"role": "assistant", "content": "hello", "provider": "p", "model": "m", "timestamp": 2u64}));
@@ -448,7 +448,7 @@ fn scan_keeps_the_latest_persisted_thinking_level() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_thinking_level_change("medium");
     session.append_thinking_level_change("high");
     session.rewrite().unwrap();
@@ -463,7 +463,7 @@ fn failed_persist_keeps_the_store_walkable() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let file = dir.join(session_file_name(session.session_id()));
-    session.set_path(file.clone());
+    session.set_path(file.clone()).unwrap();
     let first = session
         .persist_entry(
             "message",
@@ -472,7 +472,7 @@ fn failed_persist_keeps_the_store_walkable() {
         .unwrap();
     let blocker = dir.join("blocked");
     fs::create_dir_all(&blocker).unwrap();
-    session.set_path(blocker);
+    session.set_path(blocker).unwrap();
     assert!(session
         .persist_entry(
             "message",
@@ -485,7 +485,7 @@ fn failed_persist_keeps_the_store_walkable() {
         "only the persisted entry stays indexed"
     );
     assert_eq!(session.leaf_id(), Some(first.as_str()));
-    session.set_path(file.clone());
+    session.set_path(file.clone()).unwrap();
     let third = session
         .persist_entry(
             "message",
@@ -511,7 +511,7 @@ fn declaration_stamped_entry_survives_reload_as_the_same_identity() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let file = dir.join(session_file_name(session.session_id()));
-    session.set_path(file.clone());
+    session.set_path(file.clone()).unwrap();
     let disclosure = json!({
         "customType": "compaction_outcome",
         "content": "Compaction cancelled",
@@ -653,7 +653,7 @@ fn scan_builds_transcript_search_text() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(
         &json!({"role": "user", "content": "fix the login bug", "timestamp": 1u64}),
     );
@@ -679,7 +679,7 @@ fn scan_folds_the_saved_row_usage_summary() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     let assistant_id = session.append_message(&json!({
             "role": "assistant",
             "content": [{ "type": "text", "text": "run it" }],
@@ -739,7 +739,7 @@ fn scan_keeps_messages_with_partial_usage_objects() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(&json!({"role": "user", "content": "run it", "timestamp": 1u64}));
     session.append_message(&json!({
         "role": "assistant",
@@ -769,7 +769,7 @@ fn scan_omits_usage_without_billable_work() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     session.append_message(&json!({"role": "user", "content": "hi", "timestamp": 1u64}));
     session.rewrite().unwrap();
 
@@ -783,7 +783,7 @@ fn transcript_search_text_caps_at_the_ts_limit() {
     let dir = temp_dir();
     let mut session = SessionFile::create("/tmp", None, 0);
     let path = dir.join(session_file_name(session.session_id()));
-    session.set_path(path.clone());
+    session.set_path(path.clone()).unwrap();
     for round in 0..3 {
         let message = "x".repeat(30 * 1024);
         session.append_message(&json!({
@@ -1270,7 +1270,7 @@ fn hydrating_full_history_preserves_the_trace_controller() {
     let path = dir.join("trace-hydration.jsonl");
     let mut original = SessionFile::create(dir.to_str().unwrap(), None, 0);
     original.append_message(&json!({"role":"user", "content":"synthetic", "timestamp":1u64}));
-    original.set_path(path.clone());
+    original.set_path(path.clone()).unwrap();
     original.rewrite().unwrap();
     let mut windowed = SessionFile::open_windowed(&path).unwrap();
     assert!(windowed.window.is_some());

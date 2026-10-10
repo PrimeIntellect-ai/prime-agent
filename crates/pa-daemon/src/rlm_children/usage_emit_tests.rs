@@ -55,6 +55,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         closed_by_parent: false,
         session_file: Some(session_file.display().to_string()),
         attributed_rows: Some(0),
+        pending_usage_report: None,
         usage_watch_live: false,
         usage_rearm: false,
         emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -327,4 +328,106 @@ async fn reseed_lists_live_ledger_children_settled_and_bills_only_after_a_delive
         panic!("one batch: {:?}", reports[0].batches);
     };
     assert_eq!((usage.input, usage.output), (10, 5));
+}
+
+/// Cancellation after delivery starts retains the exact interval; rows arriving
+/// behind it are drained once before the caller's final forget.
+#[tokio::test]
+async fn canceled_interval_keeps_identity_and_drains_new_rows_before_forget() {
+    use std::io::Write;
+    struct CancelFirstSink {
+        attempts: std::sync::Mutex<Vec<RlmChildUsageReport>>,
+        started: tokio::sync::Notify,
+        forgotten: std::sync::atomic::AtomicBool,
+    }
+    impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CancelFirstSink {
+        fn record(
+            &self,
+            report: RlmChildUsageReport,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+            Box::pin(async move {
+                let first = {
+                    let mut attempts = self.attempts.lock().unwrap();
+                    let first = attempts.is_empty();
+                    attempts.push(report);
+                    first
+                };
+                if first {
+                    self.started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                true
+            })
+        }
+        fn forget(
+            &self,
+            _id: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.forgotten
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            })
+        }
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let sessions = registry(Path::new("/agent"));
+    let sink = Arc::new(CancelFirstSink {
+        attempts: std::sync::Mutex::new(vec![]),
+        started: tokio::sync::Notify::new(),
+        forgotten: std::sync::atomic::AtomicBool::new(false),
+    });
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-canceled", &file);
+    let inner = sessions.inner.clone();
+    let emitted_record = record.clone();
+    let emit = tokio::spawn(async move {
+        inner.emit_child_usage(&emitted_record).await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), sink.started.notified())
+        .await
+        .unwrap();
+    emit.abort();
+    assert!(emit.await.unwrap_err().is_cancelled());
+    let pending = record.lock().await.pending_usage_report.clone().unwrap();
+    let mut later: serde_json::Value = std::fs::read_to_string(&file)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|row| row["message"]["role"] == "assistant")
+        .unwrap();
+    later["id"] = serde_json::json!("new-completion");
+    later["parentId"] = serde_json::json!("a0");
+    later["message"]["usage"]["input"] = serde_json::json!(70);
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    writeln!(append, "{}", serde_json::to_string(&later).unwrap()).unwrap();
+    sessions.inner.emit_child_usage(&record).await;
+    sessions.inner.forget_child_usage(&record).await;
+    let attempts = sink.attempts.lock().unwrap();
+    assert_eq!(
+        attempts.len(),
+        3,
+        "canceled attempt, same-ID retry, then fresh interval"
+    );
+    assert_eq!(attempts[0].report_id, pending.0.report_id);
+    assert_eq!(attempts[1].report_id, pending.0.report_id);
+    assert_eq!(attempts[0].batches, attempts[1].batches);
+    assert_ne!(attempts[2].report_id, pending.0.report_id);
+    assert_eq!(attempts[2].batches.len(), 1);
+    assert_eq!(attempts[2].batches[0].1.input, 70);
+    assert!(sink.forgotten.load(std::sync::atomic::Ordering::SeqCst));
+    drop(attempts);
+    assert!(record.lock().await.pending_usage_report.is_none());
+    assert_eq!(
+        record.lock().await.attributed_rows,
+        Some(
+            crate::session_store::SessionFile::open(&file)
+                .unwrap()
+                .entries()
+                .len()
+        )
+    );
 }

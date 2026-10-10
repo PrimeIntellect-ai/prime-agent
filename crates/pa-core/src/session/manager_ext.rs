@@ -55,7 +55,7 @@ impl SessionManager {
     ///
     /// The underlying I/O error when the durable append fails.
     pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::GitState {
             payload: GitStateEntry { git },
@@ -93,7 +93,7 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::CustomMessage {
             payload: CustomMessageEntry {
@@ -124,7 +124,7 @@ impl SessionManager {
             self.get_entry_by_id(target_id).is_some(),
             "Entry {target_id} not found"
         );
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         let timestamp = base.timestamp.clone().unwrap_or_default();
         self.append_entry(FileEntry::Label {
@@ -226,6 +226,7 @@ impl SessionManager {
         from_hook: Option<bool>,
         usage: Option<pa_types::ai::Usage>,
     ) -> std::io::Result<String> {
+        self.reconcile_child_usage()?;
         let previous_leaf = self.get_leaf_id().map(str::to_string);
         if let Some(branch_from_id) = branch_from_id {
             assert!(
@@ -236,7 +237,7 @@ impl SessionManager {
         } else {
             self.set_leaf_id(None);
         }
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         let appended = self.append_entry(FileEntry::BranchSummary {
             payload: pa_types::session::BranchSummaryEntry {

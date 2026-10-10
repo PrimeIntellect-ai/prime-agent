@@ -594,7 +594,9 @@ fn wave_b11_saved_sessions_wire_shapes() {
         let path = sessions_dir.join(pa_daemon::session_store::session_file_name(
             session.session_id(),
         ));
-        session.set_path(path.clone());
+        session
+            .set_path(path.clone())
+            .expect("fixture session path");
         session.rewrite().expect("write saved session");
         path
     };

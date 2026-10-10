@@ -389,7 +389,9 @@ impl TreeNavigation {
                     let session_dir = store.path.parent().unwrap_or(store.path.as_path());
                     let file = session_dir
                         .join(crate::session_store::session_file_name(forked.session_id()));
-                    forked.set_path(file);
+                    forked.set_path(file).map_err(|error| {
+                        response_failure(None, "fork", &error.to_string(), None)
+                    })?;
                     forked.trace_upload = store
                         .trace_upload
                         .as_ref()
@@ -652,7 +654,7 @@ mod trace_fork_tests {
         )
         .unwrap();
         let mut store = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
-        store.set_path(old_path.clone());
+        store.set_path(old_path.clone()).unwrap();
         store.trace_upload = Some(controller.clone());
         let core = Arc::new(Mutex::new(SessionCore::test_core(
             Some(store),
@@ -675,7 +677,7 @@ mod trace_fork_tests {
         )
         .unwrap();
         let mut forked = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
-        forked.set_path(session_dir.join("fork.jsonl"));
+        forked.set_path(session_dir.join("fork.jsonl")).unwrap();
         forked.trace_upload = Some(prepared.clone());
         forked.rewrite().unwrap();
         navigation.replace_with_fork(forked).await.unwrap();
@@ -719,7 +721,7 @@ mod trace_fork_tests {
         )
         .unwrap();
         let mut store = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
-        store.set_path(old_path.clone());
+        store.set_path(old_path.clone()).unwrap();
         store.trace_upload = Some(controller.clone());
         let core = Arc::new(Mutex::new(SessionCore::test_core(
             Some(store),
@@ -734,7 +736,7 @@ mod trace_fork_tests {
         // bound is pa-core's, covered by its bounded-admission tests); the
         // unhooked prepared fork is that rejection's daemon-side shape.
         let mut forked = SessionFile::create(dir.path().to_string_lossy().as_ref(), None, 0);
-        forked.set_path(session_dir.join("fork.jsonl"));
+        forked.set_path(session_dir.join("fork.jsonl")).unwrap();
         forked.rewrite().unwrap();
         navigation.replace_with_fork(forked).await.unwrap();
         let live = core.lock().unwrap();

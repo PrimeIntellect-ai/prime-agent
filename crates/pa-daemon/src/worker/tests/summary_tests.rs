@@ -109,7 +109,7 @@ fn summary_lifecycle_is_message_based() {
     let path = dir.join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path);
+    session.set_path(path).unwrap();
     session.append_message(&serde_json::json!({
         "role": "user", "content": "hi", "timestamp": 1u64
     }));

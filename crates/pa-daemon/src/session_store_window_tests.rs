@@ -9,7 +9,7 @@ fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut full = SessionFile::create("/tmp", None, 0);
-    full.set_path(path.clone());
+    full.set_path(path.clone()).unwrap();
     let old = full.append_message(&json!({
         "role":"assistant", "provider":"openai", "model":"test", "api":"openai-responses",
         "content":[{"type":"text","text":"old"}], "stopReason":"stop", "timestamp":0,
@@ -92,7 +92,7 @@ fn window_preserves_transcript_metadata_and_append_then_hydrate() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut full = SessionFile::create("/tmp", None, 0);
-    full.set_path(path.clone());
+    full.set_path(path.clone()).unwrap();
     full.append_session_info("old name");
     full.append_thinking_level_change("high");
     full.append_message(&json!({
@@ -291,7 +291,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("plain.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_message(&json!({"role": "user", "content": "hi", "timestamp": 500u64}));
         store.append_message(&assistant(&usage_of(10, 2, 3, 0.1), 300));
         store.append_entry(
@@ -312,7 +312,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("nonmonotonic.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_message(&assistant(&usage_of(1, 1, 0, 0.0), 900));
         store.append_message(&json!({"role": "user", "content": "late", "timestamp": 200u64}));
         assert_scan_matches_fold("non-monotonic tail", &store);
@@ -325,7 +325,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("kept-on-message.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_message(&json!({"role": "user", "content": "gone", "timestamp": 1u64}));
         let kept =
             store.append_message(&json!({"role": "user", "content": "kept", "timestamp": 50u64}));
@@ -346,7 +346,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("kept-on-custom.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         let marker = store.append_entry("custom", json!({"customType": "thread_goal_state"}));
         store.append_message(&assistant(&usage_of(5, 5, 0, 0.5), 10));
         store.append_entry(
@@ -363,7 +363,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("kept-missing.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_message(&assistant(&usage_of(50, 50, 0, 5.0), 1));
         store.append_entry(
             "compaction",
@@ -380,7 +380,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("stacked.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_message(&assistant(&usage_of(1, 1, 0, 0.0), 1));
         let kept =
             store.append_message(&json!({"role": "user", "content": "k", "timestamp": 2u64}));
@@ -401,7 +401,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("empty.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         assert_scan_matches_fold("empty session", &store);
         assert_eq!(
             store.scan_message_scalars(),
@@ -414,7 +414,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
     {
         let path = dir.path().join("degenerate.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
-        store.set_path(path);
+        store.set_path(path).unwrap();
         store.append_entry("message", json!({"note": "no message payload"}));
         store.append_message(&assistant(&usage_of(6, 7, 0, 0.6), 42));
         assert_scan_matches_fold("degenerate message row", &store);
@@ -431,7 +431,7 @@ fn walk_pins_the_compaction_boundary_sequences() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("pin.jsonl");
     let mut store = SessionFile::create("/tmp", None, 0);
-    store.set_path(path);
+    store.set_path(path).unwrap();
     store.append_message(&json!({"role": "user", "content": "u1", "timestamp": 1u64}));
     store.append_entry(
         "custom",
@@ -498,7 +498,7 @@ fn windowed_restored_settings_match_the_full_open() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("resumed.jsonl");
     let mut file = SessionFile::create("/tmp", None, 0);
-    file.set_path(path.clone());
+    file.set_path(path.clone()).unwrap();
     file.append_entry(
         "model_change",
         json!({"provider":"old","modelId":"superseded"}),
@@ -525,7 +525,7 @@ fn windowed_restored_settings_match_the_full_open() {
 
     let path = dir.path().join("never-compacted.jsonl");
     let mut file = SessionFile::create("/tmp", None, 0);
-    file.set_path(path.clone());
+    file.set_path(path.clone()).unwrap();
     file.append_entry("model_change", json!({"provider":"p","modelId":"m"}));
     file.append_entry("thinking_level_change", json!({"thinkingLevel":"medium"}));
     file.append_entry("service_tier_change", json!({"serviceTier":"flex"}));

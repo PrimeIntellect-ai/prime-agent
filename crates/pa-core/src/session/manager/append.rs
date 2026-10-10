@@ -8,6 +8,7 @@ use super::{
 
 impl SessionManager {
     pub(crate) fn append_entry(&mut self, entry: FileEntry) -> std::io::Result<()> {
+        self.reconcile_child_usage()?;
         let was_assistant = self.has_assistant_entry;
         let was_flushed = self.flushed;
         if matches!(
@@ -38,7 +39,12 @@ impl SessionManager {
         Ok(())
     }
 
-    pub(crate) fn next_base(&self) -> EntryBase {
+    pub(crate) fn next_base(&mut self) -> std::io::Result<EntryBase> {
+        self.reconcile_child_usage()?;
+        Ok(self.next_base_retained())
+    }
+
+    fn next_base_retained(&self) -> EntryBase {
         EntryBase {
             id: Some(if self.window.is_some() {
                 uuid::Uuid::new_v4().to_string()
@@ -56,7 +62,7 @@ impl SessionManager {
     /// I/O error when the durable append fails; the entry is not kept in
     /// the in-memory index.
     pub fn append_message(&mut self, message: AgentMessage) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Message { message, base })?;
         Ok(id)
@@ -72,11 +78,15 @@ impl SessionManager {
         if matches!(message, AgentMessage::Assistant(_)) {
             self.has_assistant_entry = true;
         }
-        let base = self.next_base();
+        let recovery_error = self.reconcile_child_usage().err();
+        let base = self.next_base_retained();
         let id = base.id.clone().unwrap_or_default();
         self.file_entries.push(FileEntry::Message { message, base });
         let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
+        let write_error = recovery_error.or_else(|| self.persist_entry(index).err());
+        if write_error.is_some() {
+            self.retain_deferred_child_usage_row(index);
+        }
         let entry = self.file_entries[index].clone();
         if let Some(window) = &mut self.window {
             window.append_entry(entry.clone());
@@ -95,7 +105,7 @@ impl SessionManager {
         &mut self,
         thinking_level: &str,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ThinkingLevelChange {
             payload: pa_types::session::ThinkingLevelChangeEntry {
@@ -113,7 +123,7 @@ impl SessionManager {
         &mut self,
         service_tier: Option<pa_types::ai::ServiceTier>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ServiceTierChange {
             payload: pa_types::session::ServiceTierChangeEntry { service_tier },
@@ -130,7 +140,7 @@ impl SessionManager {
         provider: &str,
         model_id: &str,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ModelChange {
             payload: pa_types::session::ModelChangeEntry {
@@ -153,7 +163,7 @@ impl SessionManager {
         &mut self,
         payload: pa_types::session::CompactionEntry,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Compaction { payload, base })?;
         Ok(id)
@@ -167,7 +177,7 @@ impl SessionManager {
         custom_type: &str,
         data: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::Custom {
             payload: pa_types::session::CustomEntry {
@@ -188,7 +198,8 @@ impl SessionManager {
         custom_type: &str,
         data: Option<serde_json::Value>,
     ) -> (String, Option<std::io::Error>) {
-        let base = self.next_base();
+        let recovery_error = self.reconcile_child_usage().err();
+        let base = self.next_base_retained();
         let id = base.id.clone().unwrap_or_default();
         self.file_entries.push(FileEntry::Custom {
             payload: pa_types::session::CustomEntry {
@@ -199,7 +210,10 @@ impl SessionManager {
             base,
         });
         let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
+        let write_error = recovery_error.or_else(|| self.persist_entry(index).err());
+        if write_error.is_some() {
+            self.retain_deferred_child_usage_row(index);
+        }
         let entry = self.file_entries[index].clone();
         if let Some(window) = &mut self.window {
             window.append_entry(entry.clone());
@@ -223,7 +237,7 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::CustomMessage {
             payload: pa_types::session::CustomMessageEntry {
@@ -249,7 +263,8 @@ impl SessionManager {
         display: bool,
         details: Option<serde_json::Value>,
     ) -> (String, Option<std::io::Error>) {
-        let base = self.next_base();
+        let recovery_error = self.reconcile_child_usage().err();
+        let base = self.next_base_retained();
         let id = base.id.clone().unwrap_or_default();
         self.file_entries.push(FileEntry::CustomMessage {
             payload: pa_types::session::CustomMessageEntry {
@@ -262,7 +277,10 @@ impl SessionManager {
             base,
         });
         let index = self.file_entries.len() - 1;
-        let write_error = self.persist_entry(index).err();
+        let write_error = recovery_error.or_else(|| self.persist_entry(index).err());
+        if write_error.is_some() {
+            self.retain_deferred_child_usage_row(index);
+        }
         let entry = self.file_entries[index].clone();
         if let Some(window) = &mut self.window {
             window.append_entry(entry.clone());
@@ -287,6 +305,7 @@ impl SessionManager {
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> std::io::Result<String> {
+        self.reconcile_child_usage()?;
         let target_index = self.by_id.get(target_id).copied().filter(|&index| {
             matches!(
                 self.file_entries[index],
@@ -304,7 +323,7 @@ impl SessionManager {
                 format!("Assistant message entry {target_id} not found"),
             )
         })?;
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ChildUsageAttributed {
             payload: pa_types::session::ChildUsageAttributionEntry {
@@ -333,7 +352,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_info(&mut self, name: &str) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionInfo {
             payload: pa_types::session::SessionInfoEntry {
@@ -378,7 +397,7 @@ impl SessionManager {
     ///
     /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_state(&mut self, status: SessionStateStatus) -> std::io::Result<String> {
-        let base = self.next_base();
+        let base = self.next_base()?;
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::SessionState {
             payload: pa_types::session::SessionStateEntry {

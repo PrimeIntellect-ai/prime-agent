@@ -48,12 +48,15 @@ impl SessionManager {
     }
 
     pub(super) fn rewrite_file(&mut self) {
-        if let Err(error) = self.try_rewrite_file() {
+        if let Err(error) = self
+            .reconcile_child_usage()
+            .and_then(|()| self.try_rewrite_file())
+        {
             tracing::error!(%error, "session rewrite failed");
         }
     }
 
-    fn try_rewrite_file(&mut self) -> std::io::Result<()> {
+    pub(super) fn try_rewrite_file(&mut self) -> std::io::Result<()> {
         assert!(
             self.window.is_none(),
             "hydrate full session history before this operation"
@@ -80,7 +83,7 @@ impl SessionManager {
         Ok(())
     }
 
-    fn notify_persist_listeners(&self) {
+    pub(super) fn notify_persist_listeners(&self) {
         let Some(session_file) = &self.session_file else {
             return;
         };
@@ -103,6 +106,7 @@ impl SessionManager {
     /// I/O error when the session file rewrite fails; unpersisted or
     /// already-flushed managers never touch the disk.
     pub fn flush_now(&mut self) -> std::io::Result<()> {
+        self.reconcile_child_usage()?;
         if !self.persist || self.session_file.is_none() {
             return Ok(());
         }
@@ -114,6 +118,7 @@ impl SessionManager {
         Ok(())
     }
     pub(super) fn persist_entry(&mut self, index: usize) -> std::io::Result<()> {
+        self.reconcile_child_usage()?;
         if !self.persist || self.session_file.is_none() {
             return Ok(());
         }
