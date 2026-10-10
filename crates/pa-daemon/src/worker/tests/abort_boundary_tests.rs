@@ -112,6 +112,7 @@ async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
                 "follow-up reply",
             ],
         })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -297,6 +298,7 @@ async fn abort_and_send_queued_with_only_follow_ups_starts_the_oldest() {
                 "follow-up two reply",
             ],
         })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -510,6 +512,7 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": [{ "text": "held reply", "delayMs": 60000 }] })),
+        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     let created = worker

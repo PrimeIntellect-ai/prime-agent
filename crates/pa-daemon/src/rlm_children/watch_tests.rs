@@ -301,6 +301,7 @@ async fn spawn_child(sessions: &SupervisorChildSessions) -> RlmSpawnHandle {
             thinking: None,
             cell_source_code: None,
             spawned_by_request_id: None,
+            decision_child: false,
         })
         .await
         .expect("spawn must succeed against the fake supervisor")

@@ -21,8 +21,9 @@ pub(crate) enum ClickAction {
     },
     /// Move the `/model` picker's selection to the clicked filtered row.
     SelectModelRow(usize),
-    /// Move the `/effort` picker's selection to the clicked filtered row.
-    SelectEffortRow(usize),
+    /// Move the `/effort` picker's selection to the
+    /// clicked filtered row.
+    SelectChoiceRow(usize),
     /// Open the activity dock group the click landed on (operator
     /// directive 2026-09-29). The target spans one group's segment.
     OpenDockGroup(crate::chrome::ActivityGroup),
@@ -83,16 +84,16 @@ pub(crate) struct PickerClickSurface {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PickerKind {
     Model,
-    Effort,
+    Choice,
 }
 
 /// The `/model` picker's chrome rows: the bordered search field
 /// renders exactly three rows.
 pub(crate) const MODEL_PICKER_CHROME_ROWS: usize = 3;
 
-/// The `/effort` picker's chrome rows: the config selector's header
-/// block plus the bordered search field.
-pub(crate) const EFFORT_PICKER_CHROME_ROWS: usize = 6;
+/// The `/effort` picker's chrome rows: the config
+/// selector's header block plus the bordered search field.
+pub(crate) const CHOICE_PICKER_CHROME_ROWS: usize = 6;
 
 /// The last composed frame's clickable geometry; the inline compose
 /// clears it.
@@ -192,7 +193,7 @@ impl AgentView {
                 .filter(|item| *item < visible)?;
             return Some(match picker.kind {
                 PickerKind::Model => ClickAction::SelectModelRow(picker.items.0 + item),
-                PickerKind::Effort => ClickAction::SelectEffortRow(picker.items.0 + item),
+                PickerKind::Choice => ClickAction::SelectChoiceRow(picker.items.0 + item),
             });
         }
         // The dock's chrome rows resolve before the editor: their rows
