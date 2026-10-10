@@ -613,7 +613,8 @@ fn registration_adoption_fixture(
     let descriptor_path = supervisor.descriptor_dir.join("w-register.json");
     let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
         "version":2,"workerId":"w-register","pid":persisted_pid,
-        "workerInstanceId":"planned","socketPath":socket_path.to_string_lossy(),
+        "workerInstanceId":"planned","plannedLaunchInstanceId":"planned",
+        "socketPath":socket_path.to_string_lossy(),
         "recoveryJournalPath":dir.path().join("journal.jsonl").to_string_lossy(),
         "supervisorSocketPath":supervisor.options.socket_path.to_string_lossy(),
         "authenticationToken":"register-token","rootActiveSessionId":"w-register",
@@ -652,9 +653,19 @@ fn adoption_registration(socket_path: &Path, token: &str, instance: &str) -> Dae
 /// unassigned PID. Auth must bind to the registering live incarnation.
 #[tokio::test]
 async fn registration_adoption_authenticates_the_live_pid_before_persisting_authority() {
-    for persisted_pid in [4242, 0] {
+    for (persisted_pid, legacy_uuid_mismatch) in [(4242, false), (0, false), (4242, true)] {
         let (_dir, supervisor, socket_path, descriptor_path) =
             registration_adoption_fixture(persisted_pid);
+        if legacy_uuid_mismatch {
+            // Historical spawn generated a different env UUID; its durable
+            // descriptor had no planned-launch provenance or native carrier.
+            let mut descriptor: DaemonWorkerDescriptor =
+                serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+            descriptor.worker_instance_id = Some("historical-disk-uuid".to_string());
+            descriptor.rest.remove("plannedLaunchInstanceId");
+            descriptor.rest.remove(crate::native_signal::KEY);
+            crate::descriptor::persist_worker(&descriptor_path, &descriptor).unwrap();
+        }
         let listener = bind_fake_worker(&socket_path).await;
         let command = adoption_registration(&socket_path, "register-token", "planned");
         let native = match &command {
@@ -833,5 +844,92 @@ async fn planned_launch_and_registration_fence_predecessor_roster_frames() {
         assert!(!roster.accept_roster_pull("w-register", "planned", Some(6)));
         assert!(!roster.accept_delta_sequence("w-register", "previous", 100));
         assert!(roster.accept_roster_pull("w-register", "planned", Some(8)));
+    }
+}
+
+/// A queued predecessor registration cannot undo the incarnation already
+/// published by a planned launch, even when it still knows the worker token.
+#[tokio::test]
+async fn known_resident_registration_keeps_planned_identity_and_roster_watermark() {
+    let (_dir, supervisor, socket_path, descriptor_path) = registration_adoption_fixture(4242);
+    let planned = adoption_registration(&socket_path, "register-token", "planned");
+    let native = match &planned {
+        DaemonCommand::WorkerRegister { rest, .. } => rest[crate::native_signal::KEY].clone(),
+        _ => unreachable!("registration fixture"),
+    };
+    let mut descriptor: DaemonWorkerDescriptor =
+        serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+    descriptor.pid = u64::from(std::process::id());
+    descriptor.process_start_id = crate::protocol::process_start_id(std::process::id());
+    descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+    descriptor
+        .rest
+        .insert(crate::native_signal::KEY.to_string(), native.clone());
+    crate::descriptor::persist_worker(&descriptor_path, &descriptor).unwrap();
+    let before = descriptor.clone();
+    let before_bytes = std::fs::read(&descriptor_path).unwrap();
+    let resident = ResidentWorker::new(
+        "w-register".to_string(),
+        descriptor,
+        descriptor_path.clone(),
+    );
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    {
+        let mut roster = supervisor.roster.lock().unwrap();
+        roster.note_worker_generation("w-register", "planned");
+        assert!(roster.accept_delta_sequence("w-register", "planned", 7));
+    }
+
+    let mut predecessor = adoption_registration(&socket_path, "register-token", "previous");
+    match &mut predecessor {
+        DaemonCommand::WorkerRegister { pid, rest, .. } => {
+            *pid = 4242;
+            rest.insert(
+                crate::native_signal::KEY.to_string(),
+                json!({
+                    "version":1,"workerInstanceId":"previous","identity":[0,0,0,0,0,4242,0,7]
+                }),
+            );
+        }
+        _ => unreachable!("registration fixture"),
+    }
+    let refused = supervisor
+        .handle_worker_register("predecessor", "worker_register", &predecessor)
+        .await;
+    assert!(!refused.success, "queued predecessor must be refused");
+    assert_eq!(*resident.descriptor.lock().await, before);
+    assert_eq!(std::fs::read(&descriptor_path).unwrap(), before_bytes);
+    assert!(resident.cmd_tx.lock().await.is_none());
+    {
+        let mut roster = supervisor.roster.lock().unwrap();
+        assert!(!roster.accept_delta_sequence("w-register", "previous", 100));
+        assert!(!roster.accept_delta_sequence("w-register", "planned", 7));
+        assert!(roster.accept_roster_pull("w-register", "planned", Some(7)));
+    }
+
+    for _ in 0..2 {
+        let accepted = supervisor
+            .handle_worker_register("planned", "worker_register", &planned)
+            .await;
+        assert!(
+            accepted.success,
+            "planned registration failed: {accepted:?}"
+        );
+        assert_eq!(*resident.descriptor.lock().await, before);
+        assert_eq!(std::fs::read(&descriptor_path).unwrap(), before_bytes);
+        assert_eq!(
+            resident
+                .descriptor
+                .lock()
+                .await
+                .rest
+                .get(crate::native_signal::KEY),
+            Some(&native)
+        );
+        assert!(resident.cmd_tx.lock().await.is_none());
+        let mut roster = supervisor.roster.lock().unwrap();
+        assert!(!roster.accept_delta_sequence("w-register", "previous", 100));
+        assert!(!roster.accept_delta_sequence("w-register", "planned", 7));
+        assert!(roster.accept_roster_pull("w-register", "planned", Some(7)));
     }
 }

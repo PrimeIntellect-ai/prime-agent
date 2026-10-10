@@ -439,6 +439,12 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
+            if let Err(error) = crate::native_signal::ensure_registration_incarnation(
+                &descriptor,
+                worker_instance_id.as_deref(),
+            ) {
+                return fail(&error.to_string());
+            }
             // The descriptor may already name this planned launch before spawn.
             // Advance the independent roster slot idempotently: same-generation
             // re-registration preserves its watermark; replacements reject old frames.

@@ -7,6 +7,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub(crate) const KEY: &str = "nativeSignalIdentity";
+const LAUNCH_INSTANCE_KEY: &str = "plannedLaunchInstanceId";
+
+/// Legacy descriptors can name a UUID that never reached the worker environment.
+/// Only our durable launch marker or a validated native owner proves incarnation.
+pub(crate) fn ensure_registration_incarnation(
+    descriptor: &DaemonWorkerDescriptor,
+    instance: Option<&str>,
+) -> Result<()> {
+    if let Some(marker) = descriptor.rest.get(LAUNCH_INSTANCE_KEY) {
+        let planned = marker
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Worker planned launch identity is invalid"))?;
+        if descriptor.worker_instance_id.as_deref() != Some(planned) || instance != Some(planned) {
+            return Err(anyhow!(
+                "Worker registration does not match the planned incarnation"
+            ));
+        }
+    } else if parse(
+        descriptor.rest.get(KEY),
+        descriptor.pid,
+        descriptor.worker_instance_id.as_deref(),
+    )
+    .ok()
+    .flatten()
+    .is_some()
+        && descriptor.worker_instance_id.as_deref() != instance
+    {
+        return Err(anyhow!(
+            "Worker registration does not match its native owner"
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -96,6 +130,11 @@ pub(crate) fn begin_spawn(
     let mut candidate = descriptor.clone();
     reset(&mut candidate);
     candidate.worker_instance_id = Some(instance.to_string());
+    candidate.rest.insert(
+        LAUNCH_INSTANCE_KEY.to_string(),
+        Value::String(instance.to_string()),
+    );
+    candidate.process_start_id = None;
     crate::descriptor::persist_worker_at(path, &candidate, sync)?;
     *descriptor = candidate;
     Ok(())
@@ -111,19 +150,19 @@ pub(crate) fn recover_registered_process(
     socket: &str,
     start_id: Option<String>,
 ) -> Result<()> {
-    if descriptor.worker_instance_id.as_deref().is_some()
-        && descriptor.worker_instance_id.as_deref() != instance
-    {
-        return Err(anyhow!(
-            "Worker registration does not match the planned incarnation"
-        ));
-    }
+    ensure_registration_incarnation(descriptor, instance)?;
+    let same_process =
+        descriptor.pid == pid && descriptor.worker_instance_id.as_deref() == instance;
     let mut candidate = descriptor.clone();
     reset(&mut candidate);
     candidate.pid = pid;
     candidate.worker_instance_id = instance.map(str::to_string);
     candidate.socket_path = socket.to_string();
-    candidate.process_start_id = start_id;
+    candidate.process_start_id = if same_process {
+        start_id.or_else(|| descriptor.process_start_id.clone())
+    } else {
+        start_id
+    };
     crate::descriptor::persist_worker(path, &candidate)?;
     *descriptor = candidate;
     Ok(())
@@ -359,6 +398,56 @@ mod tests {
         let disk: DaemonWorkerDescriptor =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(disk.pid, 45);
+    }
+
+    #[test]
+    fn launch_provenance_and_start_observation_preserve_only_the_same_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.json");
+        let mut descriptor = fixture_descriptor();
+        descriptor.process_start_id = Some("known".to_string());
+        recover_registered_process(
+            &path,
+            &mut descriptor,
+            42,
+            Some("original"),
+            "/tmp/w.sock",
+            None,
+        )
+        .unwrap();
+        assert_eq!(descriptor.process_start_id.as_deref(), Some("known"));
+        // A legacy mismatching UUID does not establish planned provenance.
+        recover_registered_process(
+            &path,
+            &mut descriptor,
+            42,
+            Some("legacy-env"),
+            "/tmp/w.sock",
+            None,
+        )
+        .unwrap();
+        assert!(descriptor.process_start_id.is_none());
+        descriptor.process_start_id = Some("predecessor".to_string());
+        begin_spawn(
+            &path,
+            &mut descriptor,
+            "planned",
+            crate::descriptor::TempSync::Synced,
+        )
+        .unwrap();
+        assert!(descriptor.process_start_id.is_none());
+        assert_eq!(
+            descriptor.rest.get(LAUNCH_INSTANCE_KEY),
+            Some(&json!("planned"))
+        );
+        assert!(ensure_registration_incarnation(&descriptor, Some("planned")).is_ok());
+        assert!(ensure_registration_incarnation(&descriptor, Some("legacy-env")).is_err());
+        for malformed in [Value::Null, json!(7), json!(""), json!("different")] {
+            descriptor
+                .rest
+                .insert(LAUNCH_INSTANCE_KEY.to_string(), malformed);
+            assert!(ensure_registration_incarnation(&descriptor, Some("planned")).is_err());
+        }
     }
 
     #[test]
