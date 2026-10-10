@@ -201,13 +201,26 @@ async fn stop_target_within(
     // does any signal ride the held fd (a signal through this fd can
     // reach the pinned process and nothing else, ever).
     let Ok(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
-        // The kernel-held handle is unavailable (an unsupported platform,
-        // an old kernel, or a process that just exited): the conservative
-        // default never signals - a missed reap is recoverable, a wrong
-        // one is not. A LIVE process behind an unobtainable handle is NOT
-        // gone: the terminal stop keeps its tombstoned descriptor (the
-        // next boot retries), never deletes it behind a false AlreadyGone.
+        // No kernel-held handle (an unsupported platform, an old kernel,
+        // or the process just exited): never signal - a missed reap is
+        // recoverable, a wrong one is not. A live target is watched to
+        // its exit on the kernel's exit notification within the same
+        // grace (macOS has no pidfd); the watch's Ok is the exit proof -
+        // a just-acked shutdown worker is often only milliseconds from
+        // exiting, and a liveness re-check there races the exit drain -
+        // anything else keeps the conservative survivor.
         if identity_current(target) && crate::lease::is_process_alive(target.pid).unwrap_or(false) {
+            let exited = matches!(
+                tokio::time::timeout(
+                    term_grace,
+                    pa_core::platform::process::wait_for_exit(target.pid)
+                )
+                .await,
+                Ok(Ok(()))
+            );
+            if exited {
+                return ReapOutcome::AlreadyGone;
+            }
             return ReapOutcome::Survived;
         }
         return ReapOutcome::AlreadyGone;
