@@ -666,6 +666,7 @@ mod tests {
     /// pass barred from a key) registers on nothing - the raced check
     /// never reads a stop it cannot receive.
     #[test]
+    #[cfg(not(windows))]
     fn shutdown_reach_keys_cover_every_containing_shutdown_root() {
         let root = DaemonStateRoot {
             agent_dir: PathBuf::from("/home/agent"),
@@ -711,6 +712,7 @@ mod tests {
     /// A never-touch socket is barred from every stop: no reach keys at
     /// all, so no CLI pass ever reads as its concurrent shutdown.
     #[test]
+    #[cfg(not(windows))]
     fn a_never_touch_socket_has_no_shutdown_reach_keys() {
         for dir in NEVER_TOUCH_SOCKET_DIRS {
             let socket = Path::new(dir).join("daemon.sock");
@@ -729,6 +731,7 @@ mod tests {
     /// A pass barred from a key (the never-touch dirs) never bumps it:
     /// the pass keys are the root trio minus the protected entries.
     #[test]
+    #[cfg(not(windows))]
     fn a_never_touch_pass_key_is_never_bumped() {
         let protected = DaemonStateRoot {
             agent_dir: PathBuf::from("/home/agent"),
@@ -753,6 +756,27 @@ mod tests {
                 free.agent_dir.clone(),
             ],
             "an unprotected root bumps its whole trio"
+        );
+    }
+
+    /// Windows contracts: one shared pipe per machine, so both key
+    /// functions return the pipe alone (no ancestors, no containment
+    /// filtering - every stop window can stop every daemon).
+    #[test]
+    #[cfg(windows)]
+    fn windows_shutdown_keys_are_the_shared_pipe() {
+        let root = DaemonStateRoot {
+            agent_dir: PathBuf::from("C:\\agent"),
+            socket_dir: PathBuf::from("C:\\tmp\\sockets"),
+            default_socket_path: PathBuf::from(r"\\.\pipe\\prime-agent-daemon"),
+        };
+        assert_eq!(
+            shutdown_reach_keys(&root.default_socket_path, &root),
+            vec![root.default_socket_path.clone()]
+        );
+        assert_eq!(
+            shutdown_pass_keys(&root),
+            vec![root.default_socket_path.clone()]
         );
     }
 

@@ -235,6 +235,19 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 ) {
                     Ok(admission) => Some(admission),
                     Err(error) => {
+                        // The rejected successor is retired FIRST, before
+                        // any fallible status write (the identity-pinned
+                        // crash kill, best-effort): a failed write must
+                        // not leave a timed-out detached child alive to
+                        // bind the socket after the concurrent shutdown
+                        // releases its window and restart the daemon
+                        // behind the verdict.
+                        if let Some(rejected) = &failure.rejected {
+                            let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
+                                u32::try_from(rejected.pid).unwrap_or(0),
+                                rejected.process_start_id.as_deref(),
+                            );
+                        }
                         let mut writer = writer.lock().await;
                         // The rollback attempt is what failed: transition
                         // through Rollback (the state the failure arm would
@@ -251,18 +264,6 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                     }
                 };
             let Some(mut rollback_admission) = rollback_admission else {
-                // The rejected successor is retired here too (the
-                // identity-pinned crash kill, best-effort beside the
-                // recorded Failed): a timed-out detached child left alive
-                // could bind the socket after the concurrent shutdown
-                // releases its window and restart the daemon behind the
-                // verdict.
-                if let Some(rejected) = &failure.rejected {
-                    let _ = crate::daemon_discovery::kill::force_kill_identity_crash(
-                        u32::try_from(rejected.pid).unwrap_or(0),
-                        rejected.process_start_id.as_deref(),
-                    );
-                }
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
             let raced = raced_shutdown_detected(
