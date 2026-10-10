@@ -1446,6 +1446,17 @@ class RetinaScaleTests(AppTestCase):
         clicks = env.recorder.calls_named("click")
         self.assertEqual(clicks[0]["point"], (500.0, 350.0), "the live-shot scale and origin place the click without a fresh observe")
 
+    async def test_a_one_x_capture_also_uses_the_live_frame(self) -> None:
+        env = self.make_env()
+        app = await env.get_app()
+        await app.get_ax_state()  # observed (100, 50, 400, 300)
+        env.recorder.screenshot = {"path": "/tmp/fake.png", "width": 400, "height": 300}  # 1x: PNG == logical
+        env.live_window_bounds = (200.0, 100.0, 400.0, 300.0)  # the window moved after the observe
+        await app.get_screenshot(attach=False)
+        await app.click((10.0, 10.0))
+        clicks = env.recorder.calls_named("click")
+        self.assertEqual(clicks[0]["point"], (210.0, 110.0), "a 1x capture places clicks against the live frame too")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1179,10 +1179,7 @@ class App:
                     "before clicking image coordinates",
                     {},
                 )
-        if shot is not None and shot != (float(self._shot_rect[2]), float(self._shot_rect[3])):
-            # the capture's pixel-to-logical scale is a size property: it
-            # survives a moved window (the origin below is the live one), so
-            # image points still land on the on-screen element they show
+        if shot is not None:
             if not 0 <= float(point[0]) < shot[0] or not 0 <= float(point[1]) < shot[1]:
                 raise ComputerUseError(
                     "INVALID_ARGUMENT",
@@ -1194,13 +1191,17 @@ class App:
             # depicts THAT window); the clip and the offset come from the
             # window's CURRENT live bounds, falling back to the last
             # observation when the live read fails: a moved window keeps its
-            # image logicals and moves the origin, a resized one rejects
+            # image logicals and moves the origin, a resized one rejects -
+            # at any pixel ratio, a 1x capture just scales by one
             live = capture._live_window_bounds(self._shot_window_id)
             frame = live if live is not None else rect
-            scaled = (
-                float(point[0]) * float(self._shot_rect[2]) / shot[0],
-                float(point[1]) * float(self._shot_rect[3]) / shot[1],
-            )
+            if shot != (float(self._shot_rect[2]), float(self._shot_rect[3])):
+                scaled = (
+                    float(point[0]) * float(self._shot_rect[2]) / shot[0],
+                    float(point[1]) * float(self._shot_rect[3]) / shot[1],
+                )
+            else:
+                scaled = (float(point[0]), float(point[1]))
             if not 0 <= scaled[0] < float(frame[2]) or not 0 <= scaled[1] < float(frame[3]):
                 raise ComputerUseError(
                     "INVALID_ARGUMENT",
@@ -1210,13 +1211,6 @@ class App:
                     {"point": repr(point)[:64]},
                 )
             return (frame[0] + scaled[0], frame[1] + scaled[1])
-        if shot is not None and (not 0 <= float(point[0]) < shot[0] or not 0 <= float(point[1]) < shot[1]):
-            raise ComputerUseError(
-                "INVALID_ARGUMENT",
-                f"point {point!r} is outside the captured image "
-                f"({shot[0]:.0f}x{shot[1]:.0f}); use coordinates from its screenshot",
-                {"point": repr(point)[:64]},
-            )
         if not 0 <= float(point[0]) < float(rect[2]) or not 0 <= float(point[1]) < float(rect[3]):
             raise ComputerUseError(
                 "INVALID_ARGUMENT",
