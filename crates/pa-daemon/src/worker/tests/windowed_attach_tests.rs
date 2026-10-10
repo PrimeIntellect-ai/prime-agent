@@ -350,3 +350,76 @@ async fn a_windowed_attach_preserves_iso_and_fractional_prompt_times() {
         }
     }
 }
+
+/// The chunked stream's advertised count is the transcript it carries:
+/// a windowed attach streams the tail alone, and the summary keeps the
+/// session total the backfill cursor (`historyBefore`) completes.
+#[tokio::test]
+async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
+    let dir = session_dir();
+    let path = dir.join("windowed-chunked.jsonl");
+    let mut fixture = Fixture {
+        content: header_line("windowed-chunked"),
+        prev: None,
+        id: 0,
+    };
+    for index in 0..600 {
+        let message = if index == 0 {
+            json!({ "role": "user", "content": "the head prompt", "timestamp": 1000u64 })
+        } else {
+            assistant_message("kept context")
+        };
+        fixture.row(|prev, id| message_row(prev, id, &message));
+    }
+    std::fs::write(&path, fixture.content).unwrap();
+
+    let worker = worker_over(&dir, &path).await;
+    let full = full_messages(&worker).await;
+    assert_eq!(full.len(), 600, "the walk visits every message row");
+
+    let mut capabilities = TUI_CAPABILITIES.to_vec();
+    capabilities.push("chunked_snapshot");
+    let data = attach(&worker, &capabilities).await;
+    let snapshot = &data["snapshot"];
+    let omitted = snapshot["historyBefore"].as_u64().expect("historyBefore");
+    let summary_count = snapshot["summary"]["messageCount"]
+        .as_u64()
+        .expect("summary count");
+    assert_eq!(omitted, 88);
+    assert_eq!(summary_count, 600);
+    assert_eq!(snapshot["messages"].as_array().expect("tail").len(), 512);
+
+    // The supervisor's streaming step (routing.rs `streamed_attach_lines`).
+    let (streamed, events) = crate::snapshot_stream::stream_attach(
+        data,
+        "windowed-session",
+        pa_types::daemon::SnapshotPurpose::Attach,
+    )
+    .expect("stream");
+    let crate::snapshot_stream::SnapshotStreamEvents::Streamed(lines) = events else {
+        panic!("the windowed tail must stream");
+    };
+    let begin = lines
+        .iter()
+        .find(|line| line["type"] == json!("session_snapshot_begin"))
+        .expect("begin record");
+    let carried: u64 = lines
+        .iter()
+        .filter(|line| line["type"] == json!("session_snapshot_chunk"))
+        .map(|chunk| chunk["messages"].as_array().map_or(0, Vec::len) as u64)
+        .sum();
+    assert_eq!(
+        begin["messageCount"], streamed["snapshotStream"]["messageCount"],
+        "the begin record and the stream descriptor carry one count"
+    );
+    assert_eq!(
+        begin["messageCount"].as_u64().expect("begin count"),
+        carried,
+        "the advertised count is the messages the stream carries"
+    );
+    assert_eq!(
+        omitted + carried,
+        summary_count,
+        "the tail plus the history-before prefix is the session total"
+    );
+}
