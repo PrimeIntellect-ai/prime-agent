@@ -1026,6 +1026,7 @@ mod tests {
             active_session_id: "custom-session".to_string(),
             agent_dir: dir_path.join("agent"),
             recovery_journal_path: dir_path.join("recovery.jsonl"),
+            decision_child: false,
             telemetry_disabled: None,
             script: Some(json!({ "engine": "faux", "responses": ["ack"] })),
         };
