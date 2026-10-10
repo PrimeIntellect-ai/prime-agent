@@ -67,7 +67,7 @@ impl Supervisor {
             // only with a provably-gone process — the settle is not a death certificate.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                self.retire_worker_after_stop(resident).await;
+                self.retire_worker_after_stop(resident, false).await;
                 self.log_line(&format!(
                     "finished the tombstoned stop of session worker {}",
                     resident.worker_id
@@ -86,7 +86,7 @@ impl Supervisor {
             if resident.descriptor.lock().await.owner_client_id.is_some() {
                 self.finalize_owned_stop(resident).await;
             }
-            self.retire_worker_after_stop(resident).await;
+            self.retire_worker_after_stop(resident, false).await;
             self.log_line(&format!(
                 "finished the tombstoned per-session stop of session worker {}",
                 resident.worker_id
@@ -726,7 +726,7 @@ impl Supervisor {
         }
         // The per-session stop shares the terminal-stop contract: the descriptor dies only
         // with a provably-gone process — a worker that missed the shutdown stays adoptable.
-        self.retire_worker_after_stop(resident).await;
+        self.retire_worker_after_stop(resident, false).await;
         // A client-owned (ephemeral) worker's scheduled jobs die with the
         // registration (TS `cancelEphemeralWorkerScheduledJobs`).
         let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
@@ -750,13 +750,18 @@ impl Supervisor {
     /// Delete one stopped worker's descriptor only after its process is provably gone (TS
     /// `stopWorkerUntracked`'s contract): deleting the descriptor of a live worker orphans
     /// it behind its lease.
-    pub(super) async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
-        let (pid, start_id, recovery_journal_path) = {
+    pub(super) async fn retire_worker_after_stop(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        keep_interrupted_work: bool,
+    ) {
+        let (pid, start_id, journal_path, no_session) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 descriptor.pid as u32,
                 descriptor.process_start_id.clone(),
                 descriptor.recovery_journal_path.clone(),
+                descriptor.create_command.no_session == Some(true),
             )
         };
         // An unobservable identity never receives the escalation's signals; a live process
@@ -779,20 +784,35 @@ impl Supervisor {
                 ));
             }
             _ => {
-                // Metadata retirement historically treats failed liveness probes
-                // as gone. Journal deletion needs positive owner-death evidence:
-                // an unobservable process may still be writing durable work.
-                if recovery_journal_owner_is_gone(
-                    crate::lease::is_process_alive(pid).ok(),
-                    start_id.as_deref(),
-                    crate::lease::get_process_start_id(pid).as_deref(),
-                ) {
-                    let _ = std::fs::remove_file(&recovery_journal_path);
+                if keep_interrupted_work
+                    && !no_session
+                    && crate::journal::WorkerRecoveryJournal::read_interrupted(Path::new(
+                        &journal_path,
+                    ))
+                {
+                    // A shutdown-continued worker keeps descriptor and journal so
+                    // the next boot can adopt the interrupted work. An in-memory
+                    // noSession worker has no saved conversation to adopt.
+                    let mut descriptor = resident.descriptor.lock().await;
+                    descriptor.stop_requested_at = None;
+                    descriptor.archive_on_stop = None;
+                    let _ = persist_worker(&resident.descriptor_path, &descriptor);
+                } else {
+                    // Metadata retirement historically treats failed liveness probes
+                    // as gone. Journal deletion needs positive owner-death evidence:
+                    // an unobservable process may still be writing durable work.
+                    if recovery_journal_owner_is_gone(
+                        crate::lease::is_process_alive(pid).ok(),
+                        start_id.as_deref(),
+                        crate::lease::get_process_start_id(pid).as_deref(),
+                    ) {
+                        let _ = std::fs::remove_file(&journal_path);
+                    }
+                    let _ = std::fs::remove_file(&resident.descriptor_path);
+                    // The identity-pending side record dies with the descriptor it shadows
+                    // (an orphaned pending would shadow the next identity).
+                    let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
                 }
-                let _ = std::fs::remove_file(&resident.descriptor_path);
-                // The identity-pending side record dies with the descriptor it shadows
-                // (an orphaned pending would shadow the next identity).
-                let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
             }
         }
     }
@@ -1026,7 +1046,7 @@ mod tests {
         let resident =
             ResidentWorker::new("w-gone".to_string(), descriptor, descriptor_path.clone());
 
-        supervisor.retire_worker_after_stop(&resident).await;
+        supervisor.retire_worker_after_stop(&resident, false).await;
 
         assert!(
             !journal_path.exists(),

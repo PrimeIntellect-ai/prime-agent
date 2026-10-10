@@ -1,0 +1,1 @@
+- A graceful daemon shutdown can continue interrupted turns on restart while explicitly cancelled queued input remains parked.

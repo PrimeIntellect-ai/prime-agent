@@ -412,4 +412,5 @@ mod boot_cleanup;
 mod plain_boot;
 mod restart;
 mod revival;
+mod shutdown_continue;
 mod update_boot;

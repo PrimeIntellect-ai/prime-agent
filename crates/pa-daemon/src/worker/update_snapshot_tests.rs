@@ -563,6 +563,7 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
     let content = "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
     worker.persist_queue_snapshot(
         "target-session",
+        false,
         &QueueLanes {
             steering: vec![crate::journal::WorkerQueueItemRecord {
                 priority: Some(QueuePriority::Background),
@@ -572,12 +573,13 @@ async fn restored_lane_rows_keep_the_child_status_provenance() {
                 queue_key: None,
                 queue_visible: true,
                 policy: "queued".to_string(),
+                forced_batch: false,
             }],
             follow_up: Vec::new(),
         },
     );
     let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
-    let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+    let (steering, follow_up, _) = restore_queue_snapshot(&journal, "target-session");
     assert_eq!(steering.len(), 1);
     assert!(follow_up.is_empty());
     assert!(

@@ -475,11 +475,11 @@ impl Worker {
         }
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
-        let (steering, follow_up) = {
+        let (steering, follow_up, restored_suspended) = {
             let guard = self.recovery.lock().unwrap();
             match guard.as_ref() {
                 Some(journal) => restore_queue_snapshot(journal, &self.config.active_session_id),
-                None => (VecDeque::new(), VecDeque::new()),
+                None => (VecDeque::new(), VecDeque::new(), false),
             }
         };
         // The worker owns the session file; the engine reads it for the
@@ -525,6 +525,9 @@ impl Worker {
             core.cwd = cwd;
             core.steering = steering;
             core.follow_up = follow_up;
+            // The restored lanes carry their suspension: a user-aborted queue
+            // revives still parked, never auto-running its prompts.
+            core.queued_input_suspended = restored_suspended;
             core.store = Some(store);
             if let Some(disclosure) = &interrupted_compaction {
                 if let Some(store) = core.store.as_mut() {
@@ -556,7 +559,10 @@ impl Worker {
             core.active_service_tier = clamped_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
-            core.forced_all_steering = false;
+            // The restored rows carry their forced-batch flag: the batch
+            // gate rides the lane, so a restored forced batch keeps its
+            // one-turn semantics.
+            core.forced_all_steering = core.steering.iter().any(|item| item.forced_batch);
             core.scoped_models.clone_from(&scoped_entries);
             core.retry_abort_requested = false;
             // The session's depth falls back to the opened file's header: a resumed

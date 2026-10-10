@@ -847,8 +847,10 @@ impl Worker {
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let _ = self.record_recovery(false, "shutdown");
+        // `closeKeepsResumeEntry("shutdown")`). The recovery verdict was
+        // recorded by `handle_shutdown` before its reply: the supervisor may
+        // escalate the stop as soon as the reply lands, so an exit-path write
+        // would race the boot's revival decision.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }
@@ -860,7 +862,7 @@ impl Worker {
             "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
             std::process::id()
         );
-        let _ = self.handle_shutdown().await;
+        let _ = self.handle_shutdown(&json!({})).await;
         self.exit_after_close().await;
     }
 }

@@ -11,7 +11,7 @@ impl Worker {
     /// capture; the queue lanes persist BEFORE replying, so the reported queue
     /// and the durable respawn state agree (`busy` is the continuation signal).
     pub(crate) fn handle_update_snapshot(&self) -> DaemonResponse {
-        let (core_data, lanes) = {
+        let (core_data, lanes, suspended) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let data = json!({
@@ -37,12 +37,13 @@ impl Worker {
                 "busy": core.busy,
                 "compacting": core.compacting,
             });
-            (data, queue_lanes(&core))
+            (data, queue_lanes(&core), core.queued_input_suspended)
         };
         // Journal the lanes after releasing the core lock (record paths take
         // the locks in the opposite order).
         self.persist_queue_snapshot(
             core_data["activeSessionId"].as_str().unwrap_or_default(),
+            suspended,
             &lanes,
         );
         response_success(None, "update_snapshot", Some(core_data))
@@ -61,7 +62,8 @@ impl Worker {
 
     /// Graceful stop: the connection loop exits the process after
     /// replying. The session's telemetry finalizes first.
-    pub(crate) async fn handle_shutdown(&self) -> DaemonResponse {
+    pub(crate) async fn handle_shutdown(&self, payload: &Value) -> DaemonResponse {
+        let daemon_wide = payload.get("daemonShutdown").and_then(Value::as_bool) == Some(true);
         // The session is closing: the continuation mint sites and their
         // settle-hook retries bail, but unlike a kill the close KEEPS the
         // resume entry — the scheduled jobs survive for the later wake.
@@ -73,14 +75,16 @@ impl Worker {
         self.side_questions
             .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
             .await;
-        {
+        let interrupted_turn = {
             let mut core = self.core.lock().unwrap();
+            let interrupted_turn = core.busy && !core.abort_requested;
             // The shutdown gate closes FIRST: a racing execute_bash must see the
             // stop before the abort runs, or the fresh claim clears the abort and
             // spawns a child the exit leaves running.
             core.shutdown_requested = true;
             core.abort_requested = true;
-        }
+            interrupted_turn
+        };
         // The running user bash goes with the stop: the passivation stop must
         // never leave the user's process running after the worker exits.
         self.user_bash.abort().await;
@@ -94,6 +98,28 @@ impl Worker {
         self.compaction.abort();
         self.tree_navigation.abort();
         self.await_session_work_settled().await;
+        if daemon_wide && interrupted_turn {
+            {
+                let mut core = self.core.lock().unwrap();
+                core.steering.push_front(QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: crate::update_restore::UPDATE_RESTART_CONTINUATION_PROMPT.to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: false,
+                    policy: TurnPolicy::Direct,
+                    forced_batch: false,
+                });
+            }
+            self.checkpoint_queue(QueueCheckpoint::Admitted {
+                operation: "prompt_accepted",
+            });
+        }
         // The children close before the exit (an unreachable child must not
         // block the worker's own exit); their resume entries and scheduled
         // jobs survive.
@@ -114,6 +140,21 @@ impl Worker {
         // the process exit, and no late report reclaims the pane.
         let reporter = self.herdr.lock().unwrap().clone();
         reporter.release().await;
+        // The shutdown verdict must be durable BEFORE the acknowledgement:
+        // the supervisor acts on this reply at once, and a verdict written on
+        // the exit path can be lost to the stop escalation — leaving a stale
+        // journal row to decide the next boot's revival. A user abort parks
+        // visible input until an explicit resume, so suspended lanes are not
+        // busy.
+        let busy = {
+            let core = self.core.lock().unwrap();
+            !core.queued_input_suspended
+                && (!core.steering.is_empty() || !core.follow_up.is_empty())
+        };
+        // A failed write leaves the journal's previous row to decide the
+        // revival, exactly as main does — the close must still complete and
+        // the stop must still be acknowledged.
+        let _ = self.record_recovery(busy, "shutdown");
         response_success(None, "shutdown", None)
     }
 
