@@ -219,6 +219,7 @@ jobs:
         run: |
           python3 scripts/release/test_native_compat.py
           python3 scripts/release/test_npm_bridge.py
+          python3 scripts/release/test_release_publication.py
           python3 scripts/release/test_restamp.py
           python3 scripts/release/test_channel_version.py
 
