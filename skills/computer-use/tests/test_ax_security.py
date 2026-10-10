@@ -861,5 +861,39 @@ class BaselineOwnValueTests(unittest.TestCase):
         self.assertEqual(baseline, ("focus-b", "focus-b-value"))
 
 
+class LiveWindowBoundsTests(unittest.TestCase):
+    def test_the_live_bounds_helper_reads_the_quartz_window_dictionary(self) -> None:
+        from computer_use import capture
+
+        created: list[tuple[Any, Any]] = []
+
+        class Quartz:
+            kCGWindowListOptionIncludingWindow = 1
+
+            def CGWindowListCopyWindowInfo(self, option, window_id):
+                self.requested = (option, window_id)
+                return [{"kCGWindowBounds": {"X": 12, "Y": 34, "Width": 800, "Height": 600}}]
+
+            def CGRectMakeWithDictionaryRepresentation(self, bounds, rect):
+                # the CoreGraphics dictionary converter, not CGRectMakeWithString
+                created.append(bounds)
+                return types.SimpleNamespace(
+                    origin=types.SimpleNamespace(x=bounds["X"], y=bounds["Y"]),
+                    size=types.SimpleNamespace(width=bounds["Width"], height=bounds["Height"]),
+                )
+
+        quartz = Quartz()
+        fake_mac = types.SimpleNamespace(quartz=quartz)
+        with mock.patch.object(capture, "_require_mac", lambda: fake_mac):
+            bounds = capture._live_window_bounds(4321)
+        self.assertEqual(
+            bounds,
+            (12.0, 34.0, 800.0, 600.0),
+            "the kCGWindowBounds dictionary converts through the CoreGraphics dictionary converter",
+        )
+        self.assertEqual(quartz.requested, (1, 4321))
+        self.assertEqual(created[0]["Width"], 800)
+
+
 if __name__ == "__main__":
     unittest.main()

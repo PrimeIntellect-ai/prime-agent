@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from ._compat import _require_mac
 from .errors import ComputerUseError
 
 _TIMEOUT_SECONDS = 10.0
@@ -255,7 +256,11 @@ def _live_window_bounds(window_id: int) -> tuple[float, float, float, float] | N
         bounds = info[0].get("kCGWindowBounds") if isinstance(info[0], dict) else None
         if bounds is None:
             return None
-        rect = quartz.CGRectMakeWithString(bounds, None)
+        # the CoreGraphics dictionary converter, not CGRectMakeWithString:
+        # the window-list entry carries an {X, Y, Width, Height} dictionary
+        rect = quartz.CGRectMakeWithDictionaryRepresentation(bounds, None)
+        if rect is None:
+            return None
         return (
             float(rect.origin.x),
             float(rect.origin.y),
