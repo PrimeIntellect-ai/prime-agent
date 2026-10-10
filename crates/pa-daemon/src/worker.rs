@@ -162,7 +162,8 @@ pub struct Worker {
     pub(crate) model_catalog_refresh_gate: std::sync::Arc<crate::model_catalog::RefreshGate>,
     pub(crate) recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     #[cfg(test)]
-    pub(crate) resume_checkpoint_gate: Mutex<Option<Arc<crate::queue_commands::ResumeCheckpointGate>>>,
+    pub(crate) resume_checkpoint_gate:
+        Mutex<Option<Arc<crate::queue_commands::ResumeCheckpointGate>>>,
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
     pub(crate) peer_grants: PeerGrantStore,

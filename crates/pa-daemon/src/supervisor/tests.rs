@@ -308,7 +308,11 @@ async fn check_monitor_replacement(replacement: MonitorReplacement) {
                 resident.descriptor.lock().await.lifecycle,
                 DaemonWorkerLifecycle::Failed
             );
-            assert!(supervisor.registry.get("w-monitor-replaced").await.is_none());
+            assert!(supervisor
+                .registry
+                .get("w-monitor-replaced")
+                .await
+                .is_none());
             return;
         }
         MonitorReplacement::Superseded | MonitorReplacement::RearmedAfterFailure => {

@@ -910,7 +910,10 @@ async fn ordinary_resume_preserves_recovery_hold_established_during_checkpoint()
         .await
         .expect("resume did not settle")
         .expect("resume task panicked");
-    assert!(!response.success, "a newly held input cannot report resumed");
+    assert!(
+        !response.success,
+        "a newly held input cannot report resumed"
+    );
     {
         let core = worker.core.lock().unwrap();
         assert!(core.recovery_hold && core.queued_input_suspended);
@@ -1704,14 +1707,15 @@ async fn cancelled_uncertain_input_needs_no_missing_session_file_at_shutdown() {
     {
         let mut core = worker.core.lock().unwrap();
         core.store.as_mut().unwrap().set_path(missing.clone());
-        core.in_flight_input.push(super::session_core::InFlightInput {
-            lane: Lane::Steering,
-            row_id: "failed-append-id".to_string(),
-            item: queue_item_record(&item),
-            attempted: true,
-            committed: false,
-            cancelled: false,
-        });
+        core.in_flight_input
+            .push(super::session_core::InFlightInput {
+                lane: Lane::Steering,
+                row_id: "failed-append-id".to_string(),
+                item: queue_item_record(&item),
+                attempted: true,
+                committed: false,
+                cancelled: false,
+            });
     }
     let missing_path = missing.to_str().unwrap();
     let before = worker.core.lock().unwrap().in_flight_input.clone();
