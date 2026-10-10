@@ -572,7 +572,7 @@ fn a_daemon_restart_relists_and_wakes_the_parents_child() {
 
 #[test]
 fn a_daemon_restart_marks_a_still_running_child_as_failed() {
-    restart_relists_child(30_000, "running");
+    restart_relists_child(15_000, "running");
 }
 
 fn restart_relists_child(delay_ms: u64, display_status: &str) {
@@ -592,9 +592,26 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
     let probe_error = receipts.join("probe.error");
 
     let child_script = dir.path().join("child.json");
+    // A response-level delay happens before the scripted engine accepts the
+    // task. Hold an inert scripted tool event instead, after the accepted row,
+    // so this case interrupts an actual running task rather than unaccepted input.
+    let child_response = if delay_ms > 0 {
+        json!({
+            "text": "kid done",
+            "toolCalls": [{
+                "toolCallId": "hold-child",
+                "toolName": "bash",
+                "args": {},
+                "result": "fixture hold completed",
+                "delayMs": delay_ms,
+            }],
+        })
+    } else {
+        json!({ "text": "kid done" })
+    };
     std::fs::write(
         &child_script,
-        json!({ "responses": [ { "text": "kid done", "delayMs": delay_ms } ] }).to_string(),
+        json!({ "responses": [child_response] }).to_string(),
     )
     .expect("write child script");
     let parent_script = write_parent_script(
@@ -673,6 +690,27 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
             "child display never completed: {display}"
         );
         std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if delay_ms > 0 {
+        wait_until(&mut client, Duration::from_secs(30), |client| {
+            let accepted = std::fs::read_to_string(&child_file)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| {
+                    entry["type"] == "custom_message"
+                        && entry["customType"] == "agent_message"
+                        && entry["details"]["message"] == "run the lane task"
+                });
+            client.send_command(
+                "child-running-before-stop",
+                &json!({ "type": "get_state", "activeSessionId": child_session_id }),
+            );
+            let state = client.read_response("child-running-before-stop");
+            assert_eq!(state["success"], true, "child state failed: {state}");
+            (accepted && state["data"]["isStreaming"] == true).then_some(())
+        });
     }
 
     client.send_command("bye", &json!({ "type": "shutdown" }));

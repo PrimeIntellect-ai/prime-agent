@@ -215,6 +215,167 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     );
 }
 
+/// A monitor that observed an old generation must wait for a registration
+/// handoff before crash bookkeeping. The replacement is published while the
+/// registration guard is held, so the obsolete monitor cannot settle its
+/// journal, count a failure, or retire the new resident.
+enum MonitorReplacement {
+    Live,
+    Dead,
+    Superseded,
+    RearmedAfterFailure,
+}
+
+async fn check_monitor_replacement(replacement: MonitorReplacement) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-monitor-replaced",
+        "pid": 0,
+        "workerInstanceId": "old-instance",
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": dir.path().join("journal.jsonl").to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "rootActiveSessionId": "w-monitor-replaced",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = Arc::new(ResidentWorker::new(
+        "w-monitor-replaced".to_string(),
+        descriptor,
+        dir.path().join("w-monitor-replaced.descriptor.json"),
+    ));
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+
+    let registration_guard = supervisor
+        .registry
+        .adoption_guard(&resident.worker_id)
+        .await;
+    let mut watch =
+        std::pin::pin!(Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0,));
+    assert!(
+        futures::poll!(watch.as_mut()).is_pending(),
+        "the old monitor must wait at the registration guard before cleanup"
+    );
+    {
+        let mut descriptor = resident.descriptor.lock().await;
+        descriptor.worker_instance_id = Some("new-instance".to_string());
+        descriptor.pid = match replacement {
+            MonitorReplacement::Live | MonitorReplacement::Superseded => {
+                u64::from(std::process::id())
+            }
+            MonitorReplacement::Dead | MonitorReplacement::RearmedAfterFailure => 0,
+        };
+    }
+    if matches!(
+        replacement,
+        MonitorReplacement::Superseded | MonitorReplacement::RearmedAfterFailure
+    ) {
+        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+    drop(registration_guard);
+    match replacement {
+        MonitorReplacement::Live => assert!(
+            futures::poll!(watch.as_mut()).is_pending(),
+            "the monitor must transfer to the live replacement instead of returning"
+        ),
+        MonitorReplacement::Dead => {
+            tokio::time::timeout(Duration::from_secs(1), watch)
+                .await
+                .expect("the replacement's death reaches give-up");
+            assert_eq!(
+                resident.consecutive_failures.load(Ordering::SeqCst),
+                MAX_CONSECUTIVE_FAILURES + 1
+            );
+            assert_eq!(
+                resident.descriptor.lock().await.lifecycle,
+                DaemonWorkerLifecycle::Failed
+            );
+            assert!(supervisor
+                .registry
+                .get("w-monitor-replaced")
+                .await
+                .is_none());
+            return;
+        }
+        MonitorReplacement::Superseded | MonitorReplacement::RearmedAfterFailure => {
+            tokio::time::timeout(Duration::from_secs(1), watch)
+                .await
+                .expect("a newer explicit monitor owns the replacement");
+        }
+    }
+
+    if matches!(replacement, MonitorReplacement::RearmedAfterFailure) {
+        supervisor.spawn_monitor(Arc::clone(&resident), None, 0);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !resident.route_state().retired {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the rearmed failed replacement reaches its failure budget");
+        assert_eq!(
+            resident.consecutive_failures.load(Ordering::SeqCst),
+            MAX_CONSECUTIVE_FAILURES + 1
+        );
+        return;
+    }
+
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(
+        supervisor
+            .registry
+            .get("w-monitor-replaced")
+            .await
+            .is_some(),
+        "the new generation remains owned"
+    );
+}
+
+#[tokio::test]
+async fn an_obsolete_monitor_does_not_give_up_a_registered_replacement() {
+    check_monitor_replacement(MonitorReplacement::Live).await;
+}
+
+#[tokio::test]
+async fn an_obsolete_monitor_supervises_the_registered_replacements_next_death() {
+    check_monitor_replacement(MonitorReplacement::Dead).await;
+}
+
+#[tokio::test]
+async fn an_explicit_new_monitor_supersedes_an_old_watch_before_crash_bookkeeping() {
+    check_monitor_replacement(MonitorReplacement::Superseded).await;
+}
+
+#[tokio::test]
+async fn a_failed_explicit_replacement_rearms_supervision_after_superseding_the_old_watch() {
+    check_monitor_replacement(MonitorReplacement::RearmedAfterFailure).await;
+}
+
 /// An adopted worker's watch parks on the kernel's exit notification and
 /// hands the exit to whoever owns the resident now - a stop that landed,
 /// or a relaunch elsewhere that took the resident's pid. Both cases return
@@ -266,9 +427,8 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
         );
     }
     {
-        // A relaunch elsewhere took the resident: the pid no longer names
-        // the watched process, so the watch hands off instead of running
-        // the crash arm over the replacement.
+        // An explicit new monitor took the resident during relaunch. The
+        // old watch returns instead of duplicating replacement supervision.
         let mut worker = std::process::Command::new("sleep")
             .arg("600")
             .spawn()
@@ -285,6 +445,7 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             "a live adopted worker keeps the watch parked"
         );
         resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        resident.monitor_epoch.fetch_add(1, Ordering::SeqCst);
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
