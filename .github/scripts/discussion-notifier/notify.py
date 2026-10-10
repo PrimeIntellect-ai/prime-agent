@@ -38,7 +38,7 @@ query($first: Int, $last: Int, $after: String) {
 """
 
 
-def gh(*args: str, payload: dict | None = None) -> str:
+def gh(*args: str, payload: dict | None = None, allow_graphql_errors: bool = False) -> str:
     result = subprocess.run(
         ["gh", *args],
         input=json.dumps(payload) if payload is not None else None,
@@ -48,6 +48,15 @@ def gh(*args: str, payload: dict | None = None) -> str:
         timeout=60,
     )
     if result.returncode:
+        # gh exits nonzero for GraphQL partial results. Only the body lookup
+        # opts in, and it must validate every returned error before proceeding.
+        if allow_graphql_errors and args[:2] == ("api", "graphql"):
+            try:
+                response = json.loads(result.stdout)
+            except (ValueError, TypeError):
+                response = None
+            if isinstance(response, dict) and response.get("errors") and "data" in response:
+                return result.stdout
         raise RuntimeError("GitHub request failed; state was not advanced.")
     return result.stdout
 
@@ -158,6 +167,7 @@ def fetch_report_bodies(items: list[dict]) -> list[dict]:
             "graphql",
             "--input",
             "-",
+            allow_graphql_errors=True,
             payload={
                 "query": """
                     query($ids: [ID!]!) {
@@ -171,16 +181,33 @@ def fetch_report_bodies(items: list[dict]) -> list[dict]:
         )
     )
     nodes = (response.get("data") or {}).get("nodes")
-    if response.get("errors") or not isinstance(nodes, list):
+    if not isinstance(nodes, list) or len(nodes) != len(items):
         raise RuntimeError("Cannot read discussion bodies; state was not advanced.")
+    for error in response.get("errors", []):
+        path = error.get("path", [])
+        if not (
+            error.get("type") == "NOT_FOUND"
+            and len(path) == 2 and path[0] == "nodes"
+            and type(path[1]) is int and 0 <= path[1] < len(nodes)
+            and nodes[path[1]] is None
+        ):
+            raise RuntimeError("Cannot read discussion bodies; state was not advanced.")
+    unavailable = {items[index]["id"] for index, node in enumerate(nodes) if node is None}
     bodies = {
         node["id"]: node["body"]
         for node in nodes
         if node and isinstance(node.get("body"), str)
     }
-    if any(item["id"] not in bodies for item in items):
-        raise RuntimeError("Missing discussion body; state was not advanced.")
-    return [{**item, "body": bodies[item["id"]]} for item in items]
+    selected = []
+    for item in items:
+        if item["id"] in unavailable:
+            # Keep its existing reservation in state, but never send or requeue it.
+            print(f"::warning::Discussion #{item['number']} is unavailable; skipping.")
+        elif item["id"] not in bodies:
+            raise RuntimeError("Missing discussion body; state was not advanced.")
+        else:
+            selected.append({**item, "body": bodies[item["id"]]})
+    return selected
 
 
 def enqueue(state: dict, page: dict) -> None:
@@ -366,7 +393,10 @@ def test_notification(number: int, send: bool) -> None:
     repository = (response.get("data") or {}).get("repository")
     if response.get("errors") or not repository or not repository.get("discussion"):
         raise RuntimeError(f"Cannot read discussion #{number}.")
-    item = fetch_report_bodies([notification_item(repository["discussion"])])[0]
+    reports = fetch_report_bodies([notification_item(repository["discussion"])])
+    if not reports:
+        raise RuntimeError(f"Discussion #{number} is no longer available.")
+    item = reports[0]
     print(json.dumps(slack_payload(item), indent=2, ensure_ascii=False))
     if path is not None:
         deliver(item, path)
