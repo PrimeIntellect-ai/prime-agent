@@ -150,9 +150,10 @@ const INTERNAL_HOST_REQUESTS: &[&str] =
     &["model.info", "mcp.config", "mcp.refresh", "mcp.begin_login"];
 
 /// Map one registered host-request type to the prompt token that documents
-/// it. `None` when the request is host-internal.
+/// it. `None` when the request is host-internal or belongs to a gated skill.
 fn prompt_token_for_host_request(request: &str) -> Option<String> {
-    if INTERNAL_HOST_REQUESTS.contains(&request) {
+    let module = request.split('.').next().unwrap_or_default();
+    if INTERNAL_HOST_REQUESTS.contains(&request) || gated_bundled_skills().contains(module) {
         return None;
     }
     Some(
@@ -340,20 +341,22 @@ fn python_skill_functions(package_path: &Path) -> Vec<String> {
     functions
 }
 
-/// Bundled skills that are auth-gated builtin MCP integrations: they are disabled in sessions whose
-/// user is not logged into the integration, so the prompt documents them only through the dynamic
-/// skills inventory (and its generic "additional skills may exist" note), not as API surface.
-fn auth_gated_bundled_skills() -> BTreeSet<String> {
+/// Bundled skills that are gated: the auth-gated builtin MCP integrations
+/// (disabled when the user is not logged in) and the Decision API (hidden
+/// while decisionApi.systemOneModel is unset). The prompt documents them only
+/// through the dynamic skills inventory, not as API surface.
+fn gated_bundled_skills() -> BTreeSet<String> {
     pa_core::mcp::BUILTIN_MCP_CATALOG
         .iter()
         .map(|(server, _, _)| server.to_string())
+        .chain(std::iter::once("decision_api".to_string()))
         .collect()
 }
 
 /// (import name, public functions) for every bundled Python skill that is
-/// always available (auth-gated integrations excluded).
+/// always available (gated skills excluded).
 fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
-    let gated = auth_gated_bundled_skills();
+    let gated = gated_bundled_skills();
     sorted_bundled_skills()
         .into_iter()
         .filter(|skill| {
@@ -498,6 +501,8 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
     "agent-observe",
     "attach-image",
     "compact",
+    // Experimental, no TS counterpart yet.
+    "decision-api",
     "edit",
     "goal",
     "mcp",

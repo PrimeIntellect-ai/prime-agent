@@ -56,6 +56,9 @@ pub(crate) struct SessionCore {
     /// The create command's harness `childScript` (kept across the runtime swap
     /// so a replacement's children stay scripted); `None` for product sessions.
     pub(crate) child_script: Option<String>,
+    /// The Decision API child flag (`rlm.spawn kind="decision"`): the worker
+    /// runs the decision engine instead of the agent engine.
+    pub(crate) decision_child: bool,
     /// The session's service-tier preference (TS `_serviceTierPreference`,
     /// `None` = "auto"): clamps `priority` to `default` without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
@@ -142,6 +145,7 @@ impl SessionCore {
             queued_input_suspended: false,
             pending_next_turn: Vec::new(),
             active_action: None,
+            decision_child: false,
         }
     }
 }
