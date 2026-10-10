@@ -445,4 +445,4 @@ jobs:
           tag="$(jq -r .tag "${out}/meta.json")"
           gh api -X POST "${repo}/git/refs" --input "${out}/ref.json"
           echo "annotated tag ${tag} cut at the tag-only commit ${commit_sha} (parent $(jq -r .parent "${out}/meta.json"))"
-          echo "release.yml (tag-triggered, -beta* channel) takes over: build -> promote (beta.json + prerelease; publishes automatically, no approval) -> nightly-refresh rolls the nightly release"
+          echo "release.yml (tag-triggered, -beta* channel) takes over: build -> promote (beta.json + versioned R2 artifacts; publishes automatically, no approval) -> nightly-refresh rolls the nightly release"
