@@ -61,7 +61,6 @@ pub(crate) mod messaging;
 pub mod model_allowlist;
 pub(crate) mod model_catalog;
 pub(crate) mod model_switch;
-mod native_signal;
 mod overflow_compaction;
 pub mod ownership;
 pub mod paths;

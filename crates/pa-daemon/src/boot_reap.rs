@@ -106,13 +106,8 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
 
 /// Stop one worker process by identity: the terminal-stop escalation (a worker that missed
 /// its routed `shutdown`) on the `STOP_FORCE_TIMEOUT` budget, not the boot reap's fast
-/// verify. Missing identity never authorizes a signal; a native identity is
-/// additionally required when the platform cannot obtain a pidfd.
-pub(crate) async fn stop_process(
-    pid: u32,
-    start_id: Option<String>,
-    native_identity: Option<pa_core::platform::process::NativeSignalIdentity>,
-) -> ReapOutcome {
+/// verify. `None` as the start id trusts liveness alone.
+pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutcome {
     stop_target_within(
         &ReapTarget {
             pid,
@@ -120,7 +115,6 @@ pub(crate) async fn stop_process(
             worker_socket: None,
             kind: ReapKind::Worker,
         },
-        native_identity,
         TERM_GRACE,
         STOP_FORCE_TIMEOUT,
     )
@@ -175,8 +169,9 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
     }
 }
 
-/// Whether the current identity snapshot agrees with the discovered process.
-/// This preflight check cannot itself bind a later numeric signal to an instance.
+/// Whether the pid still names the discovered process (the identity gate: a
+/// recycled pid is never signaled). An UNVERIFIABLE identity never signals -
+/// safe for lease retention, not for termination.
 fn identity_current(target: &ReapTarget) -> bool {
     match &target.start_id {
         Some(expected) => {
@@ -188,25 +183,16 @@ fn identity_current(target: &ReapTarget) -> bool {
 
 /// Stop one target on the boot reap's fast budgets.
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
-    stop_target_within(target, None, TERM_GRACE, KILL_VERIFY).await
-}
-
-struct PidfdGuard(i32);
-
-impl Drop for PidfdGuard {
-    fn drop(&mut self) {
-        pa_core::platform::process::close_pidfd(self.0);
-    }
+    stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
 }
 
 /// Stop one target with explicit escalation budgets: gone check, SIGTERM,
 /// grace, SIGKILL, verify. The signals ride the kernel-held pidfd, which
 /// pins the process, where the platform has one; on unix without one
-/// macOS uses the authenticated worker's native audit token. Missing native
-/// identity or platform support conservatively retains a live target.
+/// they ride kill(2), with the identity check re-run immediately before
+/// each signal, narrowing pid reuse to the check-to-kill gap.
 async fn stop_target_within(
     target: &ReapTarget,
-    native_identity: Option<pa_core::platform::process::NativeSignalIdentity>,
     term_grace: Duration,
     kill_verify: Duration,
 ) -> ReapOutcome {
@@ -214,26 +200,24 @@ async fn stop_target_within(
         // The fd opens before the identity check and is held across it and
         // every signal, so only the pinned process can receive one.
         Ok(pidfd) => {
-            let pidfd = PidfdGuard(pidfd);
-            escalate(
+            let outcome = escalate(
                 target,
-                |signal| pa_core::platform::process::pidfd_signal(pidfd.0, signal),
+                |signal| pa_core::platform::process::pidfd_signal(pidfd, signal),
                 term_grace,
                 kill_verify,
             )
-            .await
+            .await;
+            pa_core::platform::process::close_pidfd(pidfd);
+            outcome
         }
         Err(error) if cfg!(unix) && error.kind() == std::io::ErrorKind::Unsupported => {
             escalate(
                 target,
                 |signal| {
-                    signal_verified_target(
-                        target,
-                        native_identity.as_ref(),
-                        signal,
-                        crate::lease::get_process_start_id,
-                        pa_core::platform::process::NativeSignalIdentity::signal,
-                    )
+                    if identity_current(target) {
+                        let _ = pa_core::platform::process::kill_pid(target.pid as i32, signal);
+                    }
+                    true
                 },
                 term_grace,
                 kill_verify,
@@ -254,40 +238,6 @@ async fn stop_target_within(
             }
         }
     }
-}
-
-/// A numeric identity snapshot is only a preflight check. Every signal must
-/// additionally name the authenticated worker's kernel process instance.
-fn signal_verified_target(
-    target: &ReapTarget,
-    identity: Option<&pa_core::platform::process::NativeSignalIdentity>,
-    signal: pa_core::platform::process::Signal,
-    read_start_id: impl FnOnce(u32) -> Option<String>,
-    send_signal: impl FnOnce(
-        &pa_core::platform::process::NativeSignalIdentity,
-        pa_core::platform::process::Signal,
-    ) -> std::io::Result<()>,
-) -> bool {
-    let Some(identity) = identity.filter(|identity| identity.matches_pid(target.pid)) else {
-        return false;
-    };
-    if target
-        .start_id
-        .as_deref()
-        .is_some_and(|expected| read_start_id(target.pid).as_deref() == Some(expected))
-    {
-        return match send_signal(identity, signal) {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!(
-                    "pa-daemon: native signal refused for worker pid {}: {error}",
-                    target.pid
-                );
-                false
-            }
-        };
-    }
-    false
 }
 
 /// The escalation ladder both signal carriers ride: gone check, SIGTERM,
@@ -736,102 +686,6 @@ fn read_proc_argv(pid: u32) -> Option<Vec<String>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn missing_or_wrong_native_identity_never_attempts_a_signal() {
-        use pa_core::platform::process::{NativeSignalIdentity, Signal};
-        let target = ReapTarget {
-            pid: 42,
-            start_id: Some("original".to_string()),
-            worker_socket: None,
-            kind: ReapKind::Worker,
-        };
-        let wrong = NativeSignalIdentity::try_from([0, 0, 0, 0, 0, 43, 0, 7]).unwrap();
-        for identity in [None, Some(&wrong)] {
-            for signal in [Signal::Term, Signal::Kill] {
-                assert!(!signal_verified_target(
-                    &target,
-                    identity,
-                    signal,
-                    |_| panic!("unverifiable native identity must fail before preflight"),
-                    |_, _| panic!("unverifiable native identity must never signal")
-                ));
-            }
-        }
-    }
-
-    #[test]
-    fn numeric_stop_never_signals_a_replacement_after_the_identity_snapshot() {
-        use pa_core::platform::process::Signal;
-        use std::cell::Cell;
-
-        let original = ReapTarget {
-            pid: 42,
-            start_id: Some("original-worker".to_string()),
-            worker_socket: None,
-            kind: ReapKind::Worker,
-        };
-        let mut outcomes = Vec::new();
-        let original_native = pa_core::platform::process::NativeSignalIdentity::try_from([
-            0,
-            0,
-            0,
-            0,
-            0,
-            original.pid,
-            0,
-            7,
-        ])
-        .unwrap();
-        let replacement_native = pa_core::platform::process::NativeSignalIdentity::try_from([
-            0,
-            0,
-            0,
-            0,
-            0,
-            original.pid,
-            0,
-            8,
-        ])
-        .unwrap();
-        for signal in [Signal::Term, Signal::Kill] {
-            let current_instance = Cell::new("original-worker");
-            let replacement_signaled = Cell::new(false);
-            signal_verified_target(
-                &original,
-                Some(&original_native),
-                signal,
-                |pid| {
-                    assert_eq!(pid, original.pid);
-                    let observed = current_instance.get().to_string();
-                    // The reader observed the original worker correctly. Before
-                    // the caller resumes, it exits and the same PID is reused.
-                    current_instance.set("unrelated-replacement");
-                    Some(observed)
-                },
-                |identity, delivered| {
-                    assert_eq!(identity.pid(), original.pid);
-                    assert_eq!(delivered, signal);
-                    // Model the kernel's PID+version lookup, not a second
-                    // userspace start-time check followed by numeric kill.
-                    if current_instance.get() == "unrelated-replacement"
-                        && *identity == replacement_native
-                    {
-                        replacement_signaled.set(true);
-                        Ok(())
-                    } else {
-                        Err(std::io::ErrorKind::NotFound.into())
-                    }
-                },
-            );
-            outcomes.push((signal, replacement_signaled.get()));
-        }
-        assert_eq!(
-            outcomes,
-            vec![(Signal::Term, false), (Signal::Kill, false)],
-            "the replacement must not receive either signal after a valid original-worker identity snapshot"
-        );
-    }
-
     fn target(pid: u32) -> ReapTarget {
         ReapTarget {
             pid,
@@ -939,9 +793,6 @@ mod tests {
     /// The `bash` records SIGTERM without exiting or spawning a child (a leaked
     /// grandchild would outlive the guard's kill); the trap marker is the readiness
     /// barrier and the TERM record the escalation must leave before its KILL.
-    // A shell cannot self-report the authenticated macOS native identity;
-    // native instance-bound signaling has its own isolated-process verifier.
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_term_ignoring_process_dies_to_the_stop_escalation() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -962,7 +813,7 @@ mod tests {
         }
         assert!(trap_armed.exists(), "the trap never armed");
         let pid = guard.0.as_ref().expect("guard holds the child").id();
-        let outcome = stop_process(pid, crate::lease::get_process_start_id(pid), None).await;
+        let outcome = stop_process(pid, crate::lease::get_process_start_id(pid)).await;
         assert_eq!(
             outcome,
             ReapOutcome::Kill,

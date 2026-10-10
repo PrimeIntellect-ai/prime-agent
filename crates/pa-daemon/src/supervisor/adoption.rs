@@ -375,7 +375,6 @@ impl Supervisor {
             worker_instance_id,
             token,
             pid,
-            rest,
             ..
         } = command
         else {
@@ -390,14 +389,6 @@ impl Supervisor {
         }
         let worker_instance_id =
             (!worker_instance_id.is_empty()).then(|| worker_instance_id.clone());
-        let native = match crate::native_signal::parse(
-            rest.get(crate::native_signal::KEY),
-            *pid,
-            worker_instance_id.as_deref(),
-        ) {
-            Ok(native) => native,
-            Err(error) => return fail(&error.to_string()),
-        };
         let registration = WorkerRegistration {
             active_session_id: active_session_id.clone(),
             session_id: session_id
@@ -411,10 +402,7 @@ impl Supervisor {
         let guard = self.registry.adoption_guard(active_session_id).await;
         let resident = match self.registry.get(active_session_id).await {
             Some(resident) => resident,
-            None => match self
-                .adopt_registered_worker(&registration, token, native.as_ref())
-                .await
-            {
+            None => match self.adopt_registered_worker(&registration, token).await {
                 Ok(resident) => resident,
                 Err(error) => {
                     let message = format!("{error:#}");
@@ -439,19 +427,15 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
-            if let Err(error) = crate::native_signal::ensure_registration_incarnation(
-                &descriptor,
-                worker_instance_id.as_deref(),
-            ) {
-                return fail(&error.to_string());
+            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
+            // A REPLACEMENT registration flips the roster's stale-delta slot to the replacement
+            // BEFORE it is exposed anywhere: a predecessor's pull or frame still in flight must
+            // meet the slot naming the replacement; a re-register keeps it untouched.
+            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
+                let replacement = worker_instance_id.clone().unwrap_or_default();
+                let mut roster = self.roster.lock().unwrap();
+                roster.note_worker_generation(&resident.worker_id, &replacement);
             }
-            // The descriptor may already name this planned launch before spawn.
-            // Advance the independent roster slot idempotently: same-generation
-            // re-registration preserves its watermark; replacements reject old frames.
-            self.roster.lock().unwrap().note_worker_generation(
-                &resident.worker_id,
-                worker_instance_id.as_deref().unwrap_or_default(),
-            );
             descriptor.pid = *pid;
             // Refresh the identity from the live registrant: a recycled pid must not keep
             // the old holder's identity; an unobservable start id keeps the previous value.
@@ -462,15 +446,6 @@ impl Supervisor {
             descriptor
                 .worker_instance_id
                 .clone_from(&worker_instance_id);
-            if let Err(error) = crate::native_signal::store_durable(
-                &resident.descriptor_path,
-                &mut descriptor,
-                native.as_ref(),
-            ) {
-                return fail(&format!(
-                    "Worker native signal identity could not persist: {error}"
-                ));
-            }
             if let Some(session_id) = &registration.session_id {
                 descriptor.root_session_id = Some(session_id.clone());
             }
@@ -482,8 +457,8 @@ impl Supervisor {
                 descriptor.root_session_id.as_deref(),
                 descriptor.session_file.as_deref(),
             );
-            // Only a changed native identity needs a registration-time durable
-            // write. The spawn record already carries the
+            // The registration refreshes the resident in memory only — no
+            // persist here. The spawn record already carries the
             // launch-time identity (pid, socket), and the create-completion
             // persist (`launch_worker`'s post-create write) owns the next
             // durable state — `Ready` with the session identity — as the
@@ -554,7 +529,6 @@ impl Supervisor {
         self: &Arc<Self>,
         registration: &WorkerRegistration,
         token: &str,
-        native: Option<&crate::native_signal::WorkerSignalIdentity>,
     ) -> Result<Arc<ResidentWorker>> {
         let descriptor_path = self
             .descriptor_dir
@@ -581,20 +555,10 @@ impl Supervisor {
         };
         let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
+        crate::descriptor::validate_descriptor(&descriptor, &self.options.socket_path)?;
         if token != descriptor.authentication_token.as_str() {
             return Err(anyhow!("Session worker authentication failed"));
         }
-        // The pre-spawn durable record may legitimately have no child PID yet.
-        // Validate its other fields with the authenticated planned launch's PID,
-        // without publishing or trusting any registration stop capability.
-        let mut validation = descriptor.clone();
-        if validation.pid == 0
-            && validation.worker_instance_id.is_some()
-            && validation.worker_instance_id == registration.worker_instance_id
-        {
-            validation.pid = registration.pid;
-        }
-        crate::descriptor::validate_descriptor(&validation, &self.options.socket_path)?;
         let worker_id = descriptor.worker_id.clone();
         let resident = ResidentWorker::new(
             registration.active_session_id.clone(),
@@ -615,7 +579,6 @@ impl Supervisor {
             // registrant's live identity keeps the escalation tied to the live process.
             {
                 let mut descriptor = resident.descriptor.lock().await;
-                crate::native_signal::reset(&mut descriptor);
                 if descriptor.pid != registration.pid {
                     descriptor.pid = registration.pid;
                 }
@@ -623,11 +586,7 @@ impl Supervisor {
                 {
                     descriptor.process_start_id = Some(start_id);
                 }
-                descriptor
-                    .worker_instance_id
-                    .clone_from(&registration.worker_instance_id);
-                crate::native_signal::store(&mut descriptor, native)?;
-                crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)?;
+                let _ = crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor);
             }
             self.finish_tombstoned_stop(&resident, true).await;
             return Err(anyhow!(
@@ -635,21 +594,6 @@ impl Supervisor {
                     &registration.active_session_id
                 )
             ));
-        }
-        // A crash between spawn and its PID write leaves the planned instance
-        // paired with a predecessor PID. The token-authenticated registration
-        // supplies that launch's live binding; worker_auth must then independently
-        // supply its native capability before routing or stop authority opens.
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            crate::native_signal::recover_registered_process(
-                &resident.descriptor_path,
-                &mut descriptor,
-                registration.pid,
-                registration.worker_instance_id.as_deref(),
-                &registration.socket_path,
-                crate::protocol::process_start_id(registration.pid as u32),
-            )?;
         }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;

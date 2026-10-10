@@ -5,8 +5,6 @@
 
 use std::process::Command;
 
-pub use super::process_signal_identity::NativeSignalIdentity;
-
 /// The real Unix user id, matching Node `process.getuid()` for daemon namespaces.
 #[cfg(unix)]
 #[must_use]

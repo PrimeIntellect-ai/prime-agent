@@ -3,10 +3,11 @@
 use super::routing::{fail_unsent_request, WORKER_REQUEST_TIMEOUT_MS, WORKER_SOCKET_CLOSED};
 use super::{
     anyhow, connect_transport, create_command_payload, json, mpsc, persist_worker,
-    probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command, Context,
-    DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader, ResidentWorker, Result,
-    RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value, WorkerReply, WorkerRequest,
-    DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS,
+    persist_worker_at, probe_worker_socket, util, write_frame, Arc, Child, ClientRouting, Command,
+    Context, DaemonWorkerLifecycle, Duration, Ordering, PathBuf, PrivateFrameReader,
+    ResidentWorker, Result, RouteAdmission, Supervisor, TempSync, TypedCreateRejection, Value,
+    WorkerReply, WorkerRequest, DEFAULT_PRIVATE_FRAME_LIMITS, ROUTE_TIMEOUT_MS,
+    WORKER_AUTH_FLOOR_MS,
 };
 use crate::lease::is_process_alive;
 use crate::registry::WorkerRelay;
@@ -397,46 +398,16 @@ impl Supervisor {
         Ok(child)
     }
 
-    /// Publish the planned launch and its roster generation in one descriptor
-    /// critical section, only after the durable launch write succeeds.
-    pub(super) async fn prepare_worker_spawn(
-        &self,
-        resident: &Arc<ResidentWorker>,
-        instance: &str,
-        sync: TempSync,
-    ) -> Result<()> {
-        let mut descriptor = resident.descriptor.lock().await;
-        crate::native_signal::begin_spawn(
-            &resident.descriptor_path,
-            &mut descriptor,
-            instance,
-            sync,
-        )?;
-        self.roster
-            .lock()
-            .unwrap()
-            .note_worker_generation(&resident.worker_id, instance);
-        Ok(())
-    }
-
     pub(super) async fn spawn_worker_process(
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
         connect_deadline: tokio::time::Instant,
         spawn_record_sync: TempSync,
     ) -> Result<Child> {
-        let worker_instance_id = uuid::Uuid::new_v4().to_string();
-        // The child's env and descriptor must name the same incarnation before
-        // any auth/registration can arrive. Failed writes publish neither.
-        self.prepare_worker_spawn(resident, &worker_instance_id, spawn_record_sync)
-            .await?;
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
         let (worker_socket, cwd, launch_env) = {
             let descriptor = resident.descriptor.lock().await;
-            if descriptor.worker_instance_id.as_deref() != Some(worker_instance_id.as_str()) {
-                return Err(anyhow!("Worker spawn was superseded"));
-            }
             (
                 PathBuf::from(&descriptor.socket_path),
                 descriptor
@@ -449,7 +420,7 @@ impl Supervisor {
                 crate::descriptor::worker_launch_env(
                     &self.options.agent_dir,
                     &self.options.socket_path.to_string_lossy(),
-                    &worker_instance_id,
+                    &uuid::Uuid::new_v4().to_string(),
                     &descriptor,
                 ),
             )
@@ -489,19 +460,9 @@ impl Supervisor {
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
             let child_pid = child.id().unwrap_or(0);
-            if let Err(error) = crate::native_signal::bind_spawned_process_durable(
-                &resident.descriptor_path,
-                &mut descriptor,
-                &worker_instance_id,
-                child_pid,
-                crate::protocol::process_start_id(child_pid),
-                spawn_record_sync,
-            ) {
-                drop(descriptor);
-                let mut child = child;
-                let _ = child.kill().await;
-                return Err(error);
-            }
+            descriptor.pid = u64::from(child_pid);
+            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
+            descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             // The spawn record's durability is per launch class
             // (`spawn_record_sync`): a fresh create rides the TS
             // `persistWorker` shape — the atomic rename without the
@@ -515,8 +476,7 @@ impl Supervisor {
             // lose the descriptor's whole payload — the recovery journal
             // pointer and the durable create command the next boot's
             // revival replays.
-            // The candidate write above is mandatory; on failure only our own
-            // newly spawned child is retired, and no binding is published.
+            let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
         }
 
         // A worker that never comes up inside the connect budget is killed here, so a
@@ -560,13 +520,11 @@ impl Supervisor {
         connect_deadline: tokio::time::Instant,
         auth_floor: bool,
     ) -> Result<()> {
-        let (socket_path, token, expected_pid, expected_instance) = {
+        let (socket_path, token) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 PathBuf::from(&descriptor.socket_path),
                 descriptor.authentication_token.clone(),
-                descriptor.pid,
-                descriptor.worker_instance_id.clone(),
             )
         };
         let stream = if auth_floor {
@@ -838,7 +796,7 @@ impl Supervisor {
                     "supervisorPid": std::process::id(),
                     "supervisorProcessStartId": crate::protocol::process_start_id(std::process::id()),
                     "supervisorSocketPath": self.options.socket_path.to_string_lossy(),
-                    "workerInstanceId": if cfg!(target_os = "macos") { expected_instance.clone() } else { None },
+                    "workerInstanceId": None::<String>,
                 }),
                 auth_budget_ms,
                 RouteAdmission::SupervisorInternal,
@@ -867,31 +825,6 @@ impl Supervisor {
                 "worker authentication failed: {}",
                 response.error.unwrap_or_default()
             ));
-        }
-        // A late auth reply must not grant stop authority for a newer
-        // descriptor or connection. Persist only the authenticated worker's
-        // own identity, while its PID and instance still match this handshake.
-        let native = crate::native_signal::parse(
-            response
-                .data
-                .as_ref()
-                .and_then(|data| data.get(crate::native_signal::KEY)),
-            expected_pid,
-            expected_instance.as_deref(),
-        )?;
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            if !resident.connection_is_current(connection_epoch)
-                || descriptor.pid != expected_pid
-                || descriptor.worker_instance_id != expected_instance
-            {
-                return Err(anyhow!("Worker authentication was superseded"));
-            }
-            crate::native_signal::store_durable(
-                &resident.descriptor_path,
-                &mut descriptor,
-                native.as_ref(),
-            )?;
         }
         // The handshake answered: install the channel for routing (TS
         // `worker.client = client`). A superseded connect never installs over it.

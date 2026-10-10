@@ -79,7 +79,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::backpressure::RouteAdmission;
 use crate::descriptor::{
     create_command_payload, load_descriptors, persist_supervisor_config, persist_worker,
-    PersistedSupervisorConfig, TempSync, SUPERVISOR_CONFIG_FILE_NAME,
+    persist_worker_at, PersistedSupervisorConfig, TempSync, SUPERVISOR_CONFIG_FILE_NAME,
 };
 use crate::engine::EngineModelSelection;
 use crate::framing::{write_frame, PrivateFrameReader, DEFAULT_PRIVATE_FRAME_LIMITS};
