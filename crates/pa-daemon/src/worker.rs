@@ -808,16 +808,10 @@ impl Worker {
     /// no destructors, so the caller must have settled the close first).
     async fn exit_after_close(&self) -> ! {
         // Shutdown keeps the resume entry and exits the process (TS
-        // `closeKeepsResumeEntry("shutdown")`).
-        let busy = {
-            let core = self.core.lock().unwrap();
-            // A user abort parks visible input until an explicit resume.
-            // Restarting a fresh worker would otherwise drop that suspension
-            // and execute the parked prompts without the user's consent.
-            !core.queued_input_suspended
-                && (!core.steering.is_empty() || !core.follow_up.is_empty())
-        };
-        let _ = self.record_recovery(busy, "shutdown");
+        // `closeKeepsResumeEntry("shutdown")`). The recovery verdict was
+        // recorded by `handle_shutdown` before its reply: the supervisor may
+        // escalate the stop as soon as the reply lands, so an exit-path write
+        // would race the boot's revival decision.
         self.close_listener_then_cleanup_socket().await;
         std::process::exit(0)
     }

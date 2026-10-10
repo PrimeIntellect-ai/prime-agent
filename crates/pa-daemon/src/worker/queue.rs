@@ -244,7 +244,7 @@ pub(crate) fn checkpoint_queue_recovery(
     };
     // The lanes are read under the recovery lock (a microsecond core hold —
     // never across the journal's fsyncs): no persist interleaves this read.
-    let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
+    let (active_session_id, session_id, session_file, lanes, turn_in_flight, suspended) = {
         let core = core_lock.lock().unwrap();
         (
             core.active_session_id.clone(),
@@ -257,6 +257,7 @@ pub(crate) fn checkpoint_queue_recovery(
                 .map(|s| s.path.to_string_lossy().to_string()),
             queue_lanes(&core),
             core.busy,
+            core.queued_input_suspended,
         )
     };
     let (busy, operation) = match checkpoint {
@@ -279,6 +280,7 @@ pub(crate) fn checkpoint_queue_recovery(
         operation,
         &lanes.steering,
         &lanes.follow_up,
+        suspended,
     );
 }
 
@@ -293,6 +295,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_key: item.queue_key.clone(),
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
+                forced_batch: item.forced_batch,
             })
             .collect()
     }
@@ -353,7 +356,7 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
 pub(crate) fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
-) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
+) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>, bool) {
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
         // Images on a queued prompt do not survive the restart; the
         // delivery rows ride the item record without them.
@@ -379,7 +382,7 @@ pub(crate) fn restore_queue_snapshot(
                     done: None,
                     queue_visible: record.queue_visible,
                     policy,
-                    forced_batch: false,
+                    forced_batch: record.forced_batch,
                 }
             })
             .collect()
@@ -387,13 +390,17 @@ pub(crate) fn restore_queue_snapshot(
 
     let mut steering = VecDeque::new();
     let mut follow_up = VecDeque::new();
-    if let Some((steering_lanes, follow_up_lanes)) =
+    let mut suspended = false;
+    // The snapshot carries the suspension bit with the lanes: a user-aborted
+    // queue revives still parked instead of auto-running its prompts.
+    if let Some((steering_lanes, follow_up_lanes, snapshot_suspended)) =
         journal.latest_queue_snapshot(active_session_id)
     {
         steering = pending(steering_lanes);
         follow_up = pending(follow_up_lanes);
+        suspended = snapshot_suspended;
     }
-    (steering, follow_up)
+    (steering, follow_up, suspended)
 }
 
 /// Admit one held autonomous continuation through the follow-up lane:

@@ -67,7 +67,7 @@ async fn idle_time_injected_admission_is_busy_evidence() {
     );
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "follow_up_queued");
-    let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
         "target-session",
     )
@@ -130,7 +130,7 @@ async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() 
     );
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "steer_queued");
-    let (steering, _) = WorkerRecoveryJournal::read_queue_snapshot(
+    let (steering, _, _) = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
         "target-session",
     )
@@ -258,7 +258,7 @@ async fn cancelled_admission_drop_settles_the_verdict() {
     );
     let latest = latest_record(&worker);
     assert_eq!(latest.operation, "queue_dropped");
-    let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
         "target-session",
     )
@@ -285,7 +285,7 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
         latest.busy,
         "the in-flight turn keeps the withdrawal's verdict busy"
     );
-    let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+    let (steering, follow_up, _) = WorkerRecoveryJournal::read_queue_snapshot(
         &worker.config.recovery_journal_path,
         "target-session",
     )
@@ -305,6 +305,37 @@ async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
     assert!(
         !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
         "the settled session proves nothing"
+    );
+    let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+}
+
+/// The supervisor may escalate the stop as soon as the worker's shutdown
+/// reply lands. That reply must therefore prove the final recovery verdict
+/// is durable: an exit-path write can be lost to the escalation, and the
+/// boot would then revive (or drop) the session off a stale row.
+#[tokio::test]
+async fn shutdown_ack_has_already_settled_a_user_aborted_parked_queue() {
+    let worker = created_worker_with_journal().await;
+    worker.core.lock().unwrap().busy = true;
+    let admitted = worker
+        .dispatch("follow_up", &json!({ "message": "remain parked" }))
+        .await;
+    assert!(admitted.success, "admission failed: {admitted:?}");
+    assert!(latest_record(&worker).busy, "admission was durable");
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = false;
+        core.queued_input_suspended = true;
+    }
+    let reply = worker
+        .handle_shutdown(&json!({ "daemonShutdown": true }))
+        .await;
+    assert!(reply.success, "shutdown failed: {reply:?}");
+    let latest = latest_record(&worker);
+    assert_eq!(latest.operation, "shutdown");
+    assert!(
+        !latest.busy,
+        "parked input cannot auto-replay after the ack"
     );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }

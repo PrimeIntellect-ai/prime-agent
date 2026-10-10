@@ -11,7 +11,7 @@ impl Worker {
     /// capture; the queue lanes persist BEFORE replying, so the reported queue
     /// and the durable respawn state agree (`busy` is the continuation signal).
     pub(crate) fn handle_update_snapshot(&self) -> DaemonResponse {
-        let (core_data, lanes) = {
+        let (core_data, lanes, suspended) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let data = json!({
@@ -37,12 +37,13 @@ impl Worker {
                 "busy": core.busy,
                 "compacting": core.compacting,
             });
-            (data, queue_lanes(&core))
+            (data, queue_lanes(&core), core.queued_input_suspended)
         };
         // Journal the lanes after releasing the core lock (record paths take
         // the locks in the opposite order).
         self.persist_queue_snapshot(
             core_data["activeSessionId"].as_str().unwrap_or_default(),
+            suspended,
             &lanes,
         );
         response_success(None, "update_snapshot", Some(core_data))
@@ -139,6 +140,21 @@ impl Worker {
         // the process exit, and no late report reclaims the pane.
         let reporter = self.herdr.lock().unwrap().clone();
         reporter.release().await;
+        // The shutdown verdict must be durable BEFORE the acknowledgement:
+        // the supervisor acts on this reply at once, and a verdict written on
+        // the exit path can be lost to the stop escalation — leaving a stale
+        // journal row to decide the next boot's revival. A user abort parks
+        // visible input until an explicit resume, so suspended lanes are not
+        // busy.
+        let busy = {
+            let core = self.core.lock().unwrap();
+            !core.queued_input_suspended
+                && (!core.steering.is_empty() || !core.follow_up.is_empty())
+        };
+        // A failed write leaves the journal's previous row to decide the
+        // revival, exactly as main does — the close must still complete and
+        // the stop must still be acknowledged.
+        let _ = self.record_recovery(busy, "shutdown");
         response_success(None, "shutdown", None)
     }
 

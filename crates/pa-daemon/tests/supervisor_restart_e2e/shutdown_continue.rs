@@ -348,3 +348,244 @@ fn graceful_shutdown_continues_the_aborted_turn_after_restart() {
         std::thread::sleep(Duration::from_millis(50));
     }
 }
+
+/// A user-parked queue must stay parked through a revival. Losing both
+/// processes without a verdict write (kill -9) leaves the journal's
+/// abort-settle row proving the parked lanes, so the next boot revives the
+/// session — and the restored queue must keep its suspension instead of
+/// auto-running the parked prompt without the user's consent.
+#[test]
+fn a_revived_user_parked_queue_stays_parked() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+
+    let mut daemon = spawn_supervisor(&socket, &agent_dir);
+    wait_socket_ready(&socket);
+    let (mut client, _hello) = Client::connect(&socket);
+
+    let script = dir.path().join("parked-revival.json");
+    std::fs::write(
+        &script,
+        json!({ "responses": [
+            {
+                "text": "busy-turn",
+                "toolCalls": [
+                    { "toolCallId": "call-1", "toolName": "bash", "args": {}, "result": "listed", "delayMs": 5_000 }
+                ]
+            },
+            { "text": "resumed-turn", "delayMs": 10 },
+        ] })
+        .to_string(),
+    )
+    .expect("write script");
+    client.send_command(
+        "c1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "script": script.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let parked_session = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    let parked_session_file = created["data"]["sessionFile"]
+        .as_str()
+        .expect("session file")
+        .to_string();
+    client.send_command(
+        "p1",
+        &json!({ "type": "prompt", "activeSessionId": parked_session, "message": "go" }),
+    );
+    assert_eq!(client.read_response("p1")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let started = std::fs::read_to_string(&parked_session_file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| entry["message"]["role"].as_str() == Some("assistant"));
+        if started {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the parked turn never started");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The user abort parks the visible follow-up until an explicit resume.
+    client.send_command(
+        "q1",
+        &json!({ "type": "follow_up", "activeSessionId": parked_session, "message": "remain parked" }),
+    );
+    assert_eq!(client.read_response("q1")["success"], true);
+    client.send_command(
+        "a1",
+        &json!({ "type": "abort", "activeSessionId": parked_session }),
+    );
+    assert_eq!(client.read_response("a1")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        client.send_command(
+            "w1",
+            &json!({ "type": "get_state", "activeSessionId": parked_session }),
+        );
+        let state = client.read_response("w1");
+        assert_eq!(state["success"], true);
+        if state["data"]["isStreaming"] == false {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the aborted turn never settled");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    client.send_command(
+        "g1",
+        &json!({ "type": "get_queue", "activeSessionId": parked_session }),
+    );
+    let queue = client.read_response("g1");
+    assert_eq!(queue["data"]["followUp"], json!(["remain parked"]));
+    let parked_bytes = std::fs::read(&parked_session_file).expect("parked transcript");
+
+    // The parked session's worker pid rides its descriptor
+    // (`<agent-dir>/daemon-workers/<shard>/<worker>.json`).
+    let worker_pid = {
+        let descriptor_dir = agent_dir.join("daemon-workers");
+        let mut pid = None;
+        'scan: for shard in std::fs::read_dir(&descriptor_dir).expect("descriptor dir") {
+            let shard = shard.expect("descriptor shard").path();
+            if !shard.is_dir() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&shard).expect("descriptor shard dir") {
+                let path = entry.expect("descriptor entry").path();
+                if path.extension().is_none_or(|ext| ext != "json") {
+                    continue;
+                }
+                let Ok(descriptor) = serde_json::from_str::<Value>(
+                    &std::fs::read_to_string(&path).unwrap_or_default(),
+                ) else {
+                    continue;
+                };
+                if descriptor["rootActiveSessionId"].as_str() == Some(parked_session.as_str()) {
+                    pid = Some(descriptor["pid"].as_u64().expect("worker pid"));
+                    break 'scan;
+                }
+            }
+        }
+        pid.expect("the parked session's worker descriptor")
+    };
+
+    // kill -9 the supervisor FIRST (a live supervisor would observe the
+    // worker's death and settle the journal), then the worker (its SIGKILL
+    // writes no verdict): the journal keeps the abort-settle row.
+    daemon.child.kill().expect("kill supervisor");
+    daemon.child.wait().expect("reap supervisor");
+    std::process::Command::new("kill")
+        .arg("-9")
+        .arg(worker_pid.to_string())
+        .status()
+        .expect("kill the parked worker");
+
+    let restart_before = pa_daemon::util::now_iso();
+    let mut daemon2 = spawn_supervisor(&socket, &agent_dir);
+    wait_socket_ready(&socket);
+    let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let registered = distinct(workers_registered_since(&log_path, &restart_before));
+        if registered == vec![parked_session.clone()] {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the parked session was not revived: {registered:?}; log: {}",
+            std::fs::read_to_string(&log_path).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let (mut client2, _hello) = Client::connect(&socket);
+    client2.send_command(
+        "g2",
+        &json!({ "type": "get_queue", "activeSessionId": parked_session }),
+    );
+    let queue = client2.read_response("g2");
+    assert_eq!(queue["success"], true, "queue read failed: {queue}");
+    assert_eq!(
+        queue["data"]["followUp"],
+        json!(["remain parked"]),
+        "the revival restored the parked queue"
+    );
+    client2.send_command(
+        "w2",
+        &json!({ "type": "get_state", "activeSessionId": parked_session }),
+    );
+    let state = client2.read_response("w2");
+    assert_eq!(state["success"], true);
+    assert_eq!(
+        state["data"]["isStreaming"], false,
+        "a revived parked queue must not auto-run"
+    );
+    // The create replay may append its own bookkeeping rows (a session_state
+    // marker); the conversation itself must be untouched until a resume.
+    let message_rows = |bytes: &[u8]| -> Vec<Value> {
+        String::from_utf8_lossy(bytes)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["type"] == "message")
+            .collect()
+    };
+    assert_eq!(
+        message_rows(&std::fs::read(&parked_session_file).expect("parked transcript")),
+        message_rows(&parked_bytes),
+        "the revived worker executed the parked input without a resume"
+    );
+
+    // The suspension is the only thing holding the queue: an explicit
+    // resume must run the parked item.
+    client2.send_command(
+        "r2",
+        &json!({ "type": "resume_queue", "activeSessionId": parked_session }),
+    );
+    assert_eq!(client2.read_response("r2")["success"], true);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let resumed = std::fs::read_to_string(&parked_session_file)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|entry| {
+                entry["message"]["role"].as_str() == Some("user")
+                    && entry["message"]["content"].as_str() == Some("remain parked")
+            });
+        if resumed {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resumed parked item never ran: {}",
+            std::fs::read_to_string(&parked_session_file).unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    client2.send_command("sd", &json!({ "type": "shutdown" }));
+    let shutdown = client2.read_response("sd");
+    assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while daemon2.child.try_wait().expect("try wait").is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "restarted supervisor never exited"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
