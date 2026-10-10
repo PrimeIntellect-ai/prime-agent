@@ -3,7 +3,7 @@
 //! cursor query, and the compose free helpers.
 
 use super::click::{
-    self, PickerClickSurface, PickerKind, EFFORT_PICKER_CHROME_ROWS, MODEL_PICKER_CHROME_ROWS,
+    self, PickerClickSurface, PickerKind, CHOICE_PICKER_CHROME_ROWS, MODEL_PICKER_CHROME_ROWS,
 };
 use super::AgentView;
 use super::FULLSCREEN_MIN_TRANSCRIPT_ROWS;
@@ -59,14 +59,14 @@ impl AgentView {
                 kind: PickerKind::Model,
             });
             Some(dock)
-        } else if let Some(picker) = &self.effort_picker {
+        } else if let Some(picker) = &self.choice_picker {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             self.click.record_picker(PickerClickSurface {
                 dock_row: pane_row,
-                chrome_rows: EFFORT_PICKER_CHROME_ROWS,
+                chrome_rows: CHOICE_PICKER_CHROME_ROWS,
                 items: picker.visible_window(),
-                kind: PickerKind::Effort,
+                kind: PickerKind::Choice,
             });
             Some(dock)
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
@@ -280,7 +280,7 @@ impl AgentView {
     pub fn frame_cursor(&self) -> Option<(usize, usize)> {
         if self.onboarding.is_some()
             || self.model_picker.is_some()
-            || self.effort_picker.is_some()
+            || self.choice_picker.is_some()
             || self.heartbeats_picker.is_some()
             || self.goal_panel.is_some()
             || self.bash_view.is_some()
