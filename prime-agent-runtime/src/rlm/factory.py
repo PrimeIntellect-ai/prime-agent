@@ -1008,12 +1008,24 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 ANSWER_CAPTURE_CAP = 200
-"""Local safety cap for captured answers.
+"""Local cap for captured-answer PREVIEWS: the ``answer_captured`` ledger
+event and the status node's ``answer_preview`` stay compact (the host's
+own roster previews cap at 160 characters, ``compactRlmText``).
+"""
 
-``rlm.collect`` already returns previews: the host caps them at 160
-characters (``compactRlmText``). Input binding and every rendered prompt
-therefore work on capped preview text; full child outputs stay in the
-child's own session and are never seen by the executor.
+ANSWER_BINDING_CAP = 8192
+"""Local cap for the settle-capture binding lane.
+
+``rlm.collect`` carries the child's full final answer (``answer_text``,
+host-bounded at 64 KiB): input binding and output capture work on that
+text, not the roster preview — a fenced JSON output longer than the old
+200-character preview cap was truncated before the executor ever saw it,
+and the downstream bind failed with "no JSON object containing output"
+although the child settled with exactly the fenced JSON (the M2 class).
+The factory caps its own storage here so a run of many long answers
+cannot balloon kernel memory; a bind failure names this cap when the
+capture was cut at it. Full child transcripts stay in the child's own
+session regardless.
 """
 
 EVENT_WINDOW = 200
@@ -1180,14 +1192,19 @@ def _suffixed_spawn_form(base: str, candidate: str) -> bool:
     return True
 
 
-def _parse_json_output(answer: str, output_name: str) -> tuple[Any, str | None]:
+def _parse_json_output(
+    answer: str, output_name: str, *, truncated_at: int | None = None
+) -> tuple[Any, str | None]:
     """Extract one named JSON output from an upstream answer.
 
     Prefers the fenced `````json`` block whose object contains the output
     name, scanning trailing blocks first (an answer with several fences,
     e.g. a verdict block followed by a summary block, binds from whichever
     block carries the port), then falls back to parsing the whole answer.
-    Returns ``(value, None)`` or ``(None, error_sentence)``.
+    Returns ``(value, None)`` or ``(None, error_sentence)``. A capture cut
+    at the binding cap (``truncated_at``) names the size and the cap in the
+    error, so a too-large fenced JSON reads as a size problem, not a
+    missing output.
     """
     candidates: list[str] = list(reversed(_FENCED_JSON_RE.findall(answer)))
     candidates.append(answer.strip())
@@ -1198,7 +1215,13 @@ def _parse_json_output(answer: str, output_name: str) -> tuple[Any, str | None]:
             continue
         if isinstance(parsed, dict) and output_name in parsed:
             return parsed[output_name], None
-    return None, f"no JSON object containing output {output_name!r} in the upstream answer"
+    error = f"no JSON object containing output {output_name!r} in the upstream answer"
+    if truncated_at is not None:
+        error += (
+            f"; the captured answer is truncated at {truncated_at} characters"
+            " - keep the fenced JSON block compact"
+        )
+    return None, error
 
 
 def _render_prompt(template: str, values: dict[str, str]) -> str:
@@ -1720,7 +1743,9 @@ class FactoryExecutor:
         if include_answer:
             latest = state.latest_settle()
             if latest is not None and latest.answer:
-                report["answer_preview"] = latest.answer
+                # The report previews the settle answer compactly; the
+                # full binding text stays on the entry.
+                report["answer_preview"] = latest.answer[:ANSWER_CAPTURE_CAP]
         if state.error is not None:
             report["error"] = state.error
         return report
@@ -2521,6 +2546,21 @@ class FactoryExecutor:
                         value = outputs[src_output]
             if latest is None or failure is not None:
                 if inp.get("optional"):
+                    # An optional input over a DIFFERENT state that has a
+                    # live entry (pending or running) waits: the source is
+                    # about to settle, and a sentinel here would spawn the
+                    # dependent while its upstream is still running (the
+                    # M3 premature-spawn class -- the children exited
+                    # "waiting" and the bookkeeping counted them). The
+                    # sentinel still binds for the self-input loop form and
+                    # for a source with no live entry, so loop states keep
+                    # re-entering before their upstream partner has RUN.
+                    if latest is None and src_id != state.state_id:
+                        source_state_live = source_state is not None and any(
+                            other.status in ("pending", "running") for other in source_state.entries
+                        )
+                        if source_state_live:
+                            return None, None  # wait for the in-flight source's settle
                     # Optional inputs bind a null sentinel whenever their
                     # source offers no value -- never settled, errored
                     # settle, or a settled source that captured nothing
@@ -2726,7 +2766,13 @@ class FactoryExecutor:
                 )
                 return
         instance.status = "done"
-        instance.answer = (result.answer_preview or "")[:ANSWER_CAPTURE_CAP] or None
+        # The binding lane first: the collect envelope's full final answer
+        # keeps the whole fenced JSON; the 160-character roster preview is
+        # the fallback (older hosts, a capture that raced a worker
+        # teardown). Both are capped locally at ANSWER_BINDING_CAP.
+        instance.answer = (
+            (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+        )
         self._event(
             run,
             "settled",
@@ -2743,13 +2789,13 @@ class FactoryExecutor:
                 node=state.state_id,
                 entry=entry.index,
                 instance=instance.index,
-                answer=instance.answer,
+                answer=instance.answer[:ANSWER_CAPTURE_CAP],
                 stage="arrived",
             )
         if entry.status == "running" and entry.instances and all(i.status == "done" for i in entry.instances):
             entry.status = "done"
             entry.answer = self._entry_answer(entry)
-            self._capture_outputs(state, entry)
+            await self._capture_outputs(run, state, entry)
             self._queue_settle(run, state, entry)
 
     def _entry_answer(self, entry: _StateEntry) -> str | None:
@@ -2759,16 +2805,20 @@ class FactoryExecutor:
             return None
         return "\n\n".join(answers)
 
-    def _capture_outputs(self, state: _StateRun, entry: _StateEntry) -> None:
+    def _capture_ports(self, state: _StateRun, entry: _StateEntry) -> None:
         """Capture the state's declared output ports from the entry's answer.
 
         Text ports keep the captured string; json ports parse as in V1
         binding, with the parse error recorded on the settle so a reader
         (guard or input binding) fails deterministically instead of
-        re-parsing.
+        re-parsing. A capture cut at the binding cap names the size and the
+        cap in the parse error.
         """
         outputs: dict[str, Any] = {}
         errors: dict[str, str] = {}
+        truncated_at = (
+            len(entry.answer) if entry.answer is not None and len(entry.answer) >= ANSWER_BINDING_CAP else None
+        )
         for out in state.spec.get("outputs") or []:
             name, port_type = out.get("name"), out.get("type")
             if port_type == "text":
@@ -2777,13 +2827,89 @@ class FactoryExecutor:
                 continue
             if entry.answer is None:
                 continue
-            parsed, error = _parse_json_output(entry.answer, name)
+            parsed, error = _parse_json_output(entry.answer, name, truncated_at=truncated_at)
             if error is None:
                 outputs[name] = parsed
             else:
                 errors[name] = error
         entry.outputs = outputs
         entry.output_errors = errors
+
+    async def _capture_outputs(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> None:
+        """Capture the settle's outputs, retrying the capture once.
+
+        A settle can race the child's answer capture on the host side (a
+        ``None`` answer recovers on a later refresh), and a declared port
+        that binds no value from the first capture is exactly the M2
+        silent-failure class: the downstream would run on nothing. When a
+        declared output binds no value, the settled children are
+        re-collected ONCE (a settled child keeps its result until deleted)
+        and the capture re-runs over the refreshed answers; a port that
+        still binds nothing records a deterministic capture failure in the
+        ledger (``output_capture_failed``) instead of passing silently.
+        """
+        self._capture_ports(state, entry)
+        declared = state.spec.get("outputs") or []
+        if not declared or not any(
+            (entry.outputs or {}).get(out.get("name")) is None for out in declared
+        ):
+            return  # every declared port bound a value
+        refreshed = await self._refresh_entry_answers(run, state, entry)
+        if refreshed:
+            self._capture_ports(state, entry)
+        for out in declared:
+            name = out.get("name")
+            error = (entry.output_errors or {}).get(name)
+            if error is None and (entry.outputs or {}).get(name) is None:
+                error = f"output {name!r} captured no value from the upstream answer"
+            if error is not None:
+                self._event(
+                    run,
+                    "output_capture_failed",
+                    node=state.state_id,
+                    entry=entry.index,
+                    port=name,
+                    error=error,
+                    detail=f"output {name!r} did not bind after one capture retry",
+                )
+
+    async def _refresh_entry_answers(self, run: FactoryRun, state: _StateRun, entry: _StateEntry) -> bool:
+        """Re-collect the entry's settled children once; refresh any longer
+        captured answer. Returns whether any answer changed."""
+        from . import collect
+
+        child_ids = [
+            instance.child_id
+            for instance in entry.instances
+            if instance.child_id is not None and instance.status == "done"
+        ]
+        if not child_ids:
+            return False
+        try:
+            results = await collect(child_ids, timeout_ms=0)
+        except Exception as exc:
+            self._event(
+                run,
+                "output_capture_failed",
+                node=state.state_id,
+                entry=entry.index,
+                error=f"capture retry could not re-collect the settled children: {exc}",
+                detail="the first capture stands",
+            )
+            return False
+        by_child = {result.rlm_child_id: result for result in results}
+        changed = False
+        for instance in entry.instances:
+            result = by_child.get(instance.child_id or "")
+            if result is None:
+                continue
+            answer = (result.answer_text or result.answer_preview or "")[:ANSWER_BINDING_CAP] or None
+            if answer and (instance.answer is None or len(answer) > len(instance.answer)):
+                instance.answer = answer
+                changed = True
+        if changed:
+            entry.answer = self._entry_answer(entry)
+        return changed
 
     async def _apply_instance_failure(
         self, run: FactoryRun, state: _StateRun, entry: _StateEntry, instance: _NodeInstance, reason: str, *, retry: bool
@@ -4501,9 +4627,9 @@ fixer ever runs and its re-entry re-binds the real report; `max_entries`
 bounds the loop; `monitoring` is a `resident` that stays alive under the
 parent session after the run ends. Both worked examples bound their
 emitted payloads in the prompt — a capped findings list here, a capped
-file list in the review-sweep example — because captured answers are
-capped previews: an unbounded payload truncates at the cap and fails to
-bind.
+file list in the review-sweep example — because the executor's capture
+cap still bounds very large payloads: an unbounded payload truncates at
+the cap and fails to bind.
 
 ## Authoring reference
 
@@ -4734,10 +4860,11 @@ watched = await rlm.factory.watch(result["run_id"], 30)
   `max_entries`, `max_transitions`, and `run.max_children` (total
   admissions); the default `escalate` policy pauses
   instead of failing, so read `status` (or the notice) before resuming.
-- Captured answers are capped previews (about 160 characters) and outputs
-  bind from them: keep declared outputs compact — a small fenced json
-  block or one short line — and let the full answer live in the child's
-  session.
+- Outputs bind from the child's full final answer (the collect envelope
+  carries it; the executor caps its own capture at 8,192 characters): a
+  fenced json output block binds whole as long as it fits that cap, so
+  keep declared outputs compact — the rosters and ledger previews stay
+  ~160 characters — and let the full answer live in the child's session.
 - Run registries live in kernel memory: a kernel restart loses `status`
   for old runs, but the children keep running under the supervisor
   (`rlm.list_subagents` sees them). Stop runs before restarting, or

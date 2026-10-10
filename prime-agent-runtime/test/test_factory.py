@@ -65,6 +65,7 @@ from unittest.mock import patch
 import rlm as rlm_module
 from rlm import factory as factory_module
 from rlm.factory import (
+    ANSWER_BINDING_CAP,
     ANSWER_CAPTURE_CAP,
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
@@ -107,6 +108,11 @@ from rlm.harness import HarnessState
 # ---------------------------------------------------------------------------
 # Spec fixtures
 # ---------------------------------------------------------------------------
+
+#: The host's roster-preview cap (the daemon's ANSWER_PREVIEW_MAX_CHARS):
+#: the fake host mirrors it so the binding lane's full text is what
+#: distinguishes a binding that survives truncation from one that does not.
+HOST_ANSWER_PREVIEW_CHARS = 160
 
 
 def state(state_id: str, **overrides: Any) -> dict[str, Any]:
@@ -2788,7 +2794,18 @@ class FakeHost:
             "duration_ms": 5,
         }
         if answer is not None:
-            entry["answer_preview"] = answer
+            # The real host hands the kernel a compact preview (about 160
+            # characters, whitespace-collapsed, ellipsis tail) plus the
+            # FULL final answer as the collect envelope's binding lane;
+            # the fake mirrors both, so a long fenced JSON binds from the
+            # full lane exactly like production.
+            compact = " ".join(answer.split())
+            entry["answer_preview"] = (
+                compact[:HOST_ANSWER_PREVIEW_CHARS - 3] + "..."
+                if len(compact) > HOST_ANSWER_PREVIEW_CHARS
+                else compact
+            )
+            entry["answer_text"] = answer
         if error is not None:
             entry["error"] = error
         return entry
@@ -2900,6 +2917,41 @@ class DeleteFailsHost(FakeHost):
         if request_type == "rlm.delete_subagent":
             self.calls.append((request_type, payload or {}))
             raise RuntimeError("delete_subagent: child already gone")
+        return await super().__call__(request_type, payload)
+
+
+class LateAnswerHost(FakeHost):
+    """FakeHost whose FIRST collect of a late child settles it with no
+    captured answer (the host-side capture race); later collects return
+    the real answer."""
+
+    def __init__(self, clock: "FakeClock | None" = None, late_children: "set[str] | frozenset[str]" = frozenset()):
+        super().__init__(clock=clock)
+        self.late_children = set(late_children)
+        self.collects_of: dict[str, int] = {}
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if request_type == "rlm.collect":
+            late = [t for t in payload["targets"] if t in self.late_children and self.collects_of.get(t, 0) == 0]
+            if late:
+                for target in late:
+                    self.collects_of[target] = self.collects_of.get(target, 0) + 1
+                self.calls.append((request_type, payload))
+                self.collects += 1
+                if self.clock is not None:
+                    self.clock.advance(self.clock.advance_per_collect)
+                return {
+                    "results": [
+                        self._entry(
+                            child_id=target,
+                            name=self.children[target]["name"],
+                            status="done",
+                            settled=True,
+                        )
+                        for target in late
+                    ]
+                }
         return await super().__call__(request_type, payload)
 
 
@@ -3668,6 +3720,89 @@ class FactoryExecutorTest(_ExecutorTestCase):
         captured = self.node_status(status, "a")["answer_preview"]
         self.assertEqual(len(captured), ANSWER_CAPTURE_CAP)
         self.assertEqual(captured, long_answer[:ANSWER_CAPTURE_CAP])
+
+    @async_test
+    async def test_json_output_longer_than_the_preview_cap_binds_from_the_full_answer(self) -> None:
+        # M2: the settle's declared fenced JSON was longer than the host's
+        # ~160-character roster preview, so the old preview-only capture
+        # truncated it mid-object and the downstream bind failed with "no
+        # JSON object containing output" although the child settled with
+        # exactly the fenced JSON. The collect envelope's full answer is
+        # the binding lane; the preview stays a preview.
+        worktree = "/Users/x/Research/pa-worktrees/rp-3354-the-very-long-worktree-name"
+        payload = {"worktree": worktree, "notes": "y" * 150}
+        long_json = f"Intro prose.\n\n```json\n{json.dumps(payload)}\n```\n\nOutro."
+        assert len(long_json) > HOST_ANSWER_PREVIEW_CHARS
+        self.host.outcomes["setup"] = {"status": "done", "answer": long_json}
+        self.host.outcomes["impl"] = {"status": "done", "answer": "DONE"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "setup",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "worktree", "type": "json"}],
+                    },
+                    {
+                        "id": "impl",
+                        "subagent": "worker",
+                        "inputs": [{"name": "worktree", "type": "json", "from": "setup.worktree"}],
+                    },
+                ],
+                "transitions": [{"from": "setup", "to": "impl"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        impl_prompt = self.host.spawn_calls("impl")[0]["prompt"]
+        self.assertIn(f"- worktree: {json.dumps(worktree)}", impl_prompt)
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # The event ledger previews compactly; the binding lane stays full:
+        # the captured answer is the raw final text (newlines intact), not
+        # the host's whitespace-collapsed roster preview.
+        captured_event = self.all_events_of(result, "answer_captured")[0]
+        self.assertLessEqual(len(captured_event["answer"]), ANSWER_CAPTURE_CAP)
+        self.assertIn("```json\n", captured_event["answer"])
+        self.assertNotIn("...", captured_event["answer"])
+
+    @async_test
+    async def test_capture_failure_names_the_binding_cap_and_records_the_event(self) -> None:
+        # A declared json output bigger than the executor's binding cap
+        # fails to parse with the SIZE named in the error (not a bare
+        # missing-output sentence), and the settle records the failure in
+        # the ledger instead of passing silently.
+        huge = f'{{"blob": "{"z" * (ANSWER_BINDING_CAP + 50)}"}}'
+        self.host.outcomes["src"] = {"status": "done", "answer": f"```json\n{huge}\n```"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "blob", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Use {blob}."},
+                        "inputs": [{"name": "blob", "type": "json", "from": "src.blob", "optional": True}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        # The optional dependent still proceeds on the sentinel (the
+        # authored contract), but the source's capture failure is recorded.
+        capture_failures = self.all_events_of(result, "output_capture_failed")
+        self.assertEqual(len(capture_failures), 1)
+        self.assertIn(str(ANSWER_BINDING_CAP), capture_failures[0]["error"])
+        self.assertIn("keep the fenced JSON block compact", capture_failures[0]["error"])
 
 
     # -- foreach ----------------------------------------------------------------
@@ -5527,6 +5662,105 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
             ["foreach expanded to zero items; nothing to run"] * 2,
         )
+
+    @async_test
+    async def test_optional_input_waits_for_a_live_upstream_before_spawning(self) -> None:
+        # M3: an optional input over ANOTHER state that is still running
+        # must not bind its null sentinel yet — the sentinel spawned the
+        # dependent while its upstream was in flight (the children exited
+        # "waiting" and the state bookkeeping counted them). The entry
+        # waits for the in-flight source's settle, then binds the real
+        # value; a source with no live entry keeps the loop-form sentinel.
+        self.host.outcomes["impl"] = {"status": "running"}
+        self.host.outcomes["validate"] = {"status": "done", "answer": "VALIDATED"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "impl",
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "validate",
+                        "subagent": {"prompt": "Validate the build at {result}."},
+                        "inputs": [
+                            {"name": "result", "type": "text", "from": "impl.result", "optional": True}
+                        ],
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "impl"},
+                    {"from": "seed", "to": "validate"},
+                ],
+            }
+        )
+        result = await self.start()
+        # impl is admitted and still running; the loop must prepare nothing.
+        await self.wait_until(lambda: len(self.host.spawn_calls("impl")) == 1)
+        await self.wait_until(lambda: self.host.collects >= 3)
+        self.assertEqual(self.host.spawn_calls("validate"), [])
+        # The upstream settles with a real value; validate spawns with it
+        # bound, never the null sentinel.
+        self.host.outcomes["impl"] = {"status": "done", "answer": "WTREE-A1"}
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        validate_calls = self.host.spawn_calls("validate")
+        self.assertEqual(len(validate_calls), 1)
+        self.assertIn("WTREE-A1", validate_calls[0]["prompt"])
+        self.assertNotIn("None", validate_calls[0]["prompt"])
+
+    @async_test
+    async def test_capture_retry_rebinds_a_settle_that_raced_the_answer_capture(self) -> None:
+        # M2: the host can settle a child with no captured answer yet (the
+        # capture recovers on a later refresh). The settle-capture retry
+        # re-collects the settled child once and re-runs the capture, so
+        # the declared output binds instead of leaving the settle empty
+        # and failing the downstream bind.
+        self.host = LateAnswerHost(clock=self.clock, late_children={"child-2"})
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.host.outcomes["build"] = {
+            "status": "done",
+            "answer": '```json\n{"built": "BIN-A1"}\n```',
+        }
+        self.host.outcomes["use"] = {"status": "done", "answer": "USED"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "build",
+                        "subagent": "worker",
+                        "outputs": [{"name": "built", "type": "json"}],
+                    },
+                    {
+                        "id": "use",
+                        "subagent": {"prompt": "Use {built}."},
+                        "inputs": [{"name": "built", "type": "json", "from": "build.built"}],
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "build"},
+                    {"from": "build", "to": "use"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        # The first collect of the build child settled it with no answer;
+        # the capture retry re-collected and the port bound.
+        self.assertEqual(self.host.collects_of.get("child-2"), 1)
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("use")],
+            ['Use "BIN-A1".'],
+        )
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
 
     @async_test
     async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:

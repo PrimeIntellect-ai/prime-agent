@@ -39,6 +39,7 @@ fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecor
         settled_status: None,
         settled: false,
         answer_preview: None,
+        answer_text: None,
         answer_captured: false,
         replied_since_task: false,
         notice_delivered: false,

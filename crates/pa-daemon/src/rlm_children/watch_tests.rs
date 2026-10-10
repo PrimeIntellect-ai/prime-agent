@@ -1037,6 +1037,60 @@ async fn a_deleted_settled_child_releases_its_name_slot_and_deletes_idempotently
     assert_eq!(again.subagent.status, "cancelled");
 }
 
+/// The collect envelope carries the settled child's full final answer as its
+/// binding lane (the factory's output capture binds the whole fenced JSON from
+/// it), while the roster preview stays the compact form; the deleted envelope's
+/// binding lane is empty (the tombstone only keeps the preview).
+#[tokio::test]
+async fn collect_carries_the_full_answer_text_of_a_settled_child() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::Healthy).await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sessions.list_subagents().await.expect("child roster");
+        if entries.iter().any(|entry| entry.status == "completed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never settled: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the settled child");
+    assert_eq!(
+        results[0].answer_preview.as_deref(),
+        Some("the child final answer")
+    );
+    assert_eq!(
+        results[0].answer_text.as_deref(),
+        Some("the child final answer"),
+        "the binding lane carries the full final answer"
+    );
+    sessions
+        .delete_subagent(handle.rlm_child_id.clone())
+        .await
+        .expect("delete the settled child");
+    let deleted = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the deleted child");
+    assert_eq!(
+        deleted[0].answer_preview.as_deref(),
+        Some("the child final answer")
+    );
+    assert_eq!(
+        deleted[0].answer_text, None,
+        "the tombstone carries no binding lane"
+    );
+}
+
 /// The inactive delete (a settled retained child) leaves the same tombstone as the live delete, so
 /// `collect` answers a just-deleted selector with the settled cancelled envelope.
 #[tokio::test]
@@ -1096,6 +1150,7 @@ fn an_already_settled_child_never_re_scores_as_an_unreachable_error() {
         settled_status: None,
         settled: false,
         answer_preview: None,
+        answer_text: None,
         answer_captured: false,
         replied_since_task: false,
         notice_delivered: false,

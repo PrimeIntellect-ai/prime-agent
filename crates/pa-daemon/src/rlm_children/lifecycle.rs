@@ -2,13 +2,14 @@
 //! prompt/kill/close routing, settle watching with its notices, and the
 //! spawn-admission outbox types (`CreatedSessionIds`, `CreatedChild`).
 use super::{
-    anyhow, compact_rlm_text, create_rlm_child_failure_message, create_rlm_child_terminal_notice,
-    json, now_ms, Arc, ChildCloseReason, ChildRecord, Context, CustomMessage, DaemonCommand,
-    DaemonSessionLifecycle, Duration, Map, Mutex, ParentIdentity, Path, PromptInput, Result,
-    RlmChildTerminalNotice, SupervisorChildSessionsInner, Value, CREATE_TIMEOUT_MS,
-    IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS, NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS,
-    RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS, WATCH_MAX_UNREACHABLE_POLLS,
-    WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS, WATCH_WAIT_SLICE_MS,
+    anyhow, cap_text, compact_rlm_text, create_rlm_child_failure_message,
+    create_rlm_child_terminal_notice, json, now_ms, Arc, ChildCloseReason, ChildRecord, Context,
+    CustomMessage, DaemonCommand, DaemonSessionLifecycle, Duration, Map, Mutex, ParentIdentity,
+    Path, PromptInput, Result, RlmChildTerminalNotice, SupervisorChildSessionsInner, Value,
+    ANSWER_TEXT_MAX_CHARS, CREATE_TIMEOUT_MS, IDLE_WAIT_GRACE_MS, KILL_TIMEOUT_MS,
+    NOTICE_DELIVERY_TIMEOUT_MS, PROMPT_TIMEOUT_MS, RUNTIME_METADATA_PROMPT_MAX, STATE_TIMEOUT_MS,
+    WATCH_MAX_UNREACHABLE_POLLS, WATCH_POLL_INTERVAL_MS, WATCH_SETTLE_GRACE_MS,
+    WATCH_WAIT_SLICE_MS,
 };
 
 /// Parsed ids of one created child session.
@@ -367,8 +368,12 @@ impl SupervisorChildSessionsInner {
                 > 0)
     }
 
-    /// The child's final answer text, compacted for the roster preview.
-    async fn child_answer(&self, active_session_id: &str) -> Result<Option<String>> {
+    /// One `GetLastAssistantText` round trip: the raw text the roster
+    /// preview and the collect envelope's binding lane both derive from
+    /// (the preview compacts it; the binding lane caps it at
+    /// [`ANSWER_TEXT_MAX_CHARS`] instead, so the whole fenced JSON a
+    /// settle binds from survives).
+    async fn child_answer_raw(&self, active_session_id: &str) -> Result<Option<String>> {
         let command = DaemonCommand::GetLastAssistantText {
             id: None,
             active_session_id: active_session_id.to_string(),
@@ -379,7 +384,7 @@ impl SupervisorChildSessionsInner {
             .get("text")
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
-            .map(compact_rlm_text))
+            .map(str::to_string))
     }
 
     /// Best-effort bounded wait for one child and its descendants to go
@@ -419,8 +424,18 @@ impl SupervisorChildSessionsInner {
             return;
         }
         // Capture the answer before taking the record lock (the capture is
-        // a link round trip).
-        let answer = self.child_answer(&active_session_id).await.ok().flatten();
+        // a link round trip): one fetch yields the raw text both lanes
+        // derive from — the compact preview for the roster rows and the
+        // full text for the collect envelope's binding lane.
+        let raw_answer = self
+            .child_answer_raw(&active_session_id)
+            .await
+            .ok()
+            .flatten();
+        let answer = raw_answer.as_deref().map(compact_rlm_text);
+        let answer_text = raw_answer
+            .as_deref()
+            .map(|text| cap_text(text, ANSWER_TEXT_MAX_CHARS));
         let mut record = record.lock().await;
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
@@ -429,6 +444,7 @@ impl SupervisorChildSessionsInner {
             // hand-off) recovers on a later refresh.
             if !record.answer_captured || record.answer_preview.is_none() {
                 record.answer_preview = answer;
+                record.answer_text = answer_text;
                 record.answer_captured = true;
             }
         }

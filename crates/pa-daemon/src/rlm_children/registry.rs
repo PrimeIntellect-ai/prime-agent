@@ -377,6 +377,7 @@ fn ledger_child_records(
             ),
             settled: true,
             answer_preview: None,
+            answer_text: None,
             answer_captured: false,
             replied_since_task: false,
             notice_delivered: true,

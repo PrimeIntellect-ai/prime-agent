@@ -157,6 +157,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     settled_status: None,
                     settled: false,
                     answer_preview: None,
+                    answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
                     notice_delivered: false,
