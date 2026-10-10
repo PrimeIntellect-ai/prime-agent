@@ -903,7 +903,7 @@ async fn prepare_locked_socket_path(path: &Path, lease: Option<&SocketLease>) ->
         }
     }
     if let Some(lease) = lease {
-        lease.assert_path_held(path)?;
+        lease.assert_path_held_async(path).await?;
     }
     unlink_stale_socket_with_lease(path, stale_identity, lease).await
 }
@@ -938,7 +938,7 @@ async fn unlink_stale_socket_with_lease(
             // file out of the public namespace - a replacement cannot
             // be deleted through it).
             if let Some(lease) = lease {
-                lease.assert_path_held(path)?;
+                lease.assert_path_held_async(path).await?;
             }
             if socket_identity(path) != Some(expected.clone()) {
                 return Err(anyhow!(

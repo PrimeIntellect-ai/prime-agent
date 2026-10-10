@@ -27,17 +27,33 @@ pub(super) static PRIVATE_UMASK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::n
 /// the two calls can never have its TARGET permission-mutated by
 /// this protocol.
 ///
+/// The mkdir REQUESTS mode 0700 explicitly (not the 0777 of
+/// `fs::create_dir`): a parent carrying default POSIX ACLs derives
+/// the new entry's group-class access from the requested mode's bits
+/// (not from the umask), so an explicit 0700 request zeroes the
+/// group/other bits even on such parents - an ACL that would grant
+/// group access through a 0777 request cannot through this one.
+///
 /// # Errors
 ///
-/// Returns the raw `create_dir` error on failure (name collisions
-/// included - the callers regenerate a fresh suffix on them).
+/// Returns the raw mkdir error on failure (name collisions included
+/// - the callers regenerate a fresh suffix on them).
 #[cfg(unix)]
 pub fn mkdir_mode_0700(path: &Path) -> io::Result<()> {
     let _guard = PRIVATE_UMASK_LOCK.lock();
-    let prior_umask = unsafe { libc::umask(0o077) };
-    let create = fs::create_dir(path);
+    let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+        .map_err(|_| io::Error::other("non-null-free directory path"))?;
+    // The umask only clears bits the request never sets under the
+    // toggle: 0700 stays exactly 0700 (the toggle's save/restore is
+    // belt-and-braces for an external umask that could otherwise
+    // strip owner bits).
+    let prior_umask = unsafe { libc::umask(0) };
+    let code = unsafe { libc::mkdir(raw_path.as_ptr(), 0o700) };
     unsafe { libc::umask(prior_umask) };
-    create
+    if code != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Create a fresh private directory with mode 0700 AT CREATION,
