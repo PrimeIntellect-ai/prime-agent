@@ -214,10 +214,12 @@ async fn stop_target_within(
             escalate(
                 target,
                 |signal| {
-                    if identity_current(target) {
-                        let _ = pa_core::platform::process::kill_pid(target.pid as i32, signal);
-                    }
-                    true
+                    signal_numeric_target(
+                        target,
+                        signal,
+                        crate::lease::get_process_start_id,
+                        pa_core::platform::process::kill_pid,
+                    )
                 },
                 term_grace,
                 kill_verify,
@@ -238,6 +240,24 @@ async fn stop_target_within(
             }
         }
     }
+}
+
+/// The numeric carrier's identity read and signal operation, kept together so
+/// the process-replacement interleaving can be exercised without OS signals.
+fn signal_numeric_target(
+    target: &ReapTarget,
+    signal: pa_core::platform::process::Signal,
+    read_start_id: impl FnOnce(u32) -> Option<String>,
+    send_signal: impl FnOnce(i32, pa_core::platform::process::Signal) -> bool,
+) -> bool {
+    if target
+        .start_id
+        .as_deref()
+        .is_some_and(|expected| read_start_id(target.pid).as_deref() == Some(expected))
+    {
+        let _ = send_signal(target.pid as i32, signal);
+    }
+    true
 }
 
 /// The escalation ladder both signal carriers ride: gone check, SIGTERM,
@@ -685,6 +705,48 @@ fn read_proc_argv(pid: u32) -> Option<Vec<String>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_stop_never_signals_a_replacement_after_the_identity_snapshot() {
+        use pa_core::platform::process::Signal;
+        use std::cell::Cell;
+
+        let original = ReapTarget {
+            pid: 42,
+            start_id: Some("original-worker".to_string()),
+            worker_socket: None,
+            kind: ReapKind::Worker,
+        };
+        let mut outcomes = Vec::new();
+        for signal in [Signal::Term, Signal::Kill] {
+            let current_instance = Cell::new("original-worker");
+            let replacement_signaled = Cell::new(false);
+            signal_numeric_target(
+                &original,
+                signal,
+                |pid| {
+                    assert_eq!(pid, original.pid);
+                    let observed = current_instance.get().to_string();
+                    // The reader observed the original worker correctly. Before
+                    // the caller resumes, it exits and the same PID is reused.
+                    current_instance.set("unrelated-replacement");
+                    Some(observed)
+                },
+                |pid, delivered| {
+                    assert_eq!(pid, original.pid as i32);
+                    assert_eq!(delivered, signal);
+                    replacement_signaled.set(current_instance.get() == "unrelated-replacement");
+                    true
+                },
+            );
+            outcomes.push((signal, replacement_signaled.get()));
+        }
+        assert_eq!(
+            outcomes,
+            vec![(Signal::Term, false), (Signal::Kill, false)],
+            "the replacement must not receive either signal after a valid original-worker identity snapshot"
+        );
+    }
 
     fn target(pid: u32) -> ReapTarget {
         ReapTarget {
