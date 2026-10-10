@@ -24,6 +24,9 @@ enum FakeChild {
     Healthy,
     PromptFails,
     Unreachable,
+    /// The first `get_last_assistant_text` reads no text (the settle raced
+    /// the worker's answer hand-off); later reads answer it.
+    TextLate,
     /// The worker leaves right after the settle answer is captured:
     /// every later child read fails.
     LeavesAfterSettle,
@@ -69,6 +72,9 @@ async fn spawn_fake_supervisor(
         // Shared across link connections: the give-up gate counts the
         // child's state reads on whichever connection carries them.
         let state_reads = Arc::new(AtomicU32::new(0));
+        // Shared across link connections: the late-text variant counts the
+        // child's answer reads on whichever connection carries them.
+        let text_reads = Arc::new(AtomicU32::new(0));
         loop {
             let Ok(stream) = listener.accept().await else {
                 return;
@@ -78,8 +84,10 @@ async fn spawn_fake_supervisor(
             let kill_behavior = std::sync::Arc::clone(&kill_behavior);
             let gone = Arc::clone(&gone);
             let state_reads = Arc::clone(&state_reads);
+            let text_reads = Arc::clone(&text_reads);
             let child_session_file = std::sync::Arc::clone(&child_session_file);
             let child_subagents = Arc::clone(&child_subagents);
+            let text_reads = Arc::clone(&text_reads);
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.split();
                 let mut reader = BufReader::new(reader);
@@ -176,11 +184,20 @@ async fn spawn_fake_supervisor(
                             if matches!(child, FakeChild::LeavesAfterSettle) {
                                 gone.store(true, Ordering::SeqCst);
                             }
-                            response_success(
-                                Some(&id),
-                                command_type,
-                                Some(json!({ "text": "the child final answer" })),
-                            )
+                            // The late-text variant: the FIRST answer read
+                            // races the worker's answer hand-off and reads
+                            // no text (a None capture); later reads answer.
+                            if matches!(child, FakeChild::TextLate)
+                                && text_reads.fetch_add(1, Ordering::SeqCst) == 0
+                            {
+                                response_success(Some(&id), command_type, Some(json!({})))
+                            } else {
+                                response_success(
+                                    Some(&id),
+                                    command_type,
+                                    Some(json!({ "text": "the child final answer" })),
+                                )
+                            }
                         }
                         "kill" => {
                             let _ = kill_tx.send(command.clone());
@@ -1074,6 +1091,52 @@ async fn a_failed_settle_captures_the_childs_last_assistant_text() {
         results[0].answer_text.as_deref(),
         Some("the child final answer"),
         "the binding lane carries the exit capture"
+    );
+}
+
+/// Review finding (PR #3462): a `None` first answer capture (the settle
+/// raced the worker's answer hand-off) FROZE the row empty — the capture fill
+/// only ran while the settle verdict was unset, so no later refresh could
+/// deliver the text and every re-collect answered the same empty envelope. The
+/// fill now runs on every refresh: it writes only when the fresh round trip
+/// produced a text AND the row has no answer yet.
+#[tokio::test]
+async fn a_none_first_answer_capture_recovers_on_a_later_collect() {
+    let (follow_up_tx, _follow_up_rx) = mpsc::unbounded_channel();
+    let (sessions, _kill_rx) =
+        sessions_with_fake_supervisor(follow_up_tx, 0, FakeKill::Success, FakeChild::TextLate)
+            .await;
+    let handle = spawn_child(&sessions).await;
+    sessions.notify_turn_done();
+    // The watcher's settle refresh consumed the empty first answer read and
+    // settled the child with no captured answer.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let entries = sessions.list_subagents().await.expect("child roster");
+        if entries.iter().any(|entry| entry.status == "completed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child never settled: {entries:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // A later collect refreshes the row and the answer lands: the settle
+    // verdict is one-shot, the capture is not.
+    let results = sessions
+        .collect(vec![handle.rlm_child_id.clone()], 0)
+        .await
+        .expect("collect the settled child");
+    assert_eq!(results[0].status, "done");
+    assert_eq!(
+        results[0].answer_text.as_deref(),
+        Some("the child final answer"),
+        "the late answer must land after the empty first capture"
+    );
+    assert_eq!(
+        results[0].answer_preview.as_deref(),
+        Some("the child final answer")
     );
 }
 

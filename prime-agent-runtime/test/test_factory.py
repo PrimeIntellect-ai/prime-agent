@@ -3769,6 +3769,41 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertNotIn("...", captured_event["answer"])
 
     @async_test
+    async def test_a_json_null_output_is_a_captured_value_not_a_failure(self) -> None:
+        # Review finding (PR #3462): the capture-complete check conflated a
+        # port that parsed as JSON null with a missing port — a legit null
+        # output triggered the capture retry and recorded
+        # output_capture_failed although the bind succeeded. Presence of
+        # the key is the captured test, never the value.
+        self.host.outcomes["src"] = {"status": "done", "answer": '```json\n{"data": null}\n```'}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data", "optional": True}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # The null was captured and bound: the dependent renders the JSON
+        # null, not the no-value sentinel path.
+        self.assertIn("- data: null", self.host.spawn_calls("dep")[0]["prompt"])
+
+    @async_test
     async def test_capture_failure_names_the_binding_cap_and_records_the_event(self) -> None:
         # A declared json output bigger than the executor's binding cap
         # fails to parse with the SIZE named in the error (not a bare

@@ -2916,8 +2916,12 @@ class FactoryExecutor:
         """
         self._capture_ports(state, entry)
         declared = state.spec.get("outputs") or []
+        # Presence, not truthiness: a port that parsed as JSON null is a
+        # captured value (a downstream binding reads null from it), so the
+        # retry condition and the failure report check the KEY, never the
+        # value — a null output never reads as unbound.
         if not declared or not any(
-            (entry.outputs or {}).get(out.get("name")) is None for out in declared
+            out.get("name") not in (entry.outputs or {}) for out in declared
         ):
             return  # every declared port bound a value
         refreshed = await self._refresh_entry_answers(run, state, entry)
@@ -2926,7 +2930,7 @@ class FactoryExecutor:
         for out in declared:
             name = out.get("name")
             error = (entry.output_errors or {}).get(name)
-            if error is None and (entry.outputs or {}).get(name) is None:
+            if error is None and name not in (entry.outputs or {}):
                 error = f"output {name!r} captured no value from the upstream answer"
             if error is not None:
                 self._event(

@@ -437,16 +437,22 @@ impl SupervisorChildSessionsInner {
             .as_deref()
             .map(|text| cap_text(text, ANSWER_TEXT_MAX_CHARS));
         let mut record = record.lock().await;
+        // The settle verdict is one-shot, the answer capture is not: a
+        // `None` first capture (the settle raced the worker's answer
+        // hand-off) froze the row empty before — the capture fill only
+        // ran while `settled_status` was unset, so a later refresh could
+        // never deliver the text and a re-collect answered the same empty
+        // envelope forever. The fill now runs on every refresh: it only
+        // writes when the fresh round trip produced a text AND the row has
+        // no answer yet, so a settled preview is still never overwritten
+        // with a later miss.
         if record.settled_status.is_none() {
             record.settled_status = Some("done");
-            // A settled preview is never overwritten with a later miss; a
-            // `None` capture (the settle raced the admission-to-run
-            // hand-off) recovers on a later refresh.
-            if !record.answer_captured || record.answer_preview.is_none() {
-                record.answer_preview = answer;
-                record.answer_text = answer_text;
-                record.answer_captured = true;
-            }
+        }
+        if (!record.answer_captured || record.answer_preview.is_none()) && answer.is_some() {
+            record.answer_preview = answer;
+            record.answer_text = answer_text;
+            record.answer_captured = true;
         }
     }
 
