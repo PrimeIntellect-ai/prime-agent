@@ -11,8 +11,10 @@ use serde::Deserialize;
 
 pub const MODEL_PROMPTS_TOML: &str = include_str!("layers/model_prompts.toml");
 
-const MODEL_PROMPT_FILES: &[(&str, &str)] =
-    &[("bash-over-subprocess.md", include_str!("layers/bash-over-subprocess.md"))];
+const MODEL_PROMPT_FILES: &[(&str, &str)] = &[(
+    "bash-over-subprocess.md",
+    include_str!("layers/bash-over-subprocess.md"),
+)];
 
 const USER_MODEL_PROMPTS_TOML: &str = "model-prompts.toml";
 
