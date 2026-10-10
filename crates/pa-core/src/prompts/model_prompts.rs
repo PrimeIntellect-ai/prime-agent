@@ -12,7 +12,7 @@ use serde::Deserialize;
 pub const MODEL_PROMPTS_TOML: &str = include_str!("layers/model_prompts.toml");
 
 const MODEL_PROMPT_FILES: &[(&str, &str)] =
-    &[("glm-5.3-bash.md", include_str!("layers/glm-5.3-bash.md"))];
+    &[("bash-over-subprocess.md", include_str!("layers/bash-over-subprocess.md"))];
 
 const USER_MODEL_PROMPTS_TOML: &str = "model-prompts.toml";
 
@@ -476,9 +476,9 @@ files = ["shared.md", "user-only.md"]
         assert!(resolution.errors.is_empty(), "{:#?}", resolution.errors);
         let expected = MODEL_PROMPT_FILES
             .iter()
-            .find(|(name, _)| *name == "glm-5.3-bash.md")
+            .find(|(name, _)| *name == "bash-over-subprocess.md")
             .map(|(_, content)| (*content).trim())
-            .expect("the shipped file table names glm-5.3-bash.md");
+            .expect("the shipped file table names bash-over-subprocess.md");
         assert_eq!(resolution.extras.as_deref(), Some(expected));
 
         let other = load_model_prompts(Some("anthropic/claude-sonnet-4"), empty.path());
