@@ -159,7 +159,7 @@ impl AgentSessionEngine {
             pending_branch: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             image_route: std::sync::Mutex::new(None),
-            reload_lock: std::sync::Mutex::new(()),
+            reload_lock: tokio::sync::Mutex::new(()),
             own_summary: std::sync::Arc::new(std::sync::Mutex::new(None)),
             create_resources: std::sync::RwLock::default(),
             autonomous: std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -870,12 +870,10 @@ impl AgentSessionEngine {
             // The build's resolve-and-install serializes with `/reload`'s
             // live-input refresh (the other slot writers' fence): a reload
             // landing between this resolution and the slot write must not
-            // be clobbered by the build's older pair. The guard never
-            // rides an await — the block is synchronous and scoped.
-            let _reload_serialized = self
-                .reload_lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // be clobbered by the build's older pair. The tokio lock
+            // parks THIS task while a reload runs — an executor worker
+            // never blocks on the auth I/O the reload holds it across.
+            let _reload_serialized = self.reload_lock.lock().await;
             let (api_key, headers) = self.resolve_request_key_and_headers(model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {

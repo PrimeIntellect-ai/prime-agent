@@ -299,10 +299,7 @@ impl AgentSessionEngine {
                             // turn runs on the blocking pool, so the
                             // synchronous resolution never touches an
                             // async executor worker.
-                            let _reload_serialized = self
-                                .reload_lock
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let _reload_serialized = self.reload_lock.blocking_lock();
                             // A routed episode keeps serving the route's
                             // target across the failover switch — through
                             // the fenced install (the route lock covers
@@ -363,10 +360,7 @@ impl AgentSessionEngine {
                             // and all, never touches an async executor
                             // worker; only a concurrently reloading
                             // session waits on this span.
-                            let _reload_serialized = self
-                                .reload_lock
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let _reload_serialized = self.reload_lock.blocking_lock();
                             // The armed-route install goes through the
                             // fenced helper (no provider-slot lock held
                             // across the route read).

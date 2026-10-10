@@ -89,15 +89,10 @@ impl AgentSessionEngine {
     /// at every model-turn attempt; a text-only session model with an
     /// unusable or missing `settings.imageModel` returns the refusal.
     pub(crate) fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
-        // The lock spans the route's auth resolution AND its publication:
+        // The lock spans the route's auth resolution and its publication:
         // a `/reload` in between would refresh a route the arm then
-        // overwrites with the older pair (the reload's own refreshes run
-        // under the same lock, so whichever runs last leaves the newest
-        // store standing).
-        let _reload_serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // overwrites with the older pair.
+        let _reload_serialized = self.reload_lock.blocking_lock();
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
@@ -174,10 +169,7 @@ impl AgentSessionEngine {
         // capture the pre-reload session target (and a later clear would
         // restore it over the reload's pair). Both run under the same
         // lock: whichever runs last leaves the newest store standing.
-        let _reload_serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reload_serialized = self.reload_lock.blocking_lock();
         let mut slot = self
             .image_route
             .lock()
@@ -230,10 +222,7 @@ impl AgentSessionEngine {
         // last leaves the newest store standing. This runs on the turn's
         // blocking thread (the worker parks the turn there), so the
         // synchronous resolution never touches an async executor worker.
-        let _reload_serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _reload_serialized = self.reload_lock.blocking_lock();
         let route = self
             .image_route
             .lock()

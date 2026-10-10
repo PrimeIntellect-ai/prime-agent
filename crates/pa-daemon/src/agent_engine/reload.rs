@@ -30,47 +30,23 @@ impl AgentSessionEngine {
         }
     }
 
-    /// `/reload`'s session half: the request path reads the provider
-    /// target per call, but a credential another process wrote into the
-    /// store reaches the session only through a slot rebind. The live
-    /// target keeps its model and service tier — a routed image episode
-    /// serves on its own target, and a fresh resolution must not retarget
-    /// an unflagged session to a changed settings default — so only the
-    /// request key and headers re-resolve, never the model, and the
-    /// refresh lands in place on the CURRENT slot contents (a racing
-    /// `set_model`, image-route swap, or retirement is never clobbered by
-    /// an older snapshot). A routed episode's armed target and its saved
-    /// session-target fallback refresh from the same store, or the next
-    /// model-turn attempt would reinstall the stale credentials. The
-    /// rebinds run only off live STORE auth — a credential the store
-    /// actually holds on a healthy read: the configured `models.json`
-    /// fallback key (served when the store is unreadable OR holds no
-    /// credential for the provider) is not a stored credential and
-    /// never replaces the session's last-good pair. The MCP
-    /// manager re-reads its settings and the shared auth store (the same
-    /// reload the connections view applies on open). The auth store's
-    /// reload gates the whole session half and its failure propagates:
-    /// the request-auth resolutions read the same store a malformed
-    /// document or an unacquirable lock leaves unreadable, so they would
-    /// rebind the live target onto the configured fallback key over the
-    /// session's last-good stored credential — the gate keeps a failed
-    /// reload from touching the targets at all, and the MCP manager on
-    /// its previous credentials reports the failure instead of success.
+    /// `/reload`'s session half: re-read the live inputs another process
+    /// may have changed — the request auth from the credential store
+    /// (rebinding the live target and an armed image route's pair in
+    /// place: the model and service tier never change), and the MCP
+    /// manager's settings and auth state. A rebind lands only off live
+    /// STORE auth (stored, or the ambient environment/runtime override);
+    /// the configured `models.json` fallback key never replaces a
+    /// last-good pair. A failed auth-store read fails the reload before
+    /// any target is touched.
     pub(crate) fn reload_live_inputs(&self) -> Result<(), String> {
-        // The whole refresh is serialized: overlapping `/reload`s each
-        // resolve the store at their own read times, so without this the
-        // earlier reload could install its already-resolved pair over the
-        // later reload's fresher one (the model-unchanged branch trusts
-        // its pre-read). Serialization makes the LAST reload to run leave
-        // the target serving the newest store.
-        let _serialized = self
-            .reload_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The auth store re-read runs FIRST, before any target rebind:
-        // it is the health gate for the store every resolution below
-        // reads. The settings re-read still applies on a failed reload —
-        // it reads settings, not credentials.
+        // The whole refresh is serialized against every other
+        // resolve-and-install (the session's reload lock): overlapping
+        // writers resolve the store at their own read times, so the last
+        // writer to run must be the one leaving the newest store.
+        let _serialized = self.reload_lock.blocking_lock();
+        // The auth store re-read gates the rebinds below: the settings
+        // re-read still applies on a failed reload.
         {
             let mut manager = self
                 .mcp

@@ -277,12 +277,16 @@ pub struct AgentSessionEngine {
     /// every model-turn attempt so retries keep serving it; cleared when the
     /// episode settles.
     pub(crate) image_route: std::sync::Mutex<Option<ImageRoute>>,
-    /// Serializes `/reload`'s whole live-input refresh: overlapping reloads
-    /// resolve the store at their own read times, so an earlier reload's
-    /// already-resolved key/header pair must never land over a later
-    /// reload's fresher pair (the last reload to run leaves the target
-    /// serving the newest store).
-    pub(crate) reload_lock: std::sync::Mutex<()>,
+    /// Serializes `/reload`'s whole live-input refresh and every
+    /// provider-target resolve-and-install against it: overlapping
+    /// writers resolve the store at their own read times, so an earlier
+    /// writer's already-resolved pair must never land over a later one's
+    /// fresher pair (the last writer to run leaves the target serving the
+    /// newest store). A tokio mutex: the async build path locks by
+    /// `.await` (an executor worker never blocks on it), the
+    /// blocking-pool paths (the turn machinery, the reload's own
+    /// `spawn_blocking`) use `blocking_lock`.
+    pub(crate) reload_lock: tokio::sync::Mutex<()>,
 
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
