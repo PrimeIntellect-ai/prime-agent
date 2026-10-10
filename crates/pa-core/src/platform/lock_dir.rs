@@ -157,7 +157,7 @@ fn remove_candidate_notes_pinned(candidate: &Path, expected: (u64, u64)) -> io::
 /// The non-Linux floor: the lstat-proven directory's notes are removed
 /// by pathname (the same verify-then-act floor the TS release takes).
 #[cfg(all(unix, not(target_os = "linux")))]
-fn remove_candidate_notes_pinned(_candidate: &Path, _expected: (u64, u64)) -> io::Result<()> {
+fn remove_candidate_notes_pinned(candidate: &Path, _expected: (u64, u64)) -> io::Result<()> {
     for note in ["owner", "claimed-at", "released"] {
         match fs::remove_file(candidate.join(note)) {
             Ok(()) => {}
