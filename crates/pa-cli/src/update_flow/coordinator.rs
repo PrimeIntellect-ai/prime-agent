@@ -196,15 +196,16 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
             // A concurrent stop raced the update's release-to-spawn
-            // window: the generation THIS acquisition observed under the
-            // guard advanced past the generation DRIVE's own admission
-            // observed at its acquire - a foreign stop opened in between
-            // (while drive held, the only possible window is after its
-            // release), completed, and released. The user's shutdown has
-            // reported success by now - the rollback refuses to spawn a
-            // daemon behind it.
+            // window. The arithmetic: every acquire observes the counter
+            // BEFORE its own bump, so with no foreign stop the rollback's
+            // acquire observes exactly drive's own bump - one more than
+            // drive's observation. TWO or more means a foreign stop
+            // acquired in between (while drive held, the only possible
+            // window is after its release), completed, and released. The
+            // user's shutdown has reported success by now - the rollback
+            // refuses to spawn a daemon behind it.
             let drive_generation = drive_generation.load(std::sync::atomic::Ordering::SeqCst);
-            if rollback_admission.observed_generation() > drive_generation {
+            if rollback_admission.observed_generation() > drive_generation + 1 {
                 // The rejected successor this update spawned is retired the
                 // same way finish_failure retires it (best-effort
                 // identity-pinned crash kill): left alive beside the

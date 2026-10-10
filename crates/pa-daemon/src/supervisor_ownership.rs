@@ -1433,8 +1433,12 @@ mod tests {
             1,
             "the observation is the pre-bump counter value"
         );
-        // The raced-shutdown arithmetic: observed(later) > observed(earlier
-        // baseline) means a foreign stop opened in between.
+        // The raced-shutdown arithmetic: with no foreign stop, the next
+        // acquire observes exactly one more (the earlier holder's own
+        // bump) - `> baseline + 1` is what detects a foreign stop.
+        drop(later);
+        let third = ShutdownAdmission::acquire_in(registry.path()).expect("third window");
+        assert_eq!(third.observed_generation(), 2);
     }
 
     #[test]
