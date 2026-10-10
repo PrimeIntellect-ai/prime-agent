@@ -154,7 +154,7 @@ impl SessionUi {
         let active_session_id = self.active_session_id.clone();
         let epoch = self.transcript_epoch;
         let notes = self.backfill_notes.clone();
-        let task = tokio::spawn(async move {
+        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let entries: Result<Vec<ChatEntry>> = async {
                 let command = DaemonCommand::GetMessages {
                     id: None,
@@ -183,7 +183,7 @@ impl SessionUi {
             .await;
             let entries = entries.map_err(|error| error.to_string());
             let _ = notes.send(TranscriptBackfillNote { epoch, entries });
-        });
+        }));
         self.transcript_backfill = Some(task);
     }
 

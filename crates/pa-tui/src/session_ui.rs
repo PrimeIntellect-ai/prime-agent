@@ -353,7 +353,11 @@ pub(crate) struct SessionUi {
     prompt_in_flight: usize,
     pub(crate) transcript_stale: bool,
     transcript_epoch: u64,
-    pub(crate) transcript_backfill: Option<tokio::task::JoinHandle<()>>,
+    /// Dropping or replacing the handle aborts an obsolete backfill task. An
+    /// already-running decode finishes on the blocking pool and its result is
+    /// discarded: the aborted task never sends it, and an already-queued note
+    /// is dropped by the epoch check.
+    pub(crate) transcript_backfill: Option<tokio_util::task::AbortOnDropHandle<()>>,
     pending_backfill: Option<usize>,
     backfill_seam: crate::snapshot::BackfillSeam,
     backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
