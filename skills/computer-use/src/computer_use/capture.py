@@ -257,8 +257,10 @@ def _live_window_bounds(window_id: int) -> tuple[float, float, float, float] | N
         if bounds is None:
             return None
         # the CoreGraphics dictionary converter, not CGRectMakeWithString:
-        # the window-list entry carries an {X, Y, Width, Height} dictionary
-        rect = quartz.CGRectMakeWithDictionaryRepresentation(bounds, None)
+        # the window-list entry carries an {X, Y, Width, Height} dictionary,
+        # and the pyobjc bridge returns (ok, CGRect) - upstream test_cggeometry
+        converted = quartz.CGRectMakeWithDictionaryRepresentation(bounds, None)
+        rect = converted[1] if converted and converted[0] else None
         if rect is None:
             return None
         return (

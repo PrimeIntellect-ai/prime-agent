@@ -875,11 +875,15 @@ class LiveWindowBoundsTests(unittest.TestCase):
                 return [{"kCGWindowBounds": {"X": 12, "Y": 34, "Width": 800, "Height": 600}}]
 
             def CGRectMakeWithDictionaryRepresentation(self, bounds, rect):
-                # the CoreGraphics dictionary converter, not CGRectMakeWithString
+                # the CoreGraphics dictionary converter, not CGRectMakeWithString;
+                # the pyobjc bridge returns (ok, CGRect), like upstream test_cggeometry
                 created.append(bounds)
-                return types.SimpleNamespace(
-                    origin=types.SimpleNamespace(x=bounds["X"], y=bounds["Y"]),
-                    size=types.SimpleNamespace(width=bounds["Width"], height=bounds["Height"]),
+                return (
+                    True,
+                    types.SimpleNamespace(
+                        origin=types.SimpleNamespace(x=bounds["X"], y=bounds["Y"]),
+                        size=types.SimpleNamespace(width=bounds["Width"], height=bounds["Height"]),
+                    ),
                 )
 
         quartz = Quartz()
