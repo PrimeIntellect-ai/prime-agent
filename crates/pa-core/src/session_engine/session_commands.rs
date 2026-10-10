@@ -1,7 +1,8 @@
 //! Session slash-command execution: the daemon-side behavior behind
-//! `/compact`, `/refine`, `/goal`, and `/autonomous`. The host runtime owns
-//! persistence of what this returns; errors carry the exact TS message and
-//! the host renders the `Command failed: ...` result row.
+//! `/compact`, `/refine`, `/goal`, and `/autonomous`. The
+//! host runtime owns persistence of what this returns; errors carry the
+//! exact TS message and the host renders the `Command failed: ...` result
+//! row.
 
 use std::sync::Arc;
 

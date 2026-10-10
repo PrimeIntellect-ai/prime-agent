@@ -232,6 +232,9 @@ impl Supervisor {
             "rlmMaxDepth",
             "parentSessionPath",
             "models",
+            // The Decision API child's engine choice: a dropped key respawns
+            // the decision child as a regular agent session.
+            "decisionChild",
             // The scripted-parent verification seam: a dropped key leaves
             // spawned children scriptless.
             "childScript",

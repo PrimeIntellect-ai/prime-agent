@@ -61,7 +61,8 @@ pub struct RlmSubagentEntry {
     pub session_id: Option<String>,
     pub session_name: String,
     pub session_dir: String,
-    /// `running` | `completed` | `error`.
+    /// `running` | `completed` | `error` | `cancelled` (a cancelled run
+    /// keeps its status verbatim in the registry row).
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<RlmSubagentActivity>,
@@ -97,6 +98,9 @@ pub struct RlmSubagentActivity {
 pub struct RlmDeleteSubagentResult {
     pub subagent: RlmSubagentEntry,
     /// `deleted` | `skipped_running`; absent when the host reports neither.
+    /// A re-delete of an already-deleted selector is idempotent and reports
+    /// `deleted` with the tombstone row (retirement never errors on the
+    /// second call).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
 }
@@ -114,6 +118,10 @@ pub struct RlmChildResult {
     pub settled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_preview: Option<String>,
+    /// The full final-answer text (the settle-binding lane; the roster
+    /// preview stays compact), bounded by the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -136,6 +144,10 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The decision-child spawn kind: `true` spawns the Decision API child
+    /// (the model comes from `decisionApi.systemOneModel`, and the child's
+    /// intake answers every message with one decision).
+    pub decision_child: bool,
     /// The parent's in-flight turn request the spawn anchors to (TS
     /// `spawnedByRequestId`): `None` for a spawn outside an active run.
     pub spawned_by_request_id: Option<String>,
@@ -489,7 +501,17 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
-    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking"])?;
+    reject_unsupported_kwargs(&kwargs, OPERATION, &["name", "model", "thinking", "kind"])?;
+    let decision_child = match optional_string_kwarg(&kwargs, "kind", OPERATION)? {
+        None => false,
+        Some("decision") => true,
+        Some(other) => {
+            anyhow::bail!(
+                "rlm.spawn kind must be \"decision\" when given, not {other:?}. Only the \
+                 Decision API child has a kind."
+            )
+        }
+    };
     let name = optional_string_kwarg(&kwargs, "name", OPERATION)?;
     let name = normalize_requested_rlm_subagent_session_name(name, OPERATION)?;
     if let Some(name) = &name {
@@ -505,6 +527,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        decision_child,
         spawned_by_request_id: None,
         cell_source_code: None,
     })
@@ -846,6 +869,7 @@ mod tests {
                     status: "done",
                     settled: true,
                     answer_preview: Some("all done".into()),
+                    answer_text: Some("all done".into()),
                     error: None,
                     duration_ms: Some(2_000),
                     tool_use_count: Some(3),
