@@ -923,6 +923,15 @@ async fn ordinary_resume_preserves_recovery_hold_established_during_checkpoint()
         assert_eq!(core.follow_up.len(), 1);
         assert_eq!(core.follow_up[0].message, "waiting behind failed input");
     }
+    assert!(
+        !WorkerRecoveryJournal::read_resume_checkpoint(
+            &worker.config.recovery_journal_path,
+            "ordinary-resume",
+            &worker.config.worker_instance_id,
+        )
+        .unwrap(),
+        "a refused resume must not durably prove release of a matching supervisor hold"
+    );
     let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
 }
 

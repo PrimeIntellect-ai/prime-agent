@@ -1019,6 +1019,146 @@ async fn live_resume_without_descriptor_hold_gets_a_supervisor_attempt() {
 }
 
 #[tokio::test]
+async fn a_distinct_refused_resume_cannot_reuse_an_earlier_release_proof() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        })
+        .expect("supervisor"),
+    );
+    let journal_path = dir.path().join("worker.recovery.jsonl");
+    crate::journal::WorkerRecoveryJournal::open(&journal_path)
+        .unwrap()
+        .record_resume_checkpoint(
+            "distinct-resume",
+            "session-1",
+            None,
+            "earlier-accepted-resume",
+            "instance-1",
+            &[],
+            &[],
+        )
+        .unwrap();
+    assert!(crate::journal::WorkerRecoveryJournal::read_resume_checkpoint(
+        &journal_path,
+        "earlier-accepted-resume",
+        "instance-1",
+    )
+    .unwrap());
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+        "version": 2,
+        "workerId": "distinct-resume",
+        "pid": 4242,
+        "socketPath": dir.path().join("worker.sock").to_string_lossy(),
+        "recoveryJournalPath": journal_path.to_string_lossy(),
+        "supervisorSocketPath": dir.path().join("daemon.sock").to_string_lossy(),
+        "authenticationToken": "token",
+        "workerInstanceId": "instance-1",
+        "rootActiveSessionId": "distinct-resume",
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+        "shutdownHold": {
+            "version": 1,
+            "attemptId": "shutdown-attempt",
+            "workerInstanceId": "instance-1",
+            "resumeAttemptId": "earlier-accepted-resume",
+            "resumeWorkerInstanceId": "instance-1"
+        }
+    }))
+    .expect("descriptor");
+    let descriptor_path = dir.path().join("distinct-resume.json");
+    let resident = ResidentWorker::new(
+        "distinct-resume".into(),
+        descriptor,
+        descriptor_path.clone(),
+    );
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<WorkerRequest>(1);
+    *resident.cmd_tx.lock().await = Some(cmd_tx);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    resident.note_connection_live();
+    resident.note_session_ready();
+    let (subscriber_tx, _subscriber_rx) = mpsc::channel::<Arc<Value>>(1);
+    let attached = subscribers::ClientSubscriptions::new("client".into(), subscriber_tx);
+    let command: DaemonCommand = serde_json::from_value(json!({
+        "type": "resume_queue", "activeSessionId": "distinct-resume"
+    }))
+    .expect("resume command");
+    let routed = {
+        let supervisor = Arc::clone(&supervisor);
+        tokio::spawn(async move {
+            supervisor
+                .route_client_command(
+                    &command,
+                    "client",
+                    &attached,
+                    "distinct-client-resume".into(),
+                    "resume_queue".into(),
+                    None,
+                )
+                .await
+        })
+    };
+    let request = tokio::time::timeout(Duration::from_secs(1), cmd_rx.recv())
+        .await
+        .expect("new request arrives")
+        .expect("worker channel stays open");
+    let attempt = request.payload["resumeQueueAttemptId"]
+        .as_str()
+        .expect("private attempt")
+        .to_string();
+    // This request refuses without writing any checkpoint. The only real
+    // durable release proof belongs to the earlier, distinct request.
+    let reply = resident
+        .pending
+        .lock()
+        .await
+        .remove(&request.request_id)
+        .expect("pending request");
+    assert!(reply
+        .send(WorkerReply::Typed(crate::protocol::response_failure(
+            None,
+            "resume_queue",
+            "Session recovery is required",
+            None,
+        )))
+        .is_ok());
+    let (lines, stop) = tokio::time::timeout(Duration::from_secs(1), routed)
+        .await
+        .expect("refused route finishes")
+        .expect("route task");
+    assert!(!stop);
+    assert_eq!(lines[0]["success"], json!(false));
+    // The post-route and boot paths share this reconciliation. Neither may
+    // drop the hold on a historical success from a different logical action.
+    let boot_release = supervisor
+        .reconcile_shutdown_resume_hold(&resident)
+        .await
+        .expect("reconcile refusal");
+    let persisted: DaemonWorkerDescriptor =
+        serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+    assert_eq!(
+        (
+            attempt != "earlier-accepted-resume",
+            crate::journal::WorkerRecoveryJournal::read_resume_checkpoint(
+                &journal_path,
+                &attempt,
+                "instance-1",
+            )
+            .unwrap(),
+            crate::descriptor::has_shutdown_hold(&persisted),
+            boot_release,
+        ),
+        (true, false, true, false),
+        "a new refused resume needs its own absent proof and retains the shutdown hold"
+    );
+}
+
+#[tokio::test]
 async fn held_resume_waiting_for_replacement_binds_the_receiving_generation() {
     let dir = tempfile::TempDir::new().unwrap();
     let supervisor = Arc::new(
