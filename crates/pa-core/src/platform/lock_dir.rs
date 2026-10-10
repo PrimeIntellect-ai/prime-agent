@@ -4,10 +4,12 @@
 
 mod lock_dir_setup;
 
+#[cfg(unix)]
+pub use lock_dir_setup::is_fresh_name_swap;
 #[cfg(target_os = "linux")]
 pub use lock_dir_setup::setup_private_dir;
 #[cfg(target_os = "linux")]
-use lock_dir_setup::{create_private_dir_guarded, is_fresh_name_swap, write_owner_through};
+use lock_dir_setup::{create_private_dir_guarded, write_owner_through};
 #[cfg(unix)]
 pub use lock_dir_setup::{mark_released_at, mkdir_mode_0700};
 
@@ -62,14 +64,86 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
 /// name a directory - every child unlink and the final remove would
 /// otherwise traverse the link and delete a victim's notes, so the
 /// swapped entry is left for the racing actor to own.
+/// # Errors
+///
+/// Returns the note-removal or directory-removal errors of the pinned
+/// cleanup; a missing or non-directory candidate is the racing-reclaimer
+/// non-error.
 #[cfg(unix)]
-fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
+pub fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(candidate).is_ok_and(|metadata| metadata.file_type().is_dir()) {
         // A missing candidate is the racing-reclaimer non-error; a
         // symlink or file at the name is a swap that must NOT be
         // followed or removed.
         return Ok(());
     }
+    remove_candidate_notes_pinned(candidate)?;
+    fs::remove_dir(candidate)
+}
+
+/// Remove the candidate's note files through the PINNED directory
+/// inode: the pin (`O_PATH | O_NOFOLLOW`) plus the fd-relative
+/// `unlinkat` calls make a path swap landed after the lstat unable to
+/// redirect the unlinks into a foreign directory - the note names
+/// resolve inside the pinned inode or nowhere. The final directory
+/// removal stays on the pathname: `rmdir` refuses non-directories by
+/// syscall semantics, so a swapped symlink cannot be followed, and a
+/// swapped empty directory is the accepted-risk pre-created residual.
+#[cfg(target_os = "linux")]
+fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::io::AsRawFd;
+    let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+        candidate.as_os_str(),
+    ))
+    .map_err(|_| io::Error::other("non-null-free candidate path"))?;
+    let fd = unsafe {
+        libc::open(
+            raw_path.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        // The pin failed (EIO/EACCES): the lstat above proved the entry
+        // is a directory, and an unpinned note removal could follow a
+        // mid-window swap - remove nothing and report the pin error.
+        return Err(io::Error::last_os_error());
+    }
+    let pin = unsafe { std::fs::File::from_raw_fd(fd) };
+    {
+        use std::os::unix::fs::MetadataExt;
+        // The pinned inode must still be the lstat-proven candidate: a
+        // swap between the lstat and the pin seats a different inode.
+        let lstat_identity = fs::symlink_metadata(candidate)
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()));
+        let pinned_identity = pin
+            .metadata()
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()));
+        if pinned_identity.is_none() || pinned_identity != lstat_identity {
+            return Err(io::Error::other(
+                "Candidate was replaced before its removal could be pinned",
+            ));
+        }
+    }
+    for note in ["owner", "claimed-at", "released"] {
+        let name = std::ffi::CString::new(note).expect("static note names are null-free");
+        let code = unsafe { libc::unlinkat(pin.as_raw_fd(), name.as_ptr(), 0) };
+        if code != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The non-Linux floor: the lstat-proven directory's notes are removed
+/// by pathname (the same verify-then-act floor the TS release takes).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn remove_candidate_notes_pinned(candidate: &Path) -> io::Result<()> {
     for note in ["owner", "claimed-at", "released"] {
         match fs::remove_file(candidate.join(note)) {
             Ok(()) => {}
@@ -77,7 +151,7 @@ fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    fs::remove_dir(candidate)
+    Ok(())
 }
 
 /// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.

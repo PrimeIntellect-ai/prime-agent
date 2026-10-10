@@ -16,7 +16,7 @@ pub use lock_dir::{
     exchange_paths, mark_released_through, move_without_replacing, try_reclaim_guard,
 };
 #[cfg(unix)]
-pub use lock_dir::{mark_released_at, mkdir_mode_0700};
+pub use lock_dir::{is_fresh_name_swap, mark_released_at, mkdir_mode_0700, remove_candidate_dir};
 
 pub use fs::fsync;
 pub use lock_dir::{lock_exclusive, try_lock_exclusive, LockDir};

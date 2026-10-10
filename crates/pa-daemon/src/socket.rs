@@ -699,7 +699,18 @@ fn release_lock_dir_identity(
             match result {
                 Ok(_handle) => Ok(()),
                 Err(error) => {
-                    let _ = std::fs::remove_dir(&placeholder);
+                    // A fresh-name swap refusal PRESERVES whatever sits
+                    // at the placeholder name (a blind remove could
+                    // delete a substituted entry - the same rule the
+                    // lock_dir callers apply); an ordinary failure
+                    // (including a close() failure after the owner note
+                    // landed - plain rmdir would fail ENOTEMPTY and
+                    // leak a live-owned placeholder) removes THIS
+                    // release's own creation through the pinned,
+                    // fd-relative cleanup helper.
+                    if !pa_core::platform::is_fresh_name_swap(&error) {
+                        let _ = pa_core::platform::remove_candidate_dir(&placeholder);
+                    }
                     Err(error)
                 }
             }
@@ -707,7 +718,7 @@ fn release_lock_dir_identity(
         #[cfg(not(target_os = "linux"))]
         let owner_result =
             std::fs::write(placeholder.join("owner"), owner_record).map_err(|error| {
-                let _ = std::fs::remove_dir(&placeholder);
+                let _ = pa_core::platform::remove_candidate_dir(&placeholder);
                 error
             });
         if let Err(error) = owner_result {

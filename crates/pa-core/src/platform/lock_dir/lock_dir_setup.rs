@@ -196,8 +196,9 @@ pub(super) fn swap_refusal(path: &Path) -> io::Error {
 /// with the replacement message), the no-follow ELOOP refusal, and a
 /// plain name collision are all fresh-name regeneration conditions;
 /// every other error is real and must propagate.
-#[cfg(target_os = "linux")]
-pub(super) fn is_fresh_name_swap(error: &io::Error) -> bool {
+#[cfg(unix)]
+#[must_use]
+pub fn is_fresh_name_swap(error: &io::Error) -> bool {
     matches!(error.kind(), io::ErrorKind::AlreadyExists)
         || matches!(error.raw_os_error(), Some(libc::ELOOP))
         || (error.kind() == io::ErrorKind::Other
