@@ -1505,11 +1505,16 @@ mod tests {
         let mut children: Vec<ReapOnDrop> = Vec::new();
         let mut targets = Vec::new();
         for _ in 0..BURST {
-            let child = std::process::Command::new("sleep")
-                .arg("30")
-                .spawn()
-                .expect("spawn a burst target");
-            let pid = child.id();
+            // The guard wraps the child IMMEDIATELY after the successful
+            // spawn: a panic in the start-id lookup below must not leak
+            // the just-started process.
+            let guard = ReapOnDrop(Some(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a burst target"),
+            ));
+            let pid = guard.0.as_ref().expect("the guarded child").id();
             let start_id = crate::lease::get_process_start_id(pid).expect("start id");
             targets.push(ReapTarget {
                 pid,
@@ -1517,7 +1522,7 @@ mod tests {
                 worker_socket: None,
                 kind: ReapKind::Worker,
             });
-            children.push(ReapOnDrop(Some(child)));
+            children.push(guard);
         }
         let exclusion_dir = tempfile::tempdir().unwrap();
         let socket_path = exclusion_dir.path().join("daemon.sock");
