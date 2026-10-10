@@ -248,15 +248,19 @@ impl AgentSessionEngine {
             agent.set_model_override(None);
         }
         let mut target = match self.resolve_model() {
-            Ok(model) => {
-                let (api_key, headers) = self.resolve_request_key_and_headers(&model);
-                Some(ProviderTarget {
+            Ok(model) => match self.resolve_request_key_and_headers_and_store_health(&model) {
+                (api_key, headers, true) => Some(ProviderTarget {
                     service_tier: *self.service_tier.read().expect("service tier lock"),
                     api_key,
                     headers,
                     model,
-                })
-            }
+                }),
+                // A store with no live credential resolves the configured
+                // fallback key, which never replaces a serving pair
+                // (the reload's own gate): restore the captured session
+                // target instead.
+                _ => route.session_target,
+            },
             Err(_) => route.session_target,
         };
         if let Some(target) = target.take() {
