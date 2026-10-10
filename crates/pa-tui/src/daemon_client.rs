@@ -362,9 +362,7 @@ impl DaemonClient {
                         let _ = tx.send(value);
                     }
                     "response" => {
-                        if let Ok(response) =
-                            serde_json::from_value::<DaemonResponse>(value.clone())
-                        {
+                        if let Ok(response) = serde_json::from_value::<DaemonResponse>(value) {
                             let id = response.id.clone().unwrap_or_default();
                             reader_shared.resolve(&id, response);
                         }

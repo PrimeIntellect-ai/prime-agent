@@ -1215,6 +1215,7 @@ async fn run_prompts_and_emit(
     // only silently.
     let goal = std::sync::Arc::new(crate::print_goal::PrintGoalSurface::new(json_mode));
     goal.seed_publish_baseline(engine).await;
+    let goal_updated_at_start = engine.goal_state().await.updated_at;
     let goal_accounting = goal.wire_accounting(engine, engine.session.agent()).await;
     // The autonomous run: the CLI flags enable it, a no-flag session starts disabled and
     // `/autonomous` rewrites it live.
@@ -1355,6 +1356,15 @@ async fn run_prompts_and_emit(
     // the primary message (error to stderr with exit 1, settled answer to stdout).
     let mut exit_code = 0;
     if !json_mode {
+        let goal = engine.goal_state().await;
+        let cap_reason = pa_core::session_engine::goal_driver::CONTINUATION_NO_PROGRESS_CAP_REASON;
+        if goal.status == pa_types::goal::GoalStatus::Error
+            && goal.last_error.as_deref() == Some(cap_reason)
+            && goal.updated_at != goal_updated_at_start
+        {
+            eprintln!("{cap_reason}");
+            exit_code = 1;
+        }
         if let Some(primary) = result.primary {
             if let Some(stderr) = primary.stderr_text(&mut exit_code) {
                 eprintln!("{stderr}");

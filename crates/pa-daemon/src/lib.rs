@@ -127,3 +127,5 @@ pub(crate) mod worker_stderr;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+pub(crate) mod trace_test_env;

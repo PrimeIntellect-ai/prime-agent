@@ -61,7 +61,9 @@ impl Worker {
                         return response_failure(
                             None,
                             "create",
-                            &format!("Invalid thinking level \"{level}\". Valid values: off, minimal, low, medium, high, xhigh, max"),
+                            &format!(
+                                "Invalid thinking level \"{level}\". Valid values: off, minimal, low, medium, high, xhigh, max"
+                            ),
                             None,
                         );
                     }
@@ -194,9 +196,22 @@ impl Worker {
         // Set by the continuing arm when it OPENED an existing session file:
         // `is_continuing` reads this arm fact, never an existence check.
         let mut opened_existing_session = false;
+        let mut restored_tier: Option<Option<pa_types::ai::ServiceTier>> = None;
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
+        let (settings, trace_consent) = pa_core::agent_traces::ContinuousTraceUpload::load_settings(
+            std::path::Path::new(&cwd),
+            &self.config.agent_dir,
+        );
+        let traces = |path: &std::path::Path| {
+            pa_core::agent_traces::ContinuousTraceUpload::install(
+                std::path::Path::new(&cwd),
+                &self.config.agent_dir,
+                Some(path),
+                trace_consent.clone(),
+            )
+        };
         let mut store = match (&session_path, no_session) {
             (Some(path), false) if path.exists() => {
                 let loaded = {
@@ -215,6 +230,7 @@ impl Worker {
                 };
                 match loaded {
                     Ok(mut opened) => {
+                        opened.trace_upload = traces(&opened.path);
                         opened_existing_session = true;
                         if opened.skipped_lines > 0 {
                             // The rows stay on disk (the append-only
@@ -233,9 +249,10 @@ impl Worker {
                         // this worker opened — a failed open never leaks the binding into a
                         // later create.
                         self.engine.set_session_file(path.clone());
-                        // One fold serves both consumers: the model restore takes its saved
+                        // One fold serves all consumers: the model restore takes its saved
                         // context off the store this create just opened.
                         let restored = opened.restored_settings();
+                        restored_tier = opened.has_service_tier().then_some(restored.service_tier);
                         let has_thinking_level = opened.has_thinking_level();
                         let saved = crate::agent_engine::saved_session_context_from_parts(
                             &restored,
@@ -298,6 +315,7 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 created.set_path(path.clone());
+                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -336,6 +354,7 @@ impl Worker {
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
                 created.set_path(path.clone());
+                created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
                     let agent_dir = self.config.agent_dir.clone();
@@ -362,7 +381,7 @@ impl Worker {
                     "create",
                     "Session cannot be both no-session and session-pathed",
                     None,
-                )
+                );
             }
         };
 
@@ -448,9 +467,6 @@ impl Worker {
                 }
             }
         }
-        let restored_tier = store
-            .has_service_tier()
-            .then(|| store.restored_settings().service_tier);
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
         let (steering, follow_up) = {
@@ -468,7 +484,6 @@ impl Worker {
         // The session's settings-seeded switches: a restarted session re-seeds
         // its auto-compaction flag from the persisted `compaction.enabled`.
         let (service_tier, steering_mode, follow_up_mode, auto_compaction_enabled) = {
-            let settings = pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
             let queue_mode = |mode: pa_core::settings::QueueModeSetting| -> String {
                 match mode {
                     pa_core::settings::QueueModeSetting::All => "all".to_string(),
