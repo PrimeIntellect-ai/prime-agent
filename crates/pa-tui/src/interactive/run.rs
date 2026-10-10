@@ -2032,12 +2032,12 @@ async fn run_interactive_surface(
     // so the deadline covers only the leaves that end this process.
     let handing_off = session.open_agents_view || session.pending_selection.is_some();
     if renderer.is_terminal() && !session.open_agents_view {
-        session.spawn_pending_backfill();
-        if let Some(task) = session.transcript_backfill.as_mut() {
-            let _ = task.await;
-            while let Ok(note) = backfill_rx.try_recv() {
-                session.apply_transcript_backfill(note, &mut view);
-            }
+        // Leaving the run flushes only the history already loaded: an unfinished
+        // older-history page is abandoned (dropping the task aborts its request),
+        // while a page that already arrived applies before the view goes away.
+        session.transcript_backfill = None;
+        while let Ok(note) = backfill_rx.try_recv() {
+            session.apply_transcript_backfill(note, &mut view);
         }
     }
     if renderer.is_terminal() && !handing_off {
