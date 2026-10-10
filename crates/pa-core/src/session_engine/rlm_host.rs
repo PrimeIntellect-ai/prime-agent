@@ -61,7 +61,8 @@ pub struct RlmSubagentEntry {
     pub session_id: Option<String>,
     pub session_name: String,
     pub session_dir: String,
-    /// `running` | `completed` | `error`.
+    /// `running` | `completed` | `error` | `cancelled` (a cancelled run
+    /// keeps its status verbatim in the registry row).
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<RlmSubagentActivity>,
@@ -97,6 +98,9 @@ pub struct RlmSubagentActivity {
 pub struct RlmDeleteSubagentResult {
     pub subagent: RlmSubagentEntry,
     /// `deleted` | `skipped_running`; absent when the host reports neither.
+    /// A re-delete of an already-deleted selector is idempotent and reports
+    /// `deleted` with the tombstone row (retirement never errors on the
+    /// second call).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
 }
@@ -114,6 +118,10 @@ pub struct RlmChildResult {
     pub settled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_preview: Option<String>,
+    /// The full final-answer text (the settle-binding lane; the roster
+    /// preview stays compact), bounded by the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -861,6 +869,7 @@ mod tests {
                     status: "done",
                     settled: true,
                     answer_preview: Some("all done".into()),
+                    answer_text: Some("all done".into()),
                     error: None,
                     duration_ms: Some(2_000),
                     tool_use_count: Some(3),
