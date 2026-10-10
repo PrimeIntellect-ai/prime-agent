@@ -339,7 +339,10 @@ impl Inner {
                                 };
                                 consumed = end + 1;
                                 scan_from = consumed;
-                                if trimmed.trim().is_empty() {
+                                // Large blank protocol lines are normally ASCII. Strip their
+                                // bytes before Unicode trimming, retaining the Unicode fallback
+                                // without decoding every byte of a multi-MiB ASCII padding line.
+                                if trimmed.trim_ascii().trim().is_empty() {
                                     continue;
                                 }
                                 let Some(inner) = inner.upgrade() else {
