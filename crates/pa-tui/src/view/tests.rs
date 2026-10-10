@@ -251,23 +251,6 @@ fn frame_is_exactly_height_rows() {
     assert!(joined.contains('>'));
 }
 
-#[test]
-fn osc_emissions_reemit_only_changed_rows() {
-    let mut v = view();
-    v.chrome.version = "0.0.0".to_string();
-    v.chrome.cwd = "/w".to_string();
-    v.chrome.chat_name = "w".to_string();
-    v.push(TranscriptItem::UserMessage {
-        text: "hello".to_string(),
-    });
-    let frame = v.render_frame(80, 24);
-    let first = v.take_osc_emissions(&frame);
-    let marked: Vec<usize> = first.iter().map(|(row, _)| *row).collect();
-    assert!(!marked.is_empty());
-    let again = v.take_osc_emissions(&frame);
-    assert!(again.is_empty());
-}
-
 /// Fill the transcript past one window so there is scrollable history.
 fn filled(mut v: AgentView, turns: usize) -> AgentView {
     v.chrome.version = "0.0.0".to_string();

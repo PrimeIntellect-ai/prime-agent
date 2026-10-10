@@ -32,6 +32,7 @@ impl SupervisorChildSessionsInner {
             session_name: record.session_name.clone(),
             session_dir: record.session_dir.clone(),
             started_at_ms: record.started_at_ms,
+            status: record.roster_status(),
             answer_preview: record.answer_preview.clone(),
             error: record
                 .error
@@ -376,6 +377,7 @@ fn ledger_child_records(
             ),
             settled: true,
             answer_preview: None,
+            answer_text: None,
             answer_captured: false,
             replied_since_task: false,
             notice_delivered: true,

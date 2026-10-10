@@ -135,9 +135,6 @@ pub struct AgentView {
     /// The hovered screen cell, while its row is a clickable card row
     /// (operator directive 2026-09-26); revalidated every frame.
     pub(crate) hover_pos: Option<(usize, usize)>,
-    /// Plain text of the last frame's rows: OSC zone-marker emission only
-    /// re-emits rows whose content changed.
-    osc_last_rows: std::collections::HashMap<usize, String>,
     /// Rendered rows per chat entry and detail mode: a frame re-renders only entries invalidated
     /// since the last frame, so a transcript-scale frame pays full layout once per entry/detail.
     entry_layout: Vec<[Option<EntryLayout>; 3]>,
@@ -326,7 +323,6 @@ impl AgentView {
             window_shows_tail: false,
             detail_transition: false,
             hover_pos: None,
-            osc_last_rows: std::collections::HashMap::new(),
             toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
             entry_heights: Vec::new(),
@@ -347,35 +343,6 @@ impl AgentView {
             handoff_seeds: 0,
             click: click::ClickSurface::default(),
         }
-    }
-
-    /// Zone-marker emission plan for a freshly composed frame: every
-    /// marked row whose content changed since the last frame.
-    pub fn take_osc_emissions(
-        &mut self,
-        frame: &[Line],
-    ) -> Vec<(usize, crate::osc133::RowMarkers)> {
-        // Only candidate rows build their text: joining the whole frame
-        // costs O(transcript) per render.
-        let mut plan = Vec::new();
-        let mut last_rows = std::collections::HashMap::new();
-        for (row, line) in frame.iter().enumerate() {
-            let markers = crate::osc133::row_markers(line);
-            if !markers.start && !markers.end {
-                continue;
-            }
-            let text: String = line.iter().map(|s| s.content.as_str()).collect();
-            let changed = self
-                .osc_last_rows
-                .get(&row)
-                .is_none_or(|prev| prev != &text);
-            if changed {
-                plan.push((row, markers));
-            }
-            last_rows.insert(row, text);
-        }
-        self.osc_last_rows = last_rows;
-        plan
     }
 
     pub fn terminal_rows(&self) -> u16 {
