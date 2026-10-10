@@ -1,7 +1,9 @@
 //! Headless perf verifier for mouse drag-selection: the per-frame cost of a drag is independent of
 //! the session size (a drag frame restyles the visible cached rows' selection diff, never the
 //! transcript geometry). The budget measures a 100-drag burst after the initial viewport is
-//! rendered, excluding cold attach/setup and teardown on both session sizes.
+//! rendered, excluding cold attach/setup and teardown on both session sizes; each session size
+//! samples several marker-bracketed drag runs, and the budget compares the least
+//! load-contaminated sample of each size (see `drag_cost`).
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -248,7 +250,9 @@ fn run_plan(messages: usize, steps: Vec<HeadlessStep>) -> (Vec<String>, Vec<Stri
 /// The scroll-paused drag burst: mount the window at the transcript top, then press-drag-release
 /// across the first rows. The chat opens directly into content (the operator's 2026-09-26
 /// zero-shift directive), so the first user message's text row is row 3 (SGR 0-based 2).
-fn drag_burst(timing: Option<std::sync::mpsc::Sender<std::time::Instant>>) -> Vec<HeadlessStep> {
+fn drag_burst(
+    timing: Option<std::sync::mpsc::Sender<(std::time::Instant, usize)>>,
+) -> Vec<HeadlessStep> {
     let mut steps = vec![HeadlessStep::ScrollTop];
     if let Some(sender) = &timing {
         steps.push(HeadlessStep::Timestamp(sender.clone()));
@@ -264,24 +268,98 @@ fn drag_burst(timing: Option<std::sync::mpsc::Sender<std::time::Instant>>) -> Ve
     steps
 }
 
-fn timed_drag(messages: usize) -> (Vec<String>, Vec<String>, Duration) {
+fn timed_drag(messages: usize) -> (Vec<String>, Vec<String>, Duration, usize) {
     let (timing_tx, timing_rx) = std::sync::mpsc::channel();
     let (frames, copies) = run_plan(messages, drag_burst(Some(timing_tx)));
-    let timestamps: Vec<_> = timing_rx.try_iter().collect();
-    let [started, finished]: [std::time::Instant; 2] = timestamps
-        .try_into()
-        .expect("the rendered drag burst records both timing boundaries");
+    let markers: Vec<_> = timing_rx.try_iter().collect();
+    let [(started, first_render), (finished, last_render)]: [(std::time::Instant, usize); 2] =
+        markers
+            .try_into()
+            .expect("the rendered drag burst records both timing boundaries");
     let elapsed = finished
         .checked_duration_since(started)
         .expect("timing markers arrive in monotonic order");
-    (frames, copies, elapsed)
+    (frames, copies, elapsed, last_render - first_render)
 }
 
 #[test]
 fn timing_checkpoints_preserve_rendered_frames_and_copies() {
     let expected = run_plan(40, drag_burst(None));
-    let (frames, copies, _) = timed_drag(40);
+    let (frames, copies, ..) = timed_drag(40);
     assert_eq!((frames, copies), expected);
+}
+
+/// How many marker-bracketed drag runs each session size samples after its discarded warm-up run.
+const MEASURED_RUNS: usize = 3;
+
+/// One session size's drag-burst cost: the minimum marker-bracketed drag interval across
+/// `MEASURED_RUNS` measured runs, preceded by one discarded warm-up run. Every measured run
+/// must first prove it rendered the full burst and copied the same selection — the minimum is
+/// taken only over validated runs, so an incomplete run can never win it.
+///
+/// The interval's boundaries are timing markers consumed on the UI loop: it covers press, every
+/// drag frame, release/copy and its final frame, and excludes the separately variable cold
+/// attach/initial viewport work and teardown. Wall-clock noise on a loaded shared runner only
+/// ever adds time, so the minimum over several runs is the robust estimate of the drag's own
+/// cost. The guard stays real: a session-size regression inflates every run (a burst that
+/// resolves the transcript once per frame adds seconds to each), so the minimum still trips the
+/// bounds.
+fn drag_cost(messages: usize) -> (Duration, Vec<Duration>, String) {
+    // The warm-up run primes the page cache and allocator arenas (the process's first run
+    // reads about 2x its steady state); its numbers are discarded.
+    let _ = run_plan(messages, drag_burst(None));
+
+    let mut intervals = Vec::with_capacity(MEASURED_RUNS);
+    let mut extracted = String::new();
+    for run in 0..MEASURED_RUNS {
+        let (frames, copies, drag, renders) = timed_drag(messages);
+        // The plain-text frame capture dedupes and strips styles, so a selection restyle adds
+        // no frame: the markers carry the render invocation count as the drag-render witness.
+        // Press, every drag, and release each render once, so fewer than 102 renders between
+        // the markers means the burst was skipped or coalesced, not measured.
+        assert!(
+            !frames.is_empty(),
+            "the headless capture recorded the run's frames"
+        );
+        assert!(
+            renders >= 102,
+            "the measured run rendered {renders} times — press, 100 drags, and release must \
+             each render individually"
+        );
+        assert_eq!(copies.len(), 1, "each drag burst copies once");
+        let text = copies.concat();
+        // The fixed coordinates pin the expected copy: the press (row 3, col 3) anchors the
+        // selection in message 0's wrapped block ("row 0 lorem ipsum ..."), the drag rows
+        // extend it down through the block's wrapped rows, and the release never crosses
+        // into message 1 ("answer 1 ..."). A one-row copy, or one leaking the next message,
+        // means the drag never extended the selection — the run is not measuring a drag.
+        assert!(
+            text.starts_with("row 0 lorem"),
+            "the selection anchored at the pressed row: {:?}",
+            &text[..text.len().min(40)]
+        );
+        assert!(
+            text.lines().count() > 1,
+            "the selection extended beyond the pressed row: {:?}",
+            &text[..text.len().min(80)]
+        );
+        assert!(
+            !text.contains("answer 1"),
+            "the drag stayed inside the pressed message's block: {:?}",
+            &text[..text.len().min(80)]
+        );
+        if run == 0 {
+            extracted = text;
+        } else {
+            assert_eq!(
+                text, extracted,
+                "every measured run copies the same selection"
+            );
+        }
+        intervals.push(drag);
+    }
+    let best = *intervals.iter().min().expect("at least one measured run");
+    (best, intervals, extracted)
 }
 
 #[test]
@@ -289,40 +367,29 @@ fn drag_select_frame_cost_is_independent_of_session_size() {
     let small = 40usize;
     let large = 4000usize;
 
-    let (_, copies_small, small_drag) = timed_drag(small);
-    let (frames_large_drag, copies_large, large_drag) = timed_drag(large);
+    let (small_cost, small_samples, small_copy) = drag_cost(small);
+    let (large_cost, large_samples, large_copy) = drag_cost(large);
 
-    // The copies are the same text both sizes: the drag extracts the spanned rows through the same
-    // coordinates on either session.
-    assert_eq!(copies_small.len(), 1, "the small drag copies once");
+    // The copies read the same text both sizes: the drag extracts the spanned rows through the
+    // same coordinates on either session.
     assert_eq!(
-        copies_large, copies_small,
+        large_copy, small_copy,
         "the large session drags the same rows"
     );
-    assert!(
-        copies_large[0].starts_with("row 0"),
-        "the copy reads the pressed row: {:?}",
-        &copies_large[0][..copies_large[0].len().min(40)]
-    );
 
-    // Both boundaries are consumed on the UI loop, after the preceding frame. The measured
-    // interval includes press, every drag frame, release/copy and its final frame, but excludes
-    // the separately variable cold attach/initial viewport work and teardown.
+    // The drag path's own cost (marker-bracketed interval, minimum over the sampled runs) stays
+    // in the same band on either session: no per-frame geometry resolve scales it with the
+    // transcript.
     assert!(
-        large_drag < small_drag + Duration::from_millis(250),
-        "the large session's drag cost ({large_drag:?}) must stay within \
-         250ms of the small session's ({small_drag:?})"
+        large_cost < small_cost + Duration::from_millis(250),
+        "the large session's drag cost (best of {large_samples:?}) must stay within \
+         250ms of the small session's (best of {small_samples:?})"
     );
     assert!(
-        large_drag < Duration::from_millis(500),
-        "100 drag frames on a ~40MB session cost {large_drag:?} — the \
-         per-frame cost is not session-size independent (the pre-fix \
-         release alone resolved the full geometry once per copy)"
-    );
-    // The headless capture renders per change: the drag frames flowed.
-    assert!(
-        !frames_large_drag.is_empty(),
-        "the drag burst rendered frames"
+        large_cost < Duration::from_millis(500),
+        "100 drag frames on a ~40MB session cost {large_cost:?} \
+         (samples {large_samples:?}) — the per-frame cost is not session-size independent \
+         (the pre-fix release alone resolved the full geometry once per copy)"
     );
 }
 
