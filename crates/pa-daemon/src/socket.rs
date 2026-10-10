@@ -224,13 +224,24 @@ impl SocketLease {
     /// fails (the refresh thread has no panic sites worth reporting -
     /// a panicking heartbeat never wedges the release).
     #[cfg(unix)]
-    pub async fn shutdown(mut self) -> Result<()> {
+    pub async fn shutdown(self) -> Result<()> {
         let _ = self.refresh_stop.send(());
-        if let Some(refresh) = self.refresh.take() {
-            let joined = tokio::task::spawn_blocking(move || refresh.join()).await;
-            if let Err(join_error) = joined {
-                return Err(anyhow::Error::from(join_error));
+        // The WHOLE lease moves into the blocking task: the join and
+        // the Drop-driven release both run there, IN ORDER, and an
+        // outer cancellation merely DETACHES the task (spawn_blocking
+        // tasks are not cancelled by a dropped JoinHandle) - the
+        // lease inside it still cannot drop before the join completes,
+        // preserving the join-before-release invariant that taking the
+        // handle out ahead of an cancellable await would break.
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut lease = self;
+            if let Some(refresh) = lease.refresh.take() {
+                let _ = refresh.join();
             }
+        })
+        .await;
+        if let Err(join_error) = joined {
+            return Err(anyhow::Error::from(join_error));
         }
         Ok(())
     }
