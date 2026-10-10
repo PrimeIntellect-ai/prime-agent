@@ -58,7 +58,11 @@ async fn download_once(
     user_agent: &str,
 ) -> Result<()> {
     use futures::StreamExt;
-    let response = reqwest::Client::new()
+    let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+        .map_err(anyhow::Error::msg)
+        .and_then(|builder| builder.build().map_err(anyhow::Error::msg))
+        .with_context(|| format!("build the download client for {url}"))?;
+    let response = client
         .get(url)
         .header("User-Agent", user_agent)
         .timeout(timeout)

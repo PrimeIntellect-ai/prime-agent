@@ -6,6 +6,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures::stream::SplitStream;
+use futures::Future;
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
@@ -36,6 +37,23 @@ pub use crate::providers::openai_codex_responses::session::{
 };
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// One in-flight wss connect: the futures of the two construction paths
+/// (extra-trust preconfigured TLS, or tungstenite's default connector) are
+/// one type so the abort select arms unify.
+type WsConnectFuture = std::pin::Pin<
+    Box<
+        dyn Future<
+                Output = Result<
+                    (
+                        WsStream,
+                        tokio_tungstenite::tungstenite::handshake::client::Response,
+                    ),
+                    WsError,
+                >,
+            > + Send,
+    >,
+>;
 
 /// Command sent to a connection's worker task.
 pub(crate) enum WorkerCommand {
@@ -199,7 +217,33 @@ async fn spawn_connection_worker(
         return Err(CodexStreamError::Aborted);
     }
 
-    let connect = tokio_tungstenite::connect_async(request);
+    // The TLS trust contract: when a trust variable is set, the wss
+    // handshake runs through the same extra-trust rustls config as every
+    // other client surface (tungstenite's own default connector trusts only
+    // the bundled roots); with no variable set the default connector keeps
+    // today's behavior.
+    let connector = match pa_types::tls::extra_ca_client_config(pa_types::tls::TlsAlpn::None) {
+        Ok(Some(config)) => Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            config,
+        ))),
+        Ok(None) => None,
+        Err(error) => {
+            return Err(CodexStreamError::Transport(
+                WebSocketTransportError::runtime(format!(
+                    "WebSocket connection to '{url}' failed: {error}"
+                )),
+            ));
+        }
+    };
+    let connect: WsConnectFuture = match &connector {
+        Some(connector) => Box::pin(tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            None,
+            false,
+            Some(connector.clone()),
+        )),
+        None => Box::pin(tokio_tungstenite::connect_async(request)),
+    };
     let (stream, _response) = match signal.as_ref() {
         Some(signal) => {
             tokio::select! {

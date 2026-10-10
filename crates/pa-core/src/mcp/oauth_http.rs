@@ -64,7 +64,9 @@ pub trait OAuthHttp: Send + Sync {
 
 /// Production transport: one redirect-refusing `reqwest` client.
 pub struct ReqwestOAuthHttp {
-    client: reqwest::Client,
+    /// The built client, or the loud extra-CA trust error the construction
+    /// ran into (surfaced per request, so the login flow reports it).
+    client: Result<reqwest::Client, String>,
 }
 
 impl Default for ReqwestOAuthHttp {
@@ -74,16 +76,16 @@ impl Default for ReqwestOAuthHttp {
 }
 
 impl ReqwestOAuthHttp {
-    /// # Panics
-    ///
-    /// Panics when the underlying `reqwest` client cannot be built; this construction cannot fail.
     #[must_use]
     pub fn new() -> Self {
         ReqwestOAuthHttp {
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .expect("reqwest client construction cannot fail with no TLS config"),
+            client: crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+                .and_then(|builder| {
+                    builder
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .map_err(|error| error.to_string())
+                }),
         }
     }
 }
@@ -94,11 +96,17 @@ impl OAuthHttp for ReqwestOAuthHttp {
         request: OAuthHttpRequest,
     ) -> futures::future::BoxFuture<'_, Result<OAuthHttpResponse>> {
         Box::pin(async move {
+            let client = match &self.client {
+                Ok(client) => client,
+                // The trust variables name a source that cannot be loaded:
+                // loud and actionable in the login flow's error channel.
+                Err(cause) => return Err(anyhow::anyhow!(cause.clone())),
+            };
             let method = match request.method {
                 OAuthHttpMethod::Get => reqwest::Method::GET,
                 OAuthHttpMethod::Post => reqwest::Method::POST,
             };
-            let mut builder = self.client.request(method, &request.url);
+            let mut builder = client.request(method, &request.url);
             for (name, value) in &request.headers {
                 builder = builder.header(name, value);
             }

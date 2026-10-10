@@ -115,10 +115,13 @@ impl PrimeHttp for ReqwestPrimeHttp {
         let url = url.to_string();
         let api_key = api_key.to_string();
         Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_millis(timeout_ms))
-                .build()
-                .map_err(|error| error.to_string())?;
+            let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+                .and_then(|builder| {
+                builder
+                    .timeout(Duration::from_millis(timeout_ms))
+                    .build()
+                    .map_err(|error| error.to_string())
+            })?;
             let response = client
                 .get(url)
                 .header("authorization", format!("Bearer {api_key}"))
@@ -146,10 +149,13 @@ impl PrimeHttp for ReqwestPrimeHttp {
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
         Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_millis(timeout_ms))
-                .build()
-                .map_err(|error| error.to_string())?;
+            let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+                .and_then(|builder| {
+                builder
+                    .timeout(Duration::from_millis(timeout_ms))
+                    .build()
+                    .map_err(|error| error.to_string())
+            })?;
             let mut request = client
                 .post(url)
                 .header("content-type", "application/json")
