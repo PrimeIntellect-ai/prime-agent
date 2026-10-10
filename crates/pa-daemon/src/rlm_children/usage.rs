@@ -96,6 +96,12 @@ impl SupervisorChildSessionsInner {
         let Some(sink) = sink else {
             return;
         };
+        // A failed final delivery keeps its report owed, and no observation
+        // follows this call: replay it once before the registration drops,
+        // or the forget orphans the retained report.
+        if record.lock().await.pending_usage_report.is_some() {
+            self.emit_child_usage(record).await;
+        }
         let rlm_child_id = record.lock().await.rlm_child_id.clone();
         sink.forget(&rlm_child_id).await;
     }

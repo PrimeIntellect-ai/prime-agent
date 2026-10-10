@@ -152,6 +152,35 @@ async fn emit_keeps_the_cursor_until_the_sink_persists() {
         .is_some_and(|rows| rows > 0));
 }
 
+/// A failed final observation keeps its report owed; the follow-up forget
+/// replays it before the registration drops instead of orphaning it.
+#[tokio::test]
+async fn forget_replays_the_retained_report_before_unregistering() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let sessions = registry(Path::new("/agent"));
+    let sink = Arc::new(CapturingSink::default());
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-forget1", &file);
+
+    sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.emit_child_usage(&record).await;
+    assert!(record.lock().await.pending_usage_report.is_some());
+    assert_eq!(record.lock().await.attributed_rows, Some(0));
+
+    sink.fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.forget_child_usage(&record).await;
+    let reports = sink.reports.lock().expect("reports lock").clone();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].rlm_child_id, "sub-forget1");
+    assert!(record.lock().await.pending_usage_report.is_none());
+    assert!(record
+        .lock()
+        .await
+        .attributed_rows
+        .is_some_and(|rows| rows > 0));
+}
+
 #[tokio::test]
 async fn emit_without_a_sink_consumes_nothing() {
     let tmp = tempfile::tempdir().unwrap();
