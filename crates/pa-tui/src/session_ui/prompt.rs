@@ -76,19 +76,6 @@ pub(crate) struct PromptOrder {
     pub(crate) submitted_at: std::time::Instant,
 }
 
-// A refused request is definitive even when its message quotes a transport failure.
-// Queued requests that lose their reply must stay consumed across session changes too.
-fn prompt_may_have_been_sent(error: &anyhow::Error) -> bool {
-    !crate::daemon_client::is_daemon_rejection(error)
-        && (crate::daemon_client::is_daemon_timeout(error)
-            || (crate::daemon_client::is_daemon_unreachable(error)
-                && error.chain().any(|cause| {
-                    let message = cause.to_string().to_lowercase();
-                    message.contains("connection closed")
-                        || message.starts_with("connection to the prime agent daemon closed")
-                })))
-}
-
 impl SessionUi {
     const MAX_PASTED_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -804,22 +791,20 @@ impl SessionUi {
     ) -> Result<()> {
         self.prompt_in_flight = self.prompt_in_flight.saturating_sub(1);
         // The submit's session is no longer the mounted one: the outcome never applies bookkeeping
-        // to the new session. A failed outlived submit still shows its error row, but only a
-        // definitive failure retains the draft in its original session; a success stays silent.
+        // to the new session, but a FAILED outlived submit still shows its error row and retains
+        // its rejected draft into the session it was typed for; a succeeded one stays silent.
         if note.active_session_id != self.active_session_id {
             // Borrow the settled result here: the ladder below owns it.
             if let Some(error) = note.result.as_ref().err() {
                 let rendered = format!("{error:#}");
                 self.error_row(&rendered, view);
-                if !prompt_may_have_been_sent(error) {
-                    self.retain_rejected_draft(
-                        &note.text,
-                        &note.session_id,
-                        note.generation,
-                        note.stashed_images.clone(),
-                        view,
-                    );
-                }
+                self.retain_rejected_draft(
+                    &note.text,
+                    &note.session_id,
+                    note.generation,
+                    note.stashed_images.clone(),
+                    view,
+                );
             }
             return Ok(());
         }
@@ -936,10 +921,13 @@ impl SessionUi {
                     );
                     return Ok(());
                 }
-                // A transport failure after the frame was queued (a direct link, or the
-                // supervisor socket closing mid-flight): the daemon may have admitted the turn,
-                // so the draft stays consumed like the timeout arm.
-                if prompt_may_have_been_sent(&error) {
+                // A DIRECT-link transport failure after the frame was queued: the daemon may have
+                // admitted the turn, so the draft stays consumed like the timeout arm.
+                let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                    && rendered
+                        .to_lowercase()
+                        .contains("session connection closed");
+                if direct_sent {
                     self.error_row(
                         &format!(
                             "{rendered} — the request may have been sent; the turn may still start"
@@ -1000,31 +988,5 @@ impl SessionUi {
             .lock()
             .expect("prompt stash store poisoned");
         store.for_session(stash_session_id).stash_draft_head(stash);
-    }
-}
-
-#[cfg(test)]
-mod prompt_delivery_tests {
-    use super::prompt_may_have_been_sent;
-
-    #[test]
-    fn distinguishes_ambiguous_delivery_from_definitive_failure() {
-        for message in [
-            "the daemon connection closed",
-            "the session connection closed",
-            "Connection to the Prime Agent daemon closed. Socket: fixture.",
-            "Timed out after 100ms waiting for the Prime Agent daemon response",
-        ] {
-            assert!(prompt_may_have_been_sent(&anyhow::anyhow!(message)));
-        }
-        assert!(!prompt_may_have_been_sent(&anyhow::anyhow!(
-            "the daemon connection is closed"
-        )));
-        let refusal = crate::daemon_client::RequestRejected {
-            command: "prompt".to_string(),
-            message: "the daemon connection closed".to_string(),
-            error_info: None,
-        };
-        assert!(!prompt_may_have_been_sent(&anyhow::Error::new(refusal)));
     }
 }

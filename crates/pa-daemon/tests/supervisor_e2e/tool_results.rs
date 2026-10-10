@@ -78,9 +78,7 @@ fn tool_result_entries_persisted_and_streamed() {
                     tool_result_message = event["message"].clone();
                 }
             }
-            // The first turn ends after the tool result; the scripted final
-            // assistant response is persisted only before agent_end.
-            Some("agent_end") => break,
+            Some("turn_end") => break,
             _ => {}
         }
     }

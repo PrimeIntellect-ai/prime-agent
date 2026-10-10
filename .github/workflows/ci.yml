@@ -361,9 +361,6 @@ jobs:
           for scenario in graceful_shutdown goal_backoff draft_disconnect; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
-              if [ "${scenario}" = "draft_disconnect" ]; then
-                python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
-              fi
               python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
             fi
           done

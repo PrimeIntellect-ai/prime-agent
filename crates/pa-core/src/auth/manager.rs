@@ -15,9 +15,6 @@ use super::types::{
 #[cfg(test)]
 mod tests;
 
-#[cfg(test)]
-mod refresh_tests;
-
 mod lookup;
 
 mod prime_inference;
@@ -44,23 +41,20 @@ fn now_epoch_ms() -> i64 {
         .map_or(i64::MAX, |d| d.as_millis() as i64)
 }
 
-/// Provider gate for the whole refresh, including credential commit and reload.
-fn refresh_flight_lock(provider: &str) -> &'static std::sync::Mutex<()> {
+/// One OAuth refresh in flight per provider: the token fetch runs outside every
+/// lock, so TS's single-threaded single-flight needs its own gate.
+fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
     static FLIGHTS: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, &'static std::sync::Mutex<()>>>,
     > = std::sync::OnceLock::new();
     let registry = FLIGHTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    {
+    let lock = {
         let mut registry = registry.lock().expect("auth refresh-flight registry");
-        registry
+        *registry
             .entry(provider.to_string())
             .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
-    }
-}
-
-fn refresh_flight(provider: &str) -> std::sync::MutexGuard<'static, ()> {
-    refresh_flight_lock(provider)
-        .lock()
+    };
+    lock.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 

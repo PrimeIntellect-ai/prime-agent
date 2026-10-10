@@ -227,41 +227,21 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
     }
 }
 
-struct PendingRequest {
-    reply: oneshot::Sender<Result<DaemonResponse, anyhow::Error>>,
-    direct_owner: Option<Arc<()>>,
-}
-
 /// Connection state shared between the request side and the reader task.
 #[derive(Default)]
 pub(crate) struct Shared {
     /// Pending requests keyed by envelope id. `Ok` is a daemon answer
     /// (including a refusal); `Err` is a transport failure — a refusal is
     /// recoverable UI data, a dead connection is fatal.
-    pending: Mutex<HashMap<String, PendingRequest>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<Result<DaemonResponse, anyhow::Error>>>>,
 }
 
 impl Shared {
-    pub(crate) fn register_pending(
-        &self,
-        id: String,
-        reply: oneshot::Sender<Result<DaemonResponse, anyhow::Error>>,
-        direct_owner: Option<Arc<()>>,
-    ) {
-        self.pending.lock().unwrap().insert(
-            id,
-            PendingRequest {
-                reply,
-                direct_owner,
-            },
-        );
-    }
-
     pub(crate) fn resolve(&self, id: &str, response: DaemonResponse) -> bool {
         let mut pending = self.pending.lock().unwrap();
         pending
             .remove(id)
-            .is_some_and(|request| request.reply.send(Ok(response)).is_ok())
+            .is_some_and(|tx| tx.send(Ok(response)).is_ok())
     }
 
     /// Fail every pending request whose id starts with `prefix` with a
@@ -275,28 +255,8 @@ impl Shared {
             .cloned()
             .collect();
         for id in dead {
-            if let Some(request) = pending.remove(&id) {
-                let _ = request.reply.send(Err(anyhow!(error.to_string())));
-            }
-        }
-    }
-
-    /// A replaced link's EOF must not cancel requests sent over its successor.
-    pub(crate) fn fail_direct_pending(&self, owner: &Arc<()>, error: &str) {
-        let mut pending = self.pending.lock().unwrap();
-        let dead: Vec<String> = pending
-            .iter()
-            .filter(|(_, request)| {
-                request
-                    .direct_owner
-                    .as_ref()
-                    .is_some_and(|candidate| Arc::ptr_eq(candidate, owner))
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in dead {
-            if let Some(request) = pending.remove(&id) {
-                let _ = request.reply.send(Err(anyhow!(error.to_string())));
+            if let Some(tx) = pending.remove(&id) {
+                let _ = tx.send(Err(anyhow!(error.to_string())));
             }
         }
     }
@@ -658,7 +618,7 @@ impl DaemonClient {
         };
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<Result<DaemonResponse>>();
-        self.shared.register_pending(id.clone(), tx, None);
+        self.shared.pending.lock().unwrap().insert(id.clone(), tx);
         // The reader runs on another worker: it can die (and run its failure
         // sweep) between the entry check and this registration. Re-check after
         // inserting — a death it missed is caught here.
@@ -739,7 +699,10 @@ impl DaemonClient {
         .map_err(|_| DirectRequestError::NotSent)?;
         let (reply_tx, reply_rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared
-            .register_pending(id.to_string(), reply_tx, Some(Arc::clone(&link.owner)));
+            .pending
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), reply_tx);
         if !link.send(frame) {
             self.shared.pending.lock().unwrap().remove(id);
             return Err(DirectRequestError::NotSent);

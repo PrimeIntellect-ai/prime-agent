@@ -394,7 +394,11 @@ fn fail_pending_resolves_a_transport_failure_not_a_refusal() {
     // masquerade as a daemon refusal and keep the UI alive.
     let shared = Shared::default();
     let (tx, rx) = oneshot::channel();
-    shared.register_pending("daemon_1".to_string(), tx, None);
+    shared
+        .pending
+        .lock()
+        .unwrap()
+        .insert("daemon_1".to_string(), tx);
     shared.fail_pending("daemon_", "the daemon connection closed");
     let error = rx.blocking_recv().unwrap().unwrap_err();
     assert!(!is_daemon_rejection(&error));
