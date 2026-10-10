@@ -1248,6 +1248,16 @@ jobs:
         run: |
           set -euo pipefail
           (cd release-out && sha256sum --check SHA256SUMS)
+          # RELEASE_VERSION feeds every refresh path (guarded clobber, heal,
+          # bootstrap), so it is validated up front: a tag the strict nightly
+          # regex rejects fails closed here instead of publishing a nightly
+          # that later refreshes refuse to parse.
+          python3 <<'PY_RELEASE'
+          import os, re
+          version = os.environ["RELEASE_VERSION"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+", version):
+              raise SystemExit(f"invalid nightly version: {version!r}")
+          PY_RELEASE
           # Only an explicit API 404 permits bootstrap. Authentication, network,
           # rate-limit, and malformed-response errors must not bypass the guard.
           state="$(mktemp -d)"
@@ -1260,7 +1270,11 @@ jobs:
             # is never clobbered (Bugbot: a discarded download failure fell
             # through to --clobber, so a re-run of an older tag could replace
             # a newer nightly). A release with NO beta.json asset (a partial
-            # earlier refresh) has nothing to protect - the clobber heals it.
+            # earlier refresh) lost its version witness, but its tarball names
+            # still name versions: the heal clobbers only when this refresh is
+            # the newest version the release serves, fails closed when a
+            # tarball's name cannot be read, and an empty release (a bootstrap
+            # interrupted before any upload) heals unconditionally.
             if grep -qx "beta.json" "$state/assets"; then
               guard="$state"
               ok=0
@@ -1290,6 +1304,26 @@ jobs:
               newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"
               if [ "$newest" != "$RELEASE_VERSION" ]; then
                 echo "the rolling nightly release already serves $current >= $RELEASE_VERSION; skipping the refresh"
+                exit 0
+              fi
+            else
+              served="$(python3 - "$state/assets" <<'PY_ASSETS'
+          import re, sys
+          versions = []
+          for name in open(sys.argv[1]).read().split():
+              if not name.endswith(('.tar.gz', '.tgz')):
+                  continue
+              body = name[: -len('.tar.gz')] if name.endswith('.tar.gz') else name[: -len('.tgz')]
+              match = re.fullmatch(r'prime-agent-([0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+)(?:-.+)?', body)
+              if match is None:
+                  raise SystemExit(f"cannot read a version from the nightly asset name: {name!r}")
+              versions.append('v' + match.group(1))
+          print('\n'.join(versions))
+          PY_ASSETS
+              )"
+              newest="$(printf '%s\n%s\n' "$served" "$RELEASE_VERSION" | sort -V | tail -1)"
+              if [ "$newest" != "$RELEASE_VERSION" ]; then
+                echo "the rolling nightly release already serves $newest >= $RELEASE_VERSION; skipping the refresh"
                 exit 0
               fi
             fi
