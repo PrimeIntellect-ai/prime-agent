@@ -185,8 +185,8 @@ The table summarizes each crate's current direct workspace dependencies:
 | Crate | Purpose | Direct workspace dependencies |
 | --- | --- | --- |
 | `pa-types` | Shared wire and domain types | none |
-| `pa-telemetry` | Events and sinks | none |
-| `pa-agent` | Provider-independent agent loop | none |
+| `pa-telemetry` | Events and sinks | `pa-types` |
+| `pa-agent` | Provider-independent agent loop | `pa-types` |
 | `pa-ai` | Providers, model registry, streaming | `pa-types` |
 | `pa-models` | Live model catalog and transport | `pa-ai`, `pa-types` |
 | `pa-core` | Session engine, tools, skills, kernel, settings | `pa-types`, `pa-ai`, `pa-models`, `pa-agent`, `pa-telemetry` |

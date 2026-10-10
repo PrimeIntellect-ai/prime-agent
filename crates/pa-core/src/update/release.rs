@@ -76,7 +76,12 @@ pub async fn latest_release(
     let manifest_path =
         super::version::resolve_update_channel(current_version, channel).manifest_path();
     let url = format!("{}/{manifest_path}", base_url.trim_end_matches('/'));
-    let response = reqwest::Client::new()
+    // A broken trust variable must fail loud: swallowed here it would read
+    // as "no update available" instead of a configuration error.
+    let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+        .map_err(anyhow::Error::msg)
+        .and_then(|builder| builder.build().map_err(anyhow::Error::msg))?;
+    let response = client
         .get(&url)
         .header("User-Agent", update_user_agent(current_version))
         .header("accept", "application/json")

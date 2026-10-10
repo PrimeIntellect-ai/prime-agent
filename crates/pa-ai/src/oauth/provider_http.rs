@@ -76,19 +76,20 @@ impl ProviderHttp for ReqwestProviderHttp {
                 ProviderHttpMethod::Get => reqwest::Method::GET,
                 ProviderHttpMethod::Post => reqwest::Method::POST,
             };
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_millis(timeout_ms))
-                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                    // TS `redirect: "error"`: a redirected request
-                    // fails instead of silently following.
-                    if request.follow_redirects && attempt.previous().len() < 10 {
-                        attempt.follow()
-                    } else {
-                        attempt.error("redirect refused")
-                    }
-                }))
-                .build()
-                .map_err(|error| error.to_string())?;
+            let client =
+                crate::utils_inner::http::https_client_builder(pa_types::tls::TlsAlpn::Negotiated)?
+                    .timeout(Duration::from_millis(timeout_ms))
+                    .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                        // TS `redirect: "error"`: a redirected request
+                        // fails instead of silently following.
+                        if request.follow_redirects && attempt.previous().len() < 10 {
+                            attempt.follow()
+                        } else {
+                            attempt.error("redirect refused")
+                        }
+                    }))
+                    .build()
+                    .map_err(|error| error.to_string())?;
             let mut request_builder = client.request(method, &request.url);
             for (name, value) in &request.headers {
                 request_builder = request_builder.header(name, value);

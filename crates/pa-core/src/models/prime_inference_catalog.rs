@@ -322,10 +322,13 @@ pub(crate) async fn fetch_prime_inference_model_catalog(
     timeout_ms: u64,
     allow_empty: bool,
 ) -> Result<(serde_json::Value, Vec<PrimeInferenceCatalogEntry>), String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .build()
-        .map_err(|error| error.to_string())?;
+    let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+        .and_then(|builder| {
+            builder
+                .timeout(std::time::Duration::from_millis(timeout_ms))
+                .build()
+                .map_err(|error| error.to_string())
+        })?;
     let mut request = client
         .get(format!("{base_url}/models"))
         .header("accept", "application/json");

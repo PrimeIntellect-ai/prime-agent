@@ -109,11 +109,27 @@ async fn serve_systemone(
         }
     }
     let url = format!("{}/systemone", model.base_url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .default_headers(headers)
-        .build()
-        .expect("systemone client builds");
+    // The trust variables name a source that cannot be loaded: loud and
+    // actionable (the error names the variable and the path) instead of a
+    // client-build panic inside the serve task.
+    let client =
+        match crate::utils_inner::http::https_client_builder(pa_types::tls::TlsAlpn::Negotiated)
+            .and_then(|builder| {
+                builder
+                    .timeout(std::time::Duration::from_millis(timeout_ms))
+                    .default_headers(headers)
+                    .build()
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(client) => client,
+            Err(error) => {
+                writer.end(Some(error_message(
+                    model,
+                    &format!("the systemone request failed: {error}"),
+                )));
+                return;
+            }
+        };
     let response = client.post(&url).json(&request).send().await;
     let message = match response {
         Ok(response) => {
