@@ -178,7 +178,7 @@ pub fn unix_listener_definitely_closed(path: &Path) -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = path;
-        return false;
+        false
     }
     #[cfg(target_os = "linux")]
     {

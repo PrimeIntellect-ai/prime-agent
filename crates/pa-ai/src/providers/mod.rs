@@ -16,4 +16,5 @@ pub mod openai_responses_hooks;
 pub mod openai_responses_shared;
 pub mod openai_responses_stream;
 pub mod simple_options;
+pub mod systemone;
 pub mod transform_messages;
