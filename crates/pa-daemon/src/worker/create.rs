@@ -189,6 +189,12 @@ impl Worker {
             .get("childScript")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // The Decision API child flag (`rlm.spawn kind="decision"`): the
+        // worker runs the decision engine instead of the agent engine.
+        let decision_child = payload
+            .get("decisionChild")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         // Set by the fresh-path arm when the name landed in its single rewrite:
         // the shared name persist must not append a second `session_info` line.
@@ -573,6 +579,7 @@ impl Worker {
             core.parent_active_session_id = parent_active_session_id;
             core.parent_session_id = parent_session_id;
             core.child_script.clone_from(&child_script);
+            core.decision_child = decision_child;
             (self.summary_locked(&core, inputs), rlm_depth)
         };
         // The engine's agent-level queues drain per the same modes the

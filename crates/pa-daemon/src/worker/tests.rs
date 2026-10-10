@@ -15,6 +15,7 @@ async fn created_dispatch_worker() -> std::sync::Arc<Worker> {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -64,6 +65,7 @@ async fn background_refinement_event_is_fenced_to_its_review_session() {
             recovery_journal_path: dir.join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "responses": [] })),
+            decision_child: false,
         },
         None,
     );

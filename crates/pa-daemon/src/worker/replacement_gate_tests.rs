@@ -87,6 +87,7 @@ fn recording_worker(dir: &Path, events: std::sync::Arc<std::sync::Mutex<Vec<Stri
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: Some(true),
         script: Some(json!({ "responses": ["ack"] })),
+        decision_child: false,
     };
     let mut worker = Worker::new(config, None);
     let engine: std::sync::Arc<dyn SessionEngine> = std::sync::Arc::new(RecordingEngine { events });
