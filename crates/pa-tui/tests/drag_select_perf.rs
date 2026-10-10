@@ -277,13 +277,14 @@ const MEASURED_PAIRS: usize = 3;
 /// (baseline, drag) pairs, preceded by one discarded warm-up pair.
 ///
 /// A single pair's excess is the true drag-burst cost plus the pair's differential wall-clock
-/// noise, and the large session's ~40MB attach makes that noise hundreds of ms to seconds on
-/// loaded shared runners (CI, no drag-path commits in between: 695ms-vs-266ms on main 56408e2a8,
-/// 2.011s-vs-321ms and 700ms-vs-292ms on untouched PRs the same hour) — a one-pair budget
-/// flakes on the load spike, not the drag. Wall-clock noise only ever adds time, so the minimum
-/// over several pairs is the sample least contaminated by a spike. The guard stays real: a
-/// session-size regression inflates every pair (a burst that resolves the transcript once per
-/// frame adds seconds to each), so the minimum still trips the bounds.
+/// noise, and the large session's ~40MB attach makes that differential spike hundreds of ms to
+/// seconds on loaded shared runners — the CI flake class (identical failures on pure main and
+/// on PRs with no drag-path commits). A one-pair budget flakes on the load spike, not the drag.
+/// The minimum over several pairs rejects the positive spikes; its residual error is a negative
+/// differential bounded by one baseline run's own noise, an order of magnitude below the signal
+/// the guard exists to catch. The guard stays real: a session-size regression inflates every
+/// pair (a burst that resolves the transcript once per frame adds seconds to each), so the
+/// minimum still trips the bounds.
 fn drag_excess(messages: usize) -> (Duration, Vec<Duration>, String) {
     // The warm-up pair primes the page cache and allocator arenas (the process's first run
     // reads about 2x its steady state); its numbers are discarded.
