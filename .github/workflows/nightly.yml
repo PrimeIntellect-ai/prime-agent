@@ -44,9 +44,9 @@
 #      load-bearing: a GITHUB_TOKEN-created tag fires NO downstream push
 #      event, so release.yml would never run. The App's ref creation is the
 #      push event that triggers release.yml's -beta* channel: build ->
-#      promote (beta.json, a PRERELEASE - never takes GitHub's Latest
-#      pointer; beta tags publish automatically from the release-beta
-#      environment, no approval) -> nightly-refresh rolls the rolling
+#      promote (beta.json and versioned R2 artifacts; beta tags publish
+#      automatically from the release-beta environment, no approval) ->
+#      nightly-refresh rolls the rolling
 #      `nightly` release.
 #
 # Idempotency/counter safety: if the computed tag already exists, the cut
