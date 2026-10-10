@@ -80,17 +80,35 @@ def fetch_page(cursor: str | None, limit: int, bootstrap: bool = False) -> dict:
     return response["data"]["repository"]["discussions"]
 
 
-def restore_state(directory: Path) -> dict | None:
-    response = json.loads(
-        gh(
-            "api",
-            f"repos/{STATE_REPOSITORY}/actions/artifacts"
-            f"?name={STATE_ARTIFACT}&per_page=100",
+def fetch_state_artifacts() -> list[dict]:
+    # The artifact listing has no documented order, so every page must be read
+    # before the newest trusted state can be identified.
+    artifacts: list[dict] = []
+    page = 1
+    while True:
+        response = json.loads(
+            gh(
+                "api",
+                f"repos/{STATE_REPOSITORY}/actions/artifacts"
+                f"?name={STATE_ARTIFACT}&per_page=100&page={page}",
+            )
         )
-    )
+        batch = response.get("artifacts")
+        if not isinstance(batch, list):
+            raise RuntimeError("Cannot read notification state; state was not advanced.")
+        artifacts.extend(batch)
+        if len(batch) < 100:
+            return artifacts
+        total = response.get("total_count")
+        if isinstance(total, int) and len(artifacts) >= total:
+            return artifacts
+        page += 1
+
+
+def restore_state(directory: Path) -> dict | None:
     artifacts = [
         artifact
-        for artifact in response["artifacts"]
+        for artifact in fetch_state_artifacts()
         if artifact["workflow_run"]["head_branch"] == "main"
     ]
     latest = None
