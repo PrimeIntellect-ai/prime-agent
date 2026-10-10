@@ -76,7 +76,7 @@ impl ProviderHttp for ReqwestProviderHttp {
                 ProviderHttpMethod::Get => reqwest::Method::GET,
                 ProviderHttpMethod::Post => reqwest::Method::POST,
             };
-            let client = reqwest::Client::builder()
+            let client = crate::utils_inner::tls::http_client_builder()
                 .timeout(Duration::from_millis(timeout_ms))
                 .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     // TS `redirect: "error"`: a redirected request

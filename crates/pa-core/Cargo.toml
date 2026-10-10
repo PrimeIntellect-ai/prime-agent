@@ -35,7 +35,7 @@ url = "2"
 hmac = "0.12"
 globset = "0.4"
 toml.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "rustls-tls-webpki-roots", "json", "stream"] }
 tar = "0.4"
 flate2 = "1"
 unicode-normalization = "0.1"

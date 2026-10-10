@@ -72,6 +72,16 @@ Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In 
 
 Nested tmux servers and terminals may still block delivery. An outer tmux with `set-clipboard external` can reject the inner server's OSC 52. In that case, run `tmux set -s set-clipboard on` on the outer server, or use native terminal selection (Shift-drag in most terminals; Option-drag in iTerm2) followed by Cmd-C. macOS Terminal.app does not support OSC 52; iTerm2 requires its “Applications in terminal may access clipboard” setting.
 
+## Custom certificate authorities
+
+HTTPS requests trust your operating system's trust store together with the bundled Mozilla roots. For servers behind a custom CA, point `NODE_EXTRA_CA_CERTS` at a PEM bundle of your CA certificates — the same variable the Node/TypeScript build honors:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/your-ca.pem
+```
+
+The variable is read once at startup, and the background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
+
 ## Getting Started
 
 Start Prime Agent from the repository or directory you want it to work in:

@@ -14,7 +14,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { version = "0.1", features = ["attributes"] }
 reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+    "rustls-tls-native-roots",
+    "rustls-tls-webpki-roots",
 ] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -22,6 +23,8 @@ hex = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true
