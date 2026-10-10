@@ -9,6 +9,18 @@ pub mod perms;
 pub mod process;
 pub mod shell;
 
+#[cfg(target_os = "linux")]
+pub use lock_dir::setup_private_dir;
+#[cfg(target_os = "linux")]
+pub use lock_dir::{
+    exchange_paths, mark_released_through, move_without_replacing, try_reclaim_guard,
+};
+#[cfg(unix)]
+pub use lock_dir::{
+    is_fresh_name_swap, mark_released_at, mkdir_mode_0700, remove_candidate_dir,
+    remove_notes_through,
+};
+
 pub use fs::fsync;
 pub use lock_dir::{lock_exclusive, try_lock_exclusive, LockDir};
 pub use perms::{

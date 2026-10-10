@@ -424,10 +424,13 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
 /// sessions stay down; the dormant report runs AFTER the replay.
 pub(crate) async fn restore_pass(
     supervisor: &std::sync::Arc<Supervisor>,
-    adoption: tokio::task::JoinHandle<()>,
+    mut adoption_signal: tokio::sync::watch::Receiver<bool>,
     roster: Option<UpdateRoster>,
 ) {
-    let _ = adoption.await;
+    // Same ordering wait the handle used to give: the signal is sent when
+    // the adopt pass settles, and a pass that dies without signaling
+    // drops its sender, which closes the channel and ends this wait.
+    Supervisor::wait_for_adoption_signal(&mut adoption_signal).await;
     let Some(roster) = roster else {
         report_dormant_scheduled_jobs(supervisor).await;
         supervisor

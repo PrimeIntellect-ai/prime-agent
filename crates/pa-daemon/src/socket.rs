@@ -32,6 +32,11 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
 /// Unix only: every taker of the cleanup lock sits behind the unix stale-file wall.
 #[cfg(unix)]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
+/// The bounded grace a lease refresh tolerates a stale-reclaim dance's
+/// transient displacement before declaring compromise (a live dance
+/// completes in microseconds; only persisting displacements count).
+#[cfg(unix)]
+const LEASE_DISPLACEMENT_GRACE: Duration = Duration::from_millis(250);
 /// Live-lock retry cadence and cap (600 retries): ~15s total.
 #[cfg(unix)]
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -43,11 +48,21 @@ const LOCK_RETRIES: u32 = 600;
 /// competing startup worker cannot bind a live listener in between.
 #[cfg(unix)]
 async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir> {
+    let lock_path = path.to_path_buf();
     for attempt in 0..=LOCK_RETRIES {
-        match pa_core::platform::LockDir::acquire(path, LOCK_STALE_AFTER) {
-            Ok(lock) => return Ok(lock),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(anyhow!("Daemon socket cleanup lock: {error}")),
+        // The acquisition can wait up to the reclaim-guard budget on the
+        // sidecar while a stale-reclaim dance holds it - off the async
+        // executor, never blocking a Tokio worker thread.
+        let attempt_path = lock_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            pa_core::platform::LockDir::acquire(&attempt_path, LOCK_STALE_AFTER)
+        })
+        .await
+        {
+            Ok(Ok(lock)) => return Ok(lock),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(Err(error)) => return Err(anyhow!("Daemon socket cleanup lock: {error}")),
+            Err(join_error) => return Err(anyhow!("Daemon socket cleanup lock: {join_error}")),
         }
         if attempt == LOCK_RETRIES {
             break;
@@ -58,6 +73,889 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
         "Timed out waiting for the daemon socket cleanup lock: {}",
         path.display()
     ))
+}
+
+/// The pinned handle is the ownership witness for the acquired lock: a
+/// path that no longer resolves to it means the lock was displaced
+/// mid-acquisition, so refuse rather than adopt the successor's lease.
+#[cfg(unix)]
+fn assert_path_pins(lock_path: &Path, lock_dir: &std::fs::File) -> Result<SocketIdentity> {
+    let identity = metadata_identity(&lock_dir.metadata()?);
+    if !lock_identity_matches(lock_path, &identity) {
+        return Err(anyhow!(
+            "Daemon socket lock {} was replaced while acquiring it",
+            lock_path.display()
+        ));
+    }
+    Ok(identity)
+}
+
+/// A supervisor-lifetime proper-lockfile lease on `{socket}.lock`.
+/// The opened directory pins the acquired inode across stale takeovers: a
+/// displaced holder never refreshes or removes the successor's lock.
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct SocketLease {
+    socket_path: std::path::PathBuf,
+    lock_path: std::path::PathBuf,
+    lock_dir: std::fs::File,
+    identity: SocketIdentity,
+    compromised: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    compromise_tx: tokio::sync::watch::Sender<bool>,
+    refresh_stop: std::sync::mpsc::Sender<()>,
+    refresh: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl SocketLease {
+    /// Wait up to 15s for the exclusive lease; refresh it every second
+    /// while the supervisor owns its socket, matching proper-lockfile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or locked, or if
+    /// the acquired lock was replaced before its inode could be pinned.
+    pub async fn acquire(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            crate::paths::ensure_dir(parent)?;
+        }
+        let lock = acquire_cleanup_lock(path).await?;
+        let (lock_path, lock_dir) = lock.into_parts();
+        // The handle pins the inode this supervisor acquired: if the path
+        // check or metadata read fails, ownership is unprovable, so leave
+        // the artifact to expire instead of risking removal of a racing
+        // successor's lock.
+        let identity = assert_path_pins(&lock_path, &lock_dir)?;
+        let compromised = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (compromise_tx, _) = tokio::sync::watch::channel(false);
+        let task_path = lock_path.clone();
+        let task_dir = match lock_dir.try_clone() {
+            Ok(dir) => dir,
+            Err(error) => {
+                // Never leave the just-acquired lock artifact behind a
+                // failed handle clone: it would block the next startup
+                // behind the stale threshold. The same claim-verify
+                // choreography as the lease release removes it - only a
+                // directory whose pinned inode still matches this
+                // acquisition is removed, and a displaced successor is
+                // restored, never unlinked.
+                #[cfg(target_os = "linux")]
+                let _ = release_lock_dir_identity(&lock_path, &identity, &lock_dir);
+                return Err(error.into());
+            }
+        };
+        let task_identity = identity.clone();
+        let task_compromised = std::sync::Arc::clone(&compromised);
+        let task_tx = compromise_tx.clone();
+        let (refresh_stop, stop_rx) = std::sync::mpsc::channel();
+        let refresh = std::thread::spawn(move || {
+            while stop_rx.recv_timeout(Duration::from_secs(1)).is_err() {
+                // The sidecar gates the mtime WRITE only (a dance or
+                // release pass in progress must not race a refresh
+                // mid-verification); the identity CHECK always runs -
+                // a suspended dance leaves a placeholder at the public
+                // path, and the monitor must observe that displacement
+                // instead of sleeping through it.
+                #[cfg(target_os = "linux")]
+                let guarded = pa_core::platform::try_reclaim_guard(
+                    &task_path,
+                    std::time::Duration::from_millis(100),
+                );
+                let lost = !lock_identity_matches(&task_path, &task_identity);
+                #[cfg(target_os = "linux")]
+                let write_error = match guarded {
+                    Some(guard) => {
+                        let failed = task_dir.set_modified(std::time::SystemTime::now()).is_err();
+                        drop(guard);
+                        failed
+                    }
+                    // Unguarded (a dance or release pass holds the
+                    // sidecar): skip this tick's refresh entirely when
+                    // the lease is undisplaced - the identity check
+                    // still ran, the next tick retries the write.
+                    None if !lost => continue,
+                    None => false,
+                };
+                #[cfg(not(target_os = "linux"))]
+                let write_error = task_dir.set_modified(std::time::SystemTime::now()).is_err();
+                if (lost || write_error || !lock_identity_matches(&task_path, &task_identity))
+                    && handle_refresh_failure(
+                        lost,
+                        write_error,
+                        &task_dir,
+                        &task_path,
+                        &task_identity,
+                        &task_compromised,
+                        &task_tx,
+                    )
+                {
+                    // A definitive compromise: the refresh thread STOPS -
+                    // no further tick may refresh an abandoned inode (a
+                    // declared-dead lease writing mtime through its
+                    // pinned fd would keep the lock fresh past every
+                    // stale threshold).
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            socket_path: path.to_path_buf(),
+            lock_path,
+            lock_dir,
+            identity,
+            compromised,
+            compromise_tx,
+            refresh_stop,
+            refresh: Some(refresh),
+        })
+    }
+
+    /// The awaited shutdown for async owners: sends the stop signal and
+    /// JOINS THE REFRESH THREAD OFF THE ASYNC WORKER (the thread may be
+    /// inside its 100ms reclaim-guard wait or the 250ms
+    /// displacement-grace retry sleep; joining that latency on a
+    /// Tokio worker stalls every task and timer on it - the plain
+    /// `Drop` keeps its join for non-async drop sites, so this is the
+    /// path async owners call before the lease leaves scope).
+    ///
+    /// # Errors
+    ///
+    /// Returns the join-handle error only if the blocking pool itself
+    /// fails (the refresh thread has no panic sites worth reporting -
+    /// a panicking heartbeat never wedges the release).
+    #[cfg(unix)]
+    pub async fn shutdown(self) -> Result<()> {
+        let _ = self.refresh_stop.send(());
+        // The WHOLE lease moves into the blocking task: the join and
+        // the Drop-driven release both run there, IN ORDER, and an
+        // outer cancellation merely DETACHES the task (spawn_blocking
+        // tasks are not cancelled by a dropped JoinHandle) - the
+        // lease inside it still cannot drop before the join completes,
+        // preserving the join-before-release invariant that taking the
+        // handle out ahead of an cancellable await would break.
+        let joined = tokio::task::spawn_blocking(move || {
+            let mut lease = self;
+            if let Some(refresh) = lease.refresh.take() {
+                let _ = refresh.join();
+            }
+        })
+        .await;
+        if let Err(join_error) = joined {
+            return Err(anyhow::Error::from(join_error));
+        }
+        Ok(())
+    }
+
+    /// Whether the lock path still names this lease's pinned inode.
+    fn path_lost(&self) -> bool {
+        !lock_identity_matches(&self.lock_path, &self.identity)
+    }
+
+    /// Whether ownership of this exact lock inode was lost.
+    #[must_use]
+    pub fn compromised(&self) -> bool {
+        self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost()
+    }
+
+    /// The fast displacement probe for mid-pass destructive-step checks:
+    /// TRUE the moment the public lock path no longer names this lease's
+    /// pinned inode (a transient reclaim dance also trips it - callers
+    /// freeze, which is always the safe direction).
+    #[cfg(unix)]
+    pub(crate) fn path_displaced(&self) -> bool {
+        self.path_lost()
+    }
+
+    /// The reclaim-sidecar exclusion for this lease's lock: held across a
+    /// destructive pass (the boot reap), it excludes every COMPLIANT
+    /// successor - a judge or reclaim dance must hold this same sidecar
+    /// before it displaces anything - so the pass cannot race a
+    /// protocol-following takeover mid-signal. The acquisition runs on a
+    /// blocking thread (the sidecar's flock retry spins with in-thread
+    /// sleeps - never on the async worker). `Ok(None)` means the budget
+    /// expired (a suspended dance holds the sidecar); `Err` means the
+    /// acquisition task itself failed. Callers fail closed on both.
+    #[cfg(target_os = "linux")]
+    pub(crate) async fn hold_reclaim_exclusion(
+        &self,
+        budget: std::time::Duration,
+    ) -> anyhow::Result<Option<std::fs::File>> {
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || {
+            pa_core::platform::try_reclaim_guard(&lock_path, budget)
+        })
+        .await
+        .map_err(|join_error| {
+            anyhow::anyhow!("the reclaim-exclusion acquisition task failed: {join_error:#}")
+        })
+    }
+
+    /// Compromise verdict for the direct synchronous callers (boot
+    /// fences, the serve-completion recheck, Drop): a single transient
+    /// identity mismatch - a stale-reclaim dance holding this lease's
+    /// directory displaced for the microseconds of its exchange - gets
+    /// the same bounded grace the refresh thread has; a displacement
+    /// persisting past the grace is a real compromise. A cached
+    /// compromise flag set by the refresh thread is definitive without
+    /// re-probing.
+    fn compromised_after_grace(&self) -> bool {
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
+            return true;
+        }
+        if !self.path_lost() {
+            return false;
+        }
+        std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+        // The cached flag set by the refresh thread during the grace is
+        // definitive even if the path reappeared: compromise stays
+        // compromise, never downgraded by a restoration.
+        self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost()
+    }
+
+    /// Resolve when this lease loses its lock directory. A single
+    /// transient mismatch (a reclaim dance's displacement) gets the
+    /// same bounded grace before it counts; a displacement persisting
+    /// past the grace is a real compromise.
+    pub async fn wait_compromised(&self) {
+        let mut changes = self.compromise_tx.subscribe();
+        loop {
+            // The cached flag is definitive on its own; a path mismatch
+            // alone gets the grace (the check order matters: compromised()
+            // includes the transient path loss and must not gate the
+            // grace branch).
+            if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            if self.path_lost() {
+                tokio::time::sleep(LEASE_DISPLACEMENT_GRACE).await;
+                if self.compromised() {
+                    break;
+                }
+                continue;
+            }
+            if changes.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if this lease was displaced or compromised.
+    pub fn assert_held(&self) -> Result<()> {
+        self.assert_path_held(&self.socket_path)
+    }
+
+    fn assert_path_held(&self, path: &Path) -> Result<()> {
+        if path != self.socket_path {
+            return Err(anyhow!(
+                "Daemon socket lease does not match {}",
+                path.display()
+            ));
+        }
+        if self.compromised_after_grace() {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The async-facing fence: identical to `assert_held`, with the
+    /// grace waited ASYNCHRONOUSLY - the synchronous `compromised_after_grace`
+    /// blocks its thread for the grace period, which stalls every task
+    /// and timer on a Tokio worker (the entire runtime on a
+    /// current-thread one). The async socket-preparation paths use this
+    /// variant so a displaced lock path costs an await, never a stall.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this lease was displaced or compromised.
+    /// The async-facing path-checked fence: the path check of
+    /// [`Self::assert_path_held`] with the grace waited
+    /// asynchronously, so a displaced lock path costs an await on the
+    /// async preparation paths instead of stalling the Tokio worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the path is not this lease's socket path or
+    /// the lease was displaced or compromised.
+    #[cfg(unix)]
+    pub async fn assert_path_held_async(&self, path: &Path) -> Result<()> {
+        if path != self.socket_path {
+            return Err(anyhow!(
+                "Daemon socket lease does not match {}",
+                path.display()
+            ));
+        }
+        self.assert_held_async().await
+    }
+
+    /// The async-facing fence: identical to `assert_held`, with the
+    /// grace waited asynchronously - a displaced lock path costs an
+    /// await, never a Tokio-worker stall.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lease was displaced or compromised.
+    #[cfg(unix)]
+    pub async fn assert_held_async(&self) -> Result<()> {
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                self.socket_path.display()
+            ));
+        }
+        if !self.path_lost() {
+            return Ok(());
+        }
+        tokio::time::sleep(LEASE_DISPLACEMENT_GRACE).await;
+        // The cached flag set by the refresh thread during the grace is
+        // definitive even if the path reappeared.
+        if self.compromised.load(std::sync::atomic::Ordering::Acquire) || self.path_lost() {
+            return Err(anyhow!(
+                "Daemon socket lease for {} was compromised",
+                self.socket_path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Claim the socket file at `path` under a private name in its own
+    /// directory. On filesystems without a no-replace rename (NFS, FUSE)
+    /// the claim fails and the cleanup no-ops: the leftover socket file
+    /// is self-healing - the next bind's stale-socket prepare removes a
+    /// file nothing serves, so unlike the lock directory it never blocks
+    /// a startup. A short, basename-independent name keeps the claim
+    /// probeable through the `AF_UNIX` address budget no matter how long
+    /// the original basename is, and the full-nanosecond process-unique
+    /// suffix never wraps. The claim is a no-replace rename, so a live
+    /// claimed file preserved by an earlier window (a no-replace restore
+    /// that failed because a newer holder owned the vacated path) can
+    /// never be overwritten by a later claim; a taken name regenerates
+    /// the suffix instead. Returns `None` when the path is empty or no
+    /// free claim name is found.
+    #[cfg(target_os = "linux")]
+    fn claim_under_private_name(path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let parent = path.parent()?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        for attempt in 0..8 {
+            // The attempt counter de-conflicts even a monotonically
+            // stalled clock: pid + nanos + attempt is unique in-process,
+            // and the no-replace rename rejects any other collision.
+            let claim = parent.join(format!(".u{pid:x}{nanos:x}{attempt:x}"));
+            match pa_core::platform::move_without_replacing(path, &claim) {
+                Ok(()) => return Some(claim),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Best-effort unlink of only the bound socket owned by this holder.
+    /// On compromise, leave the successor's socket untouched. The socket
+    /// file is first claimed under a private name with one atomic rename,
+    /// and the liveness probe then binds to the claimed inode through the
+    /// private pathname - the claim is ours alone, so no path swap can
+    /// slide a live successor between the probe and the removal: the
+    /// checked inode is the inode probed is the inode removed. A live or
+    /// unknown verdict restores the claimed file without ever clobbering
+    /// a newer holder of the vacated path (Linux is the only definitive
+    /// verdict; elsewhere the probe fails closed, the exit cleanup
+    /// preserves the path, and the next bind's stale-socket prepare
+    /// cleans a file nothing serves).
+    pub fn cleanup_socket_path(&self, path: &Path, expected: Option<SocketIdentity>) {
+        if self.assert_path_held(path).is_err() {
+            return;
+        }
+        let Some(expected) = expected else { return };
+        if socket_identity(path) != Some(expected.clone()) {
+            return;
+        }
+        if self.assert_path_held(path).is_err() {
+            return;
+        }
+        // The claim-probe-remove choreography is Linux-only: only there
+        // does the definitely-closed verdict exist, and only there can
+        // the no-replace moves run. Elsewhere the exit cleanup preserves
+        // the path and the next bind's stale-socket prepare cleans a
+        // file nothing serves.
+        #[cfg(target_os = "linux")]
+        {
+            let Some(claim) = Self::claim_under_private_name(path) else {
+                // Nothing at the path is ours to unlink, or no free
+                // claim name could be found.
+                return;
+            };
+            if socket_identity(&claim) == Some(expected) && self.assert_path_held(path).is_ok() {
+                // The claimed inode is this holder's own. It is removed
+                // only on a definitely-closed verdict probed through the
+                // private pathname - the claim cannot be swapped from
+                // under this probe, and a poisoned capture (a successor
+                // bound during the bind->capture gap) naming the
+                // successor's own inode gets its live socket restored,
+                // never removed.
+                if pa_types::platform::transport::unix_listener_definitely_closed(&claim) {
+                    let _ = std::fs::remove_file(&claim);
+                } else {
+                    let _ = pa_core::platform::move_without_replacing(&claim, path);
+                    // A newer holder owns the vacated path: the live
+                    // claimed file keeps its private entry (never remove
+                    // a live inode's last path entry); its listener
+                    // fences on the displaced inode.
+                }
+            } else if pa_core::platform::move_without_replacing(&claim, path).is_err()
+                && pa_types::platform::transport::unix_listener_definitely_closed(&claim)
+            {
+                // The claim is not ours and cannot go back to a path a
+                // newer holder owns: remove it only on a
+                // definitely-closed verdict.
+                let _ = std::fs::remove_file(&claim);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SocketLease {
+    fn drop(&mut self) {
+        let _ = self.refresh_stop.send(());
+        if let Some(refresh) = self.refresh.take() {
+            let _ = refresh.join();
+        }
+        // The pinned fd prevents inode reuse while this lease is alive.
+        // A successor that reclaimed a stale lock must never be released
+        // by us. Linux runs the claim-verify-release choreography;
+        // platforms and mounts without a no-replace rename never remove:
+        // the lock directory is left to expire through the stale window -
+        // a deliberate divergence from proper-lockfile's unconditional
+        // release remove - and a reclaiming successor's directory is
+        // never touched.
+        // ONE compromise verdict, cached before branching: two probes
+        // could straddle a dance's restoration (true then false) and
+        // mark a lease the release then half-strips, or the reverse
+        // (false then true) and skip both marker and release.
+        #[cfg(target_os = "linux")]
+        let compromised = self.compromised_after_grace();
+        #[cfg(not(target_os = "linux"))]
+        let compromised = self.compromised();
+        if compromised {
+            // A compromised or guard-blocked release still MARKS the
+            // lease directory released through the pinned fd (pa-core's
+            // openat helper - this crate forbids unsafe): the fd follows
+            // the inode through every exchange, so the marker lands in
+            // this lease's directory wherever it lives; a concurrent
+            // reclaim dance then consumes the abandoned directory
+            // instead of restoring it, and no judge refuses it behind
+            // this process's live pid - mirroring LockDir::release's
+            // marker path for the same case.
+            #[cfg(target_os = "linux")]
+            pa_core::platform::mark_released_through(&self.lock_dir);
+        } else {
+            self.release_lock_dir();
+        }
+        let _ = &self.lock_dir;
+    }
+}
+
+/// The refresh tick's failure path: a transient write error retries
+/// under the sidecar after the grace (a persistent failure is a
+/// compromise, never letting the lock age silently past the stale
+/// threshold), and an identity displacement walks the grace before
+/// declaring compromise - a live reclaim dance restores the directory,
+/// a persistent displacement (a suspended dance's placeholder, or a
+/// real takeover) is a compromise.
+#[cfg(unix)]
+// The tick's failure path threads the lease's own task state (the
+// pinned handle, path, identity, and the two compromise channels) -
+// a context struct would add state-splitting without serving clarity.
+#[allow(clippy::too_many_arguments)]
+fn handle_refresh_failure(
+    lost: bool,
+    write_error: bool,
+    task_dir: &std::fs::File,
+    task_path: &Path,
+    task_identity: &SocketIdentity,
+    task_compromised: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task_tx: &tokio::sync::watch::Sender<bool>,
+) -> bool {
+    if write_error && !lost {
+        // Retry the mtime write after the grace - under the sidecar
+        // again: an unguarded retry could refresh a stale judge's
+        // claimed inode mid-verification, the exact race the heartbeat
+        // coordination exists to prevent.
+        std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+        #[cfg(target_os = "linux")]
+        {
+            match pa_core::platform::try_reclaim_guard(
+                task_path,
+                std::time::Duration::from_millis(100),
+            ) {
+                // A dance or release pass is active: defer the retry to
+                // the next tick.
+                None => return false,
+                Some(retry_guard) => {
+                    let retry_failed = task_dir.set_modified(std::time::SystemTime::now()).is_err()
+                        || !lock_identity_matches(task_path, task_identity);
+                    drop(retry_guard);
+                    if retry_failed {
+                        task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                        task_tx.send_replace(true);
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if task_dir.set_modified(std::time::SystemTime::now()).is_err()
+                || !lock_identity_matches(task_path, task_identity)
+            {
+                task_compromised.store(true, std::sync::atomic::Ordering::Release);
+                task_tx.send_replace(true);
+                return true;
+            }
+            return false;
+        }
+    }
+    // A stale-reclaim dance may hold this lease's directory displaced for
+    // the microseconds of its exchange: tolerate a bounded grace before
+    // declaring compromise - a live dance restores the directory and the
+    // lease keeps serving; only a displacement persisting past the grace
+    // is a compromise.
+    std::thread::sleep(LEASE_DISPLACEMENT_GRACE);
+    if !lock_identity_matches(task_path, task_identity) {
+        task_compromised.store(true, std::sync::atomic::Ordering::Release);
+        task_tx.send_replace(true);
+        return true;
+    }
+    false
+}
+
+/// The lease release: Linux runs the airtight claim-verify-release
+/// choreography (`release_lock_dir_identity` below). Other unix
+/// platforms, and Linux mounts whose filesystem rejects `renameat2`
+/// (NFS, FUSE - the same mounts where the acquisition falls back to the
+/// mkdir protocol), have no successor-safe removal: every
+/// check-then-act remove can delete a successor that stale-reclaimed
+/// this lock in the window between the check and the remove, and no
+/// user-space margin bounds the scheduler's part in that window. The
+/// release there is a deliberate no-op: the lock directory is left to
+/// expire through the stale window, and a reclaiming successor's
+/// directory is never touched. This is a deliberate DIVERGENCE from
+/// proper-lockfile, which removes its lock unconditionally on release
+/// (`removeLock`/`onExit` in lockfile.js) and accepts that window; the
+/// price of successor safety here is one stale window on the next
+/// startup where the no-replace primitive does not exist (macOS's
+/// `renameatx_np` is not used either).
+#[cfg(unix)]
+impl SocketLease {
+    #[cfg(target_os = "linux")]
+    fn release_lock_dir(&self) {
+        // The choreography's real I/O errors are already marked-and-
+        //surfaced inside; at Drop there is no caller left to surface
+        // to, so the result is intentionally discarded.
+        let _ = release_lock_dir_identity(&self.lock_path, &self.identity, &self.lock_dir);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn release_lock_dir(&self) {
+        // No no-replace rename exists here: never remove (see above).
+    }
+}
+
+/// The claim-verify-release choreography for a held lock directory
+/// (Linux only, like the socket cleanup it mirrors), under the
+/// mandatory reclaim guard: the lock directory is EXCHANGED with a
+/// blocking placeholder (a `renameat2` swap - the public path is never
+/// vacated, so a concurrent startup can never acquire the gap), removed
+/// only when the exchanged inode still matches the acquisition's
+/// identity, and a displaced successor is swapped back home atomically
+/// (occupancy cannot fail, so the delete-a-foreign-directory arm is
+/// unrepresentable). A takeover landing between the identity check and
+/// the removal can never have its own lock unlinked, and the public
+/// path is continuously held by either the lease or the placeholder.
+#[cfg(target_os = "linux")]
+fn release_lock_dir_identity(
+    lock_path: &Path,
+    identity: &SocketIdentity,
+    lock_dir: &std::fs::File,
+) -> std::io::Result<()> {
+    // Serialize with any concurrent stale-reclaim dance (the sidecar's
+    // flock): the lease's release choreography and the dance's
+    // exchanges must never interleave on the same lock directory. The
+    // guard is MANDATORY: without it (a suspended dance holds the
+    // sidecar past the budget) the choreography is skipped entirely and
+    // the lease artifact expires through the stale window instead, the
+    // documented floor.
+    let Some(guarded) =
+        pa_core::platform::try_reclaim_guard(lock_path, std::time::Duration::from_millis(100))
+    else {
+        // A suspended dance holds the sidecar past the budget: the
+        // choreography is skipped, and the lease artifact is MARKED
+        // released through the pinned fd (the fd follows the inode
+        // through every exchange) so the dance consumes the directory
+        // instead of restoring it - the same marker path a compromised
+        // lease takes. Without the marker the abandoned inode could be
+        // swapped back onto the public lock path and the next daemon
+        // would wait out a full stale window on a lock nobody holds.
+        pa_core::platform::mark_released_through(lock_dir);
+        return Ok(());
+    };
+    let Some(parent) = lock_path.parent() else {
+        drop(guarded);
+        return Ok(());
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |age| age.as_nanos());
+    let pid = std::process::id();
+    for attempt in 0..8 {
+        let placeholder = parent.join(format!(".l{pid:x}{nanos:x}{attempt:x}"));
+        match pa_core::platform::mkdir_mode_0700(&placeholder) {
+            Ok(()) => {}
+            // Only a plain name collision regenerates the suffix; a
+            // real I/O error (EACCES, ENOSPC, EIO) must not burn
+            // eight silent retries and then leak the lease behind a
+            // clean exit - the guard drops and the artifact stays
+            // looking live. On the FIRST non-collision error, mark
+            // the lease directory released through the pinned fd (the
+            // dance consumes it; the judged floor is the stale
+            // window) and surface the error to the caller.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                continue;
+            }
+            Err(error) => {
+                pa_core::platform::mark_released_through(lock_dir);
+                return Err(error);
+            }
+        }
+        // The placeholder carries this process's live owner record for
+        // the whole exchange interval: a suspended release leaves a
+        // live-owned artifact at the public path, never a vacancy. The
+        // mode is fixed AT CREATION by the guarded mkdir (no pathname
+        // chmod follows), and on Linux the owner note is written
+        // THROUGH THE PINNED HANDLE (the no-follow pin, the type and
+        // emptiness refusals, the dual-open identity check - the same
+        // private-name hygiene the acquisition path uses), so an
+        // actor that swaps the `.l...` entry after the mkdir cannot
+        // redirect the write into a foreign directory or through a
+        // symlink. A failed owner write must NEVER report a
+        // successful release: the lease directory still sits at the
+        // public path unexchanged and unmarked - mark it released
+        // through the pinned fd (the dance consumes it) and surface
+        // the error instead of the old silent Ok.
+        let owner_record = format!(
+            "{} {:#x}\n",
+            std::process::id(),
+            uuid::Uuid::new_v4().as_u128()
+        );
+        #[cfg(target_os = "linux")]
+        let owner_result = {
+            let result = pa_core::platform::setup_private_dir(
+                &placeholder,
+                0o700,
+                Some(&owner_record),
+                None,
+            );
+            match result {
+                Ok(setup) => Ok(setup),
+                Err(error) => {
+                    // A fresh-name swap refusal PRESERVES whatever sits
+                    // at the placeholder name (a blind remove could
+                    // delete a substituted entry - the same rule the
+                    // lock_dir callers apply); an ordinary failure
+                    // (including a close() failure after the owner note
+                    // landed - plain rmdir would fail ENOTEMPTY and
+                    // leak a live-owned placeholder) removes THIS
+                    // release's own creation through the pinned,
+                    // fd-relative cleanup helper.
+                    if !pa_core::platform::is_fresh_name_swap(&error) {
+                        let _ = pa_core::platform::remove_candidate_dir(&placeholder);
+                    }
+                    Err(error)
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let owner_result =
+            std::fs::write(placeholder.join("owner"), owner_record).map_err(|error| {
+                let _ = pa_core::platform::remove_candidate_dir(&placeholder);
+                error
+            });
+        // The setup witness is RETAINED: the placeholder's pinned handle
+        // and creation identity (captured through the pin, never by a
+        // post-hoc pathname stat) drive every cleanup below - on an
+        // AMBIGUOUS exchange error the swap may have completed with the
+        // incumbent (or a racing successor) at the private name, and
+        // the placeholder's notes are unlinked fd-relative through the
+        // pin, its directory removed only after proving the private
+        // name still resolves to THIS created inode, exactly like the
+        // publish-error proof in the acquisition path. A writer that
+        // swaps the `.l...` entry (or the exchanged public entry) for a
+        // symlink can never redirect those unlinks into a foreign
+        // directory.
+        let (placeholder_handle, setup_identity) = match owner_result {
+            Ok(setup) => setup,
+            Err(error) => {
+                pa_core::platform::mark_released_through(lock_dir);
+                drop(guarded);
+                return Err(error);
+            }
+        };
+        let placeholder_identity = Some(setup_identity);
+        // The exchange: the public path holds the placeholder while the
+        // incumbent sits at the private name.
+        if pa_core::platform::exchange_paths(lock_path, &placeholder).is_err() {
+            // The exchange errored - but an error does NOT prove the
+            // public path was never displaced: the swap may have
+            // completed with the incumbent (or a racing successor) at
+            // the private name. The cleanup runs ONLY on a positive
+            // identity match with this process's created placeholder -
+            // both stats must succeed and agree - so an ambiguous
+            // result preserves the displaced lock. A missing public
+            // path means the lease directory vanished - the release is
+            // complete. An unsupported-rename mount means this
+            // choreography cannot run here at all - the artifact
+            // expires through the stale window, the documented floor.
+            let identity_proved = placeholder_identity.is_some_and(|expected| {
+                std::fs::symlink_metadata(&placeholder)
+                    .ok()
+                    .map(|metadata| {
+                        use std::os::unix::fs::MetadataExt;
+                        (metadata.dev(), metadata.ino())
+                    })
+                    == Some(expected)
+            });
+            if identity_proved {
+                // The notes go through the pinned setup handle
+                // (fd-relative, never the substitutable `.l...` name);
+                // the rmdir then removes only the entry the proof just
+                // matched to this created inode. The pin CLOSES before
+                // the rmdir: an open directory fd pins the inode and
+                // makes rmdir return EBUSY on the no-rename mounts
+                // (NFS/FUSE/CIFS) this error path serves.
+                let removed = {
+                    let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                    drop(placeholder_handle);
+                    notes.and_then(|()| std::fs::remove_dir(&placeholder))
+                };
+                if removed.is_err() {
+                    // The failed removal targeted the PRIVATE placeholder
+                    // P (an inert dotname no judge reads - no public
+                    // wedge). The marker through the pinned fd targets a
+                    // DIFFERENT inode: the ORIGINAL lease directory L,
+                    // which still sits at the PUBLIC lock_path on this
+                    // unsupported-exchange arm. Marking L released is
+                    // the correct disposition for it (the dance will
+                    // consume it), and the error surfaces the private
+                    // P residue honestly.
+                    pa_core::platform::mark_released_through(lock_dir);
+                    let error = removed.err().unwrap_or_else(|| {
+                        std::io::Error::other("private lease residue cleanup failed")
+                    });
+                    drop(guarded);
+                    return Err(error);
+                }
+            }
+            drop(guarded);
+            return Ok(());
+        }
+        {
+            {
+                if lock_identity_matches(&placeholder, identity) {
+                    // This lease's directory, held where nothing can
+                    // replace it: remove it completely, then clear the
+                    // placeholder artifact from the public path. The
+                    // artifact at lock_path is THIS PASS'S OWN
+                    // placeholder (the exchange seated it there), so a
+                    // failed removal must mark THAT inode released - the
+                    // pinned lease handle names the original inode now
+                    // at the private name, a different directory. Mark
+                    // through a no-follow, identity-verified handle on
+                    // the public artifact (pa-core's mark_released_at
+                    // with the placeholder identity captured at
+                    // creation) so the residue never wedges behind a
+                    // live owner record.
+                    // The placeholder's notes go through the pinned
+                    // setup handle: a writer that swapped the exchanged
+                    // PUBLIC entry for a symlink cannot redirect the
+                    // unlink into a foreign directory (the rmdir
+                    // refuses to follow it; a swapped empty directory
+                    // is the documented accepted residual). The pin
+                    // CLOSES before the rmdir: an open directory fd
+                    // makes rmdir EBUSY on the no-rename mounts this
+                    // floor serves.
+                    let removed = {
+                        let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                        drop(placeholder_handle);
+                        notes.and_then(|()| std::fs::remove_dir(lock_path))
+                    };
+                    if removed.is_err() {
+                        pa_core::platform::mark_released_at(lock_path, placeholder_identity);
+                        let error = removed.err().unwrap_or_else(|| {
+                            std::io::Error::other("lock directory cleanup failed")
+                        });
+                        drop(guarded);
+                        return Err(error);
+                    }
+                    // This lease's own directory notes go through the
+                    // LEASE pin (the same fd the released marker uses):
+                    // a swap of the displaced private name cannot
+                    // redirect the unlinks; the rmdir then removes the
+                    // entry the identity check proved to be this lease.
+                    let _ = pa_core::platform::remove_notes_through(lock_dir);
+                    let _ = std::fs::remove_dir(&placeholder);
+                } else {
+                    // Not this lease's directory: a successor's live
+                    // lock. Swap it home atomically and remove the
+                    // placeholder ONLY after a verified successful swap
+                    // - a failed swap leaves the successor's directory
+                    // at the private name, and stripping the placeholder
+                    // (the same name) would delete the foreign lock.
+                    // Fail closed: preserve the displaced lease.
+                    if pa_core::platform::exchange_paths(lock_path, &placeholder).is_ok() {
+                        // The placeholder's notes go through the pinned
+                        // setup handle, never the substitutable private
+                        // name (which now holds the swapped-home
+                        // placeholder again); only that entry is
+                        // rmdir'd, with the pin CLOSED first (an open
+                        // directory fd makes rmdir EBUSY on the
+                        // no-rename mounts this floor serves).
+                        let notes = pa_core::platform::remove_notes_through(&placeholder_handle);
+                        drop(placeholder_handle);
+                        let _ = notes.and_then(|()| std::fs::remove_dir(&placeholder));
+                    }
+                }
+                drop(guarded);
+                return Ok(());
+            }
+        }
+    }
+    drop(guarded);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> SocketIdentity {
+    use std::os::unix::fs::MetadataExt;
+    SocketIdentity {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+    }
+}
+
+#[cfg(unix)]
+fn lock_identity_matches(path: &Path, expected: &SocketIdentity) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.file_type().is_dir() && metadata_identity(&metadata) == *expected
+    })
 }
 
 /// Remove a stale socket file after verifying nothing is listening.
@@ -86,15 +984,36 @@ pub async fn prepare_socket_path(path: &Path) -> Result<()> {
         return Err(anyhow!("Daemon socket already in use: {}", path.display()));
     }
     let _lock = acquire_cleanup_lock(path).await?;
-    prepare_locked_socket_path(path).await
+    prepare_locked_socket_path(path, None).await
+}
+
+/// Prepare under the supervisor-lifetime lease. Unlike the short-lived
+/// cleanup lock, this lease remains held through bind and the accept loop.
+///
+/// # Errors
+///
+/// Returns an error if the lease is compromised, the path is non-socket, or
+/// a live listener or replaced inode prevents stale cleanup.
+#[cfg(unix)]
+pub async fn prepare_socket_path_with_lease(path: &Path, lease: &SocketLease) -> Result<()> {
+    lease.assert_path_held_async(path).await?;
+    if let Some(parent) = path.parent() {
+        crate::paths::ensure_dir(parent)?;
+    }
+    prepare_locked_socket_path(path, Some(lease)).await
 }
 
 /// Probe + grace wait + unlink for a probed-stale socket file; the caller owns the cleanup lock.
 #[cfg(unix)]
-async fn prepare_locked_socket_path(path: &Path) -> Result<()> {
+async fn prepare_locked_socket_path(path: &Path, lease: Option<&SocketLease>) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return Ok(());
+    if let Some(lease) = lease {
+        lease.assert_path_held_async(path).await?;
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(anyhow!("Daemon socket path stat failed: {error}")),
     };
     if !metadata.file_type().is_socket() {
         return Err(anyhow!(
@@ -129,28 +1048,190 @@ async fn prepare_locked_socket_path(path: &Path) -> Result<()> {
             return Err(anyhow!("Daemon socket already in use: {}", path.display()));
         }
     }
-    unlink_stale_socket(path, stale_identity).await
+    if let Some(lease) = lease {
+        lease.assert_path_held_async(path).await?;
+    }
+    unlink_stale_socket_with_lease(path, stale_identity, lease).await
 }
 
 /// Final gate before unlinking a probed-stale socket: refuse while a live
 /// listener answers, and remove only the exact inode that was probed stale —
 /// a file replaced between the probe and the unlink stays untouched. The
 /// identity gate covers processes that do not take the cleanup lock.
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 async fn unlink_stale_socket(path: &Path, expected: SocketIdentity) -> Result<()> {
+    unlink_stale_socket_with_lease(path, expected, None).await
+}
+
+#[cfg(unix)]
+async fn unlink_stale_socket_with_lease(
+    path: &Path,
+    expected: SocketIdentity,
+    lease: Option<&SocketLease>,
+) -> Result<()> {
     if can_connect(path, Duration::from_millis(250)).await {
         return Err(anyhow!("Daemon socket already in use: {}", path.display()));
     }
     match socket_identity(path) {
         None => Ok(()),
         Some(current) if current == expected => {
-            std::fs::remove_file(path)?;
-            Ok(())
+            // The lease fence can sleep the displacement grace; a
+            // replacement can land at the path during that wait, and
+            // the remove must NEVER unlink it: re-verify the exact
+            // inode AFTER the fence and claim atomically before the
+            // unlink (the claim's no-replace rename both proves the
+            // path still names the probed stale inode and takes the
+            // file out of the public namespace - a replacement cannot
+            // be deleted through it).
+            if let Some(lease) = lease {
+                lease.assert_path_held_async(path).await?;
+            }
+            if socket_identity(path) != Some(expected.clone()) {
+                return Err(anyhow!(
+                    "Daemon socket changed ownership while fencing: {}",
+                    path.display()
+                ));
+            }
+            let claim = match claim_socket_file_for_removal(path) {
+                Ok(Some(claim)) => claim,
+                // The source vanished mid-claim: a racing reclaimer took
+                // it (ENOENT) - there is nothing of ours left to unlink.
+                Ok(None) => return Ok(()),
+                // The claim failed for a real reason (no
+                // RENAME_NOREPLACE on this mount, a permission denial,
+                // a read-only parent): the stale socket REMAINS at the
+                // public path, so reporting success would be a lie -
+                // surface the error and let the caller fail its bind
+                // honestly.
+                Err(error) => return Err(anyhow::Error::from(error)),
+            };
+            match socket_identity(&claim) {
+                Some(claimed) if claimed == expected => {
+                    // The probed stale inode, held on the private name:
+                    // the unlink can only ever touch this file.
+                    std::fs::remove_file(&claim)?;
+                    Ok(())
+                }
+                // The claimed file is NOT the probed stale inode: a
+                // replacement landed between the re-verify and the
+                // claim, and the claim displaced it out of the public
+                // namespace. RESTORE it (no-replace, so a newer
+                // occupant is never clobbered); a failed restoration
+                // is surfaced - a live endpoint must never silently
+                // vanish.
+                Some(_) => {
+                    restore_displaced_claim(&claim, path)?;
+                    Err(anyhow!(
+                        "Daemon socket changed ownership between the re-verify and the claim: {}",
+                        path.display()
+                    ))
+                }
+                // The claim vacated the public path, so an
+                // unstattable claim is NEVER a silent success: a stat
+                // fault here hides a displaced endpoint. Attempt the
+                // no-replace restoration and surface the outcome.
+                None => {
+                    restore_displaced_claim(&claim, path)?;
+                    Err(anyhow!(
+                        "Claimed socket inode could not be re-checked after the claim: {}",
+                        path.display()
+                    ))
+                }
+            }
         }
         Some(_) => Err(anyhow!(
             "Daemon socket changed ownership while waiting for cleanup: {}",
             path.display()
         )),
+    }
+}
+
+/// Restore a claim that landed on a foreign inode: a NO-REPLACE move
+/// back to the public path, so a newer holder that bound the vacated
+/// path is never unlinked (a plain rename would clobber it - the exact
+/// violation this fence exists to prevent). A failed restoration
+/// fails closed: the claimed file stays put and the error surfaces.
+/// Non-Linux unix has no no-replace rename: the restoration is
+/// unattempted there and the error surfaces directly (the claimed
+/// file stays preserved - never clobbered, never silently dropped).
+#[cfg(all(unix, target_os = "linux"))]
+fn restore_displaced_claim(claim: &Path, path: &Path) -> Result<()> {
+    if pa_core::platform::move_without_replacing(claim, path).is_err() {
+        Err(anyhow!(
+            "Displaced socket could not be restored after a racing claim: {}",
+            path.display()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Non-Linux unix cannot attempt the restoration (no no-replace
+/// rename): the claimed file stays preserved and the error surfaces.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn restore_displaced_claim(_claim: &Path, path: &Path) -> Result<()> {
+    Err(anyhow!(
+        "Displaced socket could not be restored after a racing claim: {}",
+        path.display()
+    ))
+}
+
+/// Claim the socket file at `path` under a private name with a
+/// no-replace rename: the claim proves the path still names the inode
+/// the caller probed (EEXIST/ENOENT means it does not) and takes the
+/// file out of the public namespace, so the unlink can only ever touch
+/// the claimed file - a replacement landing at the vacated path is
+/// never unlinked through it. Non-Linux unix has no no-replace rename:
+/// the callers' re-verification narrows the window, and the removal
+/// falls back to the pathname there.
+#[cfg(unix)]
+fn claim_socket_file_for_removal(path: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No no-replace rename exists here: the re-verified pathname
+        // remove is the documented floor.
+        Ok(Some(path.to_path_buf()))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(parent) = path.parent() else {
+            return Err(std::io::Error::other("socket path has no parent"));
+        };
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        let mut claim_error: Option<std::io::Error> = None;
+        for attempt in 0..8 {
+            let claim = parent.join(format!(".s{pid:x}{nanos:x}{attempt:x}"));
+            match pa_core::platform::move_without_replacing(path, &claim) {
+                Ok(()) => return Ok(Some(claim)),
+                // The source vanished (a racing reclaimer took it):
+                // nothing of ours is left.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                // The claim NAME is taken: regenerate the suffix.
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // A filesystem without RENAME_NOREPLACE (EOPNOTSUPP on
+                // NFS/FUSE, EINVAL/ENOSYS without renameat2): no atomic
+                // claim exists here, so take the same floor the
+                // non-Linux platforms use - the caller's re-verified,
+                // inode-checked pathname remove. Erroring instead would
+                // wedge every later prepare behind this residue (the
+                // exit-cleanup path's None already documents the next
+                // prepare as self-healing; lock acquisition falls back
+                // on these mounts too, so startup must not pin here).
+                Err(error) if pa_core::platform::LockDir::rename_noreplace_unsupported(&error) => {
+                    return Ok(Some(path.to_path_buf()));
+                }
+                Err(error) => {
+                    claim_error = claim_error.or(Some(error));
+                }
+            }
+        }
+        Err(claim_error
+            .unwrap_or_else(|| std::io::Error::other("all stale-socket claim names are taken")))
     }
 }
 
@@ -257,6 +1338,407 @@ mod tests {
     /// nobody listening - exactly a crashed worker's residue.
     async fn bind_stale_socket(path: &Path) {
         drop(bind_transport(path).await.expect("bind stale socket"));
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn restrictive_umask_socket_release_child() {
+        // The socket lease's full lifecycle under a restrictive umask,
+        // in a CHILD PROCESS whose umask is set by a shell wrapper (the
+        // umask is process-global; this crate forbids unsafe; the shell
+        // sets it, the child inherits it).
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "umask 0277; exec \"{}\" --exact socket::tests::restrictive_umask_socket_release_probe",
+                std::env::current_exe().unwrap().display()
+            ))
+            .env("PA_UMASK_PROBE", "1")
+            .status()
+            .expect("run the umask socket-release child");
+        assert!(status.success(), "the umask socket-release child failed");
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn restrictive_umask_socket_release_probe() {
+        if std::env::var("PA_UMASK_PROBE").is_err() {
+            return;
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        // Acquire and RELEASE the lease fully under the restrictive
+        // umask (the child inherited it): the release placeholder's
+        // owner write must land (the 0700 restoration) and the lock
+        // directory must be removed - a fresh acquisition takes it
+        // without waiting out the stale window.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let lease = SocketLease::acquire(&socket).await;
+            let lease = lease.expect("lease acquisition works under a restrictive umask");
+            drop(lease); // the release runs INSIDE the umasked child
+        });
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        assert!(
+            !lock_path.exists(),
+            "the umask-restricted release removed the lock directory"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refresh_ticks_cease_after_compromise() {
+        // A displaced lease declares compromise; the refresh thread
+        // must STOP (drop the lease and join it) - a later tick writing
+        // mtime through the pinned fd would keep an abandoned lock
+        // fresh past every stale threshold.
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&file).await.unwrap();
+        // Displace the lease's directory: the next tick observes the
+        // loss, walks the grace, and declares compromise.
+        std::fs::rename(&lease.lock_path, dir.path().join(".displaced")).unwrap();
+        // Wait past one tick + the grace budget.
+        std::thread::sleep(Duration::from_secs(2) + LEASE_DISPLACEMENT_GRACE * 2);
+        // The decisive oracles, both BEFORE Drop (Drop stops and joins
+        // the thread regardless, and compromised() alone is true from
+        // the displaced pathname even if the refresh never ran): the
+        // refresh thread itself set the cached flag, and the thread has
+        // EXITED - a ticking loop (the pre-fix code) would still be
+        // running here.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !lease.refresh.as_ref().unwrap().is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the refresh thread kept ticking after the compromise"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            lease.compromised.load(std::sync::atomic::Ordering::Acquire),
+            "the refresh thread itself declared the compromise"
+        );
+        drop(lease);
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn stale_unlink_refuses_a_replacement_landing_during_the_fence() {
+        // The fenced unlink's re-verify: a file whose identity does not
+        // match the probed stale inode is NEVER removed - the remove can
+        // only ever touch the atomically claimed inode.
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, b"stale").unwrap();
+        let expected = socket_identity(&socket).unwrap();
+        // A replacement lands where the stale file sat while the fence
+        // could have slept: the re-verify must refuse the swap.
+        let replaced = dir.path().join("replaced.sock");
+        std::fs::write(&replaced, b"live-replacement").unwrap();
+        std::fs::rename(&socket, dir.path().join("probed-stale")).unwrap();
+        std::fs::rename(&replaced, &socket).unwrap();
+        let error = unlink_stale_socket_with_lease(&socket, expected, None)
+            .await
+            .is_err();
+        assert!(
+            error,
+            "the fencing re-verify refuses a replacement inode at the path"
+        );
+        assert!(
+            std::fs::read_to_string(&socket)
+                .unwrap()
+                .contains("live-replacement"),
+            "the replacement survives"
+        );
+        // The claim helper: a successful claim takes the file out of the
+        // public namespace, atomically proving the path named it.
+        std::fs::write(&socket, b"stale").unwrap();
+        let stale_identity = socket_identity(&socket).unwrap();
+        let claim = claim_socket_file_for_removal(&socket).unwrap();
+        let Some(claim) = claim else {
+            panic!("the claim succeeds on the unowned file");
+        };
+        assert!(!socket.exists(), "the claim vacated the public path");
+        assert_eq!(
+            socket_identity(&claim),
+            Some(stale_identity),
+            "the claimed file is the probed inode"
+        );
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn displaced_claim_restoration_never_clobbers_an_occupied_path() {
+        // A racing replacement displaced by the claim is restored with
+        // a NO-REPLACE move: a newer holder that bound the vacated
+        // public path survives the restoration, and the fencing error
+        // surfaces (the claim's own file stays preserved on the
+        // private name, never deleted through the occupied path).
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        std::fs::write(&socket, b"racing-replacement").unwrap();
+        let replacement_identity = socket_identity(&socket).unwrap();
+        // The claim takes the racing replacement out of the public
+        // namespace (this is the post-recheck/pre-claim race landing).
+        let claim = claim_socket_file_for_removal(&socket)
+            .unwrap()
+            .expect("the claim succeeds");
+        assert_eq!(
+            socket_identity(&claim),
+            Some(replacement_identity.clone()),
+            "the claim holds the racing replacement's inode"
+        );
+        // A newer holder binds the vacated public path before the
+        // restoration: the restore must NEVER unlink it.
+        std::fs::write(&socket, b"newer-holder").unwrap();
+        // The PRODUCTION restore path (restore_displaced_claim - the
+        // branch the fenced unlink routes through): an occupied public
+        // path refuses the no-replace restore, the newer holder
+        // survives, and the error surfaces (the claimed file is
+        // preserved on the private name).
+        let restore = restore_displaced_claim(&claim, &socket);
+        assert!(
+            restore.is_err(),
+            "the no-replace restore refuses the occupied public path"
+        );
+        assert!(
+            std::fs::read_to_string(&socket)
+                .unwrap()
+                .contains("newer-holder"),
+            "the newer holder's socket survives the restoration"
+        );
+        // The vacant-path restore succeeds through the same helper: the
+        // displaced file returns home, the public path names it again.
+        std::fs::remove_file(&socket).unwrap();
+        let restored = restore_displaced_claim(&claim, &socket);
+        assert!(restored.is_ok(), "the vacant path admits the restore");
+        assert_eq!(
+            socket_identity(&socket),
+            Some(replacement_identity),
+            "the displaced inode returned to the public path"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifetime_lease_refuses_a_replacement_and_never_releases_successors_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        assert!(lock_path.is_dir());
+        let listener = bind_transport(&socket).await.unwrap();
+        let own_socket = socket_identity(&socket);
+        let old_dir = dir.path().join("previous.lock");
+        std::fs::rename(&lock_path, &old_dir).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        assert!(lease.compromised());
+        lease.cleanup_socket_path(&socket, own_socket);
+        assert!(
+            socket.exists(),
+            "compromised holder cannot unlink its former socket"
+        );
+        tokio::time::timeout(Duration::from_secs(2), lease.wait_compromised())
+            .await
+            .unwrap();
+        drop(lease);
+        assert!(
+            lock_path.is_dir(),
+            "old lease must not remove successor lock"
+        );
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn lifetime_lease_guards_stale_cleanup_and_refuses_live_socket() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        bind_stale_socket(&socket).await;
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        prepare_socket_path_with_lease(&socket, &lease)
+            .await
+            .unwrap();
+        let listener = bind_transport(&socket).await.unwrap();
+        let error = prepare_socket_path_with_lease(&socket, &lease)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already in use"), "{error}");
+        // A live listener at the path outranks even the holder's own
+        // identity match: the exit cleanup only takes dead files.
+        lease.cleanup_socket_path(&socket, socket_identity(&socket));
+        assert!(socket.exists(), "the live socket survives the cleanup");
+        drop(listener);
+        lease.cleanup_socket_path(&socket, socket_identity(&socket));
+        // Linux: the dead file is claimed and unlinked. Elsewhere the
+        // probe has no definitive verdict, the exit cleanup preserves
+        // the path, and the next bind's stale-socket prepare cleans it.
+        #[cfg(target_os = "linux")]
+        assert!(!socket.exists(), "the dead socket is claimed and unlinked");
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            socket.exists(),
+            "the conservative cleanup preserves the path"
+        );
+        drop(lease);
+        // The lock directory's release is platform-split: the Linux
+        // claim-verify choreography removes it, the no-noreplace floor
+        // leaves it to expire through the stale window.
+        #[cfg(target_os = "linux")]
+        assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            pa_core::platform::LockDir::path_for(&socket).exists(),
+            "the leave-expire floor keeps the lock directory for the stale window"
+        );
+    }
+
+    #[test]
+    fn path_pins_refuses_a_lock_replaced_after_the_pin() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        std::fs::create_dir(&lock_path).unwrap();
+        let pinned = std::fs::File::open(&lock_path).unwrap();
+        // A stale takeover displaces the pinned inode after the pin.
+        let aside = dir.path().join("displaced.lock");
+        std::fs::rename(&lock_path, &aside).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        let error = assert_path_pins(&lock_path, &pinned).unwrap_err();
+        assert!(
+            error.to_string().contains("replaced while acquiring"),
+            "{error}"
+        );
+        // The refusal leaves the successor's artifact untouched.
+        assert!(lock_path.is_dir());
+        // The matching case: the pinned inode back at the path is held.
+        std::fs::remove_dir(&lock_path).unwrap();
+        std::fs::rename(&aside, &lock_path).unwrap();
+        assert_path_pins(&lock_path, &pinned).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn release_restores_a_successor_lock_claimed_in_the_takeover_race() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        // A successor's replacement sits at the lock path - the takeover
+        // race the atomic claim exists for; the lease's own directory is
+        // displaced and pinned by its fd.
+        let own = dir.path().join("own.lock");
+        std::fs::rename(&lock_path, &own).unwrap();
+        std::fs::create_dir(&lock_path).unwrap();
+        // The release must restore the successor's directory, never unlink
+        // it, even when it wins the claim on the lock path.
+        lease.release_lock_dir();
+        assert!(
+            lock_path.is_dir(),
+            "a claimed successor lock must be restored"
+        );
+        // The compromised lease still skips the release on drop.
+        drop(lease);
+        assert!(
+            lock_path.is_dir(),
+            "a compromised lease must not release the successor's lock"
+        );
+    }
+
+    /// A long-basename socket stays claim-probeable: the claim is a
+    /// basename-independent dotname in the socket's own directory, so
+    /// the claim path is short no matter how long the bound name was -
+    /// this pins the address-budget fix for names whose sibling-claim
+    /// form exceeded the `AF_UNIX` limit.
+    #[cfg(all(unix, target_os = "linux"))]
+    #[tokio::test]
+    async fn socket_cleanup_claims_a_dead_socket_with_a_long_basename() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("x".repeat(82));
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let listener = bind_transport(&socket).await.unwrap();
+        let bound = socket_identity(&socket);
+        drop(listener);
+        lease.cleanup_socket_path(&socket, bound);
+        assert!(
+            !socket.exists(),
+            "the long-named dead socket is claimed and unlinked"
+        );
+        drop(lease);
+        // This test is Linux-only: the claim-verify choreography removes
+        // the lock directory with the lease.
+        assert!(!pa_core::platform::LockDir::path_for(&socket).exists());
+    }
+
+    #[tokio::test]
+    async fn socket_cleanup_spares_a_live_successor_and_claims_dead_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let lease = SocketLease::acquire(&socket).await.unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket);
+        let listener = bind_transport(&socket).await.unwrap();
+        let bound = socket_identity(&socket);
+        // The exit sequence closes the listener before the cleanup: the
+        // dead file is the only thing the claim may take.
+        drop(listener);
+        lease.cleanup_socket_path(&socket, bound.clone());
+        // Linux: the dead file is claimed and unlinked. Elsewhere the
+        // probe has no definitive verdict, the exit cleanup preserves
+        // the path, and the next bind's stale-socket prepare cleans it.
+        #[cfg(target_os = "linux")]
+        assert!(
+            !socket.exists(),
+            "the dead bound socket is claimed and unlinked"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            socket.exists(),
+            "the conservative cleanup preserves the dead bound socket"
+        );
+        // A poisoned capture (a replacement bound while the capture was
+        // parked in the bind->capture gap) names the successor's own
+        // inode; the live-listener probe outranks the identity match -
+        // on every unix target. Off Linux the conservative cleanup
+        // preserved the dead bound file, so the successor bind goes
+        // through the lease's stale-socket prepare (a no-op on Linux,
+        // where the cleanup already removed the file).
+        prepare_socket_path_with_lease(&socket, &lease)
+            .await
+            .unwrap();
+        let successor = bind_transport(&socket).await.unwrap();
+        let poisoned = socket_identity(&socket);
+        lease.cleanup_socket_path(&socket, poisoned.clone());
+        assert!(
+            socket.exists(),
+            "the live successor survives the poisoned identity"
+        );
+        // Once the successor dies, the same cleanup takes its dead file
+        // on Linux; elsewhere it preserves it conservatively.
+        drop(successor);
+        lease.cleanup_socket_path(&socket, poisoned);
+        #[cfg(target_os = "linux")]
+        assert!(
+            !socket.exists(),
+            "the dead successor file is claimed and unlinked"
+        );
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            socket.exists(),
+            "the conservative cleanup preserves the dead successor file"
+        );
+        drop(lease);
+        // The lock directory's release is platform-split: the Linux
+        // claim-verify choreography removes it with the lease, the
+        // no-noreplace floor leaves it to expire through the stale
+        // window.
+        #[cfg(target_os = "linux")]
+        assert!(!lock_path.exists());
+        #[cfg(not(target_os = "linux"))]
+        assert!(
+            lock_path.exists(),
+            "the leave-expire floor keeps the lock directory for the stale window"
+        );
     }
 
     #[tokio::test]
@@ -606,5 +2088,72 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!socket.exists(), "stale socket file must be unlinked");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn release_choreography_closes_the_placeholder_pin_before_its_rmdir() {
+        // The release choreography driven end to end. The two mount
+        // classes carry different contracts, so the exchange primitive
+        // is PROBED first and the assertions follow the arm that runs:
+        // - RENAME_EXCHANGE mounts: the placeholder artifact the
+        //   exchange seats at the public path must be fully removed,
+        //   with its notes unlinked THROUGH the pinned setup handle and
+        //   the pin CLOSED before the pathname rmdir - on the
+        //   EBUSY-prone mounts (NFS/FUSE/CIFS) an open directory fd
+        //   makes that rmdir fail, the residue class the pin-close
+        //   order exists to prevent.
+        // - no-rename mounts: the release intentionally PRESERVES the
+        //   public lock (it expires through the stale window) - the
+        //   public path must still stand, and the inert `.l...`
+        //   placeholder residue must still be removed on BOTH arms.
+        // (On a plain local mount both pin orders rmdir cleanly, so
+        // the red-first property of the pin-close order lives on the
+        // EBUSY-prone mounts; this test pins the functional contract -
+        // a clean release with the right per-arm residue - that those
+        // mounts depend on.)
+        let dir = tempfile::TempDir::new().unwrap();
+        let probe_a = dir.path().join("probe-a");
+        let probe_b = dir.path().join("probe-b");
+        std::fs::write(&probe_a, "a").unwrap();
+        std::fs::write(&probe_b, "b").unwrap();
+        let exchange_supported = pa_core::platform::exchange_paths(&probe_a, &probe_b).is_ok();
+        drop(std::fs::remove_file(&probe_a));
+        drop(std::fs::remove_file(&probe_b));
+
+        let lock_path = dir.path().join("daemon.sock.lock");
+        std::fs::create_dir(&lock_path).unwrap();
+        let pin = std::fs::File::open(&lock_path).unwrap();
+        let identity = metadata_identity(&pin.metadata().unwrap());
+        std::fs::write(lock_path.join("owner"), "1 deadbeef\n").unwrap();
+        let released = release_lock_dir_identity(&lock_path, &identity, &pin);
+        assert!(
+            released.is_ok(),
+            "the release choreography failed: {released:?}"
+        );
+        if exchange_supported {
+            assert!(
+                !lock_path.exists(),
+                "the lock directory was left behind at the public path"
+            );
+        } else {
+            assert!(
+                lock_path.exists(),
+                "the no-rename fallback must preserve the public lock for the stale window"
+            );
+        }
+        let residue: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".l"))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "placeholder residue left behind: {:?}",
+            residue
+                .iter()
+                .map(std::fs::DirEntry::file_name)
+                .collect::<Vec<_>>()
+        );
     }
 }
