@@ -367,7 +367,16 @@ fn bundled_python_skills() -> Vec<(String, Vec<String>)> {
         })
         .filter_map(|skill| {
             let python = skill.python?;
-            let mut functions = python_skill_functions(&python.package_path)
+            // `package_path` is the install root (where pyproject.toml
+            // lives); the model-facing surface is the import package, so a
+            // skill that also ships tests at its root is not scanned.
+            let package_dir = python.package_path.join("src").join(&python.import_name);
+            let scan_root = if package_dir.is_dir() {
+                package_dir
+            } else {
+                python.package_path.clone()
+            };
+            let mut functions = python_skill_functions(&scan_root)
                 .into_iter()
                 .filter(|name| !name.starts_with('_'))
                 .collect::<Vec<_>>();
@@ -515,11 +524,24 @@ const TS_PACKAGED_SKILL_SET: &[&str] = &[
 
 /// The bundled skills directory matches the TS packaged set name-for-name: the generic `mcp` skill
 /// is present and markdown-only, and the retired per-service pair (linear/notion) is gone.
+/// Bundled skills with no TS counterpart: deliberate net-new features that
+/// the packaged-set parity below must still declare name-for-name. Every
+/// entry needs a justification here; adding one without a TS counterpart
+/// is a surface decision, not silent drift.
+const NET_NEW_BUNDLED_SKILLS: &[&str] = &[
+    // PR #3226: computer use - the TS product has no computer-use feature,
+    // so parity is not applicable; this is the declared net-new exception.
+    "computer-use",
+];
 #[test]
 fn bundled_skills_match_the_ts_packaged_set() {
     let skills = sorted_bundled_skills();
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
-    let mut expected = TS_PACKAGED_SKILL_SET.to_vec();
+    let mut expected: Vec<&str> = TS_PACKAGED_SKILL_SET
+        .iter()
+        .chain(NET_NEW_BUNDLED_SKILLS.iter())
+        .copied()
+        .collect();
     expected.sort_unstable();
     assert_eq!(
         names, expected,
