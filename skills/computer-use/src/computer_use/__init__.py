@@ -1189,10 +1189,10 @@ class App:
                 )
             # the scale comes from the shot's own live bounds (the image
             # depicts THAT window); the clip and the offset come from the
-            # window's CURRENT live bounds, falling back to the last
-            # observation when the live read fails: a moved window keeps its
-            # image logicals and moves the origin, a resized one rejects -
-            # at any pixel ratio, a 1x capture just scales by one
+            # window's CURRENT live bounds - readable or the click refuses:
+            # a moved window keeps its image logicals and moves the origin,
+            # a resized one rejects, and an unreadable frame fails closed
+            # at any pixel ratio - a 1x capture just scales by one
             live = capture._live_window_bounds(self._shot_window_id)
             if live is None:
                 # the stale AX rect cannot verify the window's current size,
