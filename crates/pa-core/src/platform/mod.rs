@@ -10,6 +10,8 @@ pub mod process;
 pub mod shell;
 
 #[cfg(target_os = "linux")]
+pub use lock_dir::setup_private_dir;
+#[cfg(target_os = "linux")]
 pub use lock_dir::{
     exchange_paths, mark_released_through, move_without_replacing, try_reclaim_guard,
 };

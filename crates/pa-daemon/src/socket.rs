@@ -671,7 +671,13 @@ fn release_lock_dir_identity(
         // the whole exchange interval: a suspended release leaves a
         // live-owned artifact at the public path, never a vacancy. The
         // mode is fixed AT CREATION by the guarded mkdir (no pathname
-        // chmod follows). A failed owner write must NEVER report a
+        // chmod follows), and on Linux the owner note is written
+        // THROUGH THE PINNED HANDLE (the no-follow pin, the type and
+        // emptiness refusals, the dual-open identity check - the same
+        // private-name hygiene the acquisition path uses), so an
+        // actor that swaps the `.l...` entry after the mkdir cannot
+        // redirect the write into a foreign directory or through a
+        // symlink. A failed owner write must NEVER report a
         // successful release: the lease directory still sits at the
         // public path unexchanged and unmarked - mark it released
         // through the pinned fd (the dance consumes it) and surface
@@ -681,8 +687,30 @@ fn release_lock_dir_identity(
             std::process::id(),
             uuid::Uuid::new_v4().as_u128()
         );
-        if let Err(error) = std::fs::write(placeholder.join("owner"), owner_record) {
-            let _ = std::fs::remove_dir(&placeholder);
+        #[cfg(target_os = "linux")]
+        let owner_result = {
+            let result = pa_core::platform::setup_private_dir(
+                &placeholder,
+                0o700,
+                Some(&owner_record),
+                None,
+            )
+            .map(|(handle, _identity)| handle);
+            match result {
+                Ok(_handle) => Ok(()),
+                Err(error) => {
+                    let _ = std::fs::remove_dir(&placeholder);
+                    Err(error)
+                }
+            }
+        };
+        #[cfg(not(target_os = "linux"))]
+        let owner_result =
+            std::fs::write(placeholder.join("owner"), owner_record).map_err(|error| {
+                let _ = std::fs::remove_dir(&placeholder);
+                error
+            });
+        if let Err(error) = owner_result {
             pa_core::platform::mark_released_through(lock_dir);
             drop(guarded);
             return Err(error);

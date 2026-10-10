@@ -5,9 +5,9 @@
 mod lock_dir_setup;
 
 #[cfg(target_os = "linux")]
-use lock_dir_setup::{
-    create_private_dir_guarded, is_fresh_name_swap, setup_private_dir, write_owner_through,
-};
+pub use lock_dir_setup::setup_private_dir;
+#[cfg(target_os = "linux")]
+use lock_dir_setup::{create_private_dir_guarded, is_fresh_name_swap, write_owner_through};
 #[cfg(unix)]
 pub use lock_dir_setup::{mark_released_at, mkdir_mode_0700};
 
@@ -885,7 +885,19 @@ impl LockDir {
         // public lock path outright).
         let dir = match setup_private_dir(&candidate, 0o700, owner, None) {
             Ok((dir, _identity)) => dir,
-            Err(error) => return Err(error),
+            Err(error) => {
+                // An ordinary I/O failure (a pin errno, a write failure
+                // through the pinned handle) happens to THIS call's own
+                // creation - remove it so failed acquisitions do not
+                // accumulate stale reclaim never touches. A fresh-name
+                // swap refusal PRESERVES the entry untouched (a blind
+                // remove could traverse a symlink into a victim) and
+                // propagates for the caller's regeneration.
+                if !is_fresh_name_swap(&error) {
+                    let _ = remove_candidate_dir(&candidate);
+                }
+                return Err(error);
+            }
         };
         let (sec, nanos) = probe_mtime();
         if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
@@ -1024,7 +1036,14 @@ impl LockDir {
                     // private name.
                     continue;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // An ordinary setup failure (a pin errno, a note
+                    // write through the pinned handle) happens to THIS
+                    // dance's own creation - remove it so failed
+                    // claims do not accumulate inert dotnames.
+                    let _ = remove_candidate_dir(&placeholder);
+                    return Err(error);
+                }
             }
             match rename_noreplace::exchange(path, &placeholder) {
                 Ok(()) => {

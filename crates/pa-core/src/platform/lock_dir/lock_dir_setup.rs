@@ -77,7 +77,12 @@ pub(super) fn create_private_dir_guarded(path: &Path) -> io::Result<()> {
 /// ACCEPTED RISK ruling at the call sites covers the pre-created
 /// empty-directory swap no user-space witness can exclude.
 #[cfg(target_os = "linux")]
-pub(super) fn setup_private_dir(
+/// # Errors
+///
+/// Returns the pin, metadata, or write errors of the pinned setup; a
+/// swap refusal surfaces as the typed sentinel the callers regenerate
+/// a fresh name on.
+pub fn setup_private_dir(
     path: &Path,
     mode: u32,
     owner: Option<&str>,
@@ -231,7 +236,12 @@ pub(super) fn write_claimed_at_through(dir: &fs::File, note: &[u8]) -> io::Resul
         }
         written += n as usize;
     }
-    unsafe { libc::close(fd) };
+    // A failing close (a delayed ENOSPC/EIO the write loop could not
+    // see) means the note may not have landed: surface it, never
+    // report a successfully written note the filesystem refused.
+    if unsafe { libc::close(fd) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -336,6 +346,11 @@ pub(super) fn write_owner_through(dir: &fs::File, record: &[u8]) -> io::Result<(
         }
         written += n as usize;
     }
-    unsafe { libc::close(fd) };
+    // A failing close (a delayed ENOSPC/EIO the write loop could not
+    // see) means the note may not have landed: surface it, never
+    // report a successfully written note the filesystem refused.
+    if unsafe { libc::close(fd) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
     Ok(())
 }
