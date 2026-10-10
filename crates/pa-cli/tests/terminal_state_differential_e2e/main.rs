@@ -38,6 +38,7 @@ use nix::pty::{openpty, Winsize};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use serde_json::json;
 
 use pa_tui::agents_view::AgentsViewUiMode;
 use pa_tui::config_selector::{
@@ -456,7 +457,7 @@ fn program_status_reports_no_idle_between_steps() {
 }
 
 /// OSC 7501: an abort landing in a run's tool batch settles through the
-/// step's ORIGINAL `tool_use` turn_end (never an aborted row) and the run's
+/// step's ORIGINAL `toolUse` `turn_end` (never an aborted row) and the run's
 /// `agent_end` carrying the abort marker — the report rests idle, not done.
 /// An Esc firing once outside the repeat window keeps the abort deterministic.
 #[test]
@@ -499,6 +500,67 @@ fn program_status_aborts_during_a_tool_batch_settles_idle_not_done() {
     assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
 
     harness.assert_terminal_state_restored("the program-status tool-batch abort route");
+}
+
+/// OSC 7501: an attach that catches an in-flight compaction reports idle —
+/// compaction is not run activity — and every compaction settle (success,
+/// cancelled, failed) leaves the surface at rest, never stuck working.
+#[test]
+fn program_status_attach_during_compaction_settles_idle() {
+    let _lock = harness_lock();
+    let compaction_ends = [
+        (
+            json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "result": { "summary": "compaction-settled-needle", "tokensBefore": 123 },
+            }),
+            &b"compaction-settled-needle"[..],
+            "the compacted summary row",
+        ),
+        (
+            json!({ "type": "compaction_end", "reason": "manual", "aborted": true }),
+            &b"Compaction cancelled"[..],
+            "the cancelled compaction row",
+        ),
+        (
+            json!({
+                "type": "compaction_end",
+                "reason": "manual",
+                "errorMessage": "compaction-error-needle",
+            }),
+            &b"compaction-error-needle"[..],
+            "the failed compaction row",
+        ),
+    ];
+    for (compaction_end, needle, what) in compaction_ends {
+        let spec = ChildSpec::new("chat").attach_compaction_end(compaction_end);
+        let mut harness = DifferentialHarness::start(&spec);
+        harness.answer_kitty_query();
+        harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+        harness.wait_from_start(
+            STATUS_IDLE,
+            "the compacting attach reports idle, not working",
+        );
+
+        // The in-flight compaction settles (its compaction_end).
+        let mark = harness.mark();
+        harness.write(b"/copy\r");
+        harness.wait_from(mark, needle, what);
+
+        let stream = harness.output();
+        assert!(
+            find_subsequence(&stream, STATUS_WORKING).is_none(),
+            "the attach's compaction never reports working"
+        );
+
+        let mark = harness.mark();
+        harness.write(b"/exit\r");
+        harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+        let exit = harness.wait_child_exit(Duration::from_secs(20));
+        assert_eq!(exit, Some(0), "the child exited cleanly through /exit");
+        harness.assert_terminal_state_restored("the compaction attach route");
+    }
 }
 
 /// OSC 7501: the force-quit watchdog's restore carries the exit clear — the

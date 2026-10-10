@@ -59,7 +59,8 @@ impl DifferentialHarness {
         let server = std::thread::spawn({
             let listener = listener.try_clone().expect("clone mock listener");
             let stall = spec.stall;
-            move || MockSupervisor::serve(&listener, stall)
+            let attach_compaction_end = spec.attach_compaction_end.clone();
+            move || MockSupervisor::serve(&listener, stall, attach_compaction_end.as_ref())
         });
 
         let pty = openpty(
@@ -350,11 +351,15 @@ impl MockSupervisor {
     pub(crate) fn serve(
         listener: &std::os::unix::net::UnixListener,
         stall: &'static [&'static str],
+        attach_compaction_end: Option<&Value>,
     ) {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    std::thread::spawn(move || Self::serve_connection(stream, stall));
+                    let pending_compaction_end = attach_compaction_end.cloned();
+                    std::thread::spawn(move || {
+                        Self::serve_connection(stream, stall, pending_compaction_end);
+                    });
                 }
                 Err(_) => return,
             }
@@ -364,6 +369,7 @@ impl MockSupervisor {
     pub(crate) fn serve_connection(
         stream: std::os::unix::net::UnixStream,
         stall: &'static [&'static str],
+        mut pending_compaction_end: Option<Value>,
     ) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
@@ -421,7 +427,25 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(
+                        &mut writer,
+                        &attach_data(id, pending_compaction_end.is_some()),
+                    );
+                }
+                "get_last_assistant_text" if pending_compaction_end.is_some() => {
+                    // The compaction the attach caught settles now: its
+                    // compaction_end, then the /copy answer.
+                    let event = pending_compaction_end.take().expect("the guard checked it");
+                    events_seen += 1;
+                    push_event(&mut writer, events_seen, &event);
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
                 }
                 "get_last_assistant_text" if retry_pending => {
                     // The test's read-only /copy request triggers an external
@@ -674,7 +698,7 @@ fn push_event(writer: &mut std::os::unix::net::UnixStream, sequence: u64, event:
 
 /// The attach snapshot: a small transcript whose last row carries a
 /// URL (the OSC 8 hyperlink pairs).
-pub(crate) fn attach_data(id: &str) -> Value {
+pub(crate) fn attach_data(id: &str, compacting: bool) -> Value {
     let messages: Vec<Value> = (0..4)
         .map(|index| {
             let text = if index == 3 {
@@ -706,7 +730,7 @@ pub(crate) fn attach_data(id: &str) -> Value {
                     "sessionName": "terminal state differential",
                     "model": null,
                     "isStreaming": false,
-                    "isCompacting": false,
+                    "isCompacting": compacting,
                     "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
                 },
                 "messages": messages,
@@ -723,11 +747,14 @@ pub(crate) fn attach_data(id: &str) -> Value {
 // The child modes (this binary re-executed as the product under test).
 
 /// One child route's spawn spec: the surface mode, the commands the mock
-/// answers by silence (the wedge), and the extra env the mode reads.
+/// answers by silence (the wedge), the extra env the mode reads, and the
+/// in-flight compaction an attach catches (its `compaction_end` event,
+/// delivered by the first `/copy`).
 pub(crate) struct ChildSpec {
     mode: &'static str,
     stall: &'static [&'static str],
     env: Vec<(&'static str, String)>,
+    attach_compaction_end: Option<Value>,
 }
 
 impl ChildSpec {
@@ -736,11 +763,19 @@ impl ChildSpec {
             mode,
             stall: &[],
             env: Vec::new(),
+            attach_compaction_end: None,
         }
     }
 
     pub(crate) fn stall(mut self, stall: &'static [&'static str]) -> ChildSpec {
         self.stall = stall;
+        self
+    }
+
+    /// Attach with `isCompacting` and settle the compaction through the
+    /// given `compaction_end` event.
+    pub(crate) fn attach_compaction_end(mut self, event: Value) -> ChildSpec {
+        self.attach_compaction_end = Some(event);
         self
     }
 

@@ -386,7 +386,7 @@ impl SuspendCycleHarness {
         let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind mock socket");
         let server = std::thread::spawn({
             let listener = listener.try_clone().expect("clone mock listener");
-            move || harness::MockSupervisor::serve(&listener, &[])
+            move || harness::MockSupervisor::serve(&listener, &[], None)
         });
         drop(listener);
 

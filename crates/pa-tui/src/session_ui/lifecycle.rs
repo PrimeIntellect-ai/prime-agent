@@ -503,12 +503,16 @@ impl SessionUi {
         self.goal_view.seed(reconstructed.goal.unwrap_or_default());
         self.settled = None;
         // The resynced state owns the loader: a turn still live behind the
-        // re-attach keeps the spinner, one that died with the old link does not.
-        let streaming = attach.snapshot.get("state").is_some_and(|state| {
-            ["isStreaming", "isCompacting"]
-                .iter()
-                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-        });
+        // re-attach keeps the spinner, one that died with the old link does
+        // not. Compaction is not run activity — the live path never touches
+        // the run flags for it, and nothing on the settle path clears a
+        // compaction-seeded flag, so it would strand the report working.
+        let streaming = attach
+            .snapshot
+            .get("state")
+            .and_then(|state| state.get("isStreaming"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         self.turn_active = streaming;
         self.run_open = streaming;
         self.streaming_index = None;
