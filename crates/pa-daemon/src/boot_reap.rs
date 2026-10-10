@@ -279,7 +279,10 @@ fn signal_verified_target(
         return match send_signal(identity, signal) {
             Ok(()) => true,
             Err(error) => {
-                tracing::warn!(%error, pid = target.pid, "worker native signal refused");
+                eprintln!(
+                    "pa-daemon: native signal refused for worker pid {}: {error}",
+                    target.pid
+                );
                 false
             }
         };
@@ -816,7 +819,7 @@ mod tests {
                         replacement_signaled.set(true);
                         Ok(())
                     } else {
-                        Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+                        Err(std::io::ErrorKind::NotFound.into())
                     }
                 },
             );

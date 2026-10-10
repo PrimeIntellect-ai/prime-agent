@@ -27,7 +27,7 @@ pub(crate) fn report(instance: &str) -> Option<WorkerSignalIdentity> {
             identity,
         }),
         Err(error) => {
-            tracing::warn!(%error, "worker native signal identity unavailable");
+            eprintln!("pa-daemon: worker native signal identity unavailable: {error}");
             None
         }
     }
@@ -126,7 +126,10 @@ pub(crate) fn recorded(descriptor: &DaemonWorkerDescriptor) -> Option<NativeSign
     ) {
         Ok(identity) => identity.map(|identity| identity.identity),
         Err(error) => {
-            tracing::warn!(%error, worker_id = %descriptor.worker_id, "unverifiable worker native signal identity");
+            eprintln!(
+                "pa-daemon: unverifiable native signal identity for worker {}: {error}",
+                descriptor.worker_id
+            );
             None
         }
     }
