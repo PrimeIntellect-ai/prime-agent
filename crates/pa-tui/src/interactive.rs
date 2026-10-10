@@ -486,6 +486,7 @@ enum UiInput {
         timeout_ms: u64,
     },
     ScrollTop,
+    Timestamp(std::sync::mpsc::Sender<(Instant, usize)>),
     Resize,
     HeadlessDone,
 }
