@@ -101,15 +101,42 @@ impl PhaseFailure {
     }
 }
 
+/// The stop-window generation baseline for the raced-shutdown check: the
+/// tracks drive's own admission observed at its acquire. The scope track
+/// advances on every window for THIS coordinator's socket (drive's own
+/// bump included); the root-reach tracks on every CLI shutdown pass that
+/// can stop this daemon (its own state root's, and any root whose
+/// default socket or shared socket dir names this socket).
+#[derive(Default)]
+struct RacedStopBaseline {
+    scope: std::sync::atomic::AtomicU64,
+    roots: std::sync::Mutex<Vec<u64>>,
+}
+
 /// Whether a concurrent stop raced the update's release-to-spawn window,
-/// judged from the generation the two admissions observed: every acquire
-/// stores the counter value BEFORE its own bump, so with no foreign stop
-/// the rollback's acquire observes exactly drive's own bump - one more
-/// than drive's observation. TWO or more bumps mean a foreign stop
-/// acquired in between (while drive held, the only possible window is
-/// after its release), completed, and released.
-fn raced_shutdown_detected(drive_generation: u64, rollback_observed: u64) -> bool {
-    rollback_observed > drive_generation + 1
+/// judged from the generation tracks the acquisitions observed. The
+/// root-reach tracks: the rollback observes more than drive on any
+/// entry exactly when a CLI shutdown pass that can stop this daemon
+/// completed in between (its own root's pass, or a foreign root's pass
+/// over a shared default socket). The scope track: every acquire stores
+/// the counter value BEFORE its own bump, so with no foreign same-socket
+/// window the rollback's acquire observes exactly drive's own bump -
+/// one more than drive's observation; two or more mean another window
+/// for THIS socket completed in between. A window for a DIFFERENT
+/// daemon never registers on either track, so another daemon's update -
+/// or a shutdown of a root that cannot reach this daemon - never reads
+/// as this daemon's concurrent shutdown.
+fn raced_shutdown_detected(
+    baseline_scope: u64,
+    baseline_roots: &[u64],
+    rollback_scope: u64,
+    rollback_roots: &[u64],
+) -> bool {
+    baseline_roots
+        .iter()
+        .zip(rollback_roots)
+        .any(|(before, after)| after > before)
+        || rollback_scope > baseline_scope + 1
 }
 
 /// Run the FSM from the adopted status to a terminal state; the returned
@@ -119,6 +146,11 @@ fn raced_shutdown_detected(drive_generation: u64, rollback_observed: u64) -> boo
 /// Returns an error when no status record exists at `status_path`, when the
 /// recorded state is not `Staged` (only a staged update is adoptable), or
 /// when a status-record write fails.
+///
+/// # Panics
+/// Panics when the raced-baseline lock is poisoned (the task that filled
+/// the baseline died mid-write; the coordinator cannot run its raced
+/// check against a lost baseline).
 pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     let Some(existing) = super::status::read_status(&options.status_path) else {
         anyhow::bail!(
@@ -141,15 +173,35 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
         &socket_lossy,
     )?));
     let heartbeat = StatusHeartbeat::start(Arc::clone(&writer));
-    // The stop-window generation DRIVE's own admission observed at its
-    // acquire (drive fills this at its first statement): the failure-arm
-    // raced-shutdown check compares the ROLLBACK acquire's observation
-    // against THIS baseline, so a shutdown that completed before drive's
-    // window (bumping the counter in drive's unbounded acquire wait) is
-    // the baseline itself, never mistaken for one that raced the update's
-    // release-to-spawn window.
-    let drive_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    match drive(&writer, options, &update_id, &socket_dir, &drive_generation).await {
+    // The stop-window generation tracks DRIVE's own admission observed
+    // at its acquire (drive fills them at its first statement): the
+    // failure-arm raced-shutdown check compares the ROLLBACK acquire's
+    // observations against THIS baseline, so a shutdown that completed
+    // before drive's window (bumping the counters in drive's unbounded
+    // acquire wait) is the baseline itself, never mistaken for one that
+    // raced the update's release-to-spawn window.
+    let baseline = Arc::new(RacedStopBaseline::default());
+    // This update's state root and its raced-stop reach keys (the
+    // discovery's own root filter, never-touch excluded): a CLI pass
+    // that can stop this daemon's socket bumps one of them; a pass of a
+    // foreign root that cannot reach this socket never registers.
+    let state_root = crate::daemon_discovery::DaemonStateRoot {
+        agent_dir: options.agent_dir.clone(),
+        socket_dir: pa_daemon::platform::socket_dir(),
+        default_socket_path: pa_daemon::platform::default_daemon_socket_path(),
+    };
+    let reach_keys =
+        crate::daemon_discovery::shutdown_reach_keys(&options.socket_path, &state_root);
+    match drive(
+        &writer,
+        options,
+        &update_id,
+        &socket_dir,
+        &reach_keys,
+        &baseline,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(failure) if !failure.after_stop => {
             // `Aborted -> [*]: daemon never stopped; user retried later`.
@@ -173,7 +225,12 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
             // spawn a daemon, undoing it. One guarded attempt; a busy
             // window aborts the rollback beside the concurrent stop.
             let rollback_admission =
-                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once() {
+                match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire_once(
+                    pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+                        socket: &options.socket_path,
+                        keys: reach_keys.to_vec(),
+                    },
+                ) {
                     Ok(admission) => Some(admission),
                     Err(error) => {
                         let mut writer = writer.lock().await;
@@ -206,8 +263,17 @@ pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
                 }
                 return finish_run(&writer, options, &socket_lossy, heartbeat).await;
             };
-            let drive_generation = drive_generation.load(std::sync::atomic::Ordering::SeqCst);
-            if raced_shutdown_detected(drive_generation, rollback_admission.observed_generation()) {
+            let raced = raced_shutdown_detected(
+                baseline.scope.load(std::sync::atomic::Ordering::SeqCst),
+                &baseline
+                    .roots
+                    .lock()
+                    .expect("the raced-baseline lock")
+                    .clone(),
+                rollback_admission.observed_scope_generation(),
+                &rollback_admission.observed_root_generations(),
+            );
+            if raced {
                 // The rejected successor this update spawned is retired the
                 // same way finish_failure retires it (best-effort
                 // identity-pinned crash kill): left alive beside the
@@ -289,7 +355,8 @@ async fn drive(
     options: &CoordinatorOptions,
     update_id: &UpdateId,
     socket_dir: &Path,
-    drive_generation: &Arc<std::sync::atomic::AtomicU64>,
+    reach_keys: &[&Path],
+    baseline: &Arc<RacedStopBaseline>,
 ) -> std::result::Result<(), PhaseFailure> {
     let budget = &options.budget;
     // The stop window opens here (TS package-manager-cli.ts
@@ -298,12 +365,19 @@ async fn drive(
     // held, a third-party successor refuses its own boot ("Daemon shutdown
     // is in progress"); the handle releases on drop, and a crashed holder
     // stops renewing, so the window self-heals inside the lease.
-    let mut admission = pa_daemon::supervisor_ownership::ShutdownAdmission::acquire()
-        .map_err(PhaseFailure::before_stop)?;
-    drive_generation.store(
-        admission.observed_generation(),
+    let mut admission = pa_daemon::supervisor_ownership::ShutdownAdmission::acquire(
+        pa_daemon::supervisor_ownership::ShutdownScope::Socket {
+            socket: &options.socket_path,
+            keys: reach_keys.to_vec(),
+        },
+    )
+    .map_err(PhaseFailure::before_stop)?;
+    baseline.scope.store(
+        admission.observed_scope_generation(),
         std::sync::atomic::Ordering::SeqCst,
     );
+    *baseline.roots.lock().expect("the raced-baseline lock") =
+        admission.observed_root_generations();
     // `Preparing`: connect the old supervisor. An unreachable daemon is a
     // daemon-less update: an empty prepare is trivially durable and the
     // successor boots without a roster (the workers are already gone).
@@ -867,16 +941,32 @@ mod tests {
     #[test]
     fn the_rollback_own_bump_never_counts_as_a_raced_stop() {
         // The rollback's acquire directly follows drive's: it observes
-        // exactly drive's own bump and must proceed.
-        assert!(!raced_shutdown_detected(0, 1));
-        assert!(!raced_shutdown_detected(7, 8));
+        // exactly drive's own socket bump on the scope track (the reach
+        // tracks untouched) and must proceed.
+        assert!(!raced_shutdown_detected(0, &[0], 1, &[0]));
+        assert!(!raced_shutdown_detected(3, &[7], 4, &[7]));
     }
 
     #[test]
     fn a_foreign_stop_between_the_windows_counts_as_raced() {
-        // A stop that opened in the release-to-spawn window adds its own
-        // bump on top of drive's: two or more past the baseline.
-        assert!(raced_shutdown_detected(0, 2));
-        assert!(raced_shutdown_detected(7, 9));
+        // A stop that opened in the release-to-spawn gap: a CLI pass of
+        // a root that can stop this daemon advances the reach tracks
+        // past drive's observation, and a same-socket window leaves two
+        // or more past drive's on the scope track.
+        assert!(raced_shutdown_detected(0, &[0], 0, &[1, 1]));
+        assert!(raced_shutdown_detected(0, &[0, 0], 0, &[1, 2]));
+        assert!(raced_shutdown_detected(0, &[7], 0, &[9]));
+        assert!(raced_shutdown_detected(0, &[5, 0], 0, &[5, 1]));
+    }
+
+    #[test]
+    fn another_daemons_window_never_counts_as_a_raced_stop() {
+        // An update for a different socket, or a shutdown pass of a
+        // root that cannot reach this daemon, acquires in the gap:
+        // neither advances this socket's scope track nor its reach
+        // tracks. The rollback still observes exactly drive's own
+        // scope bump.
+        assert!(!raced_shutdown_detected(0, &[0], 1, &[0]));
+        assert!(!raced_shutdown_detected(5, &[2], 6, &[2]));
     }
 }

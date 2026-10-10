@@ -211,7 +211,15 @@ pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) 
 /// lease, 1 s renewal); a lost lease aborts the pass, which fails the
 /// command (TS's throw out of `runShutdownAllConverging`).
 fn run_shutdown_with_admission(json: bool, force: bool, root: &DaemonStateRoot) -> i32 {
-    let mut admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire() {
+    // The pass is scoped to its state root (the discovery's own root
+    // filter): it bumps the raced-stop generations of the reach keys it
+    // can stop - its default socket, socket dir, and agent dir, the
+    // never-touch keys excluded - which are the reach keys a
+    // coordinator whose daemon this pass can stop compares against.
+    let pass_keys = super::shutdown_pass_keys(root);
+    let mut admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire(
+        pa_daemon::supervisor_ownership::ShutdownScope::Root { keys: pass_keys },
+    ) {
         Ok(admission) => admission,
         Err(error) => {
             eprintln!("Error: {error}");

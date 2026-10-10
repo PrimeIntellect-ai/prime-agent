@@ -98,6 +98,8 @@ const SHUTDOWN_ADMISSION_FILE_NAME: &str = "shutdown-admission.json";
 /// The fence records live in this subdirectory (TS
 /// `resolve(registryDir, "startup-fences")`).
 const STARTUP_FENCES_DIR_NAME: &str = "startup-fences";
+/// The per-socket stop-window generation files live in this subdirectory.
+const SHUTDOWN_ADMISSION_GENERATIONS_DIR_NAME: &str = "shutdown-admission-generations";
 
 /// The durable registry root: the env override when set, else
 /// `~/.prime/supervisor-owners` (TS `defaultDaemonSupervisorRegistryDir`:
@@ -468,36 +470,124 @@ fn read_active_shutdown_admission(registry_dir: &Path) -> Result<Option<Shutdown
     Ok(None)
 }
 
-/// The stop-window generation file: a monotonic counter bumped under the
-/// registry guard on EVERY admission acquire. A coordinator that held the
-/// window and released it for its spawn can detect a concurrent stop that
-/// opened in between (the counter advanced past its own acquire) and
-/// refuse to roll back behind the user's completed shutdown.
-fn shutdown_admission_generation_path(registry_dir: &Path) -> PathBuf {
-    registry_dir.join("shutdown-admission-generation")
+/// The scope of a stop window: which daemons it can stop. The raced-stop
+/// generations are scoped the same way, so a coordinator that released
+/// its window for its spawn can detect exactly the concurrent stops that
+/// could have stopped ITS daemon - never another daemon's restart
+/// window, and never a shutdown pass of a state root that cannot reach
+/// this socket. The caller (the CLI layer that owns the discovery root
+/// filter) names the reach keys: a stop of a daemon registers on the
+/// generation files of the keys its socket matches, never-touch excluded
+/// once beside `state_root_matches` itself, so a stop barred from a
+/// socket never registers on it.
+pub enum ShutdownScope<'a> {
+    /// The CLI shutdown's converging pass: bumps every reach key of its
+    /// state root (its default socket, socket dir, and agent dir, the
+    /// never-touch exclusions applied).
+    Root {
+        /// The state-root reach keys the pass can stop.
+        keys: Vec<&'a Path>,
+    },
+    /// An update coordinator's restart window for the daemon at this
+    /// socket: bumps its socket's own counter and observes the reach
+    /// keys a stop of this socket registers on, minus the socket's own
+    /// file (the scope track carries it with its own-bump arithmetic).
+    Socket {
+        socket: &'a Path,
+        /// This socket's reach keys (never-touch excluded).
+        keys: Vec<&'a Path>,
+    },
+}
+
+/// The files an acquire's scope bumps, and the root-reach files its
+/// raced check compares.
+enum ScopePaths {
+    /// The CLI pass bumps its root's every reach file.
+    Root { files: Vec<PathBuf> },
+    /// A coordinator window bumps its socket's own file and observes
+    /// the socket's reach files.
+    Socket {
+        socket_file: PathBuf,
+        reach: Vec<PathBuf>,
+    },
+}
+
+/// The raced-stop generation file of one stop target: a monotonic
+/// counter bumped under the registry guard by every stop window that can
+/// stop the target. The identity is the sha256 of the normalized target
+/// path (the fence files' keying): a flat file name, never the path
+/// itself - `join` with an absolute path would replace the registry
+/// prefix and land the counter ON the target.
+fn shutdown_admission_generation_file(registry_dir: &Path, target: &Path) -> PathBuf {
+    registry_dir
+        .join(SHUTDOWN_ADMISSION_GENERATIONS_DIR_NAME)
+        .join(crate::paths::hash_key(&normalize_socket_path(target), 64))
+}
+
+fn scope_paths_for(registry_dir: &Path, scope: ShutdownScope<'_>) -> ScopePaths {
+    match scope {
+        ShutdownScope::Root { keys } => ScopePaths::Root {
+            files: keys
+                .iter()
+                .map(|key| shutdown_admission_generation_file(registry_dir, key))
+                .collect(),
+        },
+        ShutdownScope::Socket { socket, keys } => {
+            let socket_file = shutdown_admission_generation_file(registry_dir, socket);
+            ScopePaths::Socket {
+                // A reach key that IS the socket's own file (a daemon on
+                // its root's default socket names the default key) rides
+                // the scope track instead: the drive's own bump lands
+                // there, and a reach entry polluted by it would read
+                // every rollback as raced.
+                reach: keys
+                    .iter()
+                    .map(|key| shutdown_admission_generation_file(registry_dir, key))
+                    .filter(|file| *file != socket_file)
+                    .collect(),
+                socket_file,
+            }
+        }
+    }
 }
 
 /// Read the current generation (0 when no acquire ever happened; a
 /// read error is 0 - the conservative "no concurrent window" answer, the
 /// same answer an absent file gives).
-#[must_use]
-pub fn shutdown_admission_generation(registry_dir: &Path) -> u64 {
-    std::fs::read_to_string(shutdown_admission_generation_path(registry_dir))
+fn read_shutdown_admission_generation(path: &Path) -> u64 {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| raw.trim().parse().ok())
         .unwrap_or(0)
 }
 
-/// Bump the generation under the caller's registry guard (acquire
+/// Bump the scope's generation under the caller's registry guard (acquire
 /// only). A write failure FAILS THE ACQUISITION: the concurrent-stop
 /// detection would silently miss a raced shutdown and the caller would
 /// spawn behind the user's completed stop.
-fn bump_shutdown_admission_generation(registry_dir: &Path) -> Result<u64> {
-    let observed = shutdown_admission_generation(registry_dir);
-    let path = shutdown_admission_generation_path(registry_dir);
-    std::fs::write(&path, (observed + 1).to_string())
+fn bump_shutdown_admission_generation_at(path: &Path) -> Result<u64> {
+    let observed = read_shutdown_admission_generation(path);
+    // The first bump of a scope track writes its directory into being
+    // (the per-socket files live in a subdirectory the guard only
+    // ensures the root of); a missing parent would fail the acquisition,
+    // which fails the update - not a stop-window answer at all.
+    crate::paths::ensure_dir(path.parent().unwrap_or(Path::new(".")))?;
+    std::fs::write(path, (observed + 1).to_string())
         .with_context(|| format!("write {}", path.display()))?;
     Ok(observed)
+}
+
+/// Bump every reach file, recording each pre-bump value for the
+/// acquisition's observations and for the caller's partial-bump restore.
+fn bump_all_shutdown_admission_generations(
+    files: &[PathBuf],
+    advanced: &mut Vec<(PathBuf, u64)>,
+) -> Result<()> {
+    for file in files {
+        let observed = bump_shutdown_admission_generation_at(file)?;
+        advanced.push((file.clone(), observed));
+    }
+    Ok(())
 }
 
 /// Read a startup-fence record; `Ok(None)` when absent (TS
@@ -718,10 +808,16 @@ struct AdmissionState {
     process_start_id: Option<String>,
     stopped: AtomicBool,
     lost: AtomicBool,
-    /// The stop-window generation THIS acquisition observed under the
-    /// guard (before its own bump): a caller holding a pre-acquire
-    /// baseline can detect a foreign stop that raced in between.
-    observed_generation: std::sync::atomic::AtomicU64,
+    /// The acquisition's own scope file observed under the guard, before
+    /// its own bump (a coordinator window's socket file; 0 for the CLI
+    /// pass, which bumps its root's files instead of one own file).
+    observed_scope_generation: std::sync::atomic::AtomicU64,
+    /// The root-reach generations THIS acquisition observed under the
+    /// guard, pre-bump, in the caller's key order (a coordinator window:
+    /// its socket's reach keys; the CLI pass: its root's reach keys): a
+    /// caller holding a pre-acquire baseline detects a completed stop
+    /// window that can stop its daemon by the advance on any entry.
+    observed_root_generations: std::sync::Mutex<Vec<u64>>,
 }
 
 impl ShutdownAdmission {
@@ -735,8 +831,8 @@ impl ShutdownAdmission {
     ///
     /// Returns an error when the registry record cannot be written or the
     /// renewal thread cannot be spawned.
-    pub fn acquire() -> Result<Self> {
-        Self::acquire_in(&registry_dir()?)
+    pub fn acquire(scope: ShutdownScope<'_>) -> Result<Self> {
+        Self::acquire_in(&registry_dir()?, scope)
     }
 
     /// A SINGLE-ATTEMPT acquire (the rollback re-close): the caller
@@ -752,26 +848,27 @@ impl ShutdownAdmission {
     /// Returns an error when the registry record cannot be written, the
     /// renewal thread cannot be spawned, or another active stop window
     /// holds the record.
-    pub fn acquire_once() -> Result<Self> {
-        Self::acquire_in_once(&registry_dir()?)
+    pub fn acquire_once(scope: ShutdownScope<'_>) -> Result<Self> {
+        Self::acquire_in_once(&registry_dir()?, scope)
     }
 
     /// [`ShutdownAdmission::acquire`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
-    fn acquire_in(registry_dir: &Path) -> Result<Self> {
-        Self::acquire_in_impl(registry_dir, false)
+    fn acquire_in(registry_dir: &Path, scope: ShutdownScope<'_>) -> Result<Self> {
+        Self::acquire_in_impl(registry_dir, scope, false)
     }
 
     /// [`ShutdownAdmission::acquire_once`] against an explicit registry
     /// directory (the seam the unit tests isolate on).
-    fn acquire_in_once(registry_dir: &Path) -> Result<Self> {
-        Self::acquire_in_impl(registry_dir, true)
+    fn acquire_in_once(registry_dir: &Path, scope: ShutdownScope<'_>) -> Result<Self> {
+        Self::acquire_in_impl(registry_dir, scope, true)
     }
 
     /// The acquire loop; `once` runs exactly one guarded attempt (the
     /// rollback re-close), otherwise the unbounded TS retry.
-    fn acquire_in_impl(registry_dir: &Path, once: bool) -> Result<Self> {
+    fn acquire_in_impl(registry_dir: &Path, scope: ShutdownScope<'_>, once: bool) -> Result<Self> {
         let registry_dir = registry_dir.to_path_buf();
+        let paths = scope_paths_for(&registry_dir, scope);
         let state = Arc::new(AdmissionState {
             registry_dir: registry_dir.clone(),
             token: uuid::Uuid::new_v4().to_string(),
@@ -779,7 +876,8 @@ impl ShutdownAdmission {
             process_start_id: crate::lease::get_process_start_id(std::process::id()),
             stopped: AtomicBool::new(false),
             lost: AtomicBool::new(false),
-            observed_generation: std::sync::atomic::AtomicU64::new(0),
+            observed_scope_generation: std::sync::atomic::AtomicU64::new(0),
+            observed_root_generations: std::sync::Mutex::new(Vec::new()),
         });
         loop {
             let acquired = with_registry_guard(&registry_dir, || {
@@ -800,10 +898,42 @@ impl ShutdownAdmission {
                     ),
                 };
                 write_record(&path, &record)?;
-                let observed = bump_shutdown_admission_generation(&registry_dir)?;
-                state
-                    .observed_generation
-                    .store(observed, std::sync::atomic::Ordering::SeqCst);
+                match &paths {
+                    ScopePaths::Root { files } => {
+                        let mut advanced: Vec<(PathBuf, u64)> = Vec::new();
+                        let bump = bump_all_shutdown_admission_generations(files, &mut advanced);
+                        if let Err(error) = bump {
+                            // A failed bump leaves the earlier files
+                            // advanced: restore their pre-bump values
+                            // so an aborted pass leaves no phantom stop
+                            // windows for a raced check to read.
+                            for (file, observed) in &advanced {
+                                let _ = std::fs::write(file, observed.to_string());
+                            }
+                            return Err(error);
+                        }
+                        *state
+                            .observed_root_generations
+                            .lock()
+                            .expect("the generation observations lock") =
+                            advanced.iter().map(|(_, observed)| *observed).collect();
+                    }
+                    ScopePaths::Socket { socket_file, reach } => {
+                        state.observed_scope_generation.store(
+                            read_shutdown_admission_generation(socket_file),
+                            std::sync::atomic::Ordering::SeqCst,
+                        );
+                        let observed: Vec<u64> = reach
+                            .iter()
+                            .map(|path| read_shutdown_admission_generation(path))
+                            .collect();
+                        *state
+                            .observed_root_generations
+                            .lock()
+                            .expect("the generation observations lock") = observed;
+                        bump_shutdown_admission_generation_at(socket_file)?;
+                    }
+                }
                 Ok(Some(()))
             });
             // A failed generation bump leaves the record orphaned on disk
@@ -948,15 +1078,35 @@ impl ShutdownAdmission {
         let _ = self.try_release();
     }
 
-    /// The stop-window generation THIS admission observed at its acquire
-    /// (under the guard, before its own bump): compared against a
-    /// pre-acquire baseline, more than the caller's own single increment
-    /// means a foreign stop raced in between.
+    /// The acquisition's own scope-file generation observed at its
+    /// acquire (under the guard, before its own bump): a coordinator
+    /// comparing its drive's value against its rollback's re-acquire
+    /// detects exactly the foreign windows for the SAME socket; another
+    /// daemon's restart window never registers.
     #[must_use]
-    pub fn observed_generation(&self) -> u64 {
+    pub fn observed_scope_generation(&self) -> u64 {
         self.state
-            .observed_generation
+            .observed_scope_generation
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The root-reach generations THIS admission observed at its acquire
+    /// (under the guard, pre-bump, in the caller's key order): a
+    /// coordinator comparing its drive's values against its rollback's
+    /// re-acquire detects a completed CLI pass of a state root that can
+    /// stop its daemon by the advance on any entry; a foreign root's
+    /// pass never registers.
+    ///
+    /// # Panics
+    /// Panics when the observations lock is poisoned (the acquire that
+    /// set them died mid-write; no reader exists in that process).
+    #[must_use]
+    pub fn observed_root_generations(&self) -> Vec<u64> {
+        self.state
+            .observed_root_generations
+            .lock()
+            .expect("the generation observations lock")
+            .clone()
     }
 }
 
@@ -1223,8 +1373,14 @@ mod tests {
     fn an_acquired_admission_renews_and_releases() {
         let registry = tempfile::tempdir().expect("registry root");
         let path = shutdown_admission_path(registry.path());
-        let mut admission =
-            ShutdownAdmission::acquire_in(registry.path()).expect("acquire the window");
+        let default_socket = registry.path().join("default.sock");
+        let mut admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("acquire the window");
         assert!(
             read_active_shutdown_admission(registry.path())
                 .expect("read")
@@ -1262,7 +1418,14 @@ mod tests {
     #[test]
     fn acquire_blocks_while_another_window_is_active() {
         let registry = tempfile::tempdir().expect("registry root");
-        let mut first = ShutdownAdmission::acquire_in(registry.path()).expect("first window");
+        let default_socket = registry.path().join("default.sock");
+        let mut first = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("first window");
 
         let (armed_tx, armed_rx) = std::sync::mpsc::channel::<()>();
         let registry_dir = registry.path().to_path_buf();
@@ -1271,7 +1434,13 @@ mod tests {
             // The scope end releases the second window (the TS finally),
             // so the bounded window below can only be crossed by an
             // acquire that truly blocked on the first.
-            let _held = ShutdownAdmission::acquire_in(&registry_dir)?;
+            let default_socket = registry_dir.join("default.sock");
+            let _held = ShutdownAdmission::acquire_in(
+                &registry_dir,
+                ShutdownScope::Root {
+                    keys: vec![&default_socket],
+                },
+            )?;
             Ok(())
         });
 
@@ -1304,8 +1473,14 @@ mod tests {
     fn a_foreign_record_loses_the_renewal_but_a_stall_keeps_ours() {
         let registry = tempfile::tempdir().expect("registry root");
         let path = shutdown_admission_path(registry.path());
-        let mut admission =
-            ShutdownAdmission::acquire_in(registry.path()).expect("acquire the window");
+        let default_socket = registry.path().join("default.sock");
+        let mut admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("acquire the window");
         // Another holder replaces our record (an expired one, so the next
         // acquire's active read reclaims it instead of blocking on it):
         // the admission is lost.
@@ -1327,7 +1502,14 @@ mod tests {
         // A merely-elapsed lease of a still-ours record re-arms (the
         // blocked-holder rule), and an unreadable record keeps the
         // admission (a guard/filesystem failure is not loss).
-        let mut second = ShutdownAdmission::acquire_in(registry.path()).expect("second window");
+        let default_socket = registry.path().join("default.sock");
+        let mut second = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("second window");
         assert!(second.assert_or_renew().is_ok());
         second.release();
     }
@@ -1396,42 +1578,318 @@ mod tests {
     #[test]
     fn the_once_acquire_never_queues_behind_a_held_window() {
         let registry = tempfile::tempdir().expect("registry root");
-        let admission = ShutdownAdmission::acquire_in(registry.path()).expect("hold the window");
+        let default_socket = registry.path().join("default.sock");
+        let admission = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: vec![&default_socket],
+            },
+        )
+        .expect("hold the window");
         assert!(
-            ShutdownAdmission::acquire_in_once(registry.path()).is_err(),
+            ShutdownAdmission::acquire_in_once(
+                registry.path(),
+                ShutdownScope::Root {
+                    keys: vec![&default_socket],
+                },
+            )
+            .is_err(),
             "a held window is refused at once, never queued"
         );
         drop(admission);
         assert!(
-            ShutdownAdmission::acquire_in_once(registry.path()).is_ok(),
+            ShutdownAdmission::acquire_in_once(
+                registry.path(),
+                ShutdownScope::Root {
+                    keys: vec![&default_socket],
+                },
+            )
+            .is_ok(),
             "the freed window acquires at once"
         );
     }
-    /// The admission handle reports the generation OBSERVED at its
+    /// The admission handle reports the generations OBSERVED at its
     /// acquire (under the guard, before its own bump): a caller comparing
     /// a later acquire against this baseline detects exactly the foreign
     /// stops that opened in between - never one that completed before.
+    /// The socket lives in its root's socket dir, so its reach track is
+    /// the socket-dir file a CLI pass of that root bumps.
     #[test]
     fn the_admission_reports_its_observed_generation() {
         let registry = tempfile::tempdir().expect("registry root");
-        // An earlier holder bumps the counter (its acquire observes the
-        // pre-bump value 0).
-        let earlier = ShutdownAdmission::acquire_in(registry.path()).expect("first window");
-        assert_eq!(earlier.observed_generation(), 0);
+        let socket_dir = registry.path().join("sockets");
+        std::fs::create_dir_all(&socket_dir).expect("mkdir the socket dir");
+        let socket = socket_dir.join("daemon.sock");
+        // The discovery layer computed this socket's reach keys: it
+        // sits in the root's socket dir (never-touch excluded there).
+        let reach_keys = vec![socket_dir.as_path()];
+        // An earlier socket-scoped holder bumps the socket track (its
+        // acquire observes the pre-bump value 0; the reach track stays
+        // untouched - a coordinator window never bumps the reach files).
+        let earlier = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &socket,
+                keys: reach_keys.clone(),
+            },
+        )
+        .expect("first window");
+        assert_eq!(earlier.observed_scope_generation(), 0);
+        assert_eq!(earlier.observed_root_generations(), vec![0]);
         drop(earlier);
-        // The next acquire observes the earlier holder's bump.
-        let later = ShutdownAdmission::acquire_in(registry.path()).expect("second window");
+        // The next acquire for the SAME socket observes the earlier
+        // holder's bump; the raced-shutdown arithmetic reads `> baseline
+        // + 1` as a foreign same-socket window, so exactly one bump is
+        // the no-race case.
+        let later = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &socket,
+                keys: reach_keys.clone(),
+            },
+        )
+        .expect("second window");
         assert_eq!(
-            later.observed_generation(),
+            later.observed_scope_generation(),
             1,
             "the observation is the pre-bump counter value"
         );
-        // The raced-shutdown arithmetic: with no foreign stop, the next
-        // acquire observes exactly one more (the earlier holder's own
-        // bump) - `> baseline + 1` is what detects a foreign stop.
         drop(later);
-        let third = ShutdownAdmission::acquire_in(registry.path()).expect("third window");
-        assert_eq!(third.observed_generation(), 2);
+        let third = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &socket,
+                keys: reach_keys.clone(),
+            },
+        )
+        .expect("third window");
+        assert_eq!(third.observed_scope_generation(), 2);
+        assert_eq!(
+            third.observed_root_generations(),
+            vec![0],
+            "no coordinator window ever advances the reach track"
+        );
+    }
+
+    /// The raced tracks a coordinator for THIS socket compares: a window
+    /// for a DIFFERENT socket bumps neither this socket's own track nor
+    /// its reach track, and a CLI pass of a state root that cannot reach
+    /// this socket (its agent dir does not contain the socket) bumps none
+    /// of them either. Only a pass of OUR root - or any pass that can
+    /// stop the default socket - advances what we see.
+    #[test]
+    fn another_daemons_window_never_registers_on_this_sockets_tracks() {
+        let registry = tempfile::tempdir().expect("registry root");
+        // Two roots share one registry: their agent dirs differ, and our
+        // daemon's socket lives inside OUR agent dir (a pass of a
+        // foreign root cannot stop it).
+        let our_dir = registry.path().join("agent-a");
+        let foreign_dir = registry.path().join("agent-b");
+        std::fs::create_dir_all(&our_dir).expect("mkdir our agent dir");
+        std::fs::create_dir_all(&foreign_dir).expect("mkdir the foreign agent dir");
+        let our_socket_dir = registry.path().join("sockets-a");
+        let foreign_socket_dir = registry.path().join("sockets-b");
+        std::fs::create_dir_all(&our_socket_dir).expect("mkdir our socket dir");
+        std::fs::create_dir_all(&foreign_socket_dir).expect("mkdir their socket dir");
+        let our_default = our_socket_dir.join("default.sock");
+        let foreign_default = foreign_socket_dir.join("default.sock");
+        // The discovery layer computed each side's reach keys: our
+        // socket sits deeper inside our agent dir (not a default socket,
+        // not in any socket dir), so its only reach key is the agent
+        // dir; the pass keys are each root's whole trio.
+        let our_reach_keys = vec![our_dir.as_path()];
+        let foreign_reach_keys = vec![foreign_dir.as_path()];
+        let our_pass_keys = vec![
+            our_default.as_path(),
+            our_socket_dir.as_path(),
+            our_dir.as_path(),
+        ];
+        let foreign_pass_keys = vec![
+            foreign_default.as_path(),
+            foreign_socket_dir.as_path(),
+            foreign_dir.as_path(),
+        ];
+        let ours = our_dir.join("sessions").join("agent.sock");
+        let theirs = foreign_dir.join("sessions").join("agent.sock");
+
+        let drive = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &ours,
+                keys: our_reach_keys.clone(),
+            },
+        )
+        .expect("our window");
+        assert_eq!(drive.observed_scope_generation(), 0);
+        assert_eq!(drive.observed_root_generations(), vec![0]);
+        drop(drive);
+
+        // A window for another daemon of a foreign root acquires in the
+        // gap: it bumps only its own socket's file.
+        let foreign = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &theirs,
+                keys: foreign_reach_keys.clone(),
+            },
+        )
+        .expect("their window");
+        assert_eq!(
+            foreign.observed_scope_generation(),
+            0,
+            "their socket track starts at its own zero"
+        );
+        assert_eq!(
+            foreign.observed_root_generations(),
+            vec![0],
+            "their reach track starts at its own zero"
+        );
+        drop(foreign);
+
+        // Our re-acquire observes neither their window nor any pass.
+        let rollback = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &ours,
+                keys: our_reach_keys.clone(),
+            },
+        )
+        .expect("our re-acquire");
+        assert_eq!(
+            rollback.observed_scope_generation(),
+            1,
+            "only our own first window's bump is on our track"
+        );
+        assert_eq!(
+            rollback.observed_root_generations(),
+            vec![0],
+            "their window never touched our reach track"
+        );
+        drop(rollback);
+
+        // A CLI pass of the foreign root completes in the gap: it bumps
+        // only ITS root's reach files - our agent dir's counter is not
+        // one of them, so the failed update of OUR daemon still rolls
+        // back behind it.
+        let foreign_pass = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: foreign_pass_keys,
+            },
+        )
+        .expect("the foreign root's CLI pass");
+        drop(foreign_pass);
+        let after_foreign_pass = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &ours,
+                keys: our_reach_keys.clone(),
+            },
+        )
+        .expect("re-acquire after the foreign pass");
+        assert_eq!(
+            after_foreign_pass.observed_root_generations(),
+            vec![0],
+            "a pass that cannot stop our daemon never registers"
+        );
+        drop(after_foreign_pass);
+
+        // A CLI pass of OUR root completes: it bumps our agent dir's
+        // counter, and the same re-acquire now sees the raced shutdown.
+        let our_pass = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root {
+                keys: our_pass_keys,
+            },
+        )
+        .expect("our root's CLI pass");
+        drop(our_pass);
+        let after_our_pass = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &ours,
+                keys: our_reach_keys,
+            },
+        )
+        .expect("re-acquire after our pass");
+        assert_eq!(
+            after_our_pass.observed_root_generations(),
+            vec![1],
+            "a pass that can stop our daemon is what the coordinator detects"
+        );
+    }
+
+    /// A daemon on the DEFAULT socket is reachable by every root's CLI
+    /// pass (the shared socket dir and default path), so its coordinator
+    /// watches the shared reach tracks: any pass's bump is a raced
+    /// shutdown for it.
+    #[test]
+    fn a_default_socket_coordinator_sees_every_cli_pass() {
+        let registry = tempfile::tempdir().expect("registry root");
+        let shared_dir = registry.path().join("sockets");
+        std::fs::create_dir_all(&shared_dir).expect("mkdir the shared socket dir");
+        let default_socket = shared_dir.join("daemon.sock");
+        let agent_a = registry.path().join("agent-a");
+        let agent_b = registry.path().join("agent-b");
+        std::fs::create_dir_all(&agent_a).expect("mkdir agent a");
+        std::fs::create_dir_all(&agent_b).expect("mkdir agent b");
+        // The discovery layer computed the keys: a coordinator on the
+        // shared default socket names the default and socket-dir keys
+        // (its own socket file IS the default key, so the admission
+        // filters it out of reach - the scope track carries it), and
+        // every root's pass bumps the shared default and socket dir.
+        let reach_keys = vec![default_socket.as_path(), shared_dir.as_path()];
+        let pass_keys_b = vec![
+            default_socket.as_path(),
+            shared_dir.as_path(),
+            agent_b.as_path(),
+        ];
+
+        let drive = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &default_socket,
+                keys: reach_keys.clone(),
+            },
+        )
+        .expect("our window on the default socket");
+        assert_eq!(
+            drive.observed_root_generations(),
+            vec![0],
+            "the socket's own file (the default key) never rides the reach track - the scope track carries it"
+        );
+        assert_eq!(drive.observed_scope_generation(), 0);
+        drop(drive);
+
+        // A CLI pass of the OTHER root can stop the shared default
+        // socket: its bump of the shared socket-dir file is visible on
+        // our reach track, and its bump of the default file (our scope
+        // file, already carrying our own window's bump) on the scope
+        // track - the raced check sees the pass on either.
+        let foreign_pass = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Root { keys: pass_keys_b },
+        )
+        .expect("the foreign root's CLI pass");
+        drop(foreign_pass);
+        let after = ShutdownAdmission::acquire_in(
+            registry.path(),
+            ShutdownScope::Socket {
+                socket: &default_socket,
+                keys: reach_keys,
+            },
+        )
+        .expect("re-acquire after the foreign pass");
+        assert_eq!(
+            after.observed_root_generations(),
+            vec![1],
+            "the pass's socket-dir bump registers on the reach track"
+        );
+        assert_eq!(
+            after.observed_scope_generation(),
+            2,
+            "our own bump plus the pass's default-file bump ride the scope track"
+        );
     }
 
     #[test]

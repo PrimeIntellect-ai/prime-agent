@@ -147,6 +147,68 @@ fn inside(directory: Option<&Path>, parent: &Path) -> bool {
     }
 }
 
+/// The raced-stop reach keys of a daemon socket in this state root: the
+/// root's default socket, socket dir, and agent dir counters its socket
+/// actually matches (`state_root_matches`'s own predicates), with the
+/// never-touch exclusion applied first - a stop that can never touch
+/// this socket registers on nothing, so a daemon in a protected dir
+/// never reads a CLI pass as its concurrent shutdown.
+#[must_use]
+pub(crate) fn shutdown_reach_keys<'a>(
+    socket_path: &Path,
+    root: &'a DaemonStateRoot,
+) -> Vec<&'a Path> {
+    #[cfg(windows)]
+    {
+        // Windows daemons share one named pipe per machine, so every
+        // stop window can stop every daemon: the one reach key is the
+        // pipe (the default path) itself.
+        let _ = socket_path;
+        vec![root.default_socket_path.as_path()]
+    }
+    #[cfg(not(windows))]
+    {
+        if is_never_touch(socket_path) {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        if socket_path == root.default_socket_path {
+            keys.push(root.default_socket_path.as_path());
+        }
+        if socket_path.parent() == Some(&root.socket_dir) {
+            keys.push(root.socket_dir.as_path());
+        }
+        if inside(socket_path.parent(), &root.agent_dir) {
+            keys.push(root.agent_dir.as_path());
+        }
+        keys
+    }
+}
+
+/// The raced-stop reach keys a CLI pass of this root bumps: the same
+/// trio, each key excluded when never-touch (every daemon matching a
+/// never-touch key is itself never-touch, so no coordinator observes the
+/// key and the pass can stop nothing behind it).
+#[must_use]
+pub(crate) fn shutdown_pass_keys<'a>(root: &'a DaemonStateRoot) -> Vec<&'a Path> {
+    #[cfg(windows)]
+    {
+        // The Windows pass stops the one shared pipe.
+        vec![root.default_socket_path.as_path()]
+    }
+    #[cfg(not(windows))]
+    {
+        [
+            root.default_socket_path.as_path(),
+            root.socket_dir.as_path(),
+            root.agent_dir.as_path(),
+        ]
+        .into_iter()
+        .filter(|key| !is_never_touch(key))
+        .collect()
+    }
+}
+
 /// Worker sockets: `worker-*.sock` in the given socket dir (never the
 /// supervisor's own). The dir comes from the state root, never the ambient env.
 pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bool {
@@ -583,6 +645,89 @@ mod tests {
         assert!(is_never_touch(Path::new("/tmp/prime-agent-1000")));
         assert!(!is_never_touch(Path::new("/tmp")));
         assert!(!is_never_touch(Path::new("/tmp/other/daemon.sock")));
+    }
+
+    /// The raced-stop reach keys mirror the root filter: a socket's keys
+    /// are the root entries it matches, and a never-touch socket (or a
+    /// pass barred from a key) registers on nothing - the raced check
+    /// never reads a stop it cannot receive.
+    #[test]
+    fn shutdown_reach_keys_mirror_the_root_filter() {
+        let root = DaemonStateRoot {
+            agent_dir: PathBuf::from("/home/agent"),
+            socket_dir: PathBuf::from("/tmp/sockets"),
+            default_socket_path: PathBuf::from("/tmp/sockets/daemon.sock"),
+        };
+        assert_eq!(
+            shutdown_reach_keys(&root.default_socket_path, &root),
+            vec![
+                root.default_socket_path.as_path(),
+                root.socket_dir.as_path()
+            ],
+            "the default socket matches its default and socket-dir keys"
+        );
+        assert_eq!(
+            shutdown_reach_keys(Path::new("/tmp/sockets/other.sock"), &root),
+            vec![root.socket_dir.as_path()],
+            "a socket-dir socket matches the socket-dir key"
+        );
+        assert_eq!(
+            shutdown_reach_keys(Path::new("/home/agent/deep/agent.sock"), &root),
+            vec![root.agent_dir.as_path()],
+            "an agent-dir socket matches the agent-dir key"
+        );
+        assert!(
+            shutdown_reach_keys(Path::new("/tmp/elsewhere/daemon.sock"), &root).is_empty(),
+            "a socket of no key registers on nothing"
+        );
+    }
+
+    /// A never-touch socket is barred from every stop: no reach keys at
+    /// all, so no CLI pass ever reads as its concurrent shutdown.
+    #[test]
+    fn a_never_touch_socket_has_no_shutdown_reach_keys() {
+        for dir in NEVER_TOUCH_SOCKET_DIRS {
+            let socket = Path::new(dir).join("daemon.sock");
+            let root = DaemonStateRoot {
+                agent_dir: PathBuf::from("/home/agent"),
+                socket_dir: PathBuf::from(dir),
+                default_socket_path: socket.clone(),
+            };
+            assert!(
+                shutdown_reach_keys(&socket, &root).is_empty(),
+                "containment must beat root matching for {socket:?}"
+            );
+        }
+    }
+
+    /// A pass barred from a key (the never-touch dirs) never bumps it:
+    /// the pass keys are the root trio minus the protected entries.
+    #[test]
+    fn a_never_touch_pass_key_is_never_bumped() {
+        let protected = DaemonStateRoot {
+            agent_dir: PathBuf::from("/home/agent"),
+            socket_dir: PathBuf::from("/tmp/prime-agent-1000"),
+            default_socket_path: PathBuf::from("/tmp/prime-agent-1000/daemon.sock"),
+        };
+        assert_eq!(
+            shutdown_pass_keys(&protected),
+            vec![protected.agent_dir.as_path()],
+            "only the unprotected keys are bumped"
+        );
+        let free = DaemonStateRoot {
+            agent_dir: PathBuf::from("/home/agent"),
+            socket_dir: PathBuf::from("/tmp/sockets"),
+            default_socket_path: PathBuf::from("/tmp/sockets/daemon.sock"),
+        };
+        assert_eq!(
+            shutdown_pass_keys(&free),
+            vec![
+                free.default_socket_path.as_path(),
+                free.socket_dir.as_path(),
+                free.agent_dir.as_path(),
+            ],
+            "an unprotected root bumps its whole trio"
+        );
     }
 
     #[test]
