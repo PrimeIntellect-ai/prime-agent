@@ -328,3 +328,28 @@ fn recovery_preserves_blank_lines_accepted_by_normal_readers() {
     assert_eq!(std::fs::read(&store.path).unwrap(), with_blank_lines);
     assert_eq!(SessionFile::open(&store.path).unwrap().entries().len(), 2);
 }
+
+#[test]
+fn recovery_rejects_interior_headers_and_empty_ids_without_changing_bytes() {
+    let (_dir, mut store, target) = fixture();
+    store.child_usage_fault = Some(AppendFault::AfterWrite);
+    assert!(store
+        .append_child_usage_once("stable", &target, child(), None)
+        .is_err());
+    let original = std::fs::read(&store.path).unwrap();
+    let invalid_rows = [
+        json!({"type":"session","version":3,"id":"other","cwd":"/synthetic","timestamp":"2026-10-10T00:00:00Z"}),
+        json!({"type":"future_record","id":"","parentId":"stable","timestamp":"2026-10-10T00:00:00Z"}),
+    ];
+    for invalid in invalid_rows {
+        let mut bytes = original.clone();
+        bytes.extend_from_slice(invalid.to_string().as_bytes());
+        bytes.push(b'\n');
+        std::fs::write(&store.path, &bytes).unwrap();
+        assert!(store
+            .append_child_usage_once("stable", &target, child(), None)
+            .is_err());
+        assert_eq!(std::fs::read(&store.path).unwrap(), bytes);
+        assert_eq!(store.child_usage_pending.len(), 1);
+    }
+}

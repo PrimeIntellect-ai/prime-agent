@@ -195,10 +195,63 @@ fn stale_preloaded_history_cannot_replace_recovered_intents() {
             .kind(),
         io::ErrorKind::WouldBlock
     );
+    let original = std::fs::read(&path).unwrap();
+    let live = serde_json::to_value(&manager.file_entries).unwrap();
+    let complete_rows = rows(&manager);
+    for changed_row in [false, true] {
+        let mut altered = complete_rows.clone();
+        if changed_row {
+            let row = altered
+                .iter_mut()
+                .find(|row| row["id"] == "stable")
+                .unwrap();
+            row["childUsage"]["input"] = serde_json::json!(99);
+        } else {
+            altered.retain(|row| row["id"] != "stable");
+        }
+        let bytes = altered
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            manager
+                .set_session_file(path.clone(), None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(manager.get_session_file(), Some(path.as_path()));
+        assert_eq!(manager.get_leaf_id(), Some("stable"));
+        assert_eq!(serde_json::to_value(&manager.file_entries).unwrap(), live);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
+    }
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        manager
+            .set_session_file(path.clone(), None)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(manager.get_session_file(), Some(path.as_path()));
+    assert_eq!(serde_json::to_value(&manager.file_entries).unwrap(), live);
+    assert!(!path.exists());
+    std::fs::write(&path, original).unwrap();
     manager.set_session_file(path, None).unwrap();
-    let fresh = manager.file_entries.clone();
-    manager.adopt_entries(fresh).unwrap();
     assert!(manager.get_entry_by_id("stable").is_some());
+    // A verified owned reload clears the guard before deliberate branch selection.
+    let selected = manager.get_entry_by_id(&target).unwrap().clone();
+    manager.adopt_entries(vec![selected]).unwrap();
+    assert_eq!(manager.get_leaf_id(), Some(target.as_str()));
+    assert_eq!(usage(&manager, &target).input, 1010);
+    assert_eq!(
+        rows(&manager)
+            .iter()
+            .filter(|row| row["id"] == "stable")
+            .count(),
+        1
+    );
 }
 
 #[test]

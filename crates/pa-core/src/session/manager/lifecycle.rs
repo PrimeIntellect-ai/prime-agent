@@ -365,7 +365,16 @@ impl SessionManager {
                     ));
                 }
                 crate::session::apply_child_usage_attributions(&mut entries);
+                let same_session = entries.iter().any(|entry| matches!(entry, FileEntry::Header { header } if header.id == self.session_id));
+                if same_path || same_session {
+                    self.before_history_replacement(&entries)?;
+                }
                 preloaded_entries = Some(entries);
+            } else if same_path {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "fresh owned history disappeared before recovery verification",
+                ));
             }
         }
         self.set_session_file_unchecked(session_file, preloaded_entries);

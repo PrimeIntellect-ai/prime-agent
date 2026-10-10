@@ -175,6 +175,10 @@ impl SessionFile {
             } else {
                 // Validate known schemas too: the normal daemon reader intentionally is lenient.
                 let typed: pa_types::session::FileEntry = serde_json::from_value(value.clone())?;
+                ensure!(
+                    !matches!(typed, pa_types::session::FileEntry::Header { .. }),
+                    "repeated session header in recovery transcript"
+                );
                 let known_kind = matches!(
                     value.get("type").and_then(serde_json::Value::as_str),
                     Some(
@@ -199,6 +203,10 @@ impl SessionFile {
                     "invalid known record in recovery transcript"
                 );
                 let entry: SessionEntry = serde_json::from_value(value)?;
+                ensure!(
+                    !entry.id.is_empty(),
+                    "empty record ID in recovery transcript"
+                );
                 ensure!(
                     !by_id.contains_key(&entry.id),
                     "duplicate ID in recovery transcript"
