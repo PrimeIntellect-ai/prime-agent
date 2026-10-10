@@ -57,6 +57,10 @@ class RLMSubagentActivity:
 
 @dataclass(frozen=True)
 class RLMSubagent:
+    """One direct child row: `status` is `running` | `completed` | `error` |
+    `cancelled` (a cancelled child keeps its status verbatim in the
+    registry row, the TS-era semantics)."""
+
     rlm_child_id: str
     active_session_id: str | None
     session_id: str | None
@@ -82,7 +86,11 @@ class RLMProgressNoteResult:
 
 @dataclass(frozen=True)
 class RLMChildResult:
-    """Terminal or in-progress state of one direct child, from `collect()`."""
+    """Terminal or in-progress state of one direct child, from `collect()`.
+
+    `answer_text` is the child's full final answer (the settle-binding
+    lane, host-bounded); `answer_preview` is the compact roster preview.
+    """
 
     rlm_child_id: str
     session_name: str | None
@@ -90,10 +98,11 @@ class RLMChildResult:
     status: str
     settled: bool
     answer_preview: str | None
-    error: str | None
-    duration_ms: int | None
-    tool_use_count: int | None
-    replied_since_task: bool | None
+    answer_text: str | None = None
+    error: str | None = None
+    duration_ms: int | None = None
+    tool_use_count: int | None = None
+    replied_since_task: bool | None = None
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
@@ -313,7 +322,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         raise RuntimeError(f"{operation} entry is missing session_name")
     if not isinstance(session_dir, str) or not session_dir:
         raise RuntimeError(f"{operation} entry is missing session_dir")
-    if status not in {"running", "completed", "error"}:
+    if status not in {"running", "completed", "error", "cancelled"}:
         raise RuntimeError(f"{operation} entry has invalid status")
     return RLMSubagent(
         rlm_child_id=child_id,
@@ -396,6 +405,7 @@ def _child_result_from_payload(payload: Any) -> RLMChildResult:
         status=status,
         settled=settled,
         answer_preview=_optional_str("answer_preview"),
+        answer_text=_optional_str("answer_text"),
         error=_optional_str("error"),
         duration_ms=_optional_int("duration_ms"),
         tool_use_count=_optional_int("tool_use_count"),
