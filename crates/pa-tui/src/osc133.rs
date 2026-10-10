@@ -2,7 +2,7 @@
 //! standard prompt/output zone sequences so shell-integration users get working jumps between turns
 //! — `A` starts a marked row, `B` then `C` land at the start of the component's last row. The
 //! sequences are zero-width: `width` skips them, the ratatui paint path strips them from cell
-//! content, and `app::draw` re-emits them per row after the frame is painted.
+//! content. Only the main-screen transcript flush emits them to the terminal.
 
 use crate::Line;
 
