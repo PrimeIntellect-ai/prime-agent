@@ -125,6 +125,7 @@ impl AgentSessionEngine {
         // unseeded (None keeps the TS default "one-at-a-time").
         let queue_modes = std::sync::Mutex::new((None, None));
         Ok(Self {
+            decision_replies: Arc::default(),
             runtime,
             config,
             mcp,
@@ -493,6 +494,9 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
+            // The Decision API follows the adopted context: the provider
+            // row the restored branch carries becomes the session's switch
+            // before the engine is installed and any turn runs.
             // A moved branch restores its own park (the early return would leave the previous
             // branch's park armed).
             self.restore_quota_park(built).await;
@@ -776,6 +780,31 @@ impl AgentSessionEngine {
             self.children.clone(),
         ));
         let mut handlers = HostRequestHandlers::default();
+        let replies = Arc::clone(&self.decision_replies);
+        handlers.register(
+            "decision_api.decision",
+            pa_core::kernel::shared::host_handler(move |payload| {
+                let replies = Arc::clone(&replies);
+                Box::pin(async move {
+                    let name = payload.data["name"].as_str().ok_or_else(|| {
+                        anyhow::anyhow!("decision_api.decision requires a child name")
+                    })?;
+                    let mut replies = replies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if payload.data["close"] == true {
+                        replies.remove(name);
+                        Ok(Value::Null)
+                    } else {
+                        Ok(replies
+                            .entry(name.to_string())
+                            .or_default()
+                            .take()
+                            .unwrap_or(Value::Null))
+                    }
+                })
+            }),
+        );
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
         self.register_bash_notice_host_handlers(&mut handlers);
@@ -814,7 +843,7 @@ impl AgentSessionEngine {
         })
     }
 
-    async fn build_session(&self, model: &Model) -> anyhow::Result<CoreSessionEngine> {
+    pub(super) async fn build_session(&self, model: &Model) -> anyhow::Result<CoreSessionEngine> {
         let agent_model =
             json_round_trip(model).ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
         // The live queue-delivery modes: read under a scoped lock (a std
@@ -872,6 +901,7 @@ impl AgentSessionEngine {
             }
             None => pa_core::session::manager::SessionManager::in_memory(&cwd),
         };
+
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
         }
@@ -998,5 +1028,92 @@ impl AgentSessionEngine {
                 engine.session.agent().set_follow_up_mode(mode);
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod decision_reply_tests {
+    use super::*;
+    use crate::worker::{Worker, WorkerConfig};
+    use pa_core::kernel::shared::HostRequestPayload;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn child_decision_replies_reach_the_loop_without_queuing_a_parent_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = Worker::new(
+            WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: dir.path().join("supervisor.sock"),
+                token: "token".into(),
+                worker_instance_id: String::new(),
+                active_session_id: "parent".into(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: None,
+                decision_child: false,
+            },
+            /*registration*/ None,
+        );
+        let created = worker
+            .dispatch("create", &json!({"noSession":true,"cwd":dir.path()}))
+            .await;
+        assert!(created.success);
+        let handlers = worker
+            .agent_engine
+            .as_ref()
+            .unwrap()
+            .extra_host_handlers()
+            .unwrap();
+        let poll = handlers
+            .get("decision_api.decision")
+            .expect("decision route registered");
+        let call = |data| {
+            poll(HostRequestPayload {
+                data,
+                cell_source_code: None,
+            })
+        };
+        assert_eq!(
+            call(json!({"name":"system-1-test"})).await.unwrap(),
+            Value::Null
+        );
+        let decision = json!({
+            "type":"decision_api.decision","seq":0,
+            "decision":{"action":"left","confidence":0.9}
+        });
+        let mut delivery = json!({"message":decision.to_string(),"sender":{
+            "activeSessionId":"child","sessionName":"system-1-test",
+            "parentActiveSessionId":"parent","runtimeKind":"subagent"
+        }});
+        worker.core.lock().unwrap().busy = true;
+        assert!(worker.handle_worker_deliver_message(&delivery).success);
+        assert_eq!(
+            call(json!({"name":"system-1-test"})).await.unwrap(),
+            decision
+        );
+        assert_eq!(
+            call(json!({"name":"system-1-test"})).await.unwrap(),
+            Value::Null
+        );
+        assert!(worker.core.lock().unwrap().steering.is_empty());
+        assert!(worker.core.lock().unwrap().follow_up.is_empty());
+        worker.core.lock().unwrap().busy = false;
+        call(json!({"name":"system-1-test","close":true}))
+            .await
+            .unwrap();
+        assert!(worker.handle_worker_deliver_message(&delivery).success);
+        assert!(
+            worker.core.lock().unwrap().steering.is_empty(),
+            "a closed decision child must not wake the parent"
+        );
+        delivery["sender"]["parentActiveSessionId"] = json!("another-parent");
+        assert!(worker.handle_worker_deliver_message(&delivery).success);
+        assert_eq!(
+            worker.core.lock().unwrap().steering.len(),
+            1,
+            "other agents retain normal routing"
+        );
     }
 }
