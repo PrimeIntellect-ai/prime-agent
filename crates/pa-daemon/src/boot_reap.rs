@@ -63,6 +63,54 @@ pub(crate) enum ReapOutcome {
     FrozeExclusionJoin,
 }
 
+/// The reap's fan-out: one future per target, with every sidecar
+/// acquisition serialized on the shared gate (sibling steps queue
+/// instead of burning their flock budgets against each other) while the
+/// escalation WAITS stay fully concurrent.
+async fn fan_out_targets(
+    supervisor: &Arc<Supervisor>,
+    targets: &[ReapTarget],
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+    exclusion_path: &(dyn Fn() -> Option<std::path::PathBuf> + Send + Sync),
+    sidecar_gate: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) -> Vec<(ReapTarget, ReapOutcome)> {
+    futures::future::join_all(
+        targets
+            .iter()
+            .map({
+                let gate = std::sync::Arc::clone(sidecar_gate);
+                move |target| {
+                    let gate = std::sync::Arc::clone(&gate);
+                    async move {
+                        // The freeze probe runs inside stop_target before
+                        // every signal; a top-level check here skips even
+                        // the scan side of a target once the lease is
+                        // gone.
+                        if frozen() {
+                            return (target.clone(), ReapOutcome::Froze);
+                        }
+                        let outcome =
+                            stop_target(target, frozen, exclusion_path().as_deref(), &gate).await;
+                        supervisor.log_line(&format!(
+                            "boot reap: {} pid {} (start id {:?}) - {:?}",
+                            match target.kind {
+                                ReapKind::Worker => "leftover worker",
+                                #[cfg(target_os = "linux")]
+                                ReapKind::Supervisor => "wedged supervisor",
+                            },
+                            target.pid,
+                            target.start_id,
+                            outcome
+                        ));
+                        (target.clone(), outcome)
+                    }
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await
+}
+
 /// Reap the same-socket predecessors before a client or adoption races the reap.
 pub(crate) async fn reap_predecessors(
     supervisor: &Arc<Supervisor>,
@@ -89,9 +137,17 @@ pub(crate) async fn reap_predecessors(
     #[cfg(target_os = "linux")]
     let reap_exclusion_path = pa_core::platform::LockDir::path_for(&socket_path);
     #[cfg(target_os = "linux")]
-    let exclusion_path = || Some(reap_exclusion_path.as_path());
+    let exclusion_path = || Some(reap_exclusion_path.clone());
     #[cfg(not(target_os = "linux"))]
     let exclusion_path = || None;
+    // The sidecar-acquisition gate: the fan-out's sibling steps QUEUE on
+    // this mutex instead of burning their own acquisition budgets
+    // against each other (the sidecar's flock retry sleeps in 5ms
+    // windows - a leftover-process burst would otherwise starve a
+    // sibling's 50ms budget into a spurious Froze and abort the whole
+    // ownership boot on an intact lease). Each queued step's hold is
+    // microseconds (the signal itself), so the queue drains fast.
+    let sidecar_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     // The adoption pass's business, never the reap's: this daemon's own descriptors,
     // protected while the identity still matches (none recorded stays protected).
     let protected: HashSet<u32> =
@@ -108,32 +164,15 @@ pub(crate) async fn reap_predecessors(
         "boot reap: {} same-socket predecessor process(es) to clear",
         targets.len()
     ));
-    // Concurrent: a stuck target's escalation must not serialize the reap.
-    let outcomes = futures::future::join_all(
-        targets
-            .iter()
-            .map(|target| async move {
-                // The freeze probe runs inside stop_target before every
-                // signal; a top-level check here skips even the scan
-                // side of a target once the lease is gone.
-                if frozen() {
-                    return (target.clone(), ReapOutcome::Froze);
-                }
-                let outcome = stop_target(target, &frozen, exclusion_path()).await;
-                supervisor.log_line(&format!(
-                    "boot reap: {} pid {} (start id {:?}) - {:?}",
-                    match target.kind {
-                        ReapKind::Worker => "leftover worker",
-                        #[cfg(target_os = "linux")]
-                        ReapKind::Supervisor => "wedged supervisor",
-                    },
-                    target.pid,
-                    target.start_id,
-                    outcome
-                ));
-                (target.clone(), outcome)
-            })
-            .collect::<Vec<_>>(),
+    // Concurrent: a stuck target's escalation must not serialize the
+    // reap (only the instant signal steps serialize on the sidecar
+    // gate).
+    let outcomes = fan_out_targets(
+        supervisor,
+        &targets,
+        &frozen,
+        &exclusion_path,
+        &sidecar_gate,
     )
     .await;
     // The dead workers' socket files leave with them (a killed process
@@ -166,7 +205,6 @@ pub(crate) async fn reap_predecessors(
             {
                 let held = match exclusion_path() {
                     Some(path) => {
-                        let path = path.to_path_buf();
                         match tokio::task::spawn_blocking(move || {
                             pa_core::platform::try_reclaim_guard(&path, Duration::from_millis(50))
                         })
@@ -238,6 +276,7 @@ pub(crate) async fn reap_predecessors(
 /// its routed `shutdown`) on the `STOP_FORCE_TIMEOUT` budget, not the boot reap's fast
 /// verify. `None` as the start id trusts liveness alone.
 pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutcome {
+    let private_gate = tokio::sync::Mutex::new(());
     stop_target_within(
         &ReapTarget {
             pid,
@@ -249,6 +288,7 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
         STOP_FORCE_TIMEOUT,
         &|| false,
         None,
+        &private_gate,
     )
     .await
 }
@@ -279,7 +319,8 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
         targets
             .iter()
             .map(|target| async move {
-                let outcome = stop_target(target, &|| false, None).await;
+                let private_gate = tokio::sync::Mutex::new(());
+                let outcome = stop_target(target, &|| false, None, &private_gate).await;
                 supervisor.log_line(&format!(
                     "give-up sweep: leftover worker pid {} (start id {:?}) of {worker_id} - {:?}",
                     target.pid, target.start_id, outcome
@@ -323,8 +364,17 @@ async fn stop_target(
     target: &ReapTarget,
     frozen: &(dyn Fn() -> bool + Send + Sync),
     exclusion_path: Option<&Path>,
+    sidecar_gate: &tokio::sync::Mutex<()>,
 ) -> ReapOutcome {
-    stop_target_within(target, TERM_GRACE, KILL_VERIFY, frozen, exclusion_path).await
+    stop_target_within(
+        target,
+        TERM_GRACE,
+        KILL_VERIFY,
+        frozen,
+        exclusion_path,
+        sidecar_gate,
+    )
+    .await
 }
 
 /// One signal under the step-scoped reclaim-sidecar exclusion. The
@@ -356,7 +406,12 @@ async fn guarded_signal(
     signal: pa_core::platform::process::Signal,
     exclusion_path: Option<&Path>,
     frozen: &(dyn Fn() -> bool + Send + Sync),
+    sidecar_gate: &tokio::sync::Mutex<()>,
 ) -> GuardedSignal {
+    // The sidecar-acquisition queue: sibling steps wait HERE (no budget
+    // burn) instead of contending their flock retry windows against
+    // each other.
+    let _serial = sidecar_gate.lock().await;
     #[cfg(not(target_os = "linux"))]
     {
         // No sidecar primitive on this platform: the probe is the only
@@ -426,6 +481,7 @@ async fn stop_target_within(
     kill_verify: Duration,
     frozen: &(dyn Fn() -> bool + Send + Sync),
     exclusion_path: Option<&Path>,
+    sidecar_gate: &tokio::sync::Mutex<()>,
 ) -> ReapOutcome {
     // The exclusion holds exist only where the sidecar primitive does
     // (Linux); elsewhere the parameter is inert.
@@ -462,6 +518,7 @@ async fn stop_target_within(
         pa_core::platform::process::Signal::Term,
         exclusion_path,
         frozen,
+        sidecar_gate,
     )
     .await
     {
@@ -482,6 +539,7 @@ async fn stop_target_within(
                 pa_core::platform::process::Signal::Kill,
                 exclusion_path,
                 frozen,
+                sidecar_gate,
             )
             .await
             {
@@ -1043,7 +1101,13 @@ mod tests {
             pa_core::platform::process::open_pidfd(pid).is_ok(),
             "the kernel-held handle opens"
         );
-        let outcome = stop_target(&target(pid), &|| false, None).await;
+        let outcome = stop_target(
+            &target(pid),
+            &|| false,
+            None,
+            &(tokio::sync::Mutex::new(())),
+        )
+        .await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
     }
@@ -1086,7 +1150,13 @@ mod tests {
         let pid = child.id();
         let _ = child.wait();
         assert_eq!(
-            stop_target(&target(pid), &|| false, None).await,
+            stop_target(
+                &target(pid),
+                &|| false,
+                None,
+                &(tokio::sync::Mutex::new(()))
+            )
+            .await,
             ReapOutcome::AlreadyGone
         );
     }
@@ -1101,7 +1171,7 @@ mod tests {
         let mut stale = target(pid);
         stale.start_id = stale.start_id.map(|id| id + "recycled");
         assert_eq!(
-            stop_target(&stale, &|| false, None).await,
+            stop_target(&stale, &|| false, None, &(tokio::sync::Mutex::new(()))).await,
             ReapOutcome::AlreadyGone
         );
         assert!(
@@ -1111,7 +1181,13 @@ mod tests {
         let mut unobservable = target(pid);
         unobservable.start_id = None;
         assert_eq!(
-            stop_target(&unobservable, &|| false, None).await,
+            stop_target(
+                &unobservable,
+                &|| false,
+                None,
+                &(tokio::sync::Mutex::new(()))
+            )
+            .await,
             ReapOutcome::AlreadyGone,
             "an unverifiable identity is never signaled"
         );
@@ -1346,7 +1422,7 @@ mod tests {
             worker_socket: None,
             kind: ReapKind::Worker,
         };
-        let outcome = stop_target(&target, &|| true, None).await;
+        let outcome = stop_target(&target, &|| true, None, &(tokio::sync::Mutex::new(()))).await;
         assert_eq!(
             outcome,
             ReapOutcome::Froze,
@@ -1392,6 +1468,7 @@ mod tests {
             &target,
             &move || probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1,
             Some(lock_path.as_path()),
+            &(tokio::sync::Mutex::new(())),
         )
         .await;
         assert_eq!(
@@ -1410,5 +1487,80 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_target_burst_cannot_starve_the_shared_sidecar() {
+        // Red-first regression for the fan-out starvation, driving the
+        // PRODUCTION fan-out (fan_out_targets) with isolated targets: a
+        // paced probe (each in-guard recheck holds the sidecar ~10ms - a
+        // slow verification pass) makes each 50ms step budget admit only
+        // ~5 acquisitions, so WITHOUT the shared gate most of a 32-target
+        // burst starves into a spurious Froze on an intact lease; WITH the
+        // production gate every sibling queues and every outcome is Term.
+        // The pacing is bounded arithmetic (a 10ms hold against a 50ms
+        // budget), not a scheduler race.
+        const BURST: usize = 32;
+        let mut children = Vec::new();
+        let mut targets = Vec::new();
+        for _ in 0..BURST {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn a burst target");
+            let pid = child.id();
+            let start_id = crate::lease::get_process_start_id(pid).expect("start id");
+            targets.push(ReapTarget {
+                pid,
+                start_id: Some(start_id),
+                worker_socket: None,
+                kind: ReapKind::Worker,
+            });
+            children.push(child);
+        }
+        let exclusion_dir = tempfile::tempdir().unwrap();
+        let socket_path = exclusion_dir.path().join("daemon.sock");
+        std::fs::write(&socket_path, "probe socket").unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket_path);
+        let sidecar_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let paced = || {
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        };
+        let exclusion_path = move || Some(lock_path.clone());
+        let fixture = tempfile::tempdir().unwrap();
+        let agent_dir = fixture.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            crate::supervisor::Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: fixture.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        );
+        let outcomes = fan_out_targets(
+            &supervisor,
+            &targets,
+            &paced,
+            &exclusion_path,
+            &sidecar_gate,
+        )
+        .await;
+        let starved: Vec<_> = outcomes
+            .iter()
+            .filter(|(_, outcome)| !matches!(outcome, ReapOutcome::Term))
+            .collect();
+        // Reap the children BEFORE the assertion: the red regression
+        // panics here, and leaked live sleeps would bleed into later
+        // tests.
+        for mut child in children {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            starved.is_empty(),
+            "the production fan-out gate must serialize the burst: {starved:?}"
+        );
     }
 }
