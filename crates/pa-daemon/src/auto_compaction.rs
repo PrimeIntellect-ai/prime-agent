@@ -1,7 +1,7 @@
 //! The automatic threshold compaction at the daemon engine's turn boundaries: the TS
 //! `_checkCompaction` threshold arm, fired after every settled turn (`agent_end`) and
 //! before the next admitted prompt (`_runPreTurnCompaction`). The decision is pa-core's
-//! [`AgentSession::auto_compaction_due`]; this module owns the threshold event pair and
+//! [`AgentSession::auto_compaction_now`]; this module owns the threshold event pair and
 //! the persist-and-broadcast contract.
 
 use pa_agent::abort::AbortController;
@@ -46,16 +46,18 @@ impl AgentSessionEngine {
         let run_model = self
             .armed_image_route()
             .map_or_else(|| model.clone(), |route| route.target.model);
-        let due = {
-            let guard = self.session.blocking_lock();
-            match guard.as_deref() {
-                Some(engine) => self
-                    .runtime
-                    .block_on(async { engine.session.auto_compaction_due(&run_model).await }),
-                // No built session: the live context is empty, matching the
-                // TS pre-turn check on a fresh session.
-                None => false,
-            }
+        let api_key = self.resolve_request_api_key(&model);
+        let engine = self.session.blocking_lock().clone();
+        let due = match engine {
+            Some(engine) => self.runtime.block_on(async {
+                engine
+                    .session
+                    .auto_compaction_now(&run_model, &model, api_key.clone())
+                    .await
+            }),
+            // No built session: the live context is empty, matching the
+            // TS pre-turn check on a fresh session.
+            None => false,
         };
         if !due {
             return AutoCompactionRun::NotDue;
@@ -81,7 +83,6 @@ impl AgentSessionEngine {
                 .lock()
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
-        let api_key = self.resolve_request_api_key(&model);
         // The lock covers the clone only; the summarizer call below must not ride it.
         let engine = self.session.blocking_lock().clone();
         let Some(engine) = engine else {
@@ -94,7 +95,7 @@ impl AgentSessionEngine {
             let compact = async {
                 engine
                     .session
-                    .compact(None, &model, api_key, Some(&signal))
+                    .compact_for_run_model(None, &run_model, &model, api_key, Some(&signal))
                     .await
             };
             let outcome = self

@@ -1098,3 +1098,615 @@ fn compact_session_command_emits_the_result_on_success() {
     assert_eq!(rows.len(), 1, "the /compact echo only: {rows:?}");
     assert_eq!(rows[0]["customType"], "session_slash_command");
 }
+
+/// One faux-driven engine over its own tempdir, the test holding its registration.
+fn faux_engine_with_registration(
+    script: &serde_json::Value,
+    reserve_tokens: u64,
+) -> (
+    AgentSessionEngine,
+    tempfile::TempDir,
+    pa_ai::faux::FauxProviderRegistration,
+) {
+    let parsed = pa_ai::faux::script::parse_faux_script(script).expect("faux script parses");
+    let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir_all(dir.path().join("agent")).unwrap();
+    std::fs::write(
+        dir.path().join("agent").join("models.json"),
+        json!({
+            "providers": {
+                "faux": {
+                    "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-faux",
+                    "models": [{
+                        "id": "faux-1", "name": "Faux Model",
+                        "contextWindow": 128_000, "maxTokens": 16_384,
+                    }],
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("agent").join("settings.json"),
+        json!({
+            "defaultProvider": "faux", "defaultModel": "faux-1",
+            "compaction": {
+                "enabled": true, "reserveTokens": reserve_tokens, "keepRecentTokens": 10,
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let engine = AgentSessionEngine::new(AgentEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: dir.path().join("agent"),
+        provider: None,
+        model: None,
+        api_key: None,
+        thinking: None,
+        session_dir: None,
+        session_file: None,
+        faux_script: None,
+        supervisor_link: None,
+        telemetry_disabled: None,
+        cron_store: None,
+        queued_steering_probe: None,
+    })
+    .unwrap();
+    (engine, dir, registration)
+}
+
+/// The reserve landing the measured crossing usage inside the background band.
+fn background_band_reserve(seed_usage: u64, crossing_usage: u64) -> u64 {
+    (2 * (128_000 - FAUX_REQUEST_BUDGET) - seed_usage - crossing_usage) / 6
+}
+
+/// One probe engine over the prompts, returning each turn's measured usage.
+fn probe_usages(prompts: &[String]) -> Vec<u64> {
+    let script = serde_json::json!({
+        "responses": prompts
+            .iter()
+            .map(|_| serde_json::json!({"text": "probe reply"}))
+            .collect::<Vec<_>>(),
+    });
+    let (probe, _probe_dir, _probe_registration) = faux_engine_with_registration(&script, 128_000);
+    let mut usages = Vec::new();
+    for prompt in prompts {
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&probe, prompt.clone(), &mut events);
+        let usage = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
+                _ => None,
+            })
+            .expect("the turn produced usage");
+        usages.push(usage);
+    }
+    usages
+}
+
+/// Wait until the registration served `calls` requests (red-detection bound).
+fn wait_for_calls(registration: &pa_ai::faux::FauxProviderRegistration, calls: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while registration.call_count() < calls {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the background summarize never started: {} calls so far",
+            registration.call_count()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn no_compaction_events(events: &[EngineEvent]) -> bool {
+    !events.iter().any(|event| {
+        matches!(
+            event,
+            EngineEvent::CompactionStart { .. } | EngineEvent::Compaction { .. }
+        )
+    })
+}
+
+fn reply_step(text: &str) -> pa_ai::faux::FauxResponseStep {
+    pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+        text,
+        pa_ai::faux::FauxAssistantMessageOptions::default(),
+    ))
+}
+
+/// Crossing the background watermark starts the summarize in the background
+/// without blocking the next model request; no compaction pair fires.
+#[test]
+fn background_watermark_summarizes_without_blocking_the_next_turn() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "crossing reply"},
+                {"text": "the held summary", "delayMs": 30_000},
+                {"text": "next reply"},
+            ]
+        }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    wait_for_calls(&registration, 3);
+    admit(&engine, "a small next turn".to_string(), &mut events);
+    assert_eq!(
+        assistant_texts(&events),
+        vec![
+            "seed reply".to_string(),
+            "crossing reply".to_string(),
+            "next reply".to_string(),
+        ],
+        "the next model request ran while the summarizer stayed held"
+    );
+    assert_eq!(
+        registration.call_count(),
+        4,
+        "the held summarizer is still the only background call"
+    );
+    assert!(
+        no_compaction_events(&events),
+        "no compaction events while the background summarize holds"
+    );
+    registration.unregister();
+}
+
+/// Within the reserve the boundary joins the in-flight background summary:
+/// the pair commits THAT summary (exactly one summarizer call), and the
+/// next turn runs clean.
+#[test]
+fn reserve_crossing_commits_the_in_flight_background_summary() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let filler = format!("history {}", "x".repeat(320_000));
+    let crossing = format!("crossing {}", "y".repeat(48_000));
+    let reserve_prompt = format!("reserve {}", "z".repeat(180_000));
+    let usages = probe_usages(&["seed turn".to_string(), filler.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        (128_000 - FAUX_REQUEST_BUDGET - usages[1] - 6_000) / 3,
+    );
+    let (summarizer_started, summarizer_started_rx) = std::sync::mpsc::channel::<()>();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+    let held = {
+        let release_rx = std::sync::Arc::clone(&release_rx);
+        move |_: &pa_types::ai::Context,
+              _: Option<&pa_ai::types::StreamOptions>,
+              _: u64,
+              _: &pa_types::ai::Model| {
+            let _ = summarizer_started.send(());
+            let _ = release_rx.lock().expect("release lock").recv();
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "the held summary",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }
+    };
+    registration.set_responses(vec![
+        reply_step("seed reply"),
+        reply_step("filler reply"),
+        reply_step("crossing reply"),
+        pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(held)),
+        reply_step("reserve reply"),
+        reply_step("next reply"),
+    ]);
+    let engine = std::sync::Arc::new(engine);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, filler, &mut events);
+    admit(&engine, crossing, &mut events);
+    summarizer_started_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the background summarize started");
+    let boundary_events: std::sync::Arc<std::sync::Mutex<Vec<EngineEvent>>> =
+        std::sync::Arc::default();
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission = admit_parked(
+        &engine,
+        reserve_prompt,
+        std::sync::Arc::clone(&boundary_events),
+        std::sync::Arc::clone(&started),
+    );
+    wait_for_compaction_start(&started);
+    release.send(()).expect("the held summarizer released");
+    admission.join().expect("the reserve admission settles");
+    let events = boundary_events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let assistant_index = events
+        .iter()
+        .rposition(|event| matches!(event, EngineEvent::AssistantMessage(_)))
+        .expect("the reserve turn answered");
+    let start_index = events
+        .iter()
+        .position(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .expect("the reserve boundary emitted compaction_start");
+    assert!(
+        start_index > assistant_index,
+        "the pair fires at the settled boundary, joining the in-flight summary"
+    );
+    let EngineEvent::AssistantMessage(assistant) = &events[assistant_index] else {
+        unreachable!();
+    };
+    assert_eq!(
+        assistant["content"][0]["text"],
+        serde_json::json!("reserve reply")
+    );
+    let EngineEvent::Compaction { event, .. } = events
+        .iter()
+        .rev()
+        .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .expect("the compaction_end event")
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        event["result"]["summary"],
+        serde_json::json!("the held summary")
+    );
+    assert_eq!(
+        registration.call_count(),
+        5,
+        "the join committed the held summary without a second summarizer call"
+    );
+    let mut next_events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "a small next turn".to_string(), &mut next_events);
+    assert_eq!(
+        assistant_texts(&next_events),
+        vec!["next reply".to_string()]
+    );
+    assert!(
+        no_compaction_events(&next_events),
+        "the join relieved the context; no re-compaction follows"
+    );
+    registration.unregister();
+}
+
+/// A finished background summary commits at the next boundary without a
+/// reserve crossing (the pressure stays in the band).
+#[test]
+fn a_finished_background_summary_commits_at_the_next_boundary() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "crossing reply"},
+                {"text": "the summary"},
+                {"text": "follow-up reply"},
+            ]
+        }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    wait_for_calls(&registration, 3);
+    let mut follow_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a small follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    let starts = follow_events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .count();
+    let ends = follow_events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .count();
+    assert_eq!(
+        (starts, ends),
+        (1, 1),
+        "the finished background summary commits at the boundary"
+    );
+    let EngineEvent::Compaction { event, .. } = follow_events
+        .iter()
+        .rev()
+        .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .expect("the compaction_end event")
+    else {
+        unreachable!();
+    };
+    assert_eq!(event["reason"], serde_json::json!("threshold"));
+    assert_eq!(event["result"]["summary"], serde_json::json!("the summary"));
+    assert_eq!(
+        assistant_texts(&follow_events),
+        vec!["follow-up reply".to_string()],
+        "the boundary's turn answered"
+    );
+    registration.unregister();
+}
+
+/// A summarizer error in the background flight never blocks the band: the
+/// boundaries stay silent and the summarize keeps retrying in the
+/// background — the blocking fresh compact stays reserved for the
+/// reserve crossing.
+#[test]
+fn a_failed_background_summarize_never_blocks_the_watermark_band() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    // Every turn answers; every summarize request errors: the summarize
+    // context carries no tools, the session turns do.
+    let route = |context: &pa_types::ai::Context,
+                 _: Option<&pa_ai::types::StreamOptions>,
+                 _: u64,
+                 _: &pa_types::ai::Model| {
+        if context.tools.is_none() {
+            Err("summarizer down".to_string())
+        } else {
+            Ok(pa_ai::faux::faux_assistant_text_message(
+                "turn reply",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ))
+        }
+    };
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(route)
+        );
+        12
+    ]);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    wait_for_calls(&registration, 3);
+    let mut follow_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a small follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    admit(
+        &engine,
+        "another follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    assert_eq!(
+        assistant_texts(&follow_events),
+        vec!["turn reply".to_string(), "turn reply".to_string()],
+        "the band's turns answer while the summarizer keeps failing"
+    );
+    assert!(
+        no_compaction_events(&follow_events),
+        "a failed background summarize never blocks the watermark band"
+    );
+    registration.unregister();
+}
+
+/// Arm a routed image-model target directly (the slot the boundary checks
+/// read): the routed model feeds the pressure decision while the session
+/// model keeps summarizing — no turn serves on it in this test.
+fn arm_routed_window(engine: &AgentSessionEngine, window: u64) {
+    let routed: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+        "id": "faux-routed", "name": "Faux Routed", "api": "faux", "provider": "faux",
+        "baseUrl": "http://localhost:0", "reasoning": false, "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": window, "maxTokens": 16_384,
+    }))
+    .expect("the routed model parses");
+    let route = crate::image_route::ImageRoute {
+        target: pa_core::session_engine::provider_adapter::ProviderTarget {
+            service_tier: None,
+            api_key: engine.resolve_request_api_key(&routed),
+            model: routed.clone(),
+            headers: None,
+        },
+        agent_override: pa_agent::agent::AgentModelOverride {
+            thinking_level: pa_core::session_engine::provider_adapter::map_thinking_level(
+                engine.effective_thinking(),
+            ),
+            model: pa_core::session_engine::provider_adapter::json_round_trip(&routed)
+                .expect("the routed agent model converts"),
+        },
+        session_target: None,
+    };
+    *engine
+        .image_route
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(route);
+}
+
+/// The relief check follows the routed run model, not the session model: a
+/// joined summary that relieves the SESSION window but leaves the routed
+/// context over its own blocking threshold is discarded and re-summarized.
+#[test]
+fn a_routed_window_rejects_a_join_that_only_relieves_the_session_window() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Reserve 20_000 puts the session band at (51_616, 91_616] — the
+    // background flight starts there — while the 64k routed window's
+    // threshold sits at 27_616: the same context is Reserve on the routed
+    // model, and its kept tail alone already passes the session window's
+    // relief check.
+    let band_prompt = format!("band turn {}", "x".repeat(260_000));
+    let (engine, _engine_dir, registration) = faux_engine_with_registration(
+        &serde_json::json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "band reply"},
+                {"text": "the join summary"},
+                {"text": "the fresh summary"},
+            ]
+        }),
+        20_000,
+    );
+    let engine = std::sync::Arc::new(engine);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    assert!(
+        no_compaction_events(&events),
+        "the session-window boundaries stay silent"
+    );
+    // The band crossing started the background summarize (the join).
+    wait_for_calls(&registration, 3);
+    // Arm the routed target: the boundary below measures the same context
+    // against the routed window.
+    arm_routed_window(&engine, 64_000);
+    let mut drive_events: Vec<EngineEvent> = Vec::new();
+    engine.run_auto_compaction(&mut |event| {
+        drive_events.push(event);
+        true
+    });
+    let starts = drive_events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .count();
+    assert_eq!(starts, 1, "one threshold pair: {drive_events:?}");
+    let EngineEvent::Compaction { event, .. } = drive_events
+        .iter()
+        .rev()
+        .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .expect("the routed reserve crossing compacted")
+    else {
+        unreachable!("matched above");
+    };
+    assert_eq!(event["reason"], serde_json::json!("threshold"));
+    assert_eq!(
+        event["result"]["summary"],
+        serde_json::json!("the fresh summary"),
+        "the join that only relieved the session window was discarded and re-summarized"
+    );
+    assert_eq!(
+        registration.call_count(),
+        4,
+        "the join summarized once and the fresh path once"
+    );
+    registration.unregister();
+}
+
+/// A finished background summary that would not relieve the context never
+/// blocks the band: the boundary discards it and restarts the summarize
+/// in the background — the blocking fresh compact stays reserved for the
+/// reserve crossing.
+#[test]
+fn an_unrelieving_finished_background_summary_never_blocks_the_watermark_band() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let band_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+    let usages = probe_usages(&["seed turn".to_string(), band_prompt.clone()]);
+    let (engine, _engine_dir, _replaced) = faux_engine_with_registration(
+        &serde_json::json!({ "responses": [] }),
+        background_band_reserve(usages[0], usages[1]),
+    );
+    // The script registration above is replaced by one serving both lanes,
+    // with response chunks large enough that even the oversized summary
+    // streams in a few deltas. Every turn answers; every summarize
+    // returns a summary too big to relieve the context (the session turns
+    // carry tools, the summarize context does not).
+    let registration =
+        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            provider: Some("faux".to_string()),
+            models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                id: "faux-1".to_string(),
+                name: Some("Faux Model".to_string()),
+                reasoning: Some(false),
+                input: Some(vec![
+                    pa_types::ai::ModelInput::Text,
+                    pa_types::ai::ModelInput::Image,
+                ]),
+                cost: None,
+                context_window: Some(128_000),
+                max_tokens: Some(16_384),
+            }]),
+            token_size_min: Some(50_000),
+            token_size_max: Some(50_000),
+            ..Default::default()
+        });
+    let route = |context: &pa_types::ai::Context,
+                 _: Option<&pa_ai::types::StreamOptions>,
+                 _: u64,
+                 _: &pa_types::ai::Model| {
+        let reply = if context.tools.is_none() {
+            format!("the oversized summary {}", "z".repeat(400_000))
+        } else {
+            "turn reply".to_string()
+        };
+        Ok(pa_ai::faux::faux_assistant_text_message(
+            &reply,
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ))
+    };
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(route)
+        );
+        12
+    ]);
+    let mut events: Vec<EngineEvent> = Vec::new();
+    admit(&engine, "seed turn".to_string(), &mut events);
+    admit(&engine, band_prompt, &mut events);
+    // The band's own consults (the real arm): each one resolves a finished
+    // flight, and this join never relieves, so every consult discards it
+    // and restarts the summarize in the background — the fourth call is
+    // that restart (the two turns and the first summarize are the other
+    // three), and no consult ever compacts.
+    let mut consult_events: Vec<EngineEvent> = Vec::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while registration.call_count() < 4 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the band never restarted the discarded join: {} calls so far",
+            registration.call_count()
+        );
+        engine.run_auto_compaction(&mut |event| {
+            consult_events.push(event);
+            true
+        });
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        no_compaction_events(&consult_events),
+        "an unusable finished join never makes the band block"
+    );
+    // The restart never blocks the next turn either: the follow-up answers
+    // while the restarted summarize churns in the background.
+    let mut follow_events: Vec<EngineEvent> = Vec::new();
+    admit(
+        &engine,
+        "a small follow-up turn".to_string(),
+        &mut follow_events,
+    );
+    assert_eq!(
+        assistant_texts(&follow_events),
+        vec!["turn reply".to_string()],
+        "the band's turn answered without blocking"
+    );
+    assert!(
+        no_compaction_events(&follow_events),
+        "the restarted flight never blocks the band"
+    );
+    registration.unregister();
+}

@@ -3,7 +3,9 @@
 
 use pa_types::session::{AgentMessage, FileEntry};
 
-use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult};
+use super::compaction::{
+    compaction_threshold, estimate_context_tokens, estimate_tokens, find_cut_point, CutPointResult,
+};
 use super::compaction_exec;
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
@@ -131,6 +133,7 @@ pub(crate) struct CompactionAttempt {
     history: Vec<AgentMessage>,
     turn_prefix_messages: Vec<AgentMessage>,
     tokens_before: u64,
+    kept_tokens: u64,
     details: CompactionDetails,
     first_kept_entry: String,
     semantic_compaction: Option<super::semantic_edges::SemanticCompaction>,
@@ -139,6 +142,12 @@ pub(crate) struct CompactionAttempt {
 pub(crate) struct PreparedCompaction {
     pub(crate) result: CompactionResult,
     pub(crate) entry: pa_types::session::CompactionEntry,
+}
+
+pub(crate) struct BackgroundSummary {
+    pub(crate) attempt: CompactionAttempt,
+    pub(crate) prepared: PreparedCompaction,
+    pub(crate) summarize_ms: u64,
 }
 
 /// PREPARE under the caller's session lock: resolve the cut, begin the
@@ -192,6 +201,15 @@ pub(crate) fn prepare_attempt(
         }),
     );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    // Every context-producing row counts, not just messages: the rebuilt
+    // context carries kept custom and branch-summary rows too. Digest rows
+    // count even when the built context keeps only the newest —
+    // over-rejecting a join falls to the fresh summarize.
+    let kept_tokens: u64 = entries[cut.first_kept_entry_index..]
+        .iter()
+        .filter_map(crate::session::context_message)
+        .map(|message| estimate_tokens(&message))
+        .sum();
     super::compaction_trace::trace(
         "compact.tokens_before_computed",
         &serde_json::json!({ "tokensBefore": tokens_before }),
@@ -213,6 +231,7 @@ pub(crate) fn prepare_attempt(
         history,
         turn_prefix_messages,
         tokens_before,
+        kept_tokens,
         details,
         first_kept_entry,
         semantic_compaction,
@@ -438,6 +457,37 @@ pub(crate) async fn summarize_attempt(
         harness_state_fingerprint,
     );
     Ok(PreparedCompaction { result, entry })
+}
+
+/// Whether a joined summary may commit: the prepared prefix is intact —
+/// the branch did not move under the flight — and committing the summary
+/// brings the context under the blocking threshold of the relief window.
+pub(crate) fn joined_summary_relieves(
+    session: &SessionManager,
+    attempt: &CompactionAttempt,
+    prepared: &PreparedCompaction,
+    context_window: u64,
+    max_output_tokens: u64,
+    settings: &super::compaction::CompactionSettings,
+) -> bool {
+    if !session.compaction_prefix_intact(attempt.prefix_leaf.as_deref()) {
+        return false;
+    }
+    let growth = context_tokens(session.retained_entries(), session.get_leaf_id())
+        .saturating_sub(attempt.tokens_before);
+    let summary_tokens = estimate_tokens(&AgentMessage::CompactionSummary(
+        pa_types::session::CompactionSummaryMessage {
+            summary: prepared.result.summary.clone(),
+            tokens_before: 0,
+            retained_message_count: None,
+            custom_instructions: None,
+            harness_digest: None,
+            harness_state_fingerprint: None,
+            timestamp: 0,
+        },
+    ));
+    let threshold = compaction_threshold(context_window, max_output_tokens, settings);
+    attempt.kept_tokens + growth + summary_tokens <= threshold
 }
 
 /// COMMIT under the session lock: an aborted run never commits; the

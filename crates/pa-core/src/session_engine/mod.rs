@@ -116,6 +116,18 @@ fn standard_message(message: &pa_agent::types::AgentMessage) -> Option<&pa_agent
     Some(message)
 }
 
+/// The background summarize flight: the in-flight summarize task, or a
+/// finished summary that every band consult re-validates before it goes
+/// due — the watermark band commits a `Ready` join without blocking, while
+/// anything less (an unfinished, failed, or stale summarize) is discarded
+/// and retried in the background.
+pub(crate) enum BackgroundFlight {
+    Summarizing(
+        tokio_util::task::AbortOnDropHandle<anyhow::Result<compact_session::BackgroundSummary>>,
+    ),
+    Ready(Box<compact_session::BackgroundSummary>),
+}
+
 /// The session-bound agent: admission rules + persistence over the loop.
 pub struct AgentSession {
     agent: Arc<Agent>,
@@ -161,8 +173,9 @@ pub struct AgentSession {
     compaction_summary_sink: std::sync::Mutex<Option<compaction_exec::SummaryDeltaSink>>,
     /// One compaction at a time: a second `compact` waits for the
     /// in-flight run and prepares against its result; reads and writes
-    /// keep using the session lock meanwhile.
-    compaction_flight: tokio::sync::Mutex<()>,
+    /// keep using the session lock meanwhile; its slot holds the
+    /// background summarize.
+    compaction_flight: tokio::sync::Mutex<Option<BackgroundFlight>>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
     /// built without a semantic identity (verification harnesses
@@ -249,7 +262,7 @@ impl AgentSession {
             semantic_edges: std::sync::Mutex::new(None),
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
-            compaction_flight: tokio::sync::Mutex::new(()),
+            compaction_flight: tokio::sync::Mutex::new(None),
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)

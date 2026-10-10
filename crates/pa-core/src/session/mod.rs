@@ -294,6 +294,28 @@ pub struct SessionContext {
     pub model: Option<(String, String)>,
 }
 
+/// The context message a session entry contributes to a built context:
+/// every message row, every custom row, and nonempty branch summaries.
+/// The harness-digest supersession is a path-level decision in
+/// [`build_session_context`], not a row rule.
+#[must_use]
+pub(crate) fn context_message(entry: &FileEntry) -> Option<AgentMessage> {
+    match entry {
+        FileEntry::Message { message, .. } => Some(message.clone()),
+        FileEntry::CustomMessage { payload, .. } => {
+            Some(AgentMessage::Custom(create_custom_message(payload, entry)))
+        }
+        FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => Some(
+            AgentMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
+                summary: payload.summary.clone(),
+                from_id: payload.from_id.clone(),
+                timestamp: timestamp_to_millis(entry.timestamp()),
+            }),
+        ),
+        _ => None,
+    }
+}
+
 /// Walk the parent chain from the leaf, reconstructing the model context
 /// (summary-first when a compaction is on the path).
 pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> SessionContext {
@@ -395,31 +417,22 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     });
 
     let mut messages: Vec<AgentMessage> = Vec::new();
-    let append_message =
-        |entry: &FileEntry, target: &mut Vec<AgentMessage>, keep_digest_entry_id: Option<&str>| {
-            match entry {
-                FileEntry::Message { message, .. } => target.push(message.clone()),
-                FileEntry::CustomMessage { payload, .. } => {
-                    if payload.custom_type
-                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE
-                        && entry.id() != keep_digest_entry_id
-                    {
-                        return;
-                    }
-                    target.push(AgentMessage::Custom(create_custom_message(payload, entry)));
-                }
-                FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
-                    target.push(AgentMessage::BranchSummary(
-                        pa_types::session::BranchSummaryMessage {
-                            summary: payload.summary.clone(),
-                            from_id: payload.from_id.clone(),
-                            timestamp: timestamp_to_millis(entry.timestamp()),
-                        },
-                    ));
-                }
-                _ => {}
+    // The digest supersession is a path-level decision; the row mapping is
+    // [`context_message`]'s one definition.
+    let append_message = |entry: &FileEntry,
+                          target: &mut Vec<AgentMessage>,
+                          keep_digest_entry_id: Option<&str>| {
+        if let FileEntry::CustomMessage { payload, .. } = entry {
+            if payload.custom_type == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE
+                && entry.id() != keep_digest_entry_id
+            {
+                return;
             }
-        };
+        }
+        if let Some(message) = context_message(entry) {
+            target.push(message);
+        }
+    };
 
     if let Some(compaction_index) = compaction {
         let payload = match &entries[compaction_index] {

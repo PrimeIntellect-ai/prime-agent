@@ -472,7 +472,9 @@ impl PrintGoalSurface {
         }
         // The threshold arm: the crossing turn mints BEFORE the loop stops; the
         // boundary compacts, and the driver runs the held turn post-compaction.
-        if engine.session.auto_compaction_due(model).await {
+        if engine.session.context_pressure(model).await
+            == pa_core::session_engine::compaction::ContextPressure::Reserve
+        {
             if let Some(message) = engine.mint_goal_continuation().await {
                 self.publish_goal_update(engine).await;
                 self.hold_threshold_continuation(message).await;

@@ -5,6 +5,7 @@ use pa_types::ai::UserContent;
 use pa_types::session::AgentMessage as SessionAgentMessage;
 
 use super::compact_session::CompactOutcome;
+use super::compaction::ContextPressure;
 use super::{AgentSession, FileEntry, SessionManager};
 
 fn user_turn(text: &str) -> SessionAgentMessage {
@@ -121,6 +122,15 @@ fn release(summarizer: &HeldSummarizer) {
 /// The session file's rows, parsed straight off disk.
 fn file_entries(path: &std::path::Path) -> Vec<FileEntry> {
     crate::session::parse_session_entries(&std::fs::read_to_string(path).expect("the file reads"))
+}
+
+async fn compaction_rows(engine: &AgentSession) -> usize {
+    engine
+        .entries()
+        .await
+        .iter()
+        .filter(|entry| matches!(entry, FileEntry::Compaction { .. }))
+        .count()
 }
 
 fn spawn_compact(
@@ -267,13 +277,7 @@ async fn a_second_compaction_waits_for_the_in_flight_one() {
         1,
         "only the in-flight compaction summarized"
     );
-    let compactions = engine
-        .entries()
-        .await
-        .iter()
-        .filter(|entry| matches!(entry, FileEntry::Compaction { .. }))
-        .count();
-    assert_eq!(compactions, 1, "exactly one committed compaction");
+    assert_eq!(compaction_rows(&engine).await, 1);
     summarizer.registration.unregister();
 }
 
@@ -319,4 +323,275 @@ async fn repeated_branch_conflicts_fail_the_compaction_after_three_attempts() {
         .any(|entry| matches!(entry, FileEntry::Compaction { .. }));
     assert!(!committed, "the capped compaction never committed");
     summarizer.registration.unregister();
+}
+
+/// A background summarize joins into the next `compact`: one summarizer
+/// call, one compaction row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_summarize_joins_into_the_next_compact() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    let mut summarizer = held_summarizer(1, Vec::new());
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    let compact = spawn_compact(&engine, &summarizer.model);
+    release(&summarizer);
+    compact
+        .await
+        .expect("the compact task joined")
+        .expect("the joined compaction ran");
+    assert_eq!(
+        summarizer.registration.call_count(),
+        1,
+        "only the background summarizer ran"
+    );
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
+
+/// A background kick while a foreground `compact` runs is a no-op: the
+/// flight is held, so no second summarizer starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_background_kick_while_a_compact_runs_is_a_noop() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    let mut summarizer = held_summarizer(1, Vec::new());
+    let compact = spawn_compact(&engine, &summarizer.model);
+    wait_for_held_summarizer(&mut summarizer).await;
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    release(&summarizer);
+    compact
+        .await
+        .expect("the compact task joined")
+        .expect("the foreground compaction ran");
+    assert_eq!(
+        summarizer.registration.call_count(),
+        1,
+        "the kick started no second summarizer"
+    );
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
+
+/// A joined summary that would leave the context over the blocking
+/// threshold is discarded; the fresh path re-prepares and re-summarizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joined_summary_that_would_not_relieve_falls_back_to_the_fresh_path() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    let mut summarizer = held_summarizer(1, vec![follow_up("## Goal\nfresh summary")]);
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_message_retained(user_turn(&"x".repeat(400_000)));
+    }
+    release(&summarizer);
+    let compact = spawn_compact(&engine, &summarizer.model);
+    compact
+        .await
+        .expect("the compact task joined")
+        .expect("the fresh compaction ran");
+    assert_eq!(
+        summarizer.registration.call_count(),
+        2,
+        "the stale join was discarded and the fresh path re-summarized"
+    );
+    let entry = engine
+        .entries()
+        .await
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            FileEntry::Compaction { payload, .. } => Some(payload.summary.clone()),
+            _ => None,
+        })
+        .expect("the compaction row");
+    assert_eq!(entry, "## Goal\nfresh summary");
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
+
+/// A retained custom row in the kept tail is kept context: a joined
+/// summary that would leave the rebuilt context over the blocking
+/// threshold is discarded even with no mid-window growth — the fresh path
+/// re-prepares and re-summarizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_joined_summary_over_a_large_kept_custom_row_falls_back_to_the_fresh_path() {
+    let (engine, _tmp) = held_engine(false, 3).await;
+    // The kept tail's custom row predates the preparation, so the growth
+    // term cannot carry it; only the kept estimate can.
+    {
+        let persistence = engine.shared_persistence();
+        let mut session = persistence.lock().await;
+        session.append_custom_message_retained(
+            "custom_type",
+            UserContent::Text("x".repeat(400_000)),
+            false,
+            None,
+        );
+    }
+    let mut summarizer = held_summarizer(1, vec![follow_up("## Goal\nfresh summary")]);
+    engine
+        .start_background_compaction(&summarizer.model, None)
+        .await;
+    wait_for_held_summarizer(&mut summarizer).await;
+    release(&summarizer);
+    let compact = spawn_compact(&engine, &summarizer.model);
+    compact
+        .await
+        .expect("the compact task joined")
+        .expect("the fresh compaction ran");
+    assert_eq!(
+        summarizer.registration.call_count(),
+        2,
+        "the join that ignored the kept custom row was discarded"
+    );
+    let entry = engine
+        .entries()
+        .await
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            FileEntry::Compaction { payload, .. } => Some(payload.summary.clone()),
+            _ => None,
+        })
+        .expect("the compaction row");
+    assert_eq!(entry, "## Goal\nfresh summary");
+    assert_eq!(compaction_rows(&engine).await, 1);
+    summarizer.registration.unregister();
+}
+
+/// Poll the band consult until it goes due (a released flight resolves
+/// and validates into a Ready join); the summarize completes
+/// asynchronously after its release, so one immediate consult could
+/// race the finished flight.
+async fn consult_until_due(
+    engine: &AgentSession,
+    run_model: &pa_types::ai::Model,
+    summarizer_model: &pa_types::ai::Model,
+) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if engine
+            .auto_compaction_now(run_model, summarizer_model, None)
+            .await
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+/// A branch move stales a stored `Ready` join: the next band consult
+/// re-validates it, discards it, and restarts in the background instead
+/// of going due — the fresh summarize a stale due would block on below
+/// Reserve never runs on the consult path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_ready_join_restarts_in_the_background_instead_of_going_due() {
+    // Window 128_000, no output budget, the default reserve headroom:
+    // threshold 111_616, watermark 78_848 — the crafted 100_000-token
+    // usage anchors the live context mid-band, before the branch move
+    // and after it.
+    let run_model: pa_types::ai::Model = serde_json::from_value(serde_json::json!({
+        "id": "run-m", "name": "run model", "api": "openai-completions", "provider": "p",
+        "baseUrl": "http://localhost", "reasoning": false, "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 128_000, "maxTokens": 0,
+    }))
+    .expect("the run model");
+    let usage_turn = |text: &str| {
+        let mut reply = faux_reply(text);
+        reply.usage.total_tokens = 100_000;
+        SessionAgentMessage::Assistant(reply)
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut manager = SessionManager::in_memory(tmp.path());
+    for i in 0..4 {
+        manager
+            .append_message(user_turn(&format!("turn {i} with a few words")))
+            .and_then(|_| manager.append_message(usage_turn(&format!("reply {i}"))))
+            .unwrap();
+    }
+    let agent = Arc::new(Agent::new(AgentOptions::default()));
+    let engine = AgentSession::new(agent, manager, Vec::new()).await.unwrap();
+    engine.set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+        keep_recent_tokens: 12,
+        ..Default::default()
+    });
+    let engine = Arc::new(engine);
+    // Load the live loop context from the session — the daemon's restore
+    // path — so the band consult measures the retained messages.
+    engine
+        .rebuild_branch_context(engine.entries().await)
+        .await
+        .expect("the live context loaded");
+    assert_eq!(
+        engine.context_pressure(&run_model).await,
+        ContextPressure::Background,
+        "the fixture must consult in the background band"
+    );
+
+    let mut summarizer = held_summarizer(1, Vec::new());
+    assert!(
+        !engine
+            .auto_compaction_now(&run_model, &summarizer.model, None)
+            .await,
+        "the first consult starts the background summarize"
+    );
+    wait_for_held_summarizer(&mut summarizer).await;
+    release(&summarizer);
+
+    // The cancelled CompactionStart: the resolved flight stores as a
+    // Ready join and no compact consumes it.
+    assert!(
+        consult_until_due(&engine, &run_model, &summarizer.model).await,
+        "the finished flight stores as a usable Ready join"
+    );
+
+    // The branch move stales the join — the prepared prefix is gone —
+    // while the moved-to branch keeps the pressure in the band.
+    let entries = engine.entries().await;
+    engine
+        .rebuild_branch_context(entries[..entries.len() - 2].to_vec())
+        .await
+        .expect("the branch moved");
+    assert_eq!(
+        engine.context_pressure(&run_model).await,
+        ContextPressure::Background,
+        "the moved-to branch stays in the background band"
+    );
+
+    let mut restart = held_summarizer(1, Vec::new());
+    assert!(
+        !engine
+            .auto_compaction_now(&run_model, &restart.model, None)
+            .await,
+        "the stale Ready is discarded and restarted in the background, not due"
+    );
+    wait_for_held_summarizer(&mut restart).await;
+    release(&restart);
+    assert!(
+        consult_until_due(&engine, &run_model, &restart.model).await,
+        "the restarted flight stores as a usable Ready join"
+    );
+    assert_eq!(
+        summarizer.registration.call_count(),
+        1,
+        "only the first summarize ran on the first summarizer"
+    );
+    assert_eq!(
+        restart.registration.call_count(),
+        1,
+        "the restart summarize ran on the restart summarizer"
+    );
+    summarizer.registration.unregister();
+    restart.registration.unregister();
 }
