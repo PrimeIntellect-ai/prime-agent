@@ -109,13 +109,6 @@ const STARTUP_FENCES_DIR_NAME: &str = "startup-fences";
 /// Returns an error when the override path is not valid Unicode and the
 /// fallback needs the home directory but [`crate::paths::home_dir`]
 /// cannot resolve it.
-/// The registry directory for the CLI's generation reads (the coordinator's
-/// concurrent-stop detection).
-#[must_use]
-pub fn default_registry_dir() -> Option<PathBuf> {
-    registry_dir().ok()
-}
-
 fn registry_dir() -> Result<PathBuf> {
     match std::env::var_os(REGISTRY_DIR_ENV) {
         Some(dir) if !dir.is_empty() => Ok(PathBuf::from(dir)),
