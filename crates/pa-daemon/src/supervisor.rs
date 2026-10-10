@@ -564,7 +564,16 @@ impl Supervisor {
                 let exclusion_budget = std::time::Duration::from_millis(500);
                 match socket_lease.hold_reclaim_exclusion(exclusion_budget).await {
                     Ok(Some(exclusion)) => {
+                        // The exclusion is held for the REASSERT only -
+                        // never across the reap: the lease heartbeat's
+                        // refresh thread skips its mtime write while the
+                        // sidecar is taken, so a whole-pass hold would
+                        // age this lock toward the stale threshold and
+                        // invite a takeover the moment it dropped. The
+                        // reap itself takes its own STEP-SCOPED holds
+                        // around every signal and removal.
                         socket_lease.assert_held_async().await?;
+                        drop(exclusion);
                         // The boot reap (the operator's same-socket
                         // predecessor rule): this daemon now owns the
                         // socket's lineage, so leftover worker processes
@@ -579,14 +588,20 @@ impl Supervisor {
                         // racing a leftover holder would answer the lease
                         // refusal this pass exists to clear. Bounded by
                         // construction (every target shares one
-                        // escalation window). The sidecar exclusion and
-                        // the belt probe are held across every signal.
-                        crate::boot_reap::reap_predecessors(
+                        // escalation window). A FROZEN reap fails the
+                        // whole ownership boot - no sweep, adoption, or
+                        // restore runs against a possibly-successor's
+                        // socket.
+                        if crate::boot_reap::reap_predecessors(
                             &self,
                             Some(&|| socket_lease.path_displaced()),
                         )
-                        .await;
-                        drop(exclusion);
+                        .await
+                        {
+                            return Err(anyhow!(
+                                "boot ownership unavailable: the socket lease was displaced during the reap"
+                            ));
+                        }
                     }
                     Ok(None) => {
                         // The sidecar stayed with a suspended dance past
@@ -621,11 +636,21 @@ impl Supervisor {
                 // allows - a suspended dance cannot exist without the
                 // exchange primitives.
                 socket_lease.assert_held_async().await?;
-                crate::boot_reap::reap_predecessors(&self, Some(&|| socket_lease.path_displaced()))
-                    .await;
+                if crate::boot_reap::reap_predecessors(
+                    &self,
+                    Some(&|| socket_lease.path_displaced()),
+                )
+                .await
+                {
+                    return Err(anyhow!(
+                        "boot ownership unavailable: the socket lease was displaced during the reap"
+                    ));
+                }
             }
             #[cfg(not(unix))]
-            crate::boot_reap::reap_predecessors(&self, None).await;
+            {
+                crate::boot_reap::reap_predecessors(&self, None).await;
+            }
 
             // Update boot (spec §6): consume the roster from the spawn
             // env BEFORE the sweep deletes the file it points at, sweep
