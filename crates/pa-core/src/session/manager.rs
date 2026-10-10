@@ -17,7 +17,6 @@ use super::{migrate_to_current_version, parse_session_entries, CURRENT_SESSION_V
 mod tests;
 
 mod append;
-mod child_usage;
 
 mod persist;
 
@@ -77,12 +76,6 @@ pub struct SessionManager {
     label_timestamps_by_id: HashMap<String, String>,
     leaf_id: Option<String>,
     persist_listeners: Vec<SessionPersistListener>,
-    pending_child_usage: Option<Vec<FileEntry>>,
-    child_usage_original: child_usage::OriginalSnapshot,
-    unconfirmed_child_usage: std::collections::HashSet<String>,
-    recovered_history_ids: std::collections::HashSet<String>,
-    #[cfg(test)]
-    child_usage_write_fault: Option<child_usage::WriteFault>,
 }
 
 /// The refine transcript's consumed artifacts: the conversation message

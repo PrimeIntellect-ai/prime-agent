@@ -120,10 +120,6 @@ pub struct MessageWindowScalars {
 /// A loaded session: header plus the full entry chain, indexed by id.
 #[derive(Debug, Clone)]
 pub struct SessionFile {
-    pub(super) child_usage_pending: Vec<SessionEntry>,
-    pub(super) child_usage_unconfirmed: std::collections::HashSet<String>,
-    #[cfg(test)]
-    child_usage_fault: Option<child_usage::AppendFault>,
     pub path: PathBuf,
     pub header: SessionHeader,
     pub(crate) entries: Vec<SessionEntry>,

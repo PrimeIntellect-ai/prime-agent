@@ -241,9 +241,7 @@ fn write_padded_session_file(dir: &Path) -> PathBuf {
     let path = dir.join(pa_daemon::session_store::session_file_name(
         session.session_id(),
     ));
-    session
-        .set_path(path.clone())
-        .expect("fixture session path");
+    session.set_path(path.clone());
     session.rewrite().expect("write session file");
     path
 }

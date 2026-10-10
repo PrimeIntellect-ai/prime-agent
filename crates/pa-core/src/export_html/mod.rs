@@ -164,7 +164,7 @@ pub fn tools_section(tools: &[Arc<dyn pa_agent::types::AgentTool>]) -> Vec<Value
 fn session_data_from_file(input_path: &Path) -> Result<SessionExportData> {
     let cwd = std::env::current_dir().unwrap_or_default();
     let mut manager = SessionManager::in_memory(&cwd);
-    manager.set_session_file(input_path.to_path_buf(), None)?;
+    manager.set_session_file(input_path.to_path_buf(), None);
     let entries = manager.get_all_entries();
     let header = entries
         .iter()

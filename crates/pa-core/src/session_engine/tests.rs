@@ -203,7 +203,7 @@ async fn resumed_digest_session(
         ..Default::default()
     });
     let mut manager = SessionManager::in_memory(&std::env::temp_dir());
-    manager.adopt_entries(entries).unwrap();
+    manager.adopt_entries(entries);
     AgentSession::from_session_arc(
         Arc::new(agent),
         Arc::new(tokio::sync::Mutex::new(manager)),

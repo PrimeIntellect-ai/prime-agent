@@ -152,10 +152,6 @@ impl SessionFile {
             path: path.to_path_buf(),
             header,
             entries: Vec::new(),
-            child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: std::collections::HashSet::default(),
-            #[cfg(test)]
-            child_usage_fault: None,
             by_id: HashMap::new(),
             leaf_id: None,
             window: None,
@@ -215,10 +211,6 @@ impl SessionFile {
             path: path.to_owned(),
             header,
             entries: Vec::new(),
-            child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: std::collections::HashSet::default(),
-            #[cfg(test)]
-            child_usage_fault: None,
             by_id: HashMap::new(),
             leaf_id: None,
             window: None,
@@ -274,19 +266,15 @@ impl SessionFile {
     pub(super) fn ensure_full_history(&mut self) -> Result<()> {
         if self.window.is_some() {
             let full = Self::open(&self.path)?;
-            self.install_full_history(full)?;
+            self.install_full_history(full);
         }
         Ok(())
     }
 
     /// Merge appends made while the disk snapshot loaded without holding the store lock.
-    pub(crate) fn install_full_history(&mut self, mut full: Self) -> Result<()> {
-        anyhow::ensure!(
-            self.child_usage_pending.is_empty(),
-            "unconfirmed child attribution requires recovery before hydration"
-        );
+    pub(crate) fn install_full_history(&mut self, mut full: Self) {
         let Some(window) = &self.window else {
-            return Ok(());
+            return;
         };
         for entry in &self.entries[window.loaded_entries..] {
             if !full.by_id.contains_key(&entry.id) {
@@ -295,14 +283,6 @@ impl SessionFile {
         }
         full.leaf_id.clone_from(&self.leaf_id);
         full.lease.clone_from(&self.lease);
-        full.child_usage_pending
-            .clone_from(&self.child_usage_pending);
-        full.child_usage_unconfirmed
-            .clone_from(&self.child_usage_unconfirmed);
-        #[cfg(test)]
-        {
-            full.child_usage_fault = self.child_usage_fault;
-        }
         full.trace_upload.clone_from(&self.trace_upload);
         // The merged store's leaf is the window's leaf: re-derive the gate
         // from the merged ACTIVE branch — the full open's own-leaf answer
@@ -310,7 +290,6 @@ impl SessionFile {
         // off-path one must not (the full scan never wins here).
         full.anthropic_warning_shown = full.branch().iter().copied().any(is_warning_shown_row);
         *self = full;
-        Ok(())
     }
 
     /// Create a new in-memory session; persisted with the first flush.
@@ -329,10 +308,6 @@ impl SessionFile {
             path: PathBuf::new(),
             header,
             entries: Vec::new(),
-            child_usage_pending: Vec::new(),
-            child_usage_unconfirmed: std::collections::HashSet::default(),
-            #[cfg(test)]
-            child_usage_fault: None,
             by_id: HashMap::new(),
             leaf_id: None,
             window: None,

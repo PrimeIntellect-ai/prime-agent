@@ -137,7 +137,7 @@ mod tests {
             }));
         }
         let path = dir.join(session_file_name(session.session_id()));
-        session.set_path(path.clone()).unwrap();
+        session.set_path(path.clone());
         session.rewrite().unwrap();
         path
     }
@@ -191,7 +191,7 @@ mod tests {
         // the file invalid (`acc.invalid`) — skipped even though a header follows.
         let mistyped = dir.join("mistyped.jsonl");
         let mut session = SessionFile::create("/repo/mistyped", None, 0);
-        session.set_path(mistyped.clone()).unwrap();
+        session.set_path(mistyped.clone());
         session.rewrite().unwrap();
         let header_line = fs::read_to_string(&mistyped).unwrap();
         fs::write(

@@ -298,7 +298,7 @@ fn session_file_pinning_model(
     let path = dir.join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path.clone()).unwrap();
+    session.set_path(path.clone());
     session.append_model_change(provider, model);
     session.rewrite().unwrap();
     path
@@ -522,7 +522,7 @@ async fn fresh_session_without_a_saved_model_keeps_the_startup_chain() {
     let path = dir.path().join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path.clone()).unwrap();
+    session.set_path(path.clone());
     session.rewrite().unwrap();
     let engine = restore_test_engine(dir.path(), None, None);
     engine.set_session_file(path.clone());
@@ -561,7 +561,7 @@ async fn a_restore_decision_is_scoped_to_its_session_file() {
     let other_path = dir
         .path()
         .join(crate::session_store::session_file_name(other.session_id()));
-    other.set_path(other_path.clone()).unwrap();
+    other.set_path(other_path.clone());
     other.rewrite().unwrap();
     engine.set_session_file(other_path);
     let moved = engine.resolve_registry_model().expect("moved resolution");
@@ -672,7 +672,7 @@ async fn a_replacement_restores_the_moved_to_sessions_saved_thinking_level() {
     let path_a = dir
         .path()
         .join(crate::session_store::session_file_name(file_a.session_id()));
-    file_a.set_path(path_a.clone()).unwrap();
+    file_a.set_path(path_a.clone());
     file_a.append_model_change("battery", "mock-reason");
     file_a.append_thinking_level_change("low");
     file_a.rewrite().unwrap();
@@ -689,7 +689,7 @@ async fn a_replacement_restores_the_moved_to_sessions_saved_thinking_level() {
     let path_b = dir
         .path()
         .join(crate::session_store::session_file_name(file_b.session_id()));
-    file_b.set_path(path_b.clone()).unwrap();
+    file_b.set_path(path_b.clone());
     file_b.append_model_change("battery", "mock-plain");
     file_b.append_thinking_level_change("high");
     file_b.rewrite().unwrap();
@@ -712,7 +712,7 @@ async fn a_compacted_session_restores_its_post_compaction_model() {
     let path = dir.path().join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path.clone()).unwrap();
+    session.set_path(path.clone());
     session.append_model_change("battery", "mock-reason");
     let kept = session.append_message(&serde_json::json!({
         "role": "assistant",
@@ -1093,7 +1093,7 @@ async fn a_pre_read_saved_context_restores_like_the_file_read() {
     let path = dir.path().join(crate::session_store::session_file_name(
         session.session_id(),
     ));
-    session.set_path(path.clone()).unwrap();
+    session.set_path(path.clone());
     session.append_model_change("battery", "mock-reason");
     session.append_thinking_level_change("low");
     session.rewrite().unwrap();

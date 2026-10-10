@@ -320,9 +320,7 @@ impl Worker {
                     parent_session_path.as_deref(),
                     rlm_depth.unwrap_or(0),
                 );
-                if let Err(error) = created.set_path(path.clone()) {
-                    return response_failure(None, "create", &error.to_string(), None);
-                }
+                created.set_path(path.clone());
                 created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();
@@ -361,9 +359,7 @@ impl Worker {
                     rlm_depth.unwrap_or(0),
                 );
                 let path = session_dir.join(session_file_name(created.session_id()));
-                if let Err(error) = created.set_path(path.clone()) {
-                    return response_failure(None, "create", &error.to_string(), None);
-                }
+                created.set_path(path.clone());
                 created.trace_upload = traces(&created.path);
                 let acquired = {
                     let path = path.clone();

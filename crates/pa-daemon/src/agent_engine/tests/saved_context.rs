@@ -43,7 +43,7 @@ fn oracle_session() -> (
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("session.jsonl");
     let mut file = crate::session_store::SessionFile::create("/tmp", None, 0);
-    file.set_path(path.clone()).unwrap();
+    file.set_path(path.clone());
     (file, path, dir)
 }
 

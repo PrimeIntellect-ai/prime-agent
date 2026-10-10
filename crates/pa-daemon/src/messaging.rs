@@ -634,9 +634,7 @@ mod tests {
         for _ in 0..2 {
             let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
             session.append_session_info("twin");
-            session
-                .set_path(sessions.join(format!("{}.jsonl", session.session_id())))
-                .unwrap();
+            session.set_path(sessions.join(format!("{}.jsonl", session.session_id())));
             session.rewrite().unwrap();
         }
         let response = supervisor

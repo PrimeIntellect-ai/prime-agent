@@ -67,11 +67,12 @@ pub enum ChildUsageAppendResult {
     Existing(Usage),
 }
 
-/// The attribution producer's durable transcript boundary. Implementations serialize
-/// mutation under the session owner, compute aggregates from their authoritative state,
-/// and validate immutable row IDs on retry. An error may follow a complete write;
-/// neither an indexed intent nor a cached aggregate is a durable acknowledgment.
-/// Callers must preserve row ID, target, child usage and origin across retries.
+/// The attribution producer's durable transcript boundary. Implementations
+/// serialize mutation under the session owner, compute the aggregate from
+/// their own authoritative state, and return [`ChildUsageAppendResult::Existing`]
+/// for a row id already in the store (the identity must match), appending one
+/// row that carries the caller's id otherwise. Callers must preserve row ID,
+/// target, child usage and origin across retries.
 pub trait RlmChildUsageStore: Send + Sync {
     fn last_assistant(&self) -> RlmChildUsageFuture<'_, Option<(String, Usage)>>;
 
@@ -110,11 +111,53 @@ impl RlmChildUsageStore for SessionUsageStore {
         let target_id = target_id.to_string();
         let row_id = row_id.to_string();
         Box::pin(async move {
-            session
-                .lock()
-                .await
-                .append_child_usage_once(&row_id, &target_id, child_usage, origin)
+            let mut session = session.lock().await;
+            // The thin idempotency check: a row this id already wrote is
+            // confirmed, whatever the caller's last attempt returned.
+            if let Some(entry) = session.get_entry_by_id(&row_id) {
+                let pa_types::session::FileEntry::ChildUsageAttributed { payload, .. } = entry
+                else {
+                    return Err(attribution_id_collision());
+                };
+                if !child_usage_identity_matches(payload, &target_id, child_usage, origin)? {
+                    return Err(attribution_id_collision());
+                }
+                return Ok(ChildUsageAppendResult::Existing(target_assistant_usage(
+                    &session, &target_id,
+                )?));
+            }
+            let mut aggregate = target_assistant_usage(&session, &target_id)?;
+            attribute_child_usage(&mut aggregate, &child_usage);
+            session.append_child_usage_attribution(
+                &row_id,
+                &target_id,
+                child_usage,
+                aggregate,
+                origin,
+            )?;
+            Ok(ChildUsageAppendResult::Created(aggregate))
         })
+    }
+}
+
+/// The duplicate retry of an id that landed under another identity is a
+/// transcript bug, not a retry: refuse it instead of folding twice.
+fn attribution_id_collision() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, "attribution ID collision")
+}
+
+/// The target assistant row's current usage: the running aggregate, since
+/// every attribution append folds its aggregate back into the row.
+fn target_assistant_usage(session: &SessionManager, target_id: &str) -> std::io::Result<Usage> {
+    match session.get_entry_by_id(target_id) {
+        Some(pa_types::session::FileEntry::Message {
+            message: pa_types::session::AgentMessage::Assistant(assistant),
+            ..
+        }) => Ok(assistant.usage),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Assistant message entry {target_id} not found"),
+        )),
     }
 }
 
@@ -232,17 +275,15 @@ impl RlmChildUsageAttributions {
                 }
             },
         };
-        // A report racing the handoff can find the registration copied before the bases:
-        // read the retired side's base BEFORE our bases lock.
-        let _fallback_base = self.fallback_base(&target_id).await;
         let mut bases = self.bases.lock().await;
         // The forward re-check runs WITH the bases lock held: a handoff that armed
         // mid-report blocks its bases copy on this lock, so the adoption carries it.
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
-            // Release the bases BEFORE forwarding: the successor's fallback_base re-locks
-            // THIS producer's bases (a tokio Mutex is not reentrant); holding it across
-            // the await would deadlock the handoff path and the adoption.
+            // Release the bases BEFORE forwarding: the successor's fallback
+            // consult re-locks THIS producer's bases (a tokio Mutex is not
+            // reentrant); holding it across the await would deadlock the
+            // handoff path and the adoption.
             drop(bases);
             return Box::pin(async move { forward.record_child_usage(report).await }).await;
         }
@@ -363,18 +404,6 @@ impl RlmChildUsageAttributions {
             }
         }
         Some(target_id)
-    }
-
-    /// The retired side's frozen cumulative base: read BEFORE our own
-    /// bases lock (lock order: the fallback's bases first, ours second).
-    async fn fallback_base(&self, target_id: &str) -> Option<Usage> {
-        for producer in self.fallback_chain() {
-            let retired_bases = producer.bases.lock().await;
-            if let Some(base) = retired_bases.get(target_id) {
-                return Some(*base);
-            }
-        }
-        None
     }
 
     /// Drop one child's registration once its final observation lands; the

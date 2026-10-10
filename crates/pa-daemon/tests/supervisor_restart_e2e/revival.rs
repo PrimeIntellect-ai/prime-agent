@@ -33,9 +33,7 @@ fn write_revival_fixture(
     session.append_session_state(session_state);
     let session_id = session.session_id().to_string();
     let session_file = sessions_dir.join(format!("{session_id}.jsonl"));
-    session
-        .set_path(session_file.clone())
-        .expect("fixture session path");
+    session.set_path(session_file.clone());
     session.rewrite().expect("session file");
     let session_bytes = std::fs::read(&session_file).expect("session bytes");
 

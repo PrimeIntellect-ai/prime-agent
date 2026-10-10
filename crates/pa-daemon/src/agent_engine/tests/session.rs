@@ -7,7 +7,7 @@ fn constructor_reordering_keeps_completed_goals_after_later_errors() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("completed.jsonl");
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
-    store.set_path(path.clone()).unwrap();
+    store.set_path(path.clone());
     let completed = pa_core::goals::GoalState {
         status: pa_core::goals::GoalStatus::Complete,
         objective: Some("finished".to_string()),

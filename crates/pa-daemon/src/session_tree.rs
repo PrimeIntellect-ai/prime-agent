@@ -244,7 +244,7 @@ impl SessionFile {
             pa_core::session::manager::capture_git_context(Path::new(&self.header.cwd));
         // Same directory as the source session, like TS `createUniqueSessionFileTarget`.
         let file = session_dir.join(session_file_name(forked.session_id()));
-        forked.set_path(file)?;
+        forked.set_path(file);
         forked.trace_upload = self
             .trace_upload
             .as_ref()
@@ -413,7 +413,7 @@ mod tests {
     fn temp_store() -> (tempfile::TempDir, SessionFile) {
         let dir = tempfile::tempdir().unwrap();
         let mut store = SessionFile::create("/w", None, 0);
-        store.set_path(dir.path().join("s.jsonl")).unwrap();
+        store.set_path(dir.path().join("s.jsonl"));
         (dir, store)
     }
 

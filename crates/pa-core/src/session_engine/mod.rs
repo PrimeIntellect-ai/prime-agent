@@ -278,17 +278,13 @@ impl AgentSession {
     }
 
     /// Restore a verified retained context without loading older transcript bodies.
-    ///
-    /// # Errors
-    ///
-    /// Returns attribution recovery errors or rejects a snapshot predating recovery.
     pub async fn restore_windowed_context(
         &self,
         window: crate::session::window::WindowedSessionStore,
-    ) -> anyhow::Result<()> {
+    ) {
         let messages = {
             let mut session = self.session.lock().await;
-            session.adopt_window(window)?;
+            session.adopt_window(window);
             session.active_context().messages
         };
         self.agent
@@ -299,7 +295,6 @@ impl AgentSession {
                     .collect(),
             )
             .await;
-        Ok(())
     }
 
     /// Persisted entries (for UI resume and inspection).

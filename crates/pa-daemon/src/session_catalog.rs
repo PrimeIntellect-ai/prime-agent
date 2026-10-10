@@ -85,7 +85,7 @@ mod tests {
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
         let path = dir.join(session_file_name(session.session_id()));
-        session.set_path(path.clone()).unwrap();
+        session.set_path(path.clone());
         session.rewrite().unwrap();
         (session.session_id().to_string(), path)
     }

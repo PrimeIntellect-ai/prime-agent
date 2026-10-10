@@ -50,9 +50,7 @@ impl Worker {
                 Ok(full) => {
                     let mut core = self.core.lock().unwrap();
                     if let Some(store) = core.store.as_mut().filter(|store| store.path == path) {
-                        if let Err(error) = store.install_full_history(full) {
-                            return response_failure(None, command_type, &error.to_string(), None);
-                        }
+                        store.install_full_history(full);
                     }
                 }
                 Err(error) => {

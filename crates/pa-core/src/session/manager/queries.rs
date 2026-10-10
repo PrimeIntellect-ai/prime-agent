@@ -336,7 +336,6 @@ impl SessionManager {
     /// Error when the window's full-history hydration fails; a windowless
     /// manager is already hydrated.
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
-        self.reconcile_child_usage()?;
         let Some(window) = self.window.as_mut() else {
             return Ok(());
         };

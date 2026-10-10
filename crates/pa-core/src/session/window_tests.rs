@@ -709,7 +709,7 @@ fn adopted_context_matches_unadopted_window_byte_for_byte() {
         assert!(!reference.raw_entries().is_empty());
         let adopted = WindowedSessionStore::open(&path).unwrap().unwrap();
         let mut manager = super::super::manager::SessionManager::in_memory(dir.path());
-        manager.adopt_window(adopted).unwrap();
+        manager.adopt_window(adopted);
         let expected = reference.context();
         let actual = manager.active_context();
         let expected_bytes = serde_json::to_vec(&(
@@ -805,6 +805,7 @@ async fn adopted_manager_live_appends_match_full_reopen() {
     // the manager folds its own copy (the detached window has none).
     manager
         .append_child_usage_attribution(
+            "attr-1",
             "a1",
             pa_types::ai::Usage {
                 input: 5,

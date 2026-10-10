@@ -442,9 +442,7 @@ fn concurrent_creates_for_one_file_share_a_single_launch() {
     let mut saved =
         pa_daemon::session_store::SessionFile::create(&dir.path().to_string_lossy(), None, 0);
     let session_path = sessions_dir.join(format!("{}.jsonl", saved.session_id()));
-    saved
-        .set_path(session_path.clone())
-        .expect("fixture session path");
+    saved.set_path(session_path.clone());
     saved.append_session_state("active");
     saved.rewrite().expect("write the saved session");
 

@@ -150,15 +150,3 @@ revocation/errors; bytes already sent cannot be recalled. Recovery belongs to al
 live hosts sharing the agent directory and cancels when the last host disappears.
 Catch-up uses at most three delivery cycles per pending entry, honors Retry-After,
 and releases upload capacity during retry waits; exhaustion retains durable intent.
-
-Child usage durability stays in the existing session ownership boundary. The public
-`RlmChildUsageStore` now accepts a stable row ID and returns
-`ChildUsageAppendResult::{Created, Existing}` with the current authoritative
-aggregate. Retries preserve the ID, target, usage and origin; indexed provisional
-intents are not acknowledgments. `SessionManager::append_child_usage_once` uses the
-same contract for persisted and in-memory sessions. Session/path/history replacement
-methods and `SessionEngine::restore_windowed_context` return recovery errors before
-replacing state; callers reload histories that predate recovery. The narrowly public
-`session::window::invalidate_cache` only evicts certified snapshots before uncertain
-writes. These are explicit public-boundary changes; no new dependency, transcript
-schema or cross-crate internal access is introduced.

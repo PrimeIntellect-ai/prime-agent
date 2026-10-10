@@ -227,7 +227,7 @@ fn write_fixture(sessions_dir: &Path, name: &str) -> String {
         "role": "user", "content": "hi", "timestamp": 1u64
     }));
     let path = sessions_dir.join(format!("{id}.jsonl"));
-    session.set_path(path).expect("fixture session path");
+    session.set_path(path);
     session.rewrite().expect("write fixture session");
     id
 }

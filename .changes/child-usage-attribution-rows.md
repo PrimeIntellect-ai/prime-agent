@@ -1,2 +1,2 @@
 - A parent session's usage and cost totals include its subagents' usage again: child usage attribution rows are written to the parent's transcript file, so live totals count child cost and a resumed parent keeps it, matching the TypeScript version.
-- Attribution retries keep immutable row identities and reconcile uncertain writes, so a partial save or lost acknowledgment cannot double-count child usage; later retained messages stay ordered behind recovery.
+- Attribution retries are idempotent: each row keeps the stable identity of its frozen report, and a re-delivered report appends nothing once that identity is already in the transcript, so a partial save or a lost cursor cannot double-count child usage.

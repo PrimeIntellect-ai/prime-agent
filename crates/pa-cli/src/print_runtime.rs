@@ -283,12 +283,10 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                                 &cwd,
                                 &session_dir,
                             );
-                            manager
-                                .new_session(&pa_core::session::manager::NewSessionOptions {
-                                    parent_session: Some(parent.clone()),
-                                    ..Default::default()
-                                })
-                                .map_err(|error| error.to_string())?;
+                            manager.new_session(&pa_core::session::manager::NewSessionOptions {
+                                parent_session: Some(parent.clone()),
+                                ..Default::default()
+                            });
                             manager
                         }
                         None => {

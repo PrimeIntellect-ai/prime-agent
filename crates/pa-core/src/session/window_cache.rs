@@ -155,14 +155,6 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     result
 }
 
-/// Evict a certified snapshot before a write whose outcome may be uncertain.
-/// This changes no transcript bytes and never certifies a new generation.
-pub fn invalidate(path: &Path) {
-    if let Ok(mut snapshots) = live_snapshots().lock() {
-        snapshots.remove(path);
-    }
-}
-
 /// Persist the live certified snapshot for `path` to the sidecar cache.
 ///
 /// # Errors
