@@ -920,7 +920,7 @@ impl SessionUi {
     /// `tui ipython bash rendered`: the settled ipython card that renders
     /// as bash reports its bash share, primitives only.
     fn track_ipython_bash_rendered(&self, card: &crate::tool_card::ToolCallCard) {
-        if card.name != "ipython" {
+        if !pa_types::ai::is_python_tool_name(&card.name) {
             return;
         }
         let Some(stats) = crate::tool_card::ipython::bash_dominated_stats(card) else {

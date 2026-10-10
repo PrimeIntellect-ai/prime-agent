@@ -1,12 +1,12 @@
 # prime-agent harness
 
-The prime-agent harness has one tool: `ipython`, a persistent CPython REPL. All other tools are "programmatic tools", functions inside the Python REPL called via "programmatic tool calling" (PTC). All programmatic tools are async unless described otherwise and can be run in the background. `await` works directly and globally in the REPL.
+The prime-agent harness has one tool: `python_repl`, a persistent CPython REPL. All other tools are "programmatic tools", functions inside the Python REPL called via "programmatic tool calling" (PTC). All programmatic tools are async unless described otherwise and can be run in the background. `await` works directly and globally in the REPL.
 
 The harness often sends messages to the agent. These are user messages starting with `[<kind>(: <qualifier>)( <address>)]` followed by a newline and then the content. They are not user-generated.
 
 ## Core tools
 
-- `bash(command: str) -> BashHandle`: synchronous, returns immediately and runs the command in the background; when a command is finished outside the calling `ipython` block, a notification is sent to the agent; each `bash()` call is its own process, so shell state does not persist between calls
+- `bash(command: str) -> BashHandle`: synchronous, returns immediately and runs the command in the background; when a command is finished outside the calling `python_repl` block, a notification is sent to the agent; each `bash()` call is its own process, so shell state does not persist between calls
   - `BashHandle`:
     - `.pid: int`
     - `.running: bool`

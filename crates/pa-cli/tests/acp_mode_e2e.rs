@@ -2193,7 +2193,7 @@ fn spawn_parent_script(spawn_cell: &str) -> Value {
         "engine": "faux",
         "responses": [
             { "content": [
-                { "type": "toolCall", "name": "ipython", "arguments": { "code": spawn_cell } },
+                { "type": "toolCall", "name": "python_repl", "arguments": { "code": spawn_cell } },
             ] },
             { "text": "spawn turn done" },
             { "text": "notice seen" },

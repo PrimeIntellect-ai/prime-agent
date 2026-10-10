@@ -278,8 +278,8 @@ async fn subagent_sessions_stay_lazy_despite_the_prewarm_flag() {
         .map(|tool| tool.name().to_string())
         .collect();
     assert!(
-        tool_names.iter().any(|name| name == "ipython"),
-        "the subagent keeps the lazy ipython tool: {tool_names:?}"
+        tool_names.iter().any(|name| name == "python_repl"),
+        "the subagent keeps the lazy python_repl tool: {tool_names:?}"
     );
 
     // Long enough for a wrongly-fired prewarm to boot and report; the lazy session reports nothing.

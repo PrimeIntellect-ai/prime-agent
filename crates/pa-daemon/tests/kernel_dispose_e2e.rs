@@ -247,7 +247,7 @@ fn write_faux_script(dir: &Path) -> PathBuf {
             "engine": "faux",
             "responses": [
                 { "content": [
-                    { "type": "toolCall", "name": "ipython", "arguments": {
+                    { "type": "toolCall", "name": "python_repl", "arguments": {
                         "code": cell,
                     } },
                 ] },
