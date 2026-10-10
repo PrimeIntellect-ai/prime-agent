@@ -730,10 +730,9 @@ fn release_lock_dir_identity(
                 0o700,
                 Some(&owner_record),
                 None,
-            )
-            .map(|(handle, _identity)| handle);
+            );
             match result {
-                Ok(_handle) => Ok(()),
+                Ok(setup) => Ok(setup),
                 Err(error) => {
                     // A fresh-name swap refusal PRESERVES whatever sits
                     // at the placeholder name (a blind remove could
@@ -757,23 +756,27 @@ fn release_lock_dir_identity(
                 let _ = pa_core::platform::remove_candidate_dir(&placeholder);
                 error
             });
-        if let Err(error) = owner_result {
-            pa_core::platform::mark_released_through(lock_dir);
-            drop(guarded);
-            return Err(error);
-        }
-        // The created placeholder's identity: on an AMBIGUOUS exchange
-        // error the swap may have completed with the incumbent (or a
-        // racing successor) at the private name - the cleanup below
-        // deletes the placeholder only after proving the private name
-        // still resolves to THIS created inode, exactly like the
-        // publish-error proof in the acquisition path.
-        let placeholder_identity = std::fs::symlink_metadata(&placeholder)
-            .ok()
-            .map(|metadata| {
-                use std::os::unix::fs::MetadataExt;
-                (metadata.dev(), metadata.ino())
-            });
+        // The setup witness is RETAINED: the placeholder's pinned handle
+        // and creation identity (captured through the pin, never by a
+        // post-hoc pathname stat) drive every cleanup below - on an
+        // AMBIGUOUS exchange error the swap may have completed with the
+        // incumbent (or a racing successor) at the private name, and
+        // the placeholder's notes are unlinked fd-relative through the
+        // pin, its directory removed only after proving the private
+        // name still resolves to THIS created inode, exactly like the
+        // publish-error proof in the acquisition path. A writer that
+        // swaps the `.l...` entry (or the exchanged public entry) for a
+        // symlink can never redirect those unlinks into a foreign
+        // directory.
+        let (placeholder_handle, setup_identity) = match owner_result {
+            Ok(setup) => setup,
+            Err(error) => {
+                pa_core::platform::mark_released_through(lock_dir);
+                drop(guarded);
+                return Err(error);
+            }
+        };
+        let placeholder_identity = Some(setup_identity);
         // The exchange: the public path holds the placeholder while the
         // incumbent sits at the private name.
         if pa_core::platform::exchange_paths(lock_path, &placeholder).is_err() {
@@ -798,7 +801,11 @@ fn release_lock_dir_identity(
                     == Some(expected)
             });
             if identity_proved {
-                let removed = std::fs::remove_file(placeholder.join("owner"))
+                // The notes go through the pinned setup handle
+                // (fd-relative, never the substitutable `.l...` name);
+                // the rmdir then removes only the entry the proof just
+                // matched to this created inode.
+                let removed = pa_core::platform::remove_notes_through(&placeholder_handle)
                     .and_then(|()| std::fs::remove_dir(&placeholder));
                 if removed.is_err() {
                     // The failed removal targeted the PRIVATE placeholder
@@ -837,7 +844,13 @@ fn release_lock_dir_identity(
                     // with the placeholder identity captured at
                     // creation) so the residue never wedges behind a
                     // live owner record.
-                    let removed = std::fs::remove_file(lock_path.join("owner"))
+                    // The placeholder's notes go through the pinned
+                    // setup handle: a writer that swapped the exchanged
+                    // PUBLIC entry for a symlink cannot redirect the
+                    // unlink into a foreign directory (the rmdir
+                    // refuses to follow it; a swapped empty directory
+                    // is the documented accepted residual).
+                    let removed = pa_core::platform::remove_notes_through(&placeholder_handle)
                         .and_then(|()| std::fs::remove_dir(lock_path));
                     if removed.is_err() {
                         pa_core::platform::mark_released_at(lock_path, placeholder_identity);
@@ -847,7 +860,12 @@ fn release_lock_dir_identity(
                         drop(guarded);
                         return Err(error);
                     }
-                    let _ = std::fs::remove_file(placeholder.join("owner"));
+                    // This lease's own directory notes go through the
+                    // LEASE pin (the same fd the released marker uses):
+                    // a swap of the displaced private name cannot
+                    // redirect the unlinks; the rmdir then removes the
+                    // entry the identity check proved to be this lease.
+                    let _ = pa_core::platform::remove_notes_through(lock_dir);
                     let _ = std::fs::remove_dir(&placeholder);
                 } else {
                     // Not this lease's directory: a successor's live
@@ -858,7 +876,12 @@ fn release_lock_dir_identity(
                     // (the same name) would delete the foreign lock.
                     // Fail closed: preserve the displaced lease.
                     if pa_core::platform::exchange_paths(lock_path, &placeholder).is_ok() {
-                        let _ = std::fs::remove_file(placeholder.join("owner"));
+                        // The placeholder's notes go through the pinned
+                        // setup handle, never the substitutable private
+                        // name (which now holds the swapped-home
+                        // placeholder again); only that entry is
+                        // rmdir'd.
+                        let _ = pa_core::platform::remove_notes_through(&placeholder_handle);
                         let _ = std::fs::remove_dir(&placeholder);
                     }
                 }

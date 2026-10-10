@@ -57,6 +57,38 @@ fn path_pins(path: &Path, dir: &fs::File) -> bool {
     }
 }
 
+/// Remove a lock directory's protocol notes (`owner`, `claimed-at`,
+/// `released`) through a PINNED directory handle: the fd-relative
+/// `unlinkat` calls resolve inside the pinned inode - wherever a name
+/// swap has moved it - never through a substituted entry at any public
+/// or private name. The caller pairs this with the plain pathname
+/// `remove_dir` (rmdir refuses to follow a swapped symlink; a swapped
+/// empty directory is the ruled accepted residual), leaving the
+/// directory empty for it.
+/// # Panics
+///
+/// Never in practice: the protocol's note names are static and
+/// null-free, so the `CString` conversions cannot fail.
+/// # Errors
+///
+/// Propagates every note-removal error but `NotFound` (an absent note
+/// is idempotent success).
+#[cfg(unix)]
+pub fn remove_notes_through(dir: &fs::File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    for note in ["owner", "claimed-at", "released"] {
+        let name = std::ffi::CString::new(note).expect("static note names are null-free");
+        let code = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+        if code != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Remove an unpublished lock candidate completely: the auxiliary
 /// files first (a directory containing them cannot be removed), then the
 /// directory. A missing candidate is a non-error (a racing reclaimer).
@@ -1597,21 +1629,30 @@ impl LockDir {
                         format!("Lock file is already being held: {}", path.display()),
                     ));
                 }
+                // Airtight reclaim where renameat2 exists: under the
+                // reclaim guard (serializing this dance against every
+                // holder release pass), exchange the stale incumbent
+                // with a blocking placeholder and remove it from the
+                // private name only on a claimed-inode == snapshot
+                // match; a live successor is swapped home untouched
+                // and reported as contention - unless its release
+                // marker says its guard already dropped, in which case
+                // it is consumed instead of restored (a released
+                // guard's directory must never wedge behind its live
+                // pid record). Only the Unsupported outcome falls to
+                // the floor sequence below - the enum makes a
+                // fall-through on any other outcome unrepresentable.
+                // The binding (not a scoped block) keeps the guard
+                // alive THROUGH the floor removal below: a successor's
+                // judge needs this sidecar to reclaim, so dropping it
+                // before the pathname removal opens a gap where the
+                // successor publishes a live lock the floor then
+                // deletes. The release pass holds its guard across the
+                // matching pathname fallback for the same reason; the
+                // guard serializes every dance on this lock. The
+                // early returns drop it on unwind.
                 #[cfg(target_os = "linux")]
-                {
-                    // Airtight reclaim where renameat2 exists: under the
-                    // reclaim guard (serializing this dance against every
-                    // holder release pass), exchange the stale incumbent
-                    // with a blocking placeholder and remove it from the
-                    // private name only on a claimed-inode == snapshot
-                    // match; a live successor is swapped home untouched
-                    // and reported as contention - unless its release
-                    // marker says its guard already dropped, in which case
-                    // it is consumed instead of restored (a released
-                    // guard's directory must never wedge behind its live
-                    // pid record). Only the Unsupported outcome falls to
-                    // the floor sequence below - the enum makes a
-                    // fall-through on any other outcome unrepresentable.
+                let _reclaim_guard = {
                     let incumbent = {
                         use std::os::unix::fs::MetadataExt;
                         Some((metadata.dev(), metadata.ino()))
@@ -1637,20 +1678,19 @@ impl LockDir {
                                 format!("Lock file is already being held: {}", path.display()),
                             ));
                         }
-                        StaleClaim::Unsupported => {}
+                        StaleClaim::Unsupported => guarded,
                     }
-                    drop(guarded);
-                }
+                };
                 // The floor reclaim (no no-replace rename): remove every
                 // protocol note (owner, claimed-at, and any release
                 // marker - a leftover marker makes the plain remove_dir
                 // fail ENOTEMPTY and error the next acquire), then the
                 // directory, by pathname - the same residual
                 // check-then-act window proper-lockfile's own reclaim
-                // has. A successor replacing the incumbent inside this
-                // window can be removed here; unreachable on supported
-                // Linux (the claim above) and documented on the mounts
-                // and platforms without the primitive.
+                // has. On Linux this runs under the judge's guard, so
+                // no judge or release pass interleaves here; the
+                // non-Linux Unix floors keep the documented residual
+                // window (no sidecar guard exists there).
                 #[cfg(unix)]
                 match remove_candidate_dir(path) {
                     Ok(()) => return Ok(()),

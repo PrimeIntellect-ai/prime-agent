@@ -105,7 +105,11 @@ impl Supervisor {
     /// Adopt or relaunch persisted workers, concurrently: one dead worker's relaunch must
     /// not delay adopting live sessions; the fan-out is capped at
     /// [`crate::recovery_pacing::ADOPTION_CONCURRENCY`] to avoid a relaunch storm.
-    pub(super) async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
+    pub(super) async fn adopt_persisted_workers(
+        self: &Arc<Self>,
+        boot: AdoptionBoot,
+        fanout: crate::recovery_pacing::FanoutDrain,
+    ) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
         let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let revived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -137,8 +141,12 @@ impl Supervisor {
                 }
             })
             .collect();
-        crate::recovery_pacing::run_bounded(jobs, crate::recovery_pacing::ADOPTION_CONCURRENCY)
-            .await;
+        crate::recovery_pacing::run_bounded(
+            jobs,
+            crate::recovery_pacing::ADOPTION_CONCURRENCY,
+            fanout,
+        )
+        .await;
         let adopted_live = adopted_live.load(std::sync::atomic::Ordering::Relaxed);
         let revived = revived.load(std::sync::atomic::Ordering::Relaxed);
         let skipped_idle = skipped_idle.load(std::sync::atomic::Ordering::Relaxed);

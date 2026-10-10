@@ -223,6 +223,21 @@ pub struct Supervisor {
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
 }
 
+/// The serving-exit boot fence: EVERY handle is aborted FIRST, then
+/// every handle is joined. A sequential abort-then-join per task would
+/// leave the later passes (restore, archive sweep, watchdog) free to
+/// act against a successor - especially after the lease is already
+/// compromised - while an earlier join waits out a slow in-flight step.
+#[cfg(unix)]
+pub(crate) async fn abort_all_then_join_all(tasks: &mut Vec<tokio::task::JoinHandle<()>>) {
+    for task in tasks.iter() {
+        task.abort();
+    }
+    for task in tasks.drain(..) {
+        let _ = task.await;
+    }
+}
+
 impl Supervisor {
     /// Build the supervisor: descriptor dir, persisted config, event channel, log, journal.
     ///
@@ -451,8 +466,18 @@ impl Supervisor {
             // monitor below: a lease compromise aborts them instead of
             // letting ownership passes act against a successor.
             let mut boot_tasks = Vec::new();
+            // The adoption pass's nested fan-out drain: the fence below
+            // aborts and awaits the pass's own handle, but the JoinSet's
+            // drop only abort-FLAGS the nested jobs - an in-flight job
+            // step (a socket connect, a relaunch spawn) can still be
+            // executing after the handle is joined. The drain is created
+            // HERE, outside the spawned pass, so the fence can await the
+            // fan-out's actual settle before the socket cleanup and the
+            // lease release below.
+            let adoption_fanout = crate::recovery_pacing::FanoutDrain::new();
             let adoption = {
                 let supervisor = Arc::clone(&self);
+                let fanout = adoption_fanout.clone();
                 let boot = match roster.as_ref() {
                     Some(roster) => AdoptionBoot::UpdateRoster {
                         kept: Arc::new(
@@ -466,7 +491,7 @@ impl Supervisor {
                     None => AdoptionBoot::PlainStartup,
                 };
                 tokio::spawn(async move {
-                    supervisor.adopt_persisted_workers(boot).await;
+                    supervisor.adopt_persisted_workers(boot, fanout).await;
                     let _ = adoption_tx.send(true);
                 })
             };
@@ -524,10 +549,10 @@ impl Supervisor {
                     supervisor.update_prepare_watchdog().await;
                 }));
             }
-            boot_tasks
+            (boot_tasks, adoption_fanout)
         };
         #[cfg(unix)]
-        let boot_tasks = tokio::select! {
+        let (mut boot_tasks, adoption_fanout) = tokio::select! {
             // `biased` polls the monitor first, deterministically: an
             // already-compromised lease must win the tie against a boot
             // block that finishes on its first poll (no reap targets, the
@@ -545,7 +570,7 @@ impl Supervisor {
             tasks = boot_ownership => tasks,
         };
         #[cfg(not(unix))]
-        let _boot_tasks = boot_ownership.await;
+        let (_boot_tasks, _adoption_fanout) = boot_ownership.await;
 
         #[cfg(unix)]
         if let Err(error) = socket_lease.assert_held_async().await {
@@ -605,9 +630,13 @@ impl Supervisor {
                 // during the exit path, so the tasks die here in every
                 // outcome, and a lease lost by then additionally takes
                 // the same shutdown path the compromise arm runs.
-                for task in &boot_tasks {
-                    task.abort();
-                }
+                // The aborts are AWAITED: an unawaited abort leaves
+                // the task's in-flight archive sweep free to move
+                // session files with a stale protected-worker snapshot
+                // after a successor has opened them - the lease must
+                // not be releasable while any boot task still runs. The
+                // shared fence aborts EVERY task first, then joins all.
+                abort_all_then_join_all(&mut boot_tasks).await;
                 if socket_lease.assert_held().is_err() {
                     self.shutting_down.store(true, Ordering::SeqCst);
                     self.accept_exit.store(true, Ordering::SeqCst);
@@ -621,10 +650,10 @@ impl Supervisor {
             () = socket_lease.wait_compromised() => {
                 // The boot's ownership passes die with the lease: none may
                 // adopt or restore against a successor that holds the
-                // socket now.
-                for task in &boot_tasks {
-                    task.abort();
-                }
+                // socket now. The shared fence aborts EVERY task first,
+                // then joins all, so the release below cannot land
+                // while a task's archive sweep is still moving files.
+                abort_all_then_join_all(&mut boot_tasks).await;
                 self.shutting_down.store(true, Ordering::SeqCst);
                 self.accept_exit.store(true, Ordering::SeqCst);
                 self.shutdown_notify.notify_waiters();
@@ -635,17 +664,30 @@ impl Supervisor {
         #[cfg(not(unix))]
         let serving = accept_loop::serve(&self, listener).await;
 
+        // The nested adoption fan-out drains BEFORE the socket cleanup and
+        // the lease release: the awaited aborts above settle the boot
+        // tasks themselves, but the adoption pass's JoinSet drop only
+        // abort-FLAGS its jobs - an in-flight job step (a socket
+        // connect, a relaunch spawn, an archive move in a task that
+        // wrapped the pass) can still be executing after the handles
+        // are joined. The drain resolves only once every job future is
+        // dropped, so no adoption work outlives the fence.
+        #[cfg(unix)]
+        adoption_fanout.wait_drained().await;
         let expected_identity = self.bound_socket_identity.lock().unwrap().clone();
         #[cfg(unix)]
         socket_lease.cleanup_socket_path(&self.options.socket_path, expected_identity);
         #[cfg(not(unix))]
         socket::cleanup_socket_path_after_close(&self.options.socket_path, expected_identity);
-        // The lease's awaited shutdown: the refresh thread's join (and
-        // its up-to-350ms in-thread waits) runs off the async worker
-        // instead of stalling every task and timer on it at drop time.
+        self.flush_telemetry_on_exit().await;
+        // The lease's awaited shutdown runs LAST: consuming it any
+        // earlier releases the socket lock while this supervisor still
+        // runs, letting a successor acquire, bind, and reap this
+        // live process - and the refresh thread's join (and its
+        // up-to-350ms in-thread waits) runs off the async worker
+        // instead of stalling every task and timer on it.
         #[cfg(unix)]
         socket_lease.shutdown().await?;
-        self.flush_telemetry_on_exit().await;
         serving
     }
 }

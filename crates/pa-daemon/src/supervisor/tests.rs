@@ -578,7 +578,10 @@ async fn adoption_settles_then_seeds_the_roster_once() {
     // Adoption adopts nothing (the descriptor dir is empty) and hands
     // back the boot seed task; the seed publishes the anchored family.
     supervisor
-        .adopt_persisted_workers(AdoptionBoot::PlainStartup)
+        .adopt_persisted_workers(
+            AdoptionBoot::PlainStartup,
+            crate::recovery_pacing::FanoutDrain::new(),
+        )
         .await;
     crate::supervisor_roster_seed::tests::drain_pending_seeds_for_tests(&supervisor).await;
     let row = supervisor
@@ -2004,5 +2007,104 @@ proptest! {
             prop_assert_eq!(pending, expected_pending);
             Ok(())
         })?;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod serving_exit_fence_tests {
+
+    /// The serving-exit boot fence must abort EVERY handle before any
+    /// join waits: a sequential abort-then-join per task would leave
+    /// the later passes free to act against a successor while an
+    /// earlier join waits out a slow in-flight step. The regression
+    /// holds the FIRST handle inside an unpreemptible blocking step and
+    /// observes the LATER task's cancellation while that step is still
+    /// held - the bad order never aborts the later task, so its
+    /// cancellation is never observed and the await times out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn every_boot_handle_is_aborted_before_any_join_waits() {
+        let (dropped_tx, mut dropped_rx) = tokio::sync::mpsc::channel::<&'static str>(8);
+        // Readiness gates: the fence must not run before both handles
+        // sit inside their guarded steps (an abort landing before a
+        // task's first poll would drop its future without it ever
+        // entering the step, and the test's held-step premise would
+        // not hold).
+        let (ready_tx, mut ready_rx) = tokio::sync::mpsc::channel::<()>(2);
+        // The first handle: a blocking std recv() no abort can preempt.
+        let (a_release_tx, a_release_rx) = std::sync::mpsc::channel::<()>();
+        let a_dropped = dropped_tx.clone();
+        let a_ready = ready_tx.clone();
+        let a = tokio::spawn(async move {
+            struct Dropped(tokio::sync::mpsc::Sender<&'static str>);
+            impl Drop for Dropped {
+                fn drop(&mut self) {
+                    let _ = self.0.try_send("a-dropped");
+                }
+            }
+            let _dropped = Dropped(a_dropped);
+            // Readiness first; the next statement is the step, so the
+            // signal proves the step is entered.
+            let _ = a_ready.send(()).await;
+            let _ = a_release_rx.recv();
+        });
+        // The later handle: parked at an await, cancellable instantly.
+        let b = tokio::spawn(async move {
+            struct Dropped(tokio::sync::mpsc::Sender<&'static str>);
+            impl Drop for Dropped {
+                fn drop(&mut self) {
+                    let _ = self.0.try_send("b-dropped");
+                }
+            }
+            let _dropped = Dropped(dropped_tx);
+            let _ = ready_tx.send(()).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        for _ in 0..2 {
+            tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx.recv())
+                .await
+                .expect("a boot task never entered its guarded step")
+                .expect("the readiness channel closed early");
+        }
+        let mut tasks = vec![a, b];
+        let fence = tokio::spawn(async move {
+            super::abort_all_then_join_all(&mut tasks).await;
+        });
+        // The later task's cancellation MUST be observable while the
+        // first handle is still held in its step (the failure bound
+        // only fails the bad order; the good order aborts b at once).
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(event) = dropped_rx.recv().await {
+                if event == "b-dropped" {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the later boot task was never aborted while the first join waited");
+        // The first handle's step is still held, so the fence cannot
+        // have completed - and the first task cannot have dropped yet.
+        assert!(
+            !fence.is_finished(),
+            "the fence completed while the first handle was still in flight"
+        );
+        // Release the first handle's step: the fence joins resolve.
+        drop(a_release_tx);
+        tokio::time::timeout(std::time::Duration::from_secs(5), fence)
+            .await
+            .expect("the fence never completed after the first step released")
+            .expect("the fence task panicked");
+        // The b-drop was consumed mid-flight (observed strictly before
+        // the first handle's step was released - the property the fence
+        // order guarantees); the remaining event is the first handle's
+        // own settle.
+        let mut events = Vec::new();
+        while let Ok(event) = dropped_rx.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(
+            events,
+            vec!["a-dropped"],
+            "the first handle must settle after the fence's joins resolve"
+        );
     }
 }
