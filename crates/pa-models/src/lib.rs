@@ -14,6 +14,9 @@ pub mod schema;
 pub mod transports;
 
 mod chain;
+mod codex;
+
+pub use codex::CodexCredentials;
 
 pub use chain::{ModelCatalog, PrimeCredentials, RefreshTrigger};
 pub use pa_types::ai::Model;

@@ -260,8 +260,18 @@ pub const AUTH_CATEGORIES: &[&str] = &[
 ];
 
 pub const FEATURE_NAMES: &[&str] = &[
-    "model", "login", "logout", "effort", "goal", "new", "resume", "fork", "clone", "tree",
+    "model",
+    "login",
+    "logout",
+    "effort",
+    "goal",
+    "new",
+    "resume",
+    "fork",
+    "clone",
+    "tree",
     "feedback",
+    "codex_catalog",
 ];
 
 pub const FEATURE_OUTCOMES: &[&str] = &[
@@ -749,6 +759,11 @@ const AGENT_SESSION_ENDED: EventRule = EventRule {
         ("feature_feedback_failed_count", optional(count())),
         ("feature_feedback_canceled_count", optional(count())),
         ("feature_feedback_unavailable_count", optional(count())),
+        ("feature_codex_catalog_initiated_count", optional(count())),
+        ("feature_codex_catalog_completed_count", optional(count())),
+        ("feature_codex_catalog_failed_count", optional(count())),
+        ("feature_codex_catalog_canceled_count", optional(count())),
+        ("feature_codex_catalog_unavailable_count", optional(count())),
     ],
 };
 
@@ -1070,6 +1085,11 @@ const TUI_EXIT: EventRule = EventRule {
         ("feature_feedback_failed_count", optional(count())),
         ("feature_feedback_canceled_count", optional(count())),
         ("feature_feedback_unavailable_count", optional(count())),
+        ("feature_codex_catalog_initiated_count", optional(count())),
+        ("feature_codex_catalog_completed_count", optional(count())),
+        ("feature_codex_catalog_failed_count", optional(count())),
+        ("feature_codex_catalog_canceled_count", optional(count())),
+        ("feature_codex_catalog_unavailable_count", optional(count())),
         ("input_received_count", optional(count())),
         ("input_queued_count", optional(count())),
         ("input_preparation_count", optional(count())),
@@ -1449,6 +1469,21 @@ mod tests {
                 assert!(exit.properties.iter().any(|(known, _)| *known == key));
             }
         }
+    }
+
+    #[test]
+    fn codex_catalog_adoption_survives_privacy_sanitization() {
+        let mut properties = Properties::new();
+        let key = feature_outcome_key("codex_catalog", "completed")
+            .expect("Codex catalog use is an adoption feature");
+        properties.set(&key, json!(1));
+        properties.set("codex_account_id", json!("private-account"));
+        properties.set("codex_model_id", json!("private-model"));
+        sanitize("agent session ended", &mut properties);
+        assert_eq!(
+            serde_json::to_value(properties).unwrap(),
+            json!({"feature_codex_catalog_completed_count": 1})
+        );
     }
 
     #[test]

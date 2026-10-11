@@ -59,6 +59,7 @@ impl PrimeCredentials {
 pub struct ModelCatalog {
     provider_cache: CatalogCache<Vec<Model>>,
     prime_inference: PrimeInferenceCatalog,
+    codex: crate::codex::CodexCatalog,
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
@@ -68,6 +69,7 @@ pub struct ModelCatalog {
     pi_base_url: Arc<str>,
     /// Guards [`ModelCatalog::spawn_hourly_refresh`]: one loop per instance.
     hourly_loop: OnceLock<()>,
+    codex_loop: OnceLock<()>,
     /// The Prime Inference credential scope the last catalog request in this process observed:
     /// `None` until the first observation (the disk snapshot's stored scope seeds it, so a login or
     /// logout that predates this process's first request is still detected), then the live scope
@@ -125,6 +127,7 @@ impl ModelCatalog {
                 Arc::new(CatalogFetcher::new()),
                 parse,
             ),
+            codex: crate::codex::CodexCatalog::new(models_dir.clone(), crate::codex::MODELS_URL),
             prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
             bundled: bundled_dir
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
@@ -132,8 +135,73 @@ impl ModelCatalog {
             compiled,
             pi_base_url: Arc::from(pi_base_url),
             hourly_loop: OnceLock::new(),
+            codex_loop: OnceLock::new(),
             pi_scope_seen: Mutex::new(None),
         }
+    }
+
+    /// Override the Codex discovery endpoint (hermetic integration tests).
+    #[must_use]
+    pub fn with_codex_url(mut self, url: &str) -> Self {
+        let dir = self
+            .provider_cache
+            .cache_path()
+            .and_then(std::path::Path::parent)
+            .map(std::path::Path::to_path_buf);
+        self.codex = crate::codex::CodexCatalog::new(dir, url);
+        self
+    }
+
+    /// Resolve without network, replacing only Codex models for the authenticated account.
+    pub fn resolve_with_codex(
+        &self,
+        prime: Option<&PrimeCredentials>,
+        codex_account_id: Option<&str>,
+    ) -> Vec<Model> {
+        let mut models = self.resolve(prime);
+        if let Some(live) = codex_account_id.and_then(|account| self.codex.get(account)) {
+            models.retain(|model| model.provider != "openai-codex");
+            models.extend(live);
+        }
+        models
+    }
+
+    /// Keep the Codex cache warm without resolving credentials or fetching on the caller's path.
+    /// Credential resolution may block (OAuth refresh) and runs on the blocking pool.
+    pub fn spawn_codex_refresh(
+        self: &Arc<Self>,
+        credentials: impl Fn() -> Option<crate::CodexCredentials> + Send + Sync + 'static,
+    ) {
+        if self.codex_loop.set(()).is_err() {
+            return;
+        }
+        let catalog = Arc::clone(self);
+        let credentials = Arc::new(credentials);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                crate::CATALOG_REFRESH_INTERVAL_MS,
+            ));
+            loop {
+                interval.tick().await;
+                if crate::offline::is_catalog_offline() {
+                    continue;
+                }
+                let resolve = Arc::clone(&credentials);
+                match tokio::task::spawn_blocking(move || resolve()).await {
+                    Ok(Some(credentials)) => {
+                        catalog.refresh_codex(&credentials).await;
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(%error, "Codex catalog credential task failed"),
+                }
+            }
+        });
+    }
+
+    /// Refresh Codex in a background caller. The one-hour disk TTL applies on startup too.
+    #[tracing::instrument(skip_all)]
+    pub async fn refresh_codex(&self, credentials: &crate::CodexCredentials) -> Option<Vec<Model>> {
+        self.codex.refresh(credentials).await
     }
 
     pub fn prime_inference_base_url(&self) -> &str {

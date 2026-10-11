@@ -80,6 +80,10 @@ pub fn startup_refresh(agent_dir: &Path) -> Arc<ModelCatalog> {
         pa_models::RefreshTrigger::Startup,
         prime_credentials_for_dir(agent_dir),
     );
+    let dir = agent_dir.to_path_buf();
+    catalog.spawn_codex_refresh(move || {
+        super::codex_catalog::credentials(&mut AuthStorage::create(&dir))
+    });
     catalog
 }
 
@@ -91,4 +95,8 @@ pub fn spawn_hourly_refresh(agent_dir: &Path) {
     let catalog = catalog_for(Some(&agent_dir.join("models.json")));
     let dir = agent_dir.to_path_buf();
     catalog.spawn_hourly_refresh(move || prime_credentials_for_dir(&dir));
+    let dir = agent_dir.to_path_buf();
+    catalog.spawn_codex_refresh(move || {
+        super::codex_catalog::credentials(&mut AuthStorage::create(&dir))
+    });
 }

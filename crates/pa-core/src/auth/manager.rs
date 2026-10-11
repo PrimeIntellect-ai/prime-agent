@@ -231,6 +231,25 @@ pub struct AuthStorage {
     candidate_memos: std::sync::Mutex<HashMap<String, (String, AuthSourceCandidate)>>,
 }
 
+// Clones share the credential backend and OAuth integration, allowing blocking
+// token refresh to run off the async runtime without replacing injected auth.
+impl Clone for AuthStorage {
+    fn clone(&self) -> Self {
+        Self {
+            storage: Arc::clone(&self.storage),
+            oauth: Arc::clone(&self.oauth),
+            env_credentials: Arc::clone(&self.env_credentials),
+            data: self.data.clone(),
+            runtime_overrides: self.runtime_overrides.clone(),
+            stale_auth_sources: self.stale_auth_sources.clone(),
+            fallback_resolver: self.fallback_resolver.clone(),
+            load_error: self.load_error.clone(),
+            errors: self.errors.clone(),
+            candidate_memos: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 impl AuthStorage {
     pub fn from_storage(
         storage: Arc<dyn AuthStorageBackend>,

@@ -1,7 +1,7 @@
 # pa-models
 
 The live model catalog subsystem: fetch layer, no-cold-start chain, strict
-schemas, transport pinning, and the credentialed Prime Inference catalog.
+schemas, transport pinning, and credentialed Prime Inference and Codex catalogs.
 Port of the TS catalog client (branch `feat/catalog-client`:
 `model-catalog-cache.ts`, `model-catalog.ts`, `model-compat-schema.ts`,
 `provider-model-catalog.ts`, `bundled-model-catalog.ts`,
@@ -24,6 +24,15 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   headers.
 - Prime Inference: live credentialed fetch, scope-keyed disk cache
   (HMAC-SHA256 of key over team), 401/403 clears only that scope.
+- Codex: subscription-authenticated `/codex/models` discovery, with a one-hour
+  TTL in `models/openai-codex-models-cache.json`. The account-scoped snapshot
+  contains metadata, not credentials. Offline or failed refreshes keep the
+  last-good snapshot; absent/invalid caches use the bundled catalog. A 401/403
+  clears the snapshot. Discovery cannot change the compiled Codex transport.
+  Missing output-token limits use the compiled limit, bounded by context;
+  new models without pricing metadata use zero (unknown) prices. The request
+  advertises the Codex 0.162.1 client contract, not the Prime Agent version;
+  future server-side minimum-client-version gates may require updating it.
 - Refresh: hourly + startup + picker open + auth change; fire-and-forget;
   coalesced per source; a mid-session refresh never retargets the active
   model.
@@ -42,7 +51,8 @@ Port of the TS catalog client (branch `feat/catalog-client`:
 ## Public API
 
 - `ModelCatalog` (chain resolution + refresh cadence),
-  `RefreshTrigger`, `PrimeCredentials`
+  `RefreshTrigger`, `PrimeCredentials`, `CodexCredentials` (Codex account +
+  access token; auth resolution remains in pa-core)
 - `cache::CatalogCache<T>` (generic last-good cache; the plugins lane
   instantiates it with its own fail-closed parser),
   `cache::{RefreshOptions, PUBLIC_SCOPE}`

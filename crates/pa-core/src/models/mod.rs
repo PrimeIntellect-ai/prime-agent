@@ -20,6 +20,7 @@ pub use pa_models::RefreshTrigger;
 
 pub mod allowlist;
 pub(crate) mod catalog_chain;
+mod codex_catalog;
 pub(crate) mod custom;
 pub mod image_model_routing;
 pub(crate) mod prime_inference;

@@ -548,7 +548,10 @@ impl ModelRegistry {
         credentials: Option<&pa_models::PrimeCredentials>,
     ) -> Vec<Model> {
         self.catalog
-            .resolve(credentials)
+            .resolve_with_codex(
+                credentials,
+                super::codex_catalog::account_id(&self.auth).as_deref(),
+            )
             .into_iter()
             .map(|mut model| {
                 if let Some(provider_override) = custom.provider_overrides.get(&model.provider) {
@@ -613,9 +616,28 @@ impl ModelRegistry {
         let previous_models = self.authorized_private_models.clone();
         self.refresh();
         let credentials = self.prime_credentials();
-        self.catalog
-            .refresh_with_credentials(force, credentials.as_ref())
-            .await;
+        let mut codex_auth = self.auth.clone();
+        let codex = match tokio::task::spawn_blocking(move || {
+            super::codex_catalog::credentials(&mut codex_auth)
+        })
+        .await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                tracing::warn!(%error, "Codex catalog credential task failed");
+                None
+            }
+        };
+        self.auth.reload();
+        let public_refresh = self
+            .catalog
+            .refresh_with_credentials(force, credentials.as_ref());
+        let codex_refresh = async {
+            if let Some(credentials) = codex {
+                self.catalog.refresh_codex(&credentials).await;
+            }
+        };
+        tokio::join!(public_refresh, codex_refresh);
         self.load_models();
         self.refresh_private_prime_inference_authorization(
             previous_ids,

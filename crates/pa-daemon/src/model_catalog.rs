@@ -67,6 +67,7 @@ impl Worker {
         }
         let agent_dir = self.config.agent_dir.clone();
         let events = Arc::clone(&self.events);
+        let agent_engine = self.agent_engine.clone();
         tokio::spawn(async move {
             let mut baseline = served;
             let mut trigger = trigger;
@@ -80,6 +81,26 @@ impl Worker {
                 let refreshed = catalog_payload(&registry, &available);
                 if refreshed != baseline {
                     events.send(OutboundFrame::model_catalog_changed());
+                }
+                // Counts usable Codex catalogs, including cached or fallback models;
+                // it does not claim that this refresh fetched a live catalog.
+                if let Some(engine) = agent_engine.as_ref().filter(|_| {
+                    available
+                        .iter()
+                        .any(|model| model.provider == "openai-codex")
+                }) {
+                    let engine = Arc::clone(engine);
+                    tokio::spawn(async move {
+                        let telemetry = engine
+                            .session
+                            .lock()
+                            .await
+                            .as_deref()
+                            .and_then(|session| session.telemetry.clone());
+                        if let Some(telemetry) = telemetry {
+                            telemetry.note_feature_outcome("codex_catalog", "completed", None);
+                        }
+                    });
                 }
                 baseline = refreshed;
                 gate.in_flight.store(false, Ordering::SeqCst);
@@ -419,7 +440,8 @@ mod tests {
             Some(bundled_dir),
             &server.url("/catalog"),
             &server.url("/api/v1"),
-        );
+        )
+        .with_codex_url(&server.url("/codex"));
         pa_core::models::install_catalog(&agent_dir.join("models.json"), Arc::new(catalog));
         let config = WorkerConfig {
             socket_path: dir.join("worker.sock"),
@@ -550,6 +572,58 @@ mod tests {
                 Err(error) => panic!("model_catalog_changed never landed: {error}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn hanging_codex_discovery_does_not_delay_the_picker_response() {
+        let mut fixture = fixture(create_phase_answers()).await;
+        let auth_path = fixture.agent_dir.join("auth.json");
+        let mut auth: Value =
+            serde_json::from_str(&std::fs::read_to_string(&auth_path).expect("read auth"))
+                .expect("parse auth");
+        auth["openai-codex"] = json!({
+            "type": "oauth",
+            "access": "codex-access",
+            "refresh": "codex-refresh",
+            "expires": 4_102_444_800_000_u64,
+            "accountId": "codex-account",
+        });
+        std::fs::write(auth_path, auth.to_string()).expect("write Codex auth");
+        let (release, held) = gate();
+        fixture.server.push(held);
+        let requests_before = fixture.server.request_count();
+
+        let served = tokio::time::timeout(
+            Duration::from_secs(2),
+            get_model_catalog(&fixture.worker, "catalog-session"),
+        )
+        .await
+        .expect("picker response must not wait for Codex discovery");
+        assert!(has_model(&served, "mock-1"));
+        assert!(!has_model(&served, "codex-runtime-probe"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() == requests_before {
+            assert!(Instant::now() < deadline, "Codex discovery never started");
+            tokio::task::yield_now().await;
+        }
+        assert!(fixture.server.recorded_requests()[requests_before].starts_with("GET /codex "));
+
+        release
+            .send(ok_json(
+                &json!({"models": [{
+                    "slug": "codex-runtime-probe",
+                    "display_name": "Runtime Codex",
+                    "visibility": "list",
+                    "context_window": 200_000,
+                    "supported_reasoning_levels": [{"effort": "high"}],
+                    "input_modalities": ["text"],
+                }]})
+                .to_string(),
+            ))
+            .expect("Codex fetch is still waiting on its response");
+        await_catalog_changed(&mut fixture.events).await;
+        let refreshed = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert!(has_model(&refreshed, "codex-runtime-probe"));
     }
 
     #[tokio::test]
