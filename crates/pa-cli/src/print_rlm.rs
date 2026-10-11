@@ -59,6 +59,8 @@ pub(crate) struct InlineSessionNode {
     /// Serializes same-parent spawn admissions (the name check through
     /// the children push); host requests run as detached tasks.
     spawn_gate: tokio::sync::Mutex<()>,
+    /// Serializes message admission with disposal; never held across an await.
+    delivery_gate: std::sync::Mutex<()>,
     pub(crate) depth: u32,
     pub(crate) max_depth: u32,
     /// The session's model selector (`provider/id`), inherited by children.
@@ -186,6 +188,7 @@ pub(crate) fn root_node(
         session_dir: session_manager.get_session_dir().display().to_string(),
         session_name: std::sync::Mutex::new(None),
         spawn_gate: tokio::sync::Mutex::new(()),
+        delivery_gate: std::sync::Mutex::new(()),
         depth: 0,
         max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),
         model_selector: std::sync::Mutex::new(None),
@@ -471,6 +474,10 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
 /// the node's activity. One delivery path for kickoffs, replies, and
 /// notices alike.
 fn deliver_row(node: &Arc<InlineSessionNode>, row: Value) -> anyhow::Result<()> {
+    let _delivery_guard = node.delivery_gate.lock().unwrap();
+    if node.is_disposed() {
+        anyhow::bail!("Cannot deliver to a disposed inline session");
+    }
     let custom: CustomMessage = serde_json::from_value(row).map_err(|error| {
         anyhow::anyhow!("the delivered row failed its wire conversion: {error}")
     })?;
@@ -495,10 +502,13 @@ fn deliver_row(node: &Arc<InlineSessionNode>, row: Value) -> anyhow::Result<()> 
 async fn dispose_child(child: &Arc<InlineChild>) {
     let mut pending = vec![Arc::clone(child)];
     while let Some(current) = pending.pop() {
-        current
-            .node
-            .disposed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        {
+            let _delivery_guard = current.node.delivery_gate.lock().unwrap();
+            current
+                .node
+                .disposed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         current.node.activity.notify_waiters();
         current.engine.session.agent().abort();
         current.engine.dispose_kernel().await;
@@ -511,8 +521,11 @@ async fn dispose_child(child: &Arc<InlineChild>) {
 
 /// Tear every inline descendant of the root down.
 pub(crate) async fn dispose_inline_subagents(root: &Arc<InlineSessionNode>) {
-    root.disposed
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let _delivery_guard = root.delivery_gate.lock().unwrap();
+        root.disposed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     root.activity.notify_waiters();
     let children = std::mem::take(&mut *root.children.lock().await);
     for child in children {
@@ -679,6 +692,7 @@ impl RlmSubagentHost for InlineHost {
                 session_dir: child_dir.display().to_string(),
                 session_name: std::sync::Mutex::new(Some(name.clone())),
                 spawn_gate: tokio::sync::Mutex::new(()),
+                delivery_gate: std::sync::Mutex::new(()),
                 depth: node.depth + 1,
                 max_depth: node.max_depth,
                 model_selector: std::sync::Mutex::new(Some(selector.clone())),
@@ -1133,14 +1147,12 @@ impl AgentMessageController for InlineMessages {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn spawn_waiting_for_admission_rejects_a_disposed_parent() {
-        let directory = tempfile::tempdir().unwrap();
-        let options = crate::mode::RunOptions {
+    fn run_options(directory: &std::path::Path) -> crate::mode::RunOptions {
+        crate::mode::RunOptions {
             app_mode: crate::mode::AppMode::Print,
             config: crate::mode::RuntimeConfig {
-                cwd: directory.path().to_path_buf(),
-                agent_dir: directory.path().join("agent"),
+                cwd: directory.to_path_buf(),
+                agent_dir: directory.join("agent"),
                 ..Default::default()
             },
             session: crate::mode::SessionOptions::default(),
@@ -1154,7 +1166,13 @@ mod tests {
             offline: true,
             agents_view_requested: false,
             attach_agent: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_waiting_for_admission_rejects_a_disposed_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = run_options(directory.path());
         std::fs::create_dir_all(&options.config.agent_dir).unwrap();
         let manager = pa_core::session::manager::SessionManager::in_memory(directory.path());
         let mut node = root_node(
@@ -1190,5 +1208,49 @@ mod tests {
         let error = result.expect_err("a disposed parent must not admit a queued spawn");
         assert!(error.to_string().contains("disposed"), "{error:#}");
         assert_eq!(admitted, 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_to_a_disposed_session_rejects_without_queuing() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = run_options(directory.path());
+        std::fs::create_dir_all(&options.config.agent_dir).unwrap();
+        let manager = pa_core::session::manager::SessionManager::in_memory(directory.path());
+        let script = json!({ "responses": ["parent"] });
+        let node = root_node(&options, &manager, Some(script.clone()));
+        let headless = crate::print_runtime::build_engine(
+            &options,
+            Some(&script),
+            Some(manager),
+            "print",
+            &HeadlessEmbedding::Root {
+                node: Arc::clone(&node),
+            },
+        )
+        .await
+        .unwrap();
+        let engine = Arc::new(headless.engine);
+        adopt_built_engine(&node, &engine, &headless.model).await;
+        let endpoint = node.endpoint();
+        let row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
+            id: "late-message",
+            prompt: "late message",
+            message: "late message",
+            from: &endpoint,
+            from_relationship: None,
+            target: Some(&endpoint),
+            timestamp: 0,
+        });
+        dispose_inline_subagents(&node).await;
+        assert!(!engine.session.agent().has_queued_messages());
+        let result = deliver_row(&node, row);
+        let queued = engine.session.agent().has_queued_messages();
+        engine.dispose_kernel().await;
+        let error = result.expect_err("a disposed session must reject a retained delivery target");
+        assert!(error.to_string().contains("disposed"), "{error:#}");
+        assert!(
+            !queued,
+            "rejected delivery must not enqueue an unread message"
+        );
     }
 }

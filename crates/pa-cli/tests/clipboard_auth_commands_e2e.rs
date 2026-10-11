@@ -124,6 +124,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let stderr_path = dir.join("supervisor.stderr");
     let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
     command
         .args(["--mode", "daemon", "--daemon-socket"])
@@ -131,7 +132,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(std::fs::File::create(&stderr_path).expect("supervisor stderr"));
     for var in [
         pa_daemon::worker::WORKER_ROLE_ENV,
         pa_daemon::worker::WORKER_TOKEN_ENV,
@@ -156,15 +157,22 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
-    let child = command.spawn().expect("spawn prime-agent --mode daemon");
+    let mut child = command.spawn().expect("spawn prime-agent --mode daemon");
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        if socket.exists() {
+        if let Some(status) = child.try_wait().expect("check supervisor exit") {
+            let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+            panic!("supervisor exited before accepting connections ({status}); stderr: {stderr}");
+        }
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
             return Supervisor { child, socket };
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    panic!("supervisor socket never appeared");
+    let _ = child.kill();
+    let _ = child.wait();
+    let stderr = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+    panic!("supervisor never accepted a connection within 15s; stderr: {stderr}");
 }
 
 // Scripted hooks (composition-root seams; the verifier drives the traits directly).
