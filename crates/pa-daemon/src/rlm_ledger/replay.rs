@@ -172,8 +172,8 @@ pub(super) fn edge_key(child_id: &str, child: &str) -> String {
 pub(super) struct LivePathResolver {
     agent_dir: PathBuf,
     sessions_dir: PathBuf,
-    resolved: HashMap<String, Option<PathBuf>>,
-    artifact_index: Option<HashMap<String, PathBuf>>,
+    pub(super) resolved: HashMap<String, Option<PathBuf>>,
+    pub(super) artifact_index: Option<HashMap<String, PathBuf>>,
 }
 
 impl LivePathResolver {
