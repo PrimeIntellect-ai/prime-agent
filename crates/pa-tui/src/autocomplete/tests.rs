@@ -712,7 +712,23 @@ fn at_index_tracks_watcher_events() {
     std::fs::create_dir_all(base.join("watched_dir")).expect("mkdir");
     std::fs::write(base.join("watched_dir/inside.rs"), "x").expect("write");
     settle(true);
-    std::fs::remove_file(base.join("watched.rs")).expect("remove");
+    // A directory replaced by a file drops the directory's descendants too.
     std::fs::remove_dir_all(base.join("watched_dir")).expect("remove");
+    std::fs::write(base.join("watched_dir"), "x").expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let replaced = values("inside").is_empty()
+            && values("watched_dir").contains(&"@watched_dir".to_string());
+        if replaced {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher never settled the replaced directory"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::fs::remove_file(base.join("watched.rs")).expect("remove");
+    std::fs::remove_file(base.join("watched_dir")).expect("remove");
     settle(false);
 }

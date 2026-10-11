@@ -387,11 +387,12 @@ fn apply_batch(
         if !parent.is_empty() && !entries.contains(parent.as_str()) {
             continue;
         }
-        // A stale entry of the other type drops before the rule check.
+        // A stale entry of the other type drops before the rule check: a directory
+        // replaced by a file takes its descendants with it.
         if is_directory {
             entries.remove(rel.as_str());
         } else {
-            entries.remove(format!("{rel}/").as_str());
+            remove_subtree(entries, rel);
         }
         inserted
             .entry(parent)
@@ -438,6 +439,12 @@ fn apply_batch(
                     .filter_map(|entry| fd_printed_form(&entry, base))
                 {
                     entries.insert(Box::from(form));
+                    if entries.len() > MAX_INDEX_ENTRIES {
+                        // An over-cap batch disables the index, like an over-cap
+                        // build does.
+                        *state = IndexState::Disabled;
+                        return;
+                    }
                 }
             }
         }
