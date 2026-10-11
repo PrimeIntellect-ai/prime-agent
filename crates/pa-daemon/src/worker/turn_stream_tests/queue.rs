@@ -889,6 +889,12 @@ async fn the_async_completion_notice_delivery_keeps_the_live_note() {
 #[derive(Default)]
 struct AbortSwallowedEngine {
     note: Mutex<Option<String>>,
+    clear_gate: Option<Arc<NoteClearGate>>,
+}
+
+struct NoteClearGate {
+    entered: Notify,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
 }
 
 impl SessionEngine for AbortSwallowedEngine {
@@ -897,6 +903,14 @@ impl SessionEngine for AbortSwallowedEngine {
     }
 
     fn clear_progress_note(&self) {
+        if let Some(gate) = &self.clear_gate {
+            gate.entered.notify_one();
+            gate.release
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("the test releases the note clear");
+        }
         *self.note.lock().unwrap() = None;
     }
 
@@ -997,4 +1011,56 @@ async fn an_aborted_run_clears_the_note_at_its_idle_settle() {
         engine.note.lock().unwrap().is_none(),
         "the aborted run's idle settle must clear the note"
     );
+}
+
+/// Pause the note clear so a roster reader can attempt the same
+/// core-then-note snapshot as SummaryInputs. Idle must never become
+/// observable with the stopped run's note still present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
+    let (release, receiver) = std::sync::mpsc::channel();
+    let gate = Arc::new(NoteClearGate {
+        entered: Notify::new(),
+        release: Mutex::new(receiver),
+    });
+    let engine = Arc::new(AbortSwallowedEngine {
+        note: Mutex::new(None),
+        clear_gate: Some(Arc::clone(&gate)),
+    });
+    let runner = burst_runner(engine.clone());
+    let core = Arc::clone(&runner.core);
+    core.lock().unwrap().busy = true;
+    let engine_for_turn = Arc::clone(&engine);
+    let turn = tokio::spawn(async move {
+        runner
+            .run_turn(
+                engine_for_turn,
+                vec![queued_prompt("review the gate", TurnPolicy::Queued)],
+            )
+            .await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while engine.progress_note().is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the run publishes a progress note");
+    core.lock().unwrap().abort_requested = true;
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("the aborted run reaches its note clear");
+    let exposed_stale_idle = match core.try_lock() {
+        Ok(core) => !core.busy && engine.progress_note().is_some(),
+        Err(std::sync::TryLockError::WouldBlock) => false,
+        Err(error) => panic!("the summary lock is poisoned: {error}"),
+    };
+    release.send(()).unwrap();
+    turn.await.unwrap();
+    assert!(
+        !exposed_stale_idle,
+        "an idle roster snapshot could retain the aborted run's progress note"
+    );
+    assert!(!core.lock().unwrap().busy);
+    assert!(engine.progress_note().is_none());
 }

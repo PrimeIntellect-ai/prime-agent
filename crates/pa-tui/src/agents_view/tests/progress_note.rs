@@ -128,6 +128,31 @@ fn a_zero_width_pane_has_no_note_lines() {
     assert!(mode.render_note_details(&mode.rows[index], 0).is_empty());
 }
 
+#[test]
+fn a_nested_wide_note_stays_within_the_pane() {
+    let (mut mode, index) = mode_with_row("worker", "mock-1");
+    mode.rows[index].kind = RowKind::Subagent;
+    mode.rows[index].depth = 3;
+    note_into(&mut mode, index, "検証中");
+    for width in [1, 2, 4, 8, 9, 10] {
+        let lines = mode.render_note_details(&mode.rows[index], width);
+        let text: String = lines
+            .iter()
+            .map(|line| flat(line).trim().to_string())
+            .collect();
+        if width >= 2 {
+            assert_eq!(text, "検証中", "wide characters survive at width {width}");
+        }
+        for line in lines {
+            let text = flat(&line);
+            assert!(
+                str_width(&text) <= width,
+                "wide note exceeds width {width}: {text:?}"
+            );
+        }
+    }
+}
+
 /// A short pane keeps the selected row plus the note lines that fit.
 #[test]
 fn a_short_pane_keeps_the_row_and_the_fitting_note_lines() {
