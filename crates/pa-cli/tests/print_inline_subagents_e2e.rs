@@ -413,7 +413,7 @@ fn print_inline_subagents_enforce_the_depth_limit() {
 fn print_inline_subagents_wait_for_a_retasked_child() {
     let lane = lane();
     let kernel = PrintLane::kernel_python();
-    let follow_up_cell = "collected = await rlm.collect([\"kid\"], timeout_ms=60000)\nawait agent_message.send(\"SECOND-RESULT\", receiver_role=\"child\", receiver_name=\"kid\")\nprint(\"SENT\")".to_string();
+    let follow_up_cell = "collected = await rlm.collect([\"kid\"], timeout_ms=60000)\nprint(\"FIRST-TASK\", collected[0].status, collected[0].settled, collected[0].answer_text)\nawait agent_message.send(\"SECOND-RESULT\", receiver_role=\"child\", receiver_name=\"kid\")\nretasked = await rlm.collect([\"kid\"], timeout_ms=60000)\nprint(\"SECOND-TASK\", retasked[0].status, retasked[0].settled, retasked[0].answer_text)".to_string();
     let script = serde_json::json!({
         "responses": [
             { "content": [
@@ -466,6 +466,119 @@ fn print_inline_subagents_wait_for_a_retasked_child() {
         reply_rows,
         ["FIRST-RESULT", "SECOND-RESULT"],
         "the re-tasked child processed the follow-up and replied again"
+    );
+
+    // The in-turn collects: the follow-up's collect waits past the
+    // re-tasked run and returns the SECOND task's answer — never the
+    // settled child's stale first answer.
+    let parent_text = serde_json::to_string(&parent_entries).unwrap();
+    assert!(
+        parent_text.contains("FIRST-TASK done True kid finished the first task"),
+        "the collect before the follow-up read the first task's settled answer: {parent_text}"
+    );
+    assert!(
+        parent_text.contains("SECOND-TASK done True kid finished the second task"),
+        "the collect after the follow-up returned the second task's answer: {parent_text}"
+    );
+}
+
+/// A child whose task turn dies on a provider error settles FAILED, not
+/// done: the parent reads the failure row (never a completed-without-
+/// reply notice), and a re-tasked child that succeeds collects `done`
+/// with no stale error from the failed run. The child's error response is
+/// delayed past the parent's spawn turn, so its failure row drains through
+/// the quiescence drive, not the spawn turn's steering poll.
+#[test]
+fn print_inline_subagents_report_a_failed_child_then_a_clean_retry() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    // The turn over the failure row: read the failed verdict, then
+    // re-task the child from the parent.
+    let retask_cell = "collected = await rlm.collect([\"flaky\"], timeout_ms=60000)\nprint(\"FIRST-COLLECT\", collected[0].status, collected[0].error)\nawait agent_message.send(\"retry the task\", receiver_role=\"child\", receiver_name=\"flaky\")".to_string();
+    // The turn over the second reply: collect the clean retry.
+    let second_collect_cell =
+        "collected = await rlm.collect([\"flaky\"], timeout_ms=60000)\nprint(\"SECOND-COLLECT\", collected[0].status, collected[0].error)".to_string();
+    let script = serde_json::json!({
+        // Turn 1 spawns and ends ("WAITING"); the failed task's failure
+        // row drains as turn 2 (the re-task), the second reply drains as
+        // turn 3, and its collect reads the clean retry.
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "kid = await rlm.spawn(\"run the kid task\", name=\"flaky\")\nprint(\"KID\", kid.rlm_child_id)" } },
+            ] },
+            "WAITING",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": retask_cell } },
+            ] },
+            "RETASKED",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": second_collect_cell } },
+            ] },
+            "RETRY CLEAN",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "flaky": { "responses": [
+                // The task turn dies on a provider error; the run path
+                // itself returns `Ok` for the row, so only its stop
+                // reason marks the failure.
+                { "text": "the provider exploded mid-task", "stopReason": "error",
+                  "errorMessage": "faux provider exploded", "delayMs": 3000 },
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": reply_cell("SECOND") } },
+                ] },
+                "kid finished the retry",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) =
+        lane.run(&["-p", "delegate the flaky task"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(stdout.trim_end(), "RETRY CLEAN");
+
+    let parent_file = lane.parent_session_file();
+    let entries = PrintLane::entries(&parent_file);
+    let parent_text = serde_json::to_string(&entries).unwrap();
+    // The failed task surfaces as the failure row — never as a
+    // completed-without-reply notice.
+    let failure_at = entries
+        .iter()
+        .position(|entry| {
+            entry.get("type").and_then(|t| t.as_str()) == Some("custom_message")
+                && entry.get("customType").and_then(|t| t.as_str()) == Some("rlm_child_failure")
+        })
+        .expect("the parent read the failed child's failure row");
+    assert_eq!(
+        entries[failure_at]
+            .pointer("/details/error")
+            .and_then(|e| e.as_str()),
+        Some("faux provider exploded"),
+        "the failure row carries the terminal error: {}",
+        entries[failure_at]
+    );
+    assert!(
+        !parent_text.contains("no-reply child:"),
+        "the failed run never read as a completed-without-reply notice: {parent_text}"
+    );
+    // The re-task turn read the failed verdict before re-tasking, and the
+    // retry collected done with NO stale error.
+    assert!(
+        parent_text.contains("FIRST-COLLECT error faux provider exploded"),
+        "the collect after the failure read the error status: {parent_text}"
+    );
+    let reply_at = custom_row_at(&entries, "agent_message", Some("SECOND-RESULT"))
+        .expect("the re-tasked child replied again");
+    assert!(
+        failure_at < reply_at,
+        "the failure row (row {failure_at}) landed before the second reply (row {reply_at})"
+    );
+    assert!(
+        parent_text.contains("SECOND-COLLECT done None"),
+        "the retry collected done with no stale error: {parent_text}"
     );
 }
 

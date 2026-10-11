@@ -233,6 +233,24 @@ pub(crate) fn inline_subagent_wiring(
 
 // The quiescence drive
 
+/// Whether one child has live work (TS `child.isSessionActive`): not
+/// settled, or a delivered row waiting in its lane, or a turn streaming.
+/// The quiescence predicate, the collect wait, and the roster rows all
+/// read this one fact — never a second bookkeeping writer — so a
+/// follow-up delivered to a settled child reads unsettled until its
+/// driver re-admits the run. A disposed child keeps no live work: its
+/// terminal verdict stands.
+async fn child_is_unsettled(child: &Arc<InlineChild>) -> bool {
+    if child.node.is_disposed() {
+        return false;
+    }
+    if !child.state.lock().await.settled {
+        return true;
+    }
+    let agent = child.engine.session.agent();
+    agent.has_queued_messages() || agent.state().await.is_streaming
+}
+
 /// Whether inline subagent work is unsettled (TS
 /// `_hasUnsettledRlmQuiescenceWork`): a running child, a delivered row
 /// waiting in a child's lane, or a row queued on the root's own agent.
@@ -241,11 +259,7 @@ pub(crate) fn inline_subagent_wiring(
 /// alone — is the fact (TS `child.isSessionActive`).
 pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> bool {
     for child in node.children.lock().await.iter() {
-        if !child.state.lock().await.settled {
-            return true;
-        }
-        let agent = child.engine.session.agent();
-        if agent.has_queued_messages() || agent.state().await.is_streaming {
+        if child_is_unsettled(child).await {
             return true;
         }
     }
@@ -353,43 +367,58 @@ async fn drive_child(child: Arc<InlineChild>) {
         state.settled = false;
         state.status = "running";
         state.started_at_ms = crate::util_time::now_ms();
+        state.error = None;
     }
 }
 
 /// Settle one child: capture its last assistant text as the answer,
 /// publish the terminal status, deliver the no-reply notice or the
-/// failure row to the parent, and fire the parent's activity.
+/// failure row to the parent, and fire the parent's activity. A terminal
+/// assistant row that stopped on a provider error settles failed like a
+/// drive error (the run path itself returns `Ok` for it).
 async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
-    // The last assistant row's text (the answer the collect envelope and
-    // the no-reply notice carry): trailing non-assistant rows are skipped.
-    let answer = if let Some(pa_types::session::AgentMessage::Assistant(assistant)) =
-        child.engine.session.last_assistant_message().await
-    {
-        let text = assistant
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-                pa_types::ai::AssistantContentBlock::Thinking(_)
-                | pa_types::ai::AssistantContentBlock::ToolCall(_) => None,
-            })
-            .collect::<String>();
-        (!text.is_empty()).then_some(text)
-    } else {
-        None
-    };
+    // The last assistant row: its text is the answer the collect envelope
+    // and the no-reply notice carry (trailing non-assistant rows are
+    // skipped); a provider-error stop on it is the terminal error.
+    let (answer, terminal_error) =
+        if let Some(pa_types::session::AgentMessage::Assistant(assistant)) =
+            child.engine.session.last_assistant_message().await
+        {
+            let text = assistant
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                    pa_types::ai::AssistantContentBlock::Thinking(_)
+                    | pa_types::ai::AssistantContentBlock::ToolCall(_) => None,
+                })
+                .collect::<String>();
+            let terminal_error = if assistant.stop_reason == pa_types::ai::StopReason::Error {
+                Some(
+                    assistant
+                        .error_message
+                        .unwrap_or_else(|| "Assistant response failed".to_string()),
+                )
+            } else {
+                None
+            };
+            ((!text.is_empty()).then_some(text), terminal_error)
+        } else {
+            (None, None)
+        };
     let name = child
         .node
         .session_name()
         .unwrap_or_else(|| child.rlm_child_id.clone());
-    let notice = {
+    let parent = child.node.parent_node();
+    {
         let mut state = child.state.lock().await;
         if state.settled || child.node.is_disposed() {
             return;
         }
         state.settled = true;
         state.answer_text = answer.map(|text| cap_text(&text, ANSWER_TEXT_MAX_CHARS));
-        if let Some(error) = run_error {
+        let notice = if let Some(error) = run_error.or(terminal_error) {
             state.status = "error";
             state.error = Some(error.clone());
             Some(create_rlm_child_failure_message(
@@ -413,12 +442,15 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
                     crate::util_time::now_ms(),
                 )
             })
-        }
-    };
-    if let Some(parent) = child.node.parent_node() {
-        if let Some(notice) = notice {
+        };
+        // The notice queues on the parent's lane while this lock is held:
+        // every reader of `settled` reads it under this same lock, so none
+        // can observe the settled child before the parent's queue holds its
+        // row — the quiescence check reads the child state before the
+        // parent's queue and cannot return through the gap.
+        if let (Some(parent), Some(notice)) = (&parent, notice) {
             let delivered = match serde_json::to_value(notice) {
-                Ok(value) => deliver_row(&parent, value),
+                Ok(value) => deliver_row(parent, value),
                 Err(error) => Err(anyhow::anyhow!(
                     "the notice failed its wire conversion: {error}"
                 )),
@@ -427,6 +459,8 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
                 eprintln!("pa-cli: RLM child notice was not delivered: {error:#}");
             }
         }
+    }
+    if let Some(parent) = parent {
         parent.activity.notify_waiters();
     }
 }
@@ -723,8 +757,9 @@ impl RlmSubagentHost for InlineHost {
             let children = node.children.lock().await.clone();
             let mut entries = Vec::with_capacity(children.len());
             for child in &children {
+                let unsettled = child_is_unsettled(child).await;
                 let state = child.state.lock().await;
-                entries.push(roster_entry(child, &state));
+                entries.push(roster_entry(child, &state, unsettled));
             }
             Ok(entries)
         })
@@ -738,6 +773,7 @@ impl RlmSubagentHost for InlineHost {
             // Cancel the child and its subtree: runs abort, kernels get
             // their final snapshots, drivers join.
             dispose_child(&child).await;
+            let unsettled = child_is_unsettled(&child).await;
             let entry = {
                 let mut state = child.state.lock().await;
                 state.settled = true;
@@ -745,7 +781,7 @@ impl RlmSubagentHost for InlineHost {
                     state.status = "cancelled";
                     state.error = Some("Deleted by parent orchestrator".to_string());
                 }
-                roster_entry(&child, &state)
+                roster_entry(&child, &state, unsettled)
             };
             node.children
                 .lock()
@@ -782,8 +818,9 @@ impl RlmSubagentHost for InlineHost {
                 let mut all_settled = true;
                 let mut results = Vec::with_capacity(children.len());
                 for child in &children {
+                    let unsettled = child_is_unsettled(child).await;
                     let state = child.state.lock().await;
-                    all_settled &= state.settled;
+                    all_settled &= !unsettled;
                     results.push(RlmChildResult {
                         rlm_child_id: child.rlm_child_id.clone(),
                         session_name: Some(
@@ -793,8 +830,8 @@ impl RlmSubagentHost for InlineHost {
                                 .unwrap_or_else(|| child.rlm_child_id.clone()),
                         ),
                         session_dir: Some(child.node.session_dir.clone()),
-                        status: state.status,
-                        settled: state.settled,
+                        status: if unsettled { "running" } else { state.status },
+                        settled: !unsettled,
                         answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
                         answer_text: state.answer_text.clone(),
                         error: state.error.clone(),
@@ -868,7 +905,11 @@ async fn rename_session(node: &Arc<InlineSessionNode>, name: &str) -> anyhow::Re
     Ok(())
 }
 
-fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmSubagentEntry {
+fn roster_entry(
+    child: &Arc<InlineChild>,
+    state: &InlineChildState,
+    unsettled: bool,
+) -> RlmSubagentEntry {
     RlmSubagentEntry {
         rlm_child_id: child.rlm_child_id.clone(),
         active_session_id: Some(child.node.session_id.clone()),
@@ -878,9 +919,13 @@ fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmSubage
             .session_name()
             .unwrap_or_else(|| child.rlm_child_id.clone()),
         session_dir: child.node.session_dir.clone(),
-        status: match state.status {
-            "done" => "completed",
-            other => other,
+        status: if unsettled {
+            "running"
+        } else {
+            match state.status {
+                "done" => "completed",
+                other => other,
+            }
         },
         activity: None,
         tool_use_count: None,
