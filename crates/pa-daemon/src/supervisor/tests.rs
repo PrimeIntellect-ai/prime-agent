@@ -266,9 +266,9 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
         );
     }
     {
-        // A relaunch elsewhere took the resident: the pid no longer names
-        // the watched process, so the watch hands off instead of running
-        // the crash arm over the replacement.
+        // An explicit new monitor (an update abandon's relaunch) took the
+        // resident. The old watch returns at the exit instead of running
+        // the crash arm over the new owner's process.
         let mut worker = std::process::Command::new("sleep")
             .arg("600")
             .spawn()
@@ -284,7 +284,7 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             futures::poll!(watch.as_mut()).is_pending(),
             "a live adopted worker keeps the watch parked"
         );
-        resident.descriptor.lock().await.pid = u64::from(std::process::id());
+        supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
@@ -294,6 +294,57 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
             "the kernel exit notification woke the watch; no poll timer fired"
         );
     }
+}
+
+/// Manual retry can replace the descriptor's pid without arming a monitor.
+/// The adopted predecessor must still hand off, even with an unchanged epoch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(start_paused = true)]
+async fn a_pid_only_replacement_keeps_the_adopted_predecessor_out_of_crash_recovery() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // A missed handoff must not spawn the test executable as a worker.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let mut predecessor = tokio::process::Command::new("sleep")
+        .arg("600")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn isolated predecessor");
+    let mut replacement = tokio::process::Command::new("sleep")
+        .arg("600")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn isolated replacement");
+    let predecessor_pid = predecessor.id().unwrap();
+    let resident = adopted_watch_resident(dir.path(), predecessor_pid);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        u64::from(predecessor_pid)
+    ));
+    assert!(futures::poll!(watch.as_mut()).is_pending());
+    let epoch = resident.monitor_epoch.load(Ordering::SeqCst);
+    resident.descriptor.lock().await.pid = u64::from(replacement.id().unwrap());
+    assert_eq!(resident.monitor_epoch.load(Ordering::SeqCst), epoch);
+    // Reap both test-owned processes before checking the watch's result.
+    predecessor.kill().await.expect("reap isolated predecessor");
+    replacement.kill().await.expect("reap isolated replacement");
+    watch.await;
+    assert_eq!(resident.consecutive_failures.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(supervisor.registry.get("w-adopted-watch").await.is_some());
 }
 
 /// The watched adopted worker's resident, with the descriptor carrying the
@@ -321,6 +372,360 @@ fn adopted_watch_resident(dir: &std::path::Path, pid: u32) -> Arc<ResidentWorker
         descriptor,
         dir.join("w-adopted-watch.descriptor.json"),
     )
+}
+
+/// The red-first headline: a replacement registration for a resident the
+/// supervisor watches over an adopted pid must transfer the watch to the
+/// registrant's process. On the unfixed tree the predecessor's exit
+/// returned the watch (the pid no longer matched) and the replacement's
+/// death went unobserved: no give-up, no cleanup, a dead resident still
+/// in the registry.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test]
+async fn a_registered_replacement_pid_is_monitored_after_the_predecessor_exits() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let mut predecessor = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("spawn the predecessor");
+    let mut replacement = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("spawn the replacement");
+    let resident = adopted_watch_resident(dir.path(), predecessor.id());
+    // The give-up budget is at the cap: a supervised death must reach the
+    // give-up at once, so the predecessor's unbookkept exit is observable.
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let mut old_watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        u64::from(predecessor.id())
+    ));
+    assert!(
+        futures::poll!(old_watch.as_mut()).is_pending(),
+        "a live adopted worker keeps the watch parked"
+    );
+    // The replacement registers: a new process for the same resident.
+    let command = DaemonCommand::WorkerRegister {
+        id: None,
+        active_session_id: "w-adopted-watch".into(),
+        session_id: None,
+        socket_path: dir
+            .path()
+            .join("replacement.sock")
+            .to_string_lossy()
+            .to_string(),
+        worker_instance_id: "replacement-instance".into(),
+        token: "token".into(),
+        pid: u64::from(replacement.id()),
+        rest: Map::default(),
+    };
+    let registered = supervisor
+        .handle_worker_register("register-1", "worker_register", &command)
+        .await;
+    assert!(
+        registered.success,
+        "the replacement registers: {registered:?}"
+    );
+    // The predecessor's exit retires the old watch without crash bookkeeping.
+    predecessor.kill().expect("kill the predecessor");
+    predecessor.wait().expect("reap the predecessor");
+    tokio::time::timeout(Duration::from_secs(2), old_watch)
+        .await
+        .expect("the old watch returns at the predecessor's exit");
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    // The replacement's death is supervised: the give-up runs at the cap.
+    replacement.kill().expect("kill the replacement");
+    replacement.wait().expect("reap the replacement");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while supervisor.registry.get("w-adopted-watch").await.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the replacement's death reaches the give-up");
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES + 1
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Failed
+    );
+}
+
+/// A second explicit monitor arm retires the old watch at the exit: the
+/// superseded generation must not run crash bookkeeping over the resident
+/// the new arm owns. On the unfixed tree the unchanged pid falls through
+/// to the crash arm and the death counts a failure.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test]
+async fn a_superseded_watch_leaves_the_failure_count_to_the_new_monitor() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let mut worker = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("spawn sleep");
+    let resident = adopted_watch_resident(dir.path(), worker.id());
+    // The cap is armed: an unsupervised crash arm would give up at once.
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        u64::from(worker.id())
+    ));
+    assert!(
+        futures::poll!(watch.as_mut()).is_pending(),
+        "a live adopted worker keeps the watch parked"
+    );
+    // The descriptor keeps the watched pid: only the generation moved on.
+    supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
+    worker.kill().expect("kill sleep");
+    worker.wait().expect("reap sleep");
+    tokio::time::timeout(Duration::from_secs(2), watch)
+        .await
+        .expect("the superseded watch returns at the exit");
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES,
+        "the superseded watch must not count the exit as a failure"
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(
+        supervisor.registry.get("w-adopted-watch").await.is_some(),
+        "the resident stays owned by the new generation"
+    );
+}
+
+/// A watch parked in the crash backoff must not relaunch over the resident
+/// when another arm claimed it during the sleep: the generation moved on
+/// while this watch was backed off.
+#[cfg(any(target_os = "linux", target_os = "macos"))] // the kernel-watch arms
+#[tokio::test(start_paused = true)]
+async fn a_superseded_watch_in_backoff_does_not_relaunch_over_the_new_owner() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // An unsupervised relaunch would fail deterministically here: a file
+    // stands where the logs dir would go.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let mut worker = std::process::Command::new("sleep")
+        .arg("600")
+        .spawn()
+        .expect("spawn sleep");
+    let resident = adopted_watch_resident(dir.path(), worker.id());
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    // A spawned watch, like production's spawn_monitor arms it: the parked
+    // task registers a real waker with the kernel exit watch.
+    let mut watch = tokio::spawn(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        u64::from(worker.id()),
+    ));
+    tokio::task::yield_now().await;
+    assert!(
+        futures::poll!(&mut watch).is_pending(),
+        "a live adopted worker keeps the watch parked"
+    );
+    worker.kill().expect("kill sleep");
+    worker.wait().expect("reap sleep");
+    // The crash arm counts its failure, then parks in its backoff: the
+    // millisecond poll parks the runtime long enough to deliver the exit
+    // event while the paused clock stays deep inside the backoff window.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while resident.consecutive_failures.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the crash arm counts the exit before its backoff");
+    // Another arm claims the resident while the watch is backed off.
+    supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
+    tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .expect("the superseded watch returns after the backoff")
+        .expect("the watch task completes");
+    assert_eq!(
+        resident.consecutive_failures.load(Ordering::SeqCst),
+        1,
+        "no relaunch arm ran over the new owner"
+    );
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(
+        supervisor.registry.get("w-adopted-watch").await.is_some(),
+        "the resident stays owned by the new generation"
+    );
+}
+
+/// The abandon-update resident: the commit's stop acked and exited, with
+/// the give-up budget at the cap so a supervised failure settles at once.
+fn abandon_update_resident(dir: &std::path::Path, worker_id: &str) -> Arc<ResidentWorker> {
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": worker_id,
+        "pid": 0,
+        "socketPath": "/tmp/none.sock",
+        "recoveryJournalPath": dir.join(format!("{worker_id}.recovery.jsonl")).to_string_lossy(),
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "token",
+        "rootActiveSessionId": worker_id,
+        "createdAt": "t",
+        "updatedAt": "t",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        worker_id.to_string(),
+        descriptor,
+        dir.join(format!("{worker_id}.descriptor.json")),
+    );
+    resident
+        .consecutive_failures
+        .store(MAX_CONSECUTIVE_FAILURES, Ordering::SeqCst);
+    resident
+}
+
+/// The update commit's abandon (a stop refusal in the budget) re-opens
+/// supervision for the worker that already stopped: when the relaunch
+/// fails, the resident is handed back to the crash path instead of
+/// staying unsupervised in the registry. On the unfixed tree the failed
+/// relaunch is only logged.
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_updates_failed_relaunch_arms_supervision_again() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // The abandon's relaunch fails deterministically: a file stands where
+    // the logs dir would go.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    // The stopped worker acks the graceful stop (pid 0 is already gone for
+    // the exit wait); the refuser never answers inside the budget.
+    let stopped = abandon_update_resident(dir.path(), "w-abandon-stopped");
+    let (stopped_tx, mut stopped_rx) = mpsc::channel::<WorkerRequest>(1);
+    *stopped.cmd_tx.lock().await = Some(stopped_tx);
+    let pump_resident = Arc::clone(&stopped);
+    tokio::spawn(async move {
+        let request = stopped_rx.recv().await.expect("the stop routes a shutdown");
+        let reply = pump_resident
+            .pending
+            .lock()
+            .await
+            .remove(&request.request_id)
+            .expect("the routed shutdown holds a reply slot");
+        let _ = reply.send(WorkerReply::Typed(crate::protocol::response_success(
+            None, "shutdown", None,
+        )));
+    });
+    supervisor.registry.insert(Arc::clone(&stopped)).await;
+    stopped.note_connection_live();
+    let refused = abandon_update_resident(dir.path(), "w-abandon-refused");
+    let (refused_tx, mut refused_rx) = mpsc::channel::<WorkerRequest>(1);
+    *refused.cmd_tx.lock().await = Some(refused_tx);
+    tokio::spawn(async move {
+        // The refuser never answers: the shutdown request runs out of budget.
+        let _ = refused_rx.recv().await;
+    });
+    supervisor.registry.insert(Arc::clone(&refused)).await;
+    refused.note_connection_live();
+
+    // Reach the committed stop window without the prepare machinery's
+    // snapshot phase: the update state machine is driven directly.
+    let update_id = UpdateId::from("u-abandon".to_string());
+    let budget = UpdateTimeoutBudget::from_env();
+    supervisor
+        .update_prepare
+        .begin(update_id.clone(), util::now_ms(), &budget);
+    supervisor.update_prepare.drain_complete(&update_id);
+    supervisor
+        .update_prepare
+        .snapshot_written(&update_id, util::now_ms(), &budget);
+    supervisor.update_prepare.prepare_acked(&update_id);
+    let command = DaemonCommand::CommitUpdateRestart {
+        id: None,
+        update_id: Some("u-abandon".to_string()),
+        rest: Map::default(),
+    };
+    let (lines, ok) = supervisor
+        .handle_commit_update_restart("commit-1", "commit_update_restart", &command)
+        .await;
+    assert!(!ok, "the refusal abandons the update: {lines:?}");
+
+    // The stopped worker's failed relaunch re-arms supervision: the give-up
+    // (the resident's budget was at the cap) removes the resident instead
+    // of leaving the dead channel in the registry.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while supervisor.registry.get("w-abandon-stopped").await.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the abandoned relaunch's failure reaches the give-up");
+    assert_eq!(
+        stopped.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Failed
+    );
+    assert_eq!(
+        stopped.consecutive_failures.load(Ordering::SeqCst),
+        MAX_CONSECUTIVE_FAILURES + 1
+    );
+    // The refuser's session is untouched: it keeps running.
+    assert!(
+        supervisor.registry.get("w-abandon-refused").await.is_some(),
+        "the refusal keeps its session running"
+    );
 }
 
 /// The saved-session surfaces (the `list --all` summary row and the

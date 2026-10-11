@@ -67,7 +67,7 @@ fn faux_script(dir: &Path) -> PathBuf {
             "responses": [
                 {"content": [
                     {"type": "text", "text": "Running the first sleep cell."},
-                    {"type": "toolCall", "name": "ipython", "id": "toolu_sleep01",
+                    {"type": "toolCall", "name": "python_repl", "id": "toolu_sleep01",
                      "arguments": {"code":
                         "import time\nopen('sleep-one-started','w').write('1')\ntime.sleep(4)\nprint('slept one')"}}
                 ]},

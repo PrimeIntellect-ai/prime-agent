@@ -351,10 +351,10 @@ async fn tui_export_and_share_surface() {
     // `state.tools` in the live-session export).
     let tools = data["tools"].as_array().expect("tools section");
     assert!(
-        tools.iter().any(|tool| tool["name"] == "ipython"
+        tools.iter().any(|tool| tool["name"] == "python_repl"
             && tool["description"].is_string()
             && tool["parameters"].is_object()),
-        "ipython contract in export tools: {data}"
+        "python_repl contract in export tools: {data}"
     );
     // No custom tool ran: the pre-render section is omitted, not null.
     assert!(
