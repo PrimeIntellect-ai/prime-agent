@@ -600,3 +600,119 @@ fn render_shows_the_source_tag_as_a_trailing_segment() {
         "the selected description renders: {all}"
     );
 }
+
+/// The `@` suggestion items of one provider query, waiting for the background search.
+fn at_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<CompletionItem> {
+    match provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), false) {
+        Some(SuggestionLookup::Searching(search)) => search
+            .results
+            .recv()
+            .expect("the search finishes")
+            .map(|suggestions| suggestions.items)
+            .unwrap_or_default(),
+        other => panic!("expected a searching lookup, got {other:?}"),
+    }
+}
+
+/// The parity fixture: nested directories, a hidden file, a pruned `.git`, a gitignored
+/// directory (the `.git` directory makes the gitignore rules apply), a directory entry,
+/// and mixed case.
+fn parity_fixture() -> tempfile::TempDir {
+    let outer = tempfile::TempDir::new().expect("temp dir");
+    let base = outer.path().join("base");
+    std::fs::create_dir_all(base.join(".git/objects")).expect("mkdir");
+    std::fs::write(base.join(".git/config"), "git").expect("write");
+    std::fs::write(base.join(".gitignore"), "ignored/\n").expect("write");
+    std::fs::create_dir_all(base.join("src/deep")).expect("mkdir");
+    std::fs::create_dir_all(base.join("ignored")).expect("mkdir");
+    std::fs::write(base.join("src/partial_match.rs"), "x").expect("write");
+    std::fs::write(base.join("src/ExactCase.rs"), "x").expect("write");
+    std::fs::write(base.join("src/deep/other.rs"), "x").expect("write");
+    std::fs::write(base.join("ignored/never.rs"), "x").expect("write");
+    std::fs::write(base.join(".hidden"), "x").expect("write");
+    std::fs::write(base.join("README.md"), "x").expect("write");
+    outer
+}
+
+/// The index answers exactly what the walk answers: one provider on the built index,
+/// one forced onto the walk path (an over-cap build disables its index), across the
+/// scope and case shapes the two paths could drift on.
+#[test]
+fn at_index_matches_the_walk_suggestions() {
+    let outer = parity_fixture();
+    let base = outer.path().join("base");
+    let indexed = provider(base.to_str().expect("utf8"));
+    let walked = provider(base.to_str().expect("utf8"));
+    assert!(indexed
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
+    assert!(!walked.file_index.build(&base, 1));
+    for query in [
+        "",
+        "match",
+        "par",
+        "README.md",
+        "ExactCase",
+        "deep/other",
+        "src/",
+        "src/deep/",
+        "src/par",
+        "src/deep/o",
+        "./READ",
+        "ignored/ne",
+    ] {
+        assert_eq!(
+            at_values(&indexed, &format!("@{query}")),
+            at_values(&walked, &format!("@{query}")),
+            "query @{query}"
+        );
+    }
+}
+
+/// Watched changes land: a new file and a new directory with a file appear in the
+/// index, and vanish with their deletion. The bounded polling waits on external
+/// OS events.
+#[test]
+fn at_index_tracks_watcher_events() {
+    let outer = parity_fixture();
+    let base = outer.path().join("base");
+    let provider = provider(base.to_str().expect("utf8"));
+    assert!(provider
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
+    let values = |query: &str| {
+        at_values(&provider, &format!("@{query}"))
+            .into_iter()
+            .map(|item| item.value)
+            .collect::<Vec<_>>()
+    };
+    let settle = |present: bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let settled = if present {
+                values("watched.rs").contains(&"@watched.rs".to_string())
+                    && values("watched_dir").contains(&"@watched_dir/".to_string())
+                    && values("inside").contains(&"@watched_dir/inside.rs".to_string())
+            } else {
+                values("watched.rs").is_empty()
+                    && values("watched_dir").is_empty()
+                    && values("inside").is_empty()
+            };
+            if settled {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher never settled the entries (present={present})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    };
+    std::fs::write(base.join("watched.rs"), "x").expect("write");
+    std::fs::create_dir_all(base.join("watched_dir")).expect("mkdir");
+    std::fs::write(base.join("watched_dir/inside.rs"), "x").expect("write");
+    settle(true);
+    std::fs::remove_file(base.join("watched.rs")).expect("remove");
+    std::fs::remove_dir_all(base.join("watched_dir")).expect("remove");
+    settle(false);
+}
