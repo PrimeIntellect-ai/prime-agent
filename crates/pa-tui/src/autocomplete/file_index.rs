@@ -400,6 +400,12 @@ fn apply_batch(
             .push((rel.clone(), is_directory));
     }
     for rel in &gone {
+        if rel.is_empty() {
+            // The base itself is gone: rebuild on the next query (into an empty
+            // or failing walk) instead of serving the dead tree.
+            *state = IndexState::Unbuilt;
+            return;
+        }
         remove_subtree(entries, rel);
     }
     for (parent, paths) in inserted {

@@ -731,4 +731,18 @@ fn at_index_tracks_watcher_events() {
     std::fs::remove_file(base.join("watched.rs")).expect("remove");
     std::fs::remove_file(base.join("watched_dir")).expect("remove");
     settle(false);
+    // A deleted session base drops the whole index: the next query rebuilds into
+    // whatever the tree still holds (nothing) instead of serving stale entries.
+    std::fs::remove_dir_all(base).expect("remove");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if values("par").is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher never dropped the deleted base's index"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
