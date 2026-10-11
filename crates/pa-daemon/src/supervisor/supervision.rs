@@ -132,6 +132,13 @@ impl Supervisor {
                         tokio::time::sleep(ADOPTED_EXIT_FALLBACK_POLL).await;
                     }
                 }
+                // Manual retry still replaces the descriptor's pid without
+                // arming a monitor. Preserve that handoff fence alongside
+                // generation ownership so the predecessor's exit cannot
+                // enter crash recovery over the retry's replacement.
+                if resident.descriptor.lock().await.pid != adopted_pid {
+                    return;
+                }
             }
             // The exit is the watched process's, not the resident's: a later
             // monitor arm (a registration re-arm, an update abandon) owns the
