@@ -104,8 +104,8 @@ impl SessionInfoGeneration {
     }
 }
 
-/// The cross-file memory budget on retained per-assistant-message usage
-/// records: keeps large families (~2k sessions, 150k entries) resident.
+/// The cross-file memory budget on retained assistant usage records and
+/// stable attribution IDs: keeps large families resident without unbounded retry history.
 const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
 
 /// The cached-state count ceiling: the cap must sit well ABOVE a catalog
@@ -671,6 +671,7 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
         }
         "child_usage_attributed" => {
             acc.usage_scan.fold_child_attribution(
+                &entry.id,
                 entry.target_id.as_deref(),
                 entry.child_usage.map(Usage::from),
                 entry.aggregate_usage.map(Usage::from),
