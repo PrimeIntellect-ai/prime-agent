@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use tokio::sync::{Mutex, Notify};
 
 use crate::print_boundary::TurnBoundary;
-use crate::print_runtime::{ChildEngineOverrides, FauxChildQueue, HeadlessEmbedding};
+use crate::print_runtime::{ChildEngineOverrides, ChildLane, FauxChildQueue, HeadlessEmbedding};
 
 /// Everything a spawned child inherits from the print invocation: the
 /// invocation's own config (cwd, agent dir, prompt/skill paths) and the
@@ -89,18 +89,8 @@ impl InlineSessionNode {
         self.disposed.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn mark_disposed(&self) {
-        self.disposed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.activity.notify_waiters();
-    }
-
     pub(crate) fn session_name(&self) -> Option<String> {
         self.session_name.lock().unwrap().clone()
-    }
-
-    fn set_session_name(&self, name: Option<String>) {
-        *self.session_name.lock().unwrap() = name;
     }
 
     /// The endpoint block a delivered row's `from`/`target` fields carry.
@@ -119,16 +109,6 @@ impl InlineSessionNode {
     fn sender_name(&self) -> String {
         self.session_name()
             .unwrap_or_else(|| self.session_id.clone())
-    }
-
-    async fn has_unsettled_children(&self) -> bool {
-        let children = self.children.lock().await;
-        for child in children.iter() {
-            if child.is_unsettled().await {
-                return true;
-            }
-        }
-        false
     }
 
     /// Resolve one direct child by every selector the roster exposes.
@@ -168,20 +148,6 @@ pub(crate) struct InlineChild {
     state: Mutex<InlineChildState>,
 }
 
-impl InlineChild {
-    /// The quiescence predicate (TS `child.isSessionActive`): a child
-    /// counts as unsettled while its run is open, its steering lane
-    /// holds a delivered row, or its agent streams. The live session
-    /// state — not the bookkeeping flag alone — is the fact.
-    async fn is_unsettled(&self) -> bool {
-        if !self.state.lock().await.settled {
-            return true;
-        }
-        let agent = self.engine.session.agent();
-        agent.has_queued_messages() || agent.state().await.is_streaming
-    }
-}
-
 struct InlineChildState {
     /// `running` | `done` | `error` | `cancelled`.
     status: &'static str,
@@ -208,7 +174,7 @@ pub(crate) fn root_node(
             .get_session_file()
             .map(|path| path.display().to_string())
             .as_deref(),
-        None,
+        /*inherited*/ None,
         &options.config.cwd,
         &options.config.agent_dir,
     );
@@ -271,10 +237,17 @@ pub(crate) fn inline_subagent_wiring(
 /// `_hasUnsettledRlmQuiescenceWork`): a running child, a delivered row
 /// waiting in a child's lane, or a row queued on the root's own agent.
 /// The goal/autonomous continuation gates and the drive's return read
-/// this one probe.
+/// this one predicate: the live session state — not a bookkeeping flag
+/// alone — is the fact (TS `child.isSessionActive`).
 pub(crate) async fn has_unsettled_rlm_work(node: &Arc<InlineSessionNode>) -> bool {
-    if node.has_unsettled_children().await {
-        return true;
+    for child in node.children.lock().await.iter() {
+        if !child.state.lock().await.settled {
+            return true;
+        }
+        let agent = child.engine.session.agent();
+        if agent.has_queued_messages() || agent.state().await.is_streaming {
+            return true;
+        }
     }
     node.engine
         .get()
@@ -324,6 +297,15 @@ pub(crate) async fn drive_to_quiescence(
             continue;
         }
         if !streaming && !has_unsettled_rlm_work(node).await {
+            // A settle that landed mid-scan fires the armed wake: poll
+            // it once instead of returning a false quiescence (the zero
+            // timeout is the one non-blocking poll).
+            if tokio::time::timeout(std::time::Duration::ZERO, notified.as_mut())
+                .await
+                .is_ok()
+            {
+                continue;
+            }
             return Ok(drained);
         }
         notified.await;
@@ -338,7 +320,7 @@ async fn drive_child(child: Arc<InlineChild>) {
         &child.node.recipe.options.config.agent_dir,
     );
     loop {
-        let mut boundary = TurnBoundary::new(false);
+        let mut boundary = TurnBoundary::new(/*json_mode*/ false);
         let run_error = drive_to_quiescence(
             &child.node,
             &child.engine,
@@ -378,7 +360,24 @@ async fn drive_child(child: Arc<InlineChild>) {
 /// publish the terminal status, deliver the no-reply notice or the
 /// failure row to the parent, and fire the parent's activity.
 async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
-    let answer = last_assistant_text(&child.engine).await;
+    // The last assistant row's text (the answer the collect envelope and
+    // the no-reply notice carry): trailing non-assistant rows are skipped.
+    let answer = if let Some(pa_types::session::AgentMessage::Assistant(assistant)) =
+        child.engine.session.last_assistant_message().await
+    {
+        let text = assistant
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
+                pa_types::ai::AssistantContentBlock::Thinking(_)
+                | pa_types::ai::AssistantContentBlock::ToolCall(_) => None,
+            })
+            .collect::<String>();
+        (!text.is_empty()).then_some(text)
+    } else {
+        None
+    };
     let name = child
         .node
         .session_name()
@@ -432,24 +431,6 @@ async fn settle_child(child: &Arc<InlineChild>, run_error: Option<String>) {
     }
 }
 
-/// The last assistant row's text (the answer the collect envelope and
-/// the no-reply notice carry): trailing non-assistant rows are skipped.
-async fn last_assistant_text(engine: &Arc<SessionEngine>) -> Option<String> {
-    let message = engine.session.last_assistant_message().await?;
-    let pa_types::session::AgentMessage::Assistant(assistant) = message else {
-        return None;
-    };
-    let text = assistant
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            pa_types::ai::AssistantContentBlock::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .collect::<String>();
-    (!text.is_empty()).then_some(text)
-}
-
 /// Deliver one custom row to a node's session: steer the loop form into
 /// the agent's steering lane (a streaming target picks it up at its next
 /// turn boundary; the quiescence drive drains it when idle), then fire
@@ -480,7 +461,11 @@ fn deliver_row(node: &Arc<InlineSessionNode>, row: Value) -> anyhow::Result<()> 
 async fn dispose_child(child: &Arc<InlineChild>) {
     let mut pending = vec![Arc::clone(child)];
     while let Some(current) = pending.pop() {
-        current.node.mark_disposed();
+        current
+            .node
+            .disposed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        current.node.activity.notify_waiters();
         current.engine.session.agent().abort();
         current.engine.dispose_kernel().await;
         if let Some(driver) = current.driver.lock().await.take() {
@@ -505,9 +490,224 @@ pub(crate) async fn dispose_inline_subagents(root: &Arc<InlineSessionNode>) {
 struct InlineHost(Arc<InlineSessionNode>);
 
 impl RlmSubagentHost for InlineHost {
+    /// Admit one inline child (TS `_startRlmChildRun` minus the usage
+    /// attribution the daemonless host does not keep): depth gate, name
+    /// uniqueness, model resolution, the child session + engine, the
+    /// kickoff row, and the driver task. Returns at admission; the task
+    /// run is the driver's.
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
         let node = Arc::clone(&self.0);
-        Box::pin(async move { spawn_inline_child(&node, request).await })
+        Box::pin(async move {
+            if node.depth >= node.max_depth {
+                return Err(rlm_depth_limit_error(node.depth, node.max_depth));
+            }
+            let recipe = Arc::clone(&node.recipe);
+            let config = &recipe.options.config;
+            let child_id = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+            let name = request.name.clone().unwrap_or_else(|| {
+                pa_core::kernel::rlm_runtime::create_default_rlm_subagent_session_name(
+                    &request.prompt,
+                    &child_id,
+                )
+            });
+            // Host requests run as detached tasks: same-parent spawns
+            // serialize on the node's spawn gate so the name check and the
+            // push are atomic.
+            let spawn_gate = node.spawn_gate.lock().await;
+            {
+                let children = node.children.lock().await.clone();
+                for child in &children {
+                    if child.node.session_name().as_deref() == Some(name.as_str()) {
+                        return Err(spawn_name_unavailable_error(&name, node.depth + 1));
+                    }
+                }
+            }
+            // The child's thinking: the requested level, else the parent's
+            // effective one; a real-provider child clamps it to what its
+            // model supports.
+            let thinking = request
+                .thinking
+                .as_deref()
+                .and_then(pa_ai::models::thinking_level_from_str)
+                .or(*node.thinking.lock().unwrap())
+                .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
+            // The model lane: a scripted child runs its own faux queue under
+            // `children.<spawn name>`; a real-provider child resolves against
+            // the catalog, inheriting the parent's selector.
+            let (selector, lane, thinking) = if let Some(script) = recipe.faux.as_ref() {
+                let queue = script
+                .get("children")
+                .and_then(|children| children.get(&name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "PRIME_AGENT_FAUX_SCRIPT has no \"children.{name}\" entry: a scripted print run \
+                         must script every spawned child"
+                    )
+                })?;
+                let steps = crate::print_runtime::faux_response_steps(
+                    queue
+                        .get("responses")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                            "PRIME_AGENT_FAUX_SCRIPT children.{name} requires a responses array"
+                        )
+                        })?,
+                )
+                .map_err(anyhow::Error::msg)?;
+                let repeat_last = queue
+                    .get("repeatLastResponse")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                (
+                    "faux/faux-1".to_string(),
+                    ChildLane::Faux(FauxChildQueue {
+                        child_id: child_id.clone(),
+                        steps,
+                        repeat_last,
+                    }),
+                    thinking,
+                )
+            } else {
+                let selector = pa_daemon::rlm_child_model::resolve_child_model_unchecked(
+                    &config.agent_dir,
+                    request.model.as_deref(),
+                    node.model_selector.lock().unwrap().as_deref(),
+                    "subagent",
+                )
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+                pa_daemon::rlm_child_model::assert_thinking_supported(
+                    &config.agent_dir,
+                    request.thinking.as_deref(),
+                    &selector,
+                )
+                .map_err(|error| anyhow::anyhow!("{error:#}"))?;
+                let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
+                let mut registry = pa_core::models::ModelRegistry::create(
+                    auth,
+                    config.agent_dir.join("models.json"),
+                );
+                registry.load_private_authorization_from_cache();
+                let all: Vec<Model> = registry.get_all().to_vec();
+                let resolved =
+                    pa_core::models::resolve_cli_model(/*cli_provider*/ None, &selector, &all);
+                if let Some(error) = resolved.error {
+                    return Err(anyhow::Error::msg(error));
+                }
+                let Some(model) = resolved.model else {
+                    return Err(anyhow::Error::msg("No matching model found."));
+                };
+                let thinking = pa_ai::models::clamp_thinking_level(&model, thinking);
+                (selector, ChildLane::Real(Box::new(model)), thinking)
+            };
+            // The child's session: its own directory under the parent's
+            // artifacts tree; a persisted parent gives the child its own file
+            // with the parent edge, a no-session parent keeps the child in
+            // memory (TS `_createInlineRlmSubagentRuntime`), still pinned to
+            // the child's dir for its artifacts.
+            let child_dir = rlm_child_session_dir(
+                &config.agent_dir,
+                node.session_file
+                    .is_some()
+                    .then(|| node.session_id.clone())
+                    .as_deref(),
+                &child_id,
+            )?;
+            let mut child_manager = if let Some(parent_file) = &node.session_file {
+                let mut manager =
+                    pa_core::session::manager::SessionManager::persisted(&config.cwd, &child_dir);
+                manager.new_session(&pa_core::session::manager::NewSessionOptions {
+                    parent_session: Some(parent_file.clone()),
+                    rlm_depth: Some(u64::from(node.depth + 1)),
+                    ..Default::default()
+                });
+                manager
+            } else {
+                pa_core::session::manager::SessionManager::in_memory_in_session_dir(
+                    &config.cwd,
+                    &child_dir,
+                )
+            };
+            child_manager
+                .append_session_info(&name)
+                .map_err(anyhow::Error::from)?;
+            let child_node = Arc::new(InlineSessionNode {
+                session_id: child_manager.get_session_id().to_string(),
+                session_file: child_manager
+                    .get_session_file()
+                    .map(|path| path.display().to_string()),
+                session_dir: child_dir.display().to_string(),
+                session_name: std::sync::Mutex::new(Some(name.clone())),
+                spawn_gate: tokio::sync::Mutex::new(()),
+                depth: node.depth + 1,
+                max_depth: node.max_depth,
+                model_selector: std::sync::Mutex::new(Some(selector.clone())),
+                thinking: std::sync::Mutex::new(Some(thinking)),
+                parent: Some(Arc::downgrade(&node)),
+                children: Mutex::new(Vec::new()),
+                engine: OnceLock::new(),
+                activity: Notify::new(),
+                recipe: Arc::clone(&recipe),
+                disposed: std::sync::atomic::AtomicBool::new(false),
+            });
+            let overrides = ChildEngineOverrides {
+                node: Arc::clone(&child_node),
+                lane,
+                thinking,
+                semantic_parent_session_id: Some(node.session_id.clone()),
+                spawned_by_request_id: request.spawned_by_request_id.clone(),
+            };
+            let headless = crate::print_runtime::build_engine(
+                &recipe.options,
+                recipe.faux.as_ref(),
+                Some(child_manager),
+                "subagent",
+                &HeadlessEmbedding::Child(Box::new(overrides)),
+            )
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let engine = Arc::new(headless.engine);
+            let _ = child_node.engine.set(Arc::downgrade(&engine));
+            let child = Arc::new(InlineChild {
+                rlm_child_id: child_id.clone(),
+                node: Arc::clone(&child_node),
+                engine: Arc::clone(&engine),
+                model: headless.model,
+                api_key: headless.api_key,
+                driver: Mutex::new(None),
+                state: Mutex::new(InlineChildState {
+                    status: "running",
+                    settled: false,
+                    answer_text: None,
+                    error: None,
+                    started_at_ms: crate::util_time::now_ms(),
+                    replied_since_task: false,
+                }),
+            });
+            node.children.lock().await.push(Arc::clone(&child));
+            drop(spawn_gate);
+            // The kickoff: the task prompt rides the parent's `agent_message` row
+            // (TS `spawnMessage`), delivered through the one steer path.
+            let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
+            let kickoff_row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
+                id: &format!("spawn:{child_id}"),
+                prompt: &kickoff_content,
+                message: &request.prompt,
+                from: &node.endpoint(),
+                from_relationship: Some(AgentFamilyRelationship::Parent),
+                target: None,
+                timestamp: crate::util_time::now_ms(),
+            });
+            deliver_row(&child_node, kickoff_row)?;
+            let driver = tokio::spawn(drive_child(Arc::clone(&child)));
+            *child.driver.lock().await = Some(driver);
+            Ok(RlmSpawnHandle {
+                rlm_child_id: child_id,
+                name,
+                session_dir: child_node.session_dir.clone(),
+                model: selector,
+            })
+        })
     }
 
     fn create_session(
@@ -535,9 +735,8 @@ impl RlmSubagentHost for InlineHost {
         Box::pin(async move {
             let child = node.find_child(&target).await.map_err(anyhow::Error::msg)?;
             let was_running = !child.state.lock().await.settled;
-            // Cancel the subtree first (its own children observe their
-            // disposed flag and unwind), then the child's run, kernel,
-            // and driver.
+            // Cancel the child and its subtree: runs abort, kernels get
+            // their final snapshots, drivers join.
             dispose_child(&child).await;
             let entry = {
                 let mut state = child.state.lock().await;
@@ -585,7 +784,26 @@ impl RlmSubagentHost for InlineHost {
                 for child in &children {
                     let state = child.state.lock().await;
                     all_settled &= state.settled;
-                    results.push(collect_result(child, &state));
+                    results.push(RlmChildResult {
+                        rlm_child_id: child.rlm_child_id.clone(),
+                        session_name: Some(
+                            child
+                                .node
+                                .session_name()
+                                .unwrap_or_else(|| child.rlm_child_id.clone()),
+                        ),
+                        session_dir: Some(child.node.session_dir.clone()),
+                        status: state.status,
+                        settled: state.settled,
+                        answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
+                        answer_text: state.answer_text.clone(),
+                        error: state.error.clone(),
+                        duration_ms: Some(
+                            crate::util_time::now_ms().saturating_sub(state.started_at_ms),
+                        ),
+                        tool_use_count: None,
+                        replied_since_task: Some(state.replied_since_task),
+                    });
                 }
                 if all_settled || deadline <= tokio::time::Instant::now() {
                     return Ok(results);
@@ -646,7 +864,7 @@ async fn rename_session(node: &Arc<InlineSessionNode>, name: &str) -> anyhow::Re
     session
         .append_session_info(name)
         .map_err(anyhow::Error::from)?;
-    node.set_session_name(Some(name.to_string()));
+    *node.session_name.lock().unwrap() = Some(name.to_string());
     Ok(())
 }
 
@@ -674,307 +892,6 @@ fn roster_entry(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmSubage
         last_activity_at: Some(state.started_at_ms),
         activity_stale_ms: None,
     }
-}
-
-fn collect_result(child: &Arc<InlineChild>, state: &InlineChildState) -> RlmChildResult {
-    RlmChildResult {
-        rlm_child_id: child.rlm_child_id.clone(),
-        session_name: Some(
-            child
-                .node
-                .session_name()
-                .unwrap_or_else(|| child.rlm_child_id.clone()),
-        ),
-        session_dir: Some(child.node.session_dir.clone()),
-        status: state.status,
-        settled: state.settled,
-        answer_preview: state.answer_text.as_deref().map(compact_rlm_text),
-        answer_text: state.answer_text.clone(),
-        error: state.error.clone(),
-        duration_ms: Some(crate::util_time::now_ms().saturating_sub(state.started_at_ms)),
-        tool_use_count: None,
-        replied_since_task: Some(state.replied_since_task),
-    }
-}
-
-// The spawn (one inline child, admitted by the parent's kernel)
-
-/// One real-provider child's resolved model: the selector the spawn
-/// handle carries, the full model the engine serves, and the thinking
-/// level the child runs.
-struct ChildModelInputs {
-    selector: String,
-    model: Model,
-    thinking: pa_types::ai::ModelThinkingLevel,
-}
-
-/// The registry resolution a real-provider child runs: the shared
-/// child-model chain (`None` inherits the parent's selector), then the
-/// full model from the same catalog the parent resolved against.
-fn real_child_inputs(
-    node: &Arc<InlineSessionNode>,
-    request: &RlmSpawnRequest,
-) -> Result<ChildModelInputs, String> {
-    let config = &node.recipe.options.config;
-    let parent_selector = node.model_selector.lock().unwrap().clone();
-    let selector = pa_daemon::rlm_child_model::resolve_child_model_unchecked(
-        &config.agent_dir,
-        request.model.as_deref(),
-        parent_selector.as_deref(),
-        "subagent",
-    )
-    .map_err(|error| format!("{error:#}"))?;
-    pa_daemon::rlm_child_model::assert_thinking_supported(
-        &config.agent_dir,
-        request.thinking.as_deref(),
-        &selector,
-    )
-    .map_err(|error| format!("{error:#}"))?;
-    let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
-    let all: Vec<Model> = registry.get_all().to_vec();
-    let resolved = pa_core::models::resolve_cli_model(None, &selector, &all);
-    if let Some(error) = resolved.error {
-        return Err(error);
-    }
-    let Some(model) = resolved.model else {
-        return Err("No matching model found.".to_string());
-    };
-    // The requested level, else the parent's effective level, clamped to
-    // what the child model supports.
-    let requested = request
-        .thinking
-        .as_deref()
-        .and_then(pa_ai::models::thinking_level_from_str);
-    let level = requested
-        .or(*node.thinking.lock().unwrap())
-        .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-    let thinking = pa_ai::models::clamp_thinking_level(&model, level);
-    Ok(ChildModelInputs {
-        selector,
-        model,
-        thinking,
-    })
-}
-
-/// The per-child faux queue a scripted child runs: its own response steps
-/// under `children.<spawn name>` in the faux script.
-fn faux_child_inputs(
-    node: &Arc<InlineSessionNode>,
-    request: &RlmSpawnRequest,
-    child_id: &str,
-) -> Result<(FauxChildQueue, pa_types::ai::ModelThinkingLevel), String> {
-    let name = request.name.clone().unwrap_or_default();
-    let script = node
-        .recipe
-        .faux
-        .as_ref()
-        .and_then(|script| script.get("children"))
-        .and_then(|children| children.get(&name))
-        .ok_or_else(|| {
-            format!(
-                "PRIME_AGENT_FAUX_SCRIPT has no \"children.{name}\" entry: a scripted print run \
-                 must script every spawned child"
-            )
-        })?;
-    let steps = crate::print_runtime::faux_response_steps(
-        script
-            .get("responses")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                format!("PRIME_AGENT_FAUX_SCRIPT children.{name} requires a responses array")
-            })?,
-    )?;
-    let repeat_last = script
-        .get("repeatLastResponse")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    // The requested level, else the parent's, rides the registration's
-    // model resolution in the engine build.
-    let thinking = request
-        .thinking
-        .as_deref()
-        .and_then(pa_ai::models::thinking_level_from_str)
-        .or(*node.thinking.lock().unwrap())
-        .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium);
-    Ok((
-        FauxChildQueue {
-            child_id: child_id.to_string(),
-            steps,
-            repeat_last,
-        },
-        thinking,
-    ))
-}
-
-/// Admit one inline child (TS `_startRlmChildRun` minus the usage
-/// attribution the daemonless host does not keep): depth gate, name
-/// uniqueness, model resolution, the child session + engine, the kickoff
-/// row, and the driver task. Returns at admission; the task run is the
-/// driver's.
-async fn spawn_inline_child(
-    node: &Arc<InlineSessionNode>,
-    request: RlmSpawnRequest,
-) -> anyhow::Result<RlmSpawnHandle> {
-    if node.depth >= node.max_depth {
-        return Err(rlm_depth_limit_error(node.depth, node.max_depth));
-    }
-    let recipe = Arc::clone(&node.recipe);
-    let config = &recipe.options.config;
-    let child_id = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-    let name = request.name.clone().unwrap_or_else(|| {
-        pa_core::kernel::rlm_runtime::create_default_rlm_subagent_session_name(
-            &request.prompt,
-            &child_id,
-        )
-    });
-    // Host requests run as detached tasks: same-parent spawns serialize
-    // on the node's spawn gate so the name check and the push are atomic.
-    let spawn_gate = node.spawn_gate.lock().await;
-    {
-        let children = node.children.lock().await.clone();
-        for child in &children {
-            if child.node.session_name().as_deref() == Some(name.as_str()) {
-                return Err(spawn_name_unavailable_error(&name, node.depth + 1));
-            }
-        }
-    }
-    // The model lane: a real-provider child resolves against the catalog
-    // (inheriting the parent's selector); a scripted child runs its own
-    // faux registration, whose identity the builder defines.
-    let (model, selector, thinking, faux) = if recipe.faux.is_some() {
-        let (queue, thinking) =
-            faux_child_inputs(node, &request, &child_id).map_err(anyhow::Error::msg)?;
-        (None, "faux/faux-1".to_string(), thinking, Some(queue))
-    } else {
-        let inputs = real_child_inputs(node, &request).map_err(anyhow::Error::msg)?;
-        (
-            Some(inputs.model.clone()),
-            inputs.selector,
-            inputs.thinking,
-            None,
-        )
-    };
-    // The child's session: its own directory under the parent's
-    // artifacts tree (an ephemeral temp dir without one), a persisted
-    // manager with the parent edge, and the spawn name as its
-    // `session_info` row (TS `_createInlineRlmSubagentRuntime`).
-    let child_dir = rlm_child_session_dir(
-        &config.agent_dir,
-        node.session_file
-            .is_some()
-            .then(|| node.session_id.clone())
-            .as_deref(),
-        &child_id,
-    )?;
-    // A persisted parent gives the child its own file with the parent
-    // edge; a no-session parent keeps the child in memory (TS
-    // `_createInlineRlmSubagentRuntime`), still pinned to the child's
-    // dir for its artifacts.
-    let mut child_manager = if let Some(parent_file) = &node.session_file {
-        let mut manager =
-            pa_core::session::manager::SessionManager::persisted(&config.cwd, &child_dir);
-        manager.new_session(&pa_core::session::manager::NewSessionOptions {
-            parent_session: Some(parent_file.clone()),
-            rlm_depth: Some(u64::from(node.depth + 1)),
-            ..Default::default()
-        });
-        manager
-    } else {
-        pa_core::session::manager::SessionManager::in_memory_in_session_dir(&config.cwd, &child_dir)
-    };
-    child_manager
-        .append_session_info(&name)
-        .map_err(anyhow::Error::from)?;
-    let child_node = Arc::new(InlineSessionNode {
-        session_id: child_manager.get_session_id().to_string(),
-        session_file: child_manager
-            .get_session_file()
-            .map(|path| path.display().to_string()),
-        session_dir: child_dir.display().to_string(),
-        session_name: std::sync::Mutex::new(Some(name.clone())),
-        spawn_gate: tokio::sync::Mutex::new(()),
-        depth: node.depth + 1,
-        max_depth: node.max_depth,
-        model_selector: std::sync::Mutex::new(Some(selector.clone())),
-        thinking: std::sync::Mutex::new(Some(thinking)),
-        parent: Some(Arc::downgrade(node)),
-        children: Mutex::new(Vec::new()),
-        engine: OnceLock::new(),
-        activity: Notify::new(),
-        recipe: Arc::clone(&recipe),
-        disposed: std::sync::atomic::AtomicBool::new(false),
-    });
-    let overrides = ChildEngineOverrides {
-        node: Arc::clone(&child_node),
-        model,
-        thinking,
-        faux,
-        semantic_parent_session_id: Some(node.session_id.clone()),
-        spawned_by_request_id: request.spawned_by_request_id.clone(),
-    };
-    let headless = match &recipe.faux {
-        Some(script) => crate::print_runtime::build_faux_engine_with(
-            &recipe.options,
-            script,
-            Some(child_manager),
-            "subagent",
-            &HeadlessEmbedding::Child(Box::new(overrides)),
-        )
-        .await
-        .map_err(anyhow::Error::msg)?,
-        None => crate::print_runtime::build_headless_engine_with(
-            &recipe.options,
-            Some(child_manager),
-            "subagent",
-            &HeadlessEmbedding::Child(Box::new(overrides)),
-        )
-        .await
-        .map_err(anyhow::Error::msg)?,
-    };
-    let engine = Arc::new(headless.engine);
-    let _ = child_node.engine.set(Arc::downgrade(&engine));
-    let child = Arc::new(InlineChild {
-        rlm_child_id: child_id.clone(),
-        node: Arc::clone(&child_node),
-        engine: Arc::clone(&engine),
-        model: headless.model,
-        api_key: headless.api_key,
-        driver: Mutex::new(None),
-        state: Mutex::new(InlineChildState {
-            status: "running",
-            settled: false,
-            answer_text: None,
-            error: None,
-            started_at_ms: crate::util_time::now_ms(),
-            replied_since_task: false,
-        }),
-    });
-    node.children.lock().await.push(Arc::clone(&child));
-    drop(spawn_gate);
-    // The kickoff: the task prompt rides the parent's `agent_message` row
-    // (TS `spawnMessage`), delivered through the one steer path.
-    let kickoff_content = format!("[task from parent]\n\n{}", request.prompt);
-    let kickoff_row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
-        id: &format!("spawn:{child_id}"),
-        prompt: &kickoff_content,
-        message: &request.prompt,
-        from: &node.endpoint(),
-        from_relationship: Some(AgentFamilyRelationship::Parent),
-        target: None,
-        timestamp: crate::util_time::now_ms(),
-    });
-    deliver_row(&child_node, kickoff_row)?;
-    let driver = tokio::spawn(drive_child(Arc::clone(&child)));
-    *child.driver.lock().await = Some(driver);
-    Ok(RlmSpawnHandle {
-        rlm_child_id: child_id,
-        name,
-        session_dir: child_node.session_dir.clone(),
-        model: selector,
-    })
 }
 
 // The messaging controller (the `agent_message.*` kernel surface)
@@ -1031,14 +948,56 @@ impl AgentMessageController for InlineMessages {
         if input.target == node.session_id {
             anyhow::bail!("Agent messaging cannot target the sending session");
         }
-        let Some((target_node, relationship)) = resolve_family_target(node, &input.target).await
-        else {
+        // The sender's relationship to the target: the parent (the
+        // sender is its child), a sibling, or one of the sender's own
+        // children (the sender is their parent).
+        let mut target: Option<(Arc<InlineSessionNode>, AgentFamilyRelationship)> = None;
+        if let Some(parent) = node.parent_node() {
+            if parent.session_id == input.target {
+                target = Some((Arc::clone(&parent), AgentFamilyRelationship::Child));
+            }
+            if target.is_none() {
+                for sibling in parent.children.lock().await.iter() {
+                    if !Arc::ptr_eq(&sibling.node, node) && sibling.node.session_id == input.target
+                    {
+                        target =
+                            Some((Arc::clone(&sibling.node), AgentFamilyRelationship::Sibling));
+                        break;
+                    }
+                }
+            }
+        }
+        if target.is_none() {
+            for child in node.children.lock().await.iter() {
+                if child.node.session_id == input.target {
+                    target = Some((Arc::clone(&child.node), AgentFamilyRelationship::Parent));
+                    break;
+                }
+            }
+        }
+        let Some((target_node, relationship)) = target else {
             anyhow::bail!("No family member matches \"{}\"", input.target);
         };
-        // A delivery to the parent from one of its children counts as the
-        // child's reply: the settle arm withholds the no-reply notice.
-        if relationship == AgentFamilyRelationship::Child {
-            mark_child_reply(&target_node, node).await;
+        // Marked before the delivery, so a fast child's reply cannot race
+        // the marking: a reply to the parent withholds the no-reply
+        // notice; a fresh task from the parent means silence this round
+        // earns it.
+        match relationship {
+            AgentFamilyRelationship::Child => {
+                for child in target_node.children.lock().await.iter() {
+                    if Arc::ptr_eq(&child.node, node) {
+                        child.state.lock().await.replied_since_task = true;
+                    }
+                }
+            }
+            AgentFamilyRelationship::Parent => {
+                for child in node.children.lock().await.iter() {
+                    if Arc::ptr_eq(&child.node, &target_node) {
+                        child.state.lock().await.replied_since_task = false;
+                    }
+                }
+            }
+            AgentFamilyRelationship::Sibling => {}
         }
         let prompt = create_agent_session_message_prompt(&AgentMessagePromptPayload {
             message: input.message.clone(),
@@ -1065,11 +1024,6 @@ impl AgentMessageController for InlineMessages {
         // idle.
         let streaming = engine.session.agent().state().await.is_streaming;
         deliver_row(&target_node, row)?;
-        // A delivery to a child from its parent is a new task: a child
-        // that stays silent this round still earns the no-reply notice.
-        if relationship == AgentFamilyRelationship::Parent {
-            mark_child_task(node, &target_node).await;
-        }
         let (delivered_at, queued_at, status) = if streaming {
             (
                 None,
@@ -1096,50 +1050,5 @@ impl AgentMessageController for InlineMessages {
             delivered_at,
             queued_at,
         })
-    }
-}
-
-/// Resolve one family target and the sender's relationship to it: the
-/// parent (the sender is its child), a sibling, or one of the sender's
-/// own children (the sender is their parent).
-async fn resolve_family_target(
-    node: &Arc<InlineSessionNode>,
-    target: &str,
-) -> Option<(Arc<InlineSessionNode>, AgentFamilyRelationship)> {
-    if let Some(parent) = node.parent_node() {
-        if parent.session_id == target {
-            return Some((parent, AgentFamilyRelationship::Child));
-        }
-        for sibling in parent.children.lock().await.clone() {
-            if !Arc::ptr_eq(&sibling.node, node) && sibling.node.session_id == target {
-                return Some((Arc::clone(&sibling.node), AgentFamilyRelationship::Sibling));
-            }
-        }
-    }
-    for child in node.children.lock().await.clone() {
-        if child.node.session_id == target {
-            return Some((Arc::clone(&child.node), AgentFamilyRelationship::Parent));
-        }
-    }
-    None
-}
-
-/// Mark one child's reply to its parent (the sender is the child).
-async fn mark_child_reply(parent: &Arc<InlineSessionNode>, sender: &Arc<InlineSessionNode>) {
-    for child in parent.children.lock().await.iter() {
-        if Arc::ptr_eq(&child.node, sender) {
-            child.state.lock().await.replied_since_task = true;
-        }
-    }
-}
-
-/// Mark one child's fresh task from its parent (the sender is the
-/// parent): the next settle without an intervening reply earns the
-/// no-reply notice.
-async fn mark_child_task(parent: &Arc<InlineSessionNode>, child: &Arc<InlineSessionNode>) {
-    for entry in parent.children.lock().await.iter() {
-        if Arc::ptr_eq(&entry.node, child) {
-            entry.state.lock().await.replied_since_task = false;
-        }
     }
 }

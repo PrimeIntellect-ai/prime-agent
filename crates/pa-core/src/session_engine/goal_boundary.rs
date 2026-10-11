@@ -217,7 +217,7 @@ impl SessionEngine {
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
         let mut session = persistence.lock().await;
-        let _ = driver.take_owed_continuation(&mut session, None);
+        let _ = driver.take_owed_continuation(&mut session, /*last_turn*/ None);
     }
 
     /// Deliver the RLM-deferred goal continuation once descendant work

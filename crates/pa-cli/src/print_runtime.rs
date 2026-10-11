@@ -325,19 +325,14 @@ fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngin
                     (manager, lease)
                 }
             };
-            let engine = if let Some(script) = faux_script_env()? {
-                build_faux_engine_with(
-                    &options,
-                    &script,
-                    Some(manager),
-                    "rpc",
-                    &HeadlessEmbedding::Rpc,
-                )
-                .await?
-            } else {
-                build_headless_engine_with(&options, Some(manager), "rpc", &HeadlessEmbedding::Rpc)
-                    .await?
-            };
+            let engine = build_engine(
+                &options,
+                faux_script_env()?.as_ref(),
+                Some(manager),
+                "rpc",
+                &HeadlessEmbedding::Rpc,
+            )
+            .await?;
             let mut handle = pa_daemon::rpc::session::RpcEngineHandle::from(engine);
             handle.session_lease = opened_lease;
             Ok(handle)
@@ -404,43 +399,24 @@ async fn print_mode_main(
     crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
     *lease = opened_lease;
-    let session_manager = Some(session_manager.unwrap_or_else(|| {
+    let session_manager = session_manager.unwrap_or_else(|| {
         pa_core::session::manager::SessionManager::in_memory(&options.config.cwd)
-    }));
+    });
     // The print root's inline-subagent node: the quiescence drive, the
     // host, and the messaging controller all hang off it. The faux
     // script (when scripted) rides the recipe down to every child.
     let faux = faux_script_env()?;
-    let root_node = crate::print_rlm::root_node(
+    let root_node = crate::print_rlm::root_node(options, &session_manager, faux.clone());
+    let headless = build_engine(
         options,
-        session_manager.as_ref().expect("a session manager"),
-        faux.clone(),
-    );
-    let headless = match &faux {
-        Some(script) => {
-            build_faux_engine_with(
-                options,
-                script,
-                session_manager,
-                options.app_mode.as_str(),
-                &HeadlessEmbedding::Root {
-                    node: std::sync::Arc::clone(&root_node),
-                },
-            )
-            .await?
-        }
-        None => {
-            build_headless_engine_with(
-                options,
-                session_manager,
-                options.app_mode.as_str(),
-                &HeadlessEmbedding::Root {
-                    node: std::sync::Arc::clone(&root_node),
-                },
-            )
-            .await?
-        }
-    };
+        faux.as_ref(),
+        Some(session_manager),
+        options.app_mode.as_str(),
+        &HeadlessEmbedding::Root {
+            node: std::sync::Arc::clone(&root_node),
+        },
+    )
+    .await?;
     let engine = std::sync::Arc::new(headless.engine);
     crate::print_rlm::adopt_built_engine(&root_node, &engine, &headless.model).await;
     // The CLI `--goal` seed: a fresh root branch starts the goal; a resumed
@@ -465,26 +441,39 @@ async fn print_mode_main(
     exit
 }
 
-/// Assemble the in-process session engine for a headless run: model
-/// resolution, session persistence, and the engine facade. The faux-script
-/// seam (`PRIME_AGENT_FAUX_SCRIPT`) drives the same assembly without the
-/// network; verification harness only, never set by the product.
-///
+/// One engine build for every headless embedding: the scripted
+/// verification seam when a faux script is set, the real provider
+/// otherwise.
+pub(crate) async fn build_engine(
+    options: &RunOptions,
+    faux: Option<&serde_json::Value>,
+    session_manager: Option<pa_core::session::manager::SessionManager>,
+    execution_mode: &str,
+    embedding: &HeadlessEmbedding,
+) -> Result<HeadlessEngine, String> {
+    match faux {
+        Some(script) => {
+            build_faux_engine_with(options, script, session_manager, execution_mode, embedding)
+                .await
+        }
+        None => {
+            build_headless_engine_with(options, session_manager, execution_mode, embedding).await
+        }
+    }
+}
+
+/// The faux-script verification seam (`PRIME_AGENT_FAUX_SCRIPT`; never
+/// set by the product): the script env parse, the per-child queues, and
+/// the scripted engine build.
+mod faux;
+
+pub(crate) use faux::{
+    build_faux_engine_with, faux_response_steps, faux_script_env, FauxChildQueue,
+};
+
 /// The switchable provider target the session's stream reads per call
 /// (shared with the RPC mode, whose picker model switches swap it live).
 pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
-
-/// The parsed `PRIME_AGENT_FAUX_SCRIPT` (the whole-process verification
-/// seam; never set by the product): `None` on a live run, an error when
-/// the script does not parse.
-pub(crate) fn faux_script_env() -> Result<Option<serde_json::Value>, String> {
-    match std::env::var("PRIME_AGENT_FAUX_SCRIPT") {
-        Ok(script) => serde_json::from_str(&script)
-            .map(Some)
-            .map_err(|error| format!("invalid PRIME_AGENT_FAUX_SCRIPT: {error}")),
-        Err(_) => Ok(None),
-    }
-}
 
 /// What one engine build varies by session: the print root (inline
 /// subagents over its node), a spawned inline child (its own model,
@@ -498,26 +487,21 @@ pub(crate) enum HeadlessEmbedding {
     Rpc,
 }
 
-/// One spawned inline child's engine deltas: the resolved model and
-/// request auth, the parent-edge identity, and (in a scripted run) its
-/// own faux queue.
+/// One spawned inline child's engine deltas: its model lane, the
+/// thinking level it runs, and the parent-edge identity.
 pub(crate) struct ChildEngineOverrides {
     pub node: std::sync::Arc<crate::print_rlm::InlineSessionNode>,
-    /// The resolved child model (a real-provider child); a scripted child
-    /// builds its model from its own faux registration.
-    pub model: Option<Model>,
+    pub lane: ChildLane,
     pub thinking: pa_types::ai::ModelThinkingLevel,
-    pub faux: Option<FauxChildQueue>,
     pub semantic_parent_session_id: Option<String>,
     pub spawned_by_request_id: Option<String>,
 }
 
-/// The per-child faux queue: its own registered provider (keyed by the
-/// child id, so siblings never share a response lane) and its steps.
-pub(crate) struct FauxChildQueue {
-    pub child_id: String,
-    pub steps: Vec<pa_ai::faux::FauxResponseStep>,
-    pub repeat_last: bool,
+/// A child's model source: a real-provider child carries its resolved
+/// model; a scripted child runs its own faux queue.
+pub(crate) enum ChildLane {
+    Real(Box<Model>),
+    Faux(FauxChildQueue),
 }
 
 /// The assembled headless engine, so host transports can drive session-command
@@ -546,18 +530,9 @@ async fn build_headless_engine_parts(
     crate::telemetry_notice::print_if_due(&options.config);
     let (session_manager, opened_lease) = select_session_manager_with_lease(options)?;
     *lease = opened_lease;
-    if let Some(script) = faux_script_env()? {
-        return build_faux_engine_with(
-            options,
-            &script,
-            session_manager,
-            execution_mode,
-            &HeadlessEmbedding::Rpc,
-        )
-        .await;
-    }
-    build_headless_engine_with(
+    build_engine(
         options,
+        faux_script_env()?.as_ref(),
         session_manager,
         execution_mode,
         &HeadlessEmbedding::Rpc,
@@ -583,7 +558,8 @@ fn select_session_manager_with_lease(
     Ok((Some(manager), lease))
 }
 
-/// The real-provider engine assembly over one session-manager selection.
+/// The real-provider engine assembly over one session-manager selection:
+/// model resolution, session persistence, and the engine facade.
 pub(crate) async fn build_headless_engine_with(
     options: &RunOptions,
     session_manager: Option<pa_core::session::manager::SessionManager>,
@@ -600,11 +576,13 @@ pub(crate) async fn build_headless_engine_with(
         pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
     registry.load_private_authorization_from_cache();
     let model = match embedding {
-        HeadlessEmbedding::Child(overrides) => overrides
-            .model
-            .clone()
-            .expect("a real-provider child build carries its resolved model"),
-        _ => select_model(
+        HeadlessEmbedding::Child(overrides) => match &overrides.lane {
+            ChildLane::Real(model) => (**model).clone(),
+            ChildLane::Faux(_) => {
+                return Err("a scripted child builds through the faux builder".to_string());
+            }
+        },
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => select_model(
             &mut registry,
             config.provider.as_deref(),
             config.model.as_deref(),
@@ -727,7 +705,7 @@ pub(crate) async fn build_headless_engine_with(
             Some(overrides.node.depth),
             Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking)),
         ),
-        _ => (
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => (
             Some(
                 pa_core::session_engine::semantic_edges::SemanticEdgeIdentity {
                     session_id: session_manager.get_session_id().to_string(),
@@ -1492,18 +1470,17 @@ async fn run_prompts_and_emit(
         boundary
             .run_at_settled_turn(engine, model, api_key.clone(), global_harness_dir.clone())
             .await?;
-        let goal_owns_boundary = goal
-            .drive_boundary(
-                engine,
-                &mut boundary,
-                model,
-                api_key.clone(),
-                global_harness_dir.clone(),
-            )
-            .await?;
+        goal.drive_boundary(
+            engine,
+            &mut boundary,
+            model,
+            api_key.clone(),
+            global_harness_dir.clone(),
+        )
+        .await?;
         // The autonomous arm runs only when the goal does not own the boundary (the goal arm takes
         // exclusive priority).
-        if !goal_owns_boundary {
+        if !engine.goal_owns_continuation_wakeup().await {
             // The held threshold continuation drains as this invocation's follow-up
             // turn; the stop surfaces only through the exit contract.
             autonomous
@@ -1540,8 +1517,7 @@ async fn run_prompts_and_emit(
     // goal/autonomous continuations deliver after the settle ("no
     // front": the settling child's terminal notice is read first), and
     // the boundary drain runs whatever turns it drained armed — a
-    // threshold continuation, a budget steer, more descendants — before
-    // a final quiescence pass closes the run.
+    // threshold continuation, a budget steer, more descendants.
     loop {
         if crate::print_rlm::drive_to_quiescence(
             root_node,
@@ -1580,7 +1556,11 @@ async fn run_prompts_and_emit(
         {
             continue;
         }
-        let goal_owns_boundary = goal
+        // The boundary drain: turns it ran may spawn descendants or arm
+        // more holds, so it reports whether it ran and the loop goes
+        // around — the leading quiescence pass then waits for whatever
+        // they left behind.
+        let mut boundary_ran = goal
             .drive_boundary(
                 engine,
                 &mut boundary,
@@ -1589,8 +1569,8 @@ async fn run_prompts_and_emit(
                 global_harness_dir.clone(),
             )
             .await?;
-        if !goal_owns_boundary {
-            autonomous
+        if !engine.goal_owns_continuation_wakeup().await {
+            boundary_ran |= autonomous
                 .drive_boundary(
                     engine,
                     &mut boundary,
@@ -1600,18 +1580,7 @@ async fn run_prompts_and_emit(
                 )
                 .await?;
         }
-        // The boundary's own turns may have armed more: the closing
-        // quiescence pass waits for whatever they left behind.
-        if crate::print_rlm::drive_to_quiescence(
-            root_node,
-            engine,
-            &mut boundary,
-            model,
-            api_key.clone(),
-            global_harness_dir.clone(),
-        )
-        .await?
-        {
+        if boundary_ran {
             continue;
         }
         break;
@@ -1667,207 +1636,6 @@ async fn run_prompts_and_emit(
         .drain_compact_auto_refine_at_disposal(engine, model, api_key, global_harness_dir)
         .await;
     Ok(exit_code)
-}
-
-/// The faux-script engine: identical session assembly, scripted provider.
-/// A spawned child in a scripted run registers its OWN provider (keyed by
-/// the child id) with the queue under `children.<spawn name>`, so
-/// multi-child runs stay deterministic (the registry is process-global).
-pub(crate) async fn build_faux_engine_with(
-    options: &RunOptions,
-    script: &serde_json::Value,
-    session_manager: Option<pa_core::session::manager::SessionManager>,
-    // The execution mode label carries through the real path only.
-    _execution_mode: &str,
-    embedding: &HeadlessEmbedding,
-) -> Result<HeadlessEngine, String> {
-    let config = &options.config;
-    // Response entries: a plain string answers with fixed text; `{"systemPrompt":
-    // true}` answers with the request's system prompt; other objects go through the
-    // shared faux-script parser.
-    let response_steps = faux_response_steps(
-        script
-            .get("responses")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "PRIME_AGENT_FAUX_SCRIPT requires a responses array".to_string())?,
-    )?;
-    // A `reasoning` model makes the harness script thinking-capable turns so
-    // thinking-level resolution can be verified without the network.
-    let reasoning = script
-        .get("reasoning")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    // The script pins the context window: threshold/overflow verifiers size it to the probe they
-    // run.
-    let context_window = script
-        .get("contextWindow")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(100_000);
-    // The stable faux identity (`api: "faux"`, `provider: "faux"`): fixtures can declare
-    // faux-provider models in models.json. A spawned child gets its own api
-    // lane so its queue never interleaves with its parent's.
-    let (api, child_queue) = match embedding {
-        HeadlessEmbedding::Child(overrides) => {
-            let queue = overrides
-                .faux
-                .as_ref()
-                .expect("a scripted child build carries its faux queue");
-            (format!("faux-{}", queue.child_id), Some(queue))
-        }
-        _ => ("faux".to_string(), None),
-    };
-    let registration =
-        pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
-            api: Some(api),
-            provider: Some("faux".to_string()),
-            models: Some(vec![pa_ai::faux::FauxModelDefinition {
-                id: "faux-1".to_string(),
-                name: Some("Faux Model".to_string()),
-                reasoning: Some(reasoning),
-                input: Some(vec![pa_types::ai::ModelInput::Text]),
-                cost: None,
-                context_window: Some(context_window),
-                max_tokens: Some(4_096),
-            }]),
-            ..Default::default()
-        });
-    if let Some(queue) = child_queue {
-        registration.set_responses(queue.steps.clone());
-        registration.set_repeat_last_response(queue.repeat_last);
-    } else {
-        registration.set_responses(response_steps);
-        registration.set_repeat_last_response(
-            script
-                .get("repeatLastResponse")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-        );
-    }
-    let model = registration.get_model();
-    let thinking_level = match embedding {
-        HeadlessEmbedding::Child(overrides) => {
-            Some(pa_core::session_engine::provider_adapter::map_thinking_level(overrides.thinking))
-        }
-        _ => Some(resolve_thinking_level(config, &model)),
-    };
-    let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
-    let provider_target: ProviderTargetSlot =
-        std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
-            api_key: None,
-            model: model.clone(),
-            service_tier: None,
-            headers: None,
-        })));
-    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
-    // The faux path shares the session-manager wiring with the real provider
-    // path so binary-level tests can verify persistence without the network.
-    let (rlm_subagent_host, extra_host_handlers, rlm_depth) = match embedding {
-        HeadlessEmbedding::Rpc => (None, None, None),
-        HeadlessEmbedding::Root { node } => {
-            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(node);
-            (Some(host), Some(handlers), None)
-        }
-        HeadlessEmbedding::Child(overrides) => {
-            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(&overrides.node);
-            (Some(host), Some(handlers), Some(overrides.node.depth))
-        }
-    };
-    let engine = pa_core::session_engine::engine::create_session(
-        pa_core::session_engine::engine::SessionEngineConfig {
-            on_late_sent_agent_message: None,
-            cron_store: None,
-            // Faux verification harness: no product telemetry.
-            semantic_edges: None,
-            steering_mode: None,
-            follow_up_mode: None,
-            telemetry: None,
-            cwd: config.cwd.clone(),
-            agent_dir: config.agent_dir.clone(),
-            mcp_manager: None,
-            model: Some(agent_model),
-            thinking_level,
-            stream_fn: Some(stream_fn),
-            tools: builtin_tools(&config.cwd),
-            custom_system_prompt: config.system_prompt.clone(),
-            prompt_guidelines: config.append_system_prompt.clone(),
-            generic_mcp_servers: vec![],
-            allow_recursion: None,
-            session_manager,
-            extra_host_handlers,
-            conversation_log_path: None,
-            additional_skill_paths: vec![],
-            additional_prompt_paths: vec![],
-            extra_builtin_skill_overrides: vec![],
-            rlm_subagent_host,
-            rlm_depth,
-            daemonless: true,
-            model_info: Some(model.clone()),
-            // A Rust-only verification harness: no background kernel boot in tests.
-            prewarm_ipython_kernel: None,
-            on_background_work_settled: None,
-            queued_goal_context_purge: None,
-            queued_steering_probe: None,
-            image_model_router: None,
-        },
-    )
-    .await
-    .map_err(|error| format!("{error:#}"))?;
-    Ok(HeadlessEngine {
-        engine,
-        model,
-        api_key: None,
-        provider_target,
-    })
-}
-
-/// One scripted response entry: a plain string answers with fixed text;
-/// `{"systemPrompt": true}` answers with the request's system prompt;
-/// other objects go through the shared faux-script parser.
-pub(crate) fn faux_response_steps(
-    entries: &[serde_json::Value],
-) -> Result<Vec<pa_ai::faux::FauxResponseStep>, String> {
-    entries
-        .iter()
-        .map(|entry| match entry {
-            serde_json::Value::String(text) => Ok(pa_ai::faux::FauxResponseStep::Message(
-                pa_ai::faux::faux_assistant_text_message(
-                    text,
-                    pa_ai::faux::FauxAssistantMessageOptions::default(),
-                ),
-            )),
-            serde_json::Value::Object(map)
-                if map.get("systemPrompt").and_then(serde_json::Value::as_bool) == Some(true) =>
-            {
-                Ok(pa_ai::faux::FauxResponseStep::Factory(std::sync::Arc::new(
-                    |context, _options, _call, _model| {
-                        Ok(pa_ai::faux::faux_assistant_text_message(
-                            context.system_prompt.as_deref().unwrap_or_default(),
-                            pa_ai::faux::FauxAssistantMessageOptions::default(),
-                        ))
-                    },
-                )))
-            }
-            serde_json::Value::Object(_) => {
-                pa_ai::faux::script::parse_faux_script(&serde_json::json!({
-                    "responses": [entry]
-                }))
-                .map(|parsed| {
-                    let mut steps = parsed.responses.into_iter();
-                    let first = steps
-                        .next()
-                        .expect("an object entry parses into one response step");
-                    debug_assert!(steps.next().is_none());
-                    first
-                })
-            }
-            _ => Ok(pa_ai::faux::FauxResponseStep::Message(
-                pa_ai::faux::faux_assistant_text_message(
-                    "",
-                    pa_ai::faux::FauxAssistantMessageOptions::default(),
-                ),
-            )),
-        })
-        .collect()
 }
 
 #[cfg(test)]

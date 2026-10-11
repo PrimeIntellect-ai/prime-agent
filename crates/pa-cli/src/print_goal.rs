@@ -516,8 +516,9 @@ impl PrintGoalSurface {
 
     /// The settled boundary's goal drain: the held continuation and the armed
     /// budget steer run as this invocation's follow-up turns; a turn that
-    /// still ends in a terminal error fails an active goal. Returns whether
-    /// an active goal still owns the boundary.
+    /// still ends in a terminal error fails an active goal. Returns
+    /// whether any turn ran (the drive loop re-enters quiescence for
+    /// whatever the turns left behind).
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -527,6 +528,7 @@ impl PrintGoalSurface {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
     ) -> Result<bool, String> {
+        let mut ran = false;
         loop {
             if let Some(message) = self.take_threshold_continuation().await {
                 // A goal that went inactive mid-turn drops its queued continuation.
@@ -540,6 +542,7 @@ impl PrintGoalSurface {
                         &message,
                     )
                     .await?;
+                    ran = true;
                     continue;
                 }
             }
@@ -553,6 +556,7 @@ impl PrintGoalSurface {
                     &steer,
                 )
                 .await?;
+                ran = true;
                 continue;
             }
             if let Some(message) = crate::headless_autonomous::latest_assistant_error(engine).await
@@ -577,9 +581,10 @@ impl PrintGoalSurface {
                         global_harness_dir.clone(),
                     )
                     .await?;
+                ran = true;
                 continue;
             }
-            return Ok(engine.goal_state().await.status == pa_types::goal::GoalStatus::Active);
+            return Ok(ran);
         }
     }
 
@@ -884,7 +889,7 @@ mod tests {
             &model,
             &surface,
             &autonomous_run,
-            None,
+            /*root_node*/ None,
         );
         let harness_dir = dir.path().join("harness");
         GoalBed {
@@ -940,7 +945,8 @@ mod tests {
                     self.harness_dir.clone(),
                 )
                 .await
-                .unwrap()
+                .unwrap();
+            self.engine.goal_owns_continuation_wakeup().await
         }
     }
 
@@ -1496,7 +1502,7 @@ mod tests {
             &model,
             &surface,
             &autonomous_run,
-            None,
+            /*root_node*/ None,
         );
         GoalBed {
             engine,

@@ -191,7 +191,8 @@ impl HeadlessAutonomous {
     }
 
     /// The settled boundary's autonomous drain: each held continuation runs as
-    /// this invocation's follow-up turn; a re-crossing threshold holds the next.
+    /// this invocation's follow-up turn; a re-crossing threshold holds the
+    /// next. Returns whether any turn ran.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn drive_boundary(
         &self,
@@ -200,7 +201,8 @@ impl HeadlessAutonomous {
         model: &Model,
         api_key: Option<String>,
         global_harness_dir: PathBuf,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let mut ran = false;
         while let Some(text) = self.held.lock().await.take() {
             boundary
                 .admit_continuation(
@@ -211,8 +213,9 @@ impl HeadlessAutonomous {
                     global_harness_dir.clone(),
                 )
                 .await?;
+            ran = true;
         }
-        Ok(())
+        Ok(ran)
     }
 
     /// The print-mode exit contract: stderr text when the run must exit

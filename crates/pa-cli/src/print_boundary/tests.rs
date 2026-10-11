@@ -542,7 +542,7 @@ async fn autonomous_continuation_turns_cross_the_boundary_arms() {
         &model,
         &goal,
         &run,
-        None,
+        /*root_node*/ None,
     );
     admit(
         &mut boundary,

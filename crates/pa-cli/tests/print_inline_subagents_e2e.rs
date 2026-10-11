@@ -668,3 +668,141 @@ fn print_inline_autonomous_continuation_waits_for_the_child_reply() {
         "the held autonomous continuation (row {continuation_at}) landed after the child reply (row {reply_at})"
     );
 }
+
+/// The R1 regression (via the goal token budget, no compaction needed):
+/// the reply turn crosses the budget, the accounting arms the budget
+/// steer, and the drive loop must run it AFTER the reply drained —
+/// before the fix the post-prompt loop broke with the armed steer
+/// unrun. The budget self-calibrates: pass 1 runs the same script with
+/// a huge budget and reads the persisted faux usage of the spawn turn
+/// and the reply turn; the real run uses spawn + half the reply turn
+/// (thousands of tokens of margin, so the crossing lands mid-reply-turn
+/// and nowhere else).
+#[test]
+fn print_inline_budget_steer_from_a_drained_reply_runs_after_it() {
+    let warm_lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let complete_cell = "done = await goal.complete()\nprint(\"GOAL COMPLETED\")".to_string();
+    let script = serde_json::json!({
+        // Turn 1 spawns and ends; the reply drains as turn 2 (crossing
+        // the budget); the wrap-up steer runs as turn 3 and completes the
+        // goal, so the run ends deterministically.
+        "responses": [
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": "kid = await rlm.spawn(\"run the kid task\", name=\"kid\")\nprint(\"KID\", kid.rlm_child_id)" } },
+            ] },
+            "WAITING",
+            "READ THE REPLY",
+            { "content": [
+                { "type": "toolCall", "name": "ipython",
+                  "arguments": { "code": complete_cell } },
+            ] },
+            "GOAL WRAPPED UP",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "kid": { "responses": [
+                { "content": [
+                    { "type": "toolCall", "name": "ipython",
+                      "arguments": { "code": reply_cell("KID") } },
+                ], "delayMs": 3000 },
+                "kid done",
+            ] },
+        },
+    });
+
+    // Pass 1: the same script with a budget no turn can cross; the goal
+    // completes at the same slot, so the usage rows of the first three
+    // assistant messages match the real run's.
+    let (_, _, warm) = warm_lane.run(
+        &[
+            "--goal",
+            "finish the delegated work",
+            "--goal-token-budget",
+            "4000000000",
+            "-p",
+            "delegate then finish",
+        ],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(warm, 0);
+    let warm_file = warm_lane.parent_session_file();
+    let warm_entries = PrintLane::entries(&warm_file);
+    let usage: Vec<u64> = warm_entries
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|t| t.as_str()) == Some("message"))
+        .filter(|entry| {
+            entry.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant")
+        })
+        .map(|entry| {
+            let usage = entry
+                .pointer("/message/usage")
+                .expect("the faux row carries usage");
+            let input = usage
+                .get("input")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let output = usage
+                .get("output")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            input + output
+        })
+        .collect();
+    // The two spawn-turn assistant rows, then the reply-turn row.
+    assert!(usage.len() >= 3, "the warm run's assistant rows: {usage:?}");
+    let spawn_turn: u64 = usage[0] + usage[1];
+    let reply_turn: u64 = usage[2];
+    assert!(
+        reply_turn > 0,
+        "the reply turn's usage is positive: {usage:?}"
+    );
+    let budget = spawn_turn + reply_turn / 2;
+
+    // The real run: the crossing lands mid-reply-turn (the spawn turn
+    // stays under budget).
+    let lane = lane();
+    let (stdout, stderr, code) = lane.run(
+        &[
+            "--goal",
+            "finish the delegated work",
+            "--goal-token-budget",
+            &budget.to_string(),
+            "-p",
+            "delegate then finish",
+        ],
+        &script,
+        &kernel,
+        &[],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert_eq!(
+        stdout.trim_end(),
+        "GOAL WRAPPED UP",
+        "the budget steer's wrap-up turn ran after the reply drained"
+    );
+
+    // The steer's budget-limit row lands AFTER the child's reply row.
+    let parent_file = lane.parent_session_file();
+    let entries = PrintLane::entries(&parent_file);
+    let reply_at = custom_row_at(&entries, "agent_message", Some("KID-RESULT"))
+        .expect("the child reply row landed in the parent transcript");
+    let steer_at = entries
+        .iter()
+        .position(|entry| {
+            entry.get("type").and_then(|t| t.as_str()) == Some("custom_message")
+                && entry.get("customType").and_then(|t| t.as_str()) == Some("goal_context")
+                && entry
+                    .pointer("/content")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|text| text.starts_with("[goal: budget-limit]"))
+        })
+        .expect("the budget steer row landed in the parent transcript");
+    assert!(
+        steer_at > reply_at,
+        "the budget steer (row {steer_at}) landed after the child reply (row {reply_at})"
+    );
+}
