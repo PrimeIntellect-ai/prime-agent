@@ -259,15 +259,14 @@ pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
     #[serde(with = "usage_bits")]
     attributed_child_usage: Usage,
-    attributed_child_ids: std::collections::HashSet<String>,
     #[serde(with = "usage_bits")]
     summarization_usage: Usage,
 }
 
 impl UsageScan {
-    /// The assistant usage records and stable attribution IDs kept resident.
+    /// The per-assistant-message records the scan state keeps resident.
     pub(crate) fn retained_entries(&self) -> usize {
-        self.assistant_usage_by_id.len() + self.attributed_child_ids.len()
+        self.assistant_usage_by_id.len()
     }
 
     /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id (only an assistant
@@ -282,12 +281,9 @@ impl UsageScan {
     }
 
     /// A `child_usage_attributed` entry folds only when its target is already
-    /// in the map; a malformed attribution contributes nothing. Stable nonempty
-    /// row IDs subtract child spend once; legacy rows without an ID each fold.
-    /// Every valid row still replaces the target aggregate in file order.
+    /// in the map; a malformed attribution contributes nothing.
     pub(crate) fn fold_child_attribution(
         &mut self,
-        row_id: &str,
         target_id: Option<&str>,
         child_usage: Option<Usage>,
         aggregate_usage: Option<Usage>,
@@ -299,9 +295,7 @@ impl UsageScan {
         };
         if self.assistant_usage_by_id.contains(target_id) {
             self.assistant_usage_by_id.set(target_id, aggregate_usage);
-            if row_id.is_empty() || self.attributed_child_ids.insert(row_id.to_owned()) {
-                add_assistant_usage(&mut self.attributed_child_usage, &child_usage);
-            }
+            add_assistant_usage(&mut self.attributed_child_usage, &child_usage);
         }
     }
 
@@ -374,7 +368,6 @@ impl ScanEntry {
                 scan.fold_message(&self.id, role, usage);
             }
             "child_usage_attributed" => scan.fold_child_attribution(
-                &self.id,
                 self.target_id.as_deref(),
                 self.child_usage.map(Usage::from),
                 self.aggregate_usage.map(Usage::from),

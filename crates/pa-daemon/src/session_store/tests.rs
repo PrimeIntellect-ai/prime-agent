@@ -1301,13 +1301,16 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
         })
     };
     let target = session.append_message(&json!({
-        "role": "assistant", "content": [], "usage": usage(100u64, 10u64, 8.0)
+        "role": "assistant", "content": [], "timestamp": 1_790_110_000_000_u64,
+        "usage": usage(100u64, 10u64, 8.0)
     }));
     session.rewrite().unwrap();
     let attributed = json!({
         "type": "child_usage_attributed", "id": "report-1", "targetId": target,
+        "timestamp": "2026-10-11T00:00:00.000Z",
         "childUsage": usage(20, 2, 2.0), "aggregateUsage": usage(120, 12, 10.0)
     });
+    serde_json::from_str::<super::info::SessionInfoEntry<'_>>(&attributed.to_string()).unwrap();
     let append = || {
         use std::io::Write;
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -1320,8 +1323,11 @@ fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
         cost: 8.0,
     });
     assert_eq!(read_session_info(&path).unwrap().usage, expected);
-    // Resume the cached prefix: the duplicate tail must not subtract again.
+    let prefix_len = fs::metadata(&path).unwrap().len();
+    // The appended duplicate must not subtract again in either scanner.
     append();
+    let grown_len = fs::metadata(&path).unwrap().len();
+    assert!(grown_len > prefix_len);
     assert_eq!(read_session_info(&path).unwrap().usage, expected);
     assert_eq!(
         crate::session_usage::read_session_usage(&path),

@@ -104,8 +104,8 @@ impl SessionInfoGeneration {
     }
 }
 
-/// The cross-file memory budget on retained assistant usage records and
-/// stable attribution IDs: keeps large families resident without unbounded retry history.
+/// The cross-file memory budget on retained per-assistant-message usage
+/// records: keeps large families (~2k sessions, 150k entries) resident.
 const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
 
 /// The cached-state count ceiling: the cap must sit well ABOVE a catalog
@@ -671,7 +671,6 @@ pub(super) fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Op
         }
         "child_usage_attributed" => {
             acc.usage_scan.fold_child_attribution(
-                &entry.id,
                 entry.target_id.as_deref(),
                 entry.child_usage.map(Usage::from),
                 entry.aggregate_usage.map(Usage::from),
@@ -748,6 +747,49 @@ mod cache_tests {
     use super::*;
 
     #[test]
+    fn cached_prefix_resume_subtracts_a_duplicate_attribution_once() {
+        use std::io::{BufReader, Seek, SeekFrom, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("isolated-prefix.jsonl");
+        let assistant = r#"{"type":"message","id":"a","timestamp":"2026-10-11T00:00:00.000Z","message":{"role":"assistant","timestamp":1790110000000,"usage":{"input":100,"output":10,"totalTokens":110}}}"#;
+        let attribution = r#"{"type":"child_usage_attributed","id":"report","timestamp":"2026-10-11T00:00:00.000Z","targetId":"a","childUsage":{"input":20,"output":2,"totalTokens":22},"aggregateUsage":{"input":120,"output":12,"totalTokens":132}}"#;
+        for row in [assistant, attribution] {
+            serde_json::from_str::<SessionInfoEntry<'_>>(row).unwrap();
+        }
+        let prefix = format!("{assistant}\n{attribution}\n");
+        fs::write(&path, &prefix).unwrap();
+        let mut file = fs::File::open(&path).unwrap();
+        let generation = SessionInfoGeneration::from_metadata(&file.metadata().unwrap());
+        let mut state = SessionScanState::fresh(generation);
+        state
+            .scan_from_cursor(&mut BufReader::new(&mut file), generation.len)
+            .unwrap();
+        assert_eq!(state.offset, generation.len);
+        let expected = state.acc.usage_scan.totals();
+        let mut cache = SessionInfoScanCache::default();
+        cache.store_state(&path, state);
+        let cached = cache.states.get(&path).unwrap().clone_for_resume();
+        let mut resumed: SessionScanState =
+            serde_json::from_slice(&serde_json::to_vec(&cached).unwrap()).unwrap();
+        {
+            let mut append = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(append, "{attribution}").unwrap();
+        }
+        let grown_len = file.metadata().unwrap().len();
+        assert!(grown_len > cached.offset);
+        file.seek(SeekFrom::Start(resumed.offset)).unwrap();
+        resumed
+            .scan_from_cursor(&mut BufReader::new(&mut file), grown_len)
+            .unwrap();
+        assert_eq!(resumed.offset, grown_len);
+        assert_eq!(resumed.acc.usage_scan.totals(), expected);
+        assert_eq!(resumed.acc.usage_scan.retained_entries(), 2);
+        drop(file);
+        dir.close().unwrap();
+    }
+
+    #[test]
     fn attribution_ids_share_the_retained_usage_budget_and_trigger_lru_eviction() {
         let generation = SessionInfoGeneration {
             len: 0,
@@ -767,8 +809,9 @@ mod cache_tests {
             .fold_message("assistant", Some("assistant"), Some(Usage::default()));
         for index in 1..SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES {
             let row = format!(
-                r#"{{"type":"child_usage_attributed","id":"report-{index}","targetId":"assistant","childUsage":{{}},"aggregateUsage":{{}}}}"#
+                r#"{{"type":"child_usage_attributed","id":"report-{index}","timestamp":"2026-10-11T00:00:00.000Z","targetId":"assistant","childUsage":{{}},"aggregateUsage":{{}}}}"#
             );
+            serde_json::from_str::<SessionInfoEntry<'_>>(&row).unwrap();
             fold_scan_entry(&mut old.acc, &row).unwrap();
         }
         cache.store_state(old_path, old);
@@ -780,7 +823,7 @@ mod cache_tests {
         new.acc
             .usage_scan
             .fold_message("assistant", Some("assistant"), Some(Usage::default()));
-        fold_scan_entry(&mut new.acc, r#"{"type":"child_usage_attributed","id":"new-report","targetId":"assistant","childUsage":{},"aggregateUsage":{}}"#).unwrap();
+        fold_scan_entry(&mut new.acc, r#"{"type":"child_usage_attributed","id":"new-report","timestamp":"2026-10-11T00:00:00.000Z","targetId":"assistant","childUsage":{},"aggregateUsage":{}}"#).unwrap();
         cache.store_state(new_path, new);
         assert_eq!(
             cache.states.keys().cloned().collect::<Vec<_>>(),
