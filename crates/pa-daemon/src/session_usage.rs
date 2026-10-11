@@ -475,6 +475,78 @@ mod tests {
         })
     }
 
+    #[test]
+    fn duplicate_attribution_ids_subtract_once_and_preserve_latest_aggregate() {
+        let assistant = message(
+            "a",
+            "assistant",
+            &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
+        );
+        let mut first = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        first["id"] = json!("report-1");
+        let mut second = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
+        second["id"] = json!("report-2");
+        let mut repeated = first.clone();
+        // Aggregate replacement still follows file order, even for a repeated ID.
+        repeated["aggregateUsage"] = serde_json::to_value(usage(160, 16, 16.0)).unwrap();
+        let mut full = UsageScan::default();
+        for row in [&assistant, &first] {
+            serde_json::from_value::<ScanEntry>(row.clone())
+                .unwrap()
+                .fold_into(&mut full);
+        }
+        let mut resumed: UsageScan =
+            serde_json::from_slice(&serde_json::to_vec(&full).unwrap()).unwrap();
+        for scan in [&mut full, &mut resumed] {
+            for row in [&second, &repeated] {
+                serde_json::from_value::<ScanEntry>(row.clone())
+                    .unwrap()
+                    .fold_into(scan);
+            }
+            assert_eq!(
+                scan.totals(),
+                SessionUsageTotals {
+                    own: usage(110, 11, 10.0),
+                    total: usage(160, 16, 16.0),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn orphan_ids_are_not_consumed_and_legacy_attributions_remain_distinct() {
+        let mut orphan = attribution("a", usage(20, 2, 2.0), usage(120, 12, 10.0));
+        orphan["id"] = json!("report-1");
+        let assistant = message(
+            "a",
+            "assistant",
+            &serde_json::to_value(usage(100, 10, 8.0)).unwrap(),
+        );
+        let missing_id = attribution("a", usage(30, 3, 4.0), usage(150, 15, 14.0));
+        let mut empty_id = attribution("a", usage(40, 4, 8.0), usage(190, 19, 22.0));
+        empty_id["id"] = json!("");
+        let mut scan = UsageScan::default();
+        for row in [
+            orphan.clone(),
+            assistant,
+            orphan.clone(),
+            orphan,
+            missing_id,
+            empty_id,
+        ] {
+            serde_json::from_value::<ScanEntry>(row)
+                .unwrap()
+                .fold_into(&mut scan);
+        }
+        assert_eq!(
+            scan.totals(),
+            SessionUsageTotals {
+                own: usage(100, 10, 8.0),
+                total: usage(190, 19, 22.0),
+            }
+        );
+    }
+
     /// The latest aggregate replaces the raw block, every child block
     /// accumulates, and the summary subtracts the child spend (no double count).
     #[test]

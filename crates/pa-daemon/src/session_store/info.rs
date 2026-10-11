@@ -741,3 +741,60 @@ pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &str) -> Option
         })
         .map(|info| info.path)
 }
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn attribution_ids_share_the_retained_usage_budget_and_trigger_lru_eviction() {
+        let generation = SessionInfoGeneration {
+            len: 0,
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        };
+        let mut cache = SessionInfoScanCache::default();
+        let old_path = Path::new("old.jsonl");
+        let new_path = Path::new("new.jsonl");
+        let mut old = SessionScanState::fresh(generation);
+        old.acc
+            .usage_scan
+            .fold_message("assistant", Some("assistant"), Some(Usage::default()));
+        for index in 1..SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES {
+            let row = format!(
+                r#"{{"type":"child_usage_attributed","id":"report-{index}","targetId":"assistant","childUsage":{{}},"aggregateUsage":{{}}}}"#
+            );
+            fold_scan_entry(&mut old.acc, &row).unwrap();
+        }
+        cache.store_state(old_path, old);
+        assert_eq!(
+            cache.retained_usage_entries,
+            SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES
+        );
+        let mut new = SessionScanState::fresh(generation);
+        new.acc
+            .usage_scan
+            .fold_message("assistant", Some("assistant"), Some(Usage::default()));
+        fold_scan_entry(&mut new.acc, r#"{"type":"child_usage_attributed","id":"new-report","targetId":"assistant","childUsage":{},"aggregateUsage":{}}"#).unwrap();
+        cache.store_state(new_path, new);
+        assert_eq!(
+            cache.states.keys().cloned().collect::<Vec<_>>(),
+            vec![new_path.to_path_buf()]
+        );
+        assert_eq!(cache.retained_usage_entries, 2);
+        assert_eq!(
+            cache.order.values().cloned().collect::<Vec<_>>(),
+            vec![new_path.to_path_buf()]
+        );
+        assert_eq!(cache.ordinal_by_path.len(), 1);
+        cache.drop_state(new_path);
+        assert!(cache.states.is_empty());
+        assert_eq!(cache.retained_usage_entries, 0);
+        assert!(cache.order.is_empty());
+        assert!(cache.ordinal_by_path.is_empty());
+    }
+}
