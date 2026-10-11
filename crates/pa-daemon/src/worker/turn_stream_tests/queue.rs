@@ -1014,7 +1014,7 @@ async fn an_aborted_run_clears_the_note_at_its_idle_settle() {
 }
 
 /// Pause the note clear so a roster reader can attempt the same
-/// core-then-note snapshot as SummaryInputs. Idle must never become
+/// core-then-note snapshot as `SummaryInputs`. Idle must never become
 /// observable with the stopped run's note still present.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {

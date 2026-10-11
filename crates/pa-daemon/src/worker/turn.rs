@@ -1014,12 +1014,22 @@ impl TurnRunner {
         coalescer.close();
         flusher.abort();
 
-        {
+        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
+        let more_queued = {
             let mut core = self.core.lock().unwrap();
+            let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
+            // Publish the note clear and idle transition atomically to
+            // roster readers, which capture core then the engine note.
+            // An abort-gated run may emit no later event to repair a
+            // roster push that observes idle with its old note.
+            if !engine_reported_run_end && !more_queued {
+                settle_engine.clear_progress_note();
+            }
             core.busy = false;
             core.active_action = None;
             core.running_admission_ids.clear();
-        }
+            more_queued
+        };
         self.push_roster_delta();
         // The fallback `agent_end` for runs that ended without a model
         // turn (session commands, pre-model failures): the engine's own
@@ -1039,22 +1049,6 @@ impl TurnRunner {
         // (the flag stays armed until the next pickup — a settle-time
         // re-read would race `handle_abort` and silence a completed
         // session-command or pre-model-failure run).
-        let engine_reported_run_end = engine_agent_end.load(std::sync::atomic::Ordering::SeqCst);
-        // One read of the queued-work state keys both the fallback note
-        // clear and the pane's `run_ended` below.
-        let more_queued = {
-            let core = self.core.lock().unwrap();
-            !core.steering.is_empty() || !core.follow_up.is_empty()
-        };
-        // The note clear rides the same lanes-empty idle settle as the
-        // pane's `run_ended` below, not the fallback's emission: a run whose
-        // `agent_end` the abort gate swallowed still settles the pane idle,
-        // so the same true-end key must clear the note (the engine's own
-        // `agent_end` clear above already ran for a run that reported its
-        // end — one clear rule for both fallback shapes).
-        if !engine_reported_run_end && !more_queued {
-            settle_engine.clear_progress_note();
-        }
         if !engine_reported_run_end && !abort_gate_armed.load(std::sync::atomic::Ordering::SeqCst) {
             self.emit_turn_event(json!({ "type": "agent_end" }));
         }

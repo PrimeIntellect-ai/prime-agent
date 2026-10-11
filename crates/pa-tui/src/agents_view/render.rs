@@ -614,7 +614,7 @@ impl AgentsViewMode {
     /// The selected agent/subagent row's progress note: wrapped,
     /// indented to the title column, dim; other row kinds render nothing.
     pub(super) fn render_note_details(&self, row: &AgentsViewRow, width: usize) -> Vec<Line> {
-        if !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
+        if width == 0 || !matches!(row.kind, RowKind::Agent | RowKind::Subagent) {
             return Vec::new();
         }
         let Some(note) = row
@@ -626,7 +626,13 @@ impl AgentsViewMode {
         else {
             return Vec::new();
         };
-        let indent = format!("{}  ", "  ".repeat(row.depth));
+        // Keep room for a wide character when nesting exceeds the pane.
+        let indent_width = row
+            .depth
+            .saturating_add(1)
+            .saturating_mul(2)
+            .min(width.saturating_sub(2));
+        let indent = " ".repeat(indent_width);
         let dim = self.theme.fg_style(ThemeColor::Dim);
         let wrap_width = width.saturating_sub(str_width(&indent)).max(1);
         crate::width::wrap_text(&note, wrap_width)
@@ -636,7 +642,8 @@ impl AgentsViewMode {
                 for span in wrapped.drain(..) {
                     out.push(crate::Span::styled(span.content, dim));
                 }
-                out
+                // A one-column pane cannot contain a wide character.
+                crate::width::slice_line_by_column_strict(&out, 0, width, true)
             })
             .collect()
     }
