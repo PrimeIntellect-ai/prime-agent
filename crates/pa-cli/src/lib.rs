@@ -49,6 +49,7 @@ pub(crate) mod self_update;
 pub(crate) mod session_export;
 pub(crate) mod sessions_table_format;
 pub(crate) mod subscription_login;
+pub(crate) mod tailscale;
 pub(crate) mod telemetry_notice;
 pub(crate) mod traces_login;
 
@@ -306,6 +307,8 @@ fn main_impl(args: &[String], runtime: &dyn mode::Runtime) -> Result<i32, String
         initial_images,
         file_args: parsed.file_args.clone(),
         daemon_socket: parsed.daemon_socket.clone(),
+        daemon_port: parsed.daemon_port,
+        daemon_bind_host: parsed.daemon_bind_host.clone(),
         list_models: parsed.list_models,
         verbose: parsed.verbose,
         offline: parsed.offline,
