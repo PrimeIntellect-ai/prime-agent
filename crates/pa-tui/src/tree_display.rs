@@ -107,7 +107,7 @@ pub fn user_entry_text(entry: &FileEntry) -> Option<String> {
     }
 }
 
-/// One tool-call row: `[edit: ~/path]`, `[bash: cmd…]`, `[ipython: code…]`,
+/// One tool-call row: `[edit: ~/path]`, `[bash: cmd…]`, `[python_repl: code…]`,
 /// or the truncated-JSON fallback (TS `formatToolCall`).
 fn format_tool_call(theme: &Theme, name: &str, arguments: &Value) -> Line {
     let shorten_path = |p: &str| -> String {
@@ -141,7 +141,9 @@ fn format_tool_call(theme: &Theme, name: &str, arguments: &Value) -> Line {
     let text = match name {
         "edit" => format!("[edit: {}]", shorten_path(&arg("path"))),
         "bash" => format!("[bash: {}]", shorten(&arg("command"))),
-        "ipython" => format!("[ipython: {}]", shorten(&arg("code"))),
+        python_name if pa_types::ai::is_python_tool_name(python_name) => {
+            format!("[{python_name}: {}]", shorten(&arg("code")))
+        }
         _ => {
             let serialized = serde_json::to_string(arguments).unwrap_or_default();
             let truncated: String = serialized.chars().take(40).collect();
