@@ -296,6 +296,57 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
     }
 }
 
+/// Manual retry can replace the descriptor's pid without arming a monitor.
+/// The adopted predecessor must still hand off, even with an unchanged epoch.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(start_paused = true)]
+async fn a_pid_only_replacement_keeps_the_adopted_predecessor_out_of_crash_recovery() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    // A missed handoff must not spawn the test executable as a worker.
+    std::fs::write(agent_dir.join("logs"), "not a directory").unwrap();
+    let supervisor = Arc::new(
+        Supervisor::new(SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir,
+        })
+        .expect("supervisor"),
+    );
+    let mut predecessor = tokio::process::Command::new("sleep")
+        .arg("600")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn isolated predecessor");
+    let mut replacement = tokio::process::Command::new("sleep")
+        .arg("600")
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn isolated replacement");
+    let predecessor_pid = predecessor.id().unwrap();
+    let resident = adopted_watch_resident(dir.path(), predecessor_pid);
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
+        Arc::clone(&resident),
+        None,
+        u64::from(predecessor_pid)
+    ));
+    assert!(futures::poll!(watch.as_mut()).is_pending());
+    let epoch = resident.monitor_epoch.load(Ordering::SeqCst);
+    resident.descriptor.lock().await.pid = u64::from(replacement.id().unwrap());
+    assert_eq!(resident.monitor_epoch.load(Ordering::SeqCst), epoch);
+    // Reap both test-owned processes before checking the watch's result.
+    predecessor.kill().await.expect("reap isolated predecessor");
+    replacement.kill().await.expect("reap isolated replacement");
+    watch.await;
+    assert_eq!(resident.consecutive_failures.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        resident.descriptor.lock().await.lifecycle,
+        DaemonWorkerLifecycle::Ready
+    );
+    assert!(supervisor.registry.get("w-adopted-watch").await.is_some());
+}
+
 /// The watched adopted worker's resident, with the descriptor carrying the
 /// watched pid (the post-exit ownership check compares against it).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
