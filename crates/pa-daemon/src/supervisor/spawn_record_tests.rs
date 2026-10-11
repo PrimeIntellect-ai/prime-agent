@@ -179,18 +179,56 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
     .expect("parse the spawn record");
     assert_eq!(persisted.lifecycle, DaemonWorkerLifecycle::Starting);
     assert!(persisted.pid > 0, "the spawned pid rides the record");
-    let instance = persisted
-        .worker_instance_id
-        .as_deref()
-        .expect("spawn identity");
-    assert!(
-        uuid::Uuid::parse_str(instance).is_ok(),
-        "the generated launch identity rides the record"
+}
+
+/// A spawn record that cannot land (the descriptor path is occupied) must
+/// fail the launch and kill the spawned child: a lost record is how a
+/// successor boot adopts a stale or recycled pid as a live worker. On the
+/// unfixed tree the persist failure is discarded and the launch only fails
+/// later, at the connect probe, with no spawn record behind it.
+#[tokio::test]
+async fn a_spawn_record_persist_failure_kills_the_child_and_fails_the_launch() {
+    let (supervisor, dir) = spawn_record_witness("persistfail");
+    let descriptor_path = dir.join("w-persistfail.json");
+    // The spawn record's destination is occupied: the atomic persist fails.
+    std::fs::create_dir(&descriptor_path).unwrap();
+    let descriptor: DaemonWorkerDescriptor = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "workerId": "w-persistfail",
+        "pid": 0,
+        "socketPath": dir.join("w-persistfail.sock").to_string_lossy(),
+        "recoveryJournalPath": "/tmp/w-persistfail.recovery.jsonl",
+        "supervisorSocketPath": "/tmp/none.sock",
+        "authenticationToken": "spawnrec-token",
+        "rootActiveSessionId": "w-persistfail",
+        "createdAt": "2026-10-01T00:00:00Z",
+        "updatedAt": "2026-10-01T00:00:00Z",
+        "lifecycle": "ready",
+        "createCommand": {},
+        "consecutiveFailures": 0,
+    }))
+    .expect("descriptor");
+    let resident = ResidentWorker::new(
+        "w-persistfail".to_string(),
+        descriptor,
+        descriptor_path.clone(),
     );
-    assert_eq!(
-        resident.descriptor.lock().await.worker_instance_id,
-        persisted.worker_instance_id,
-        "the watched in-memory identity matches the durable spawn record"
+    supervisor.registry.insert(Arc::clone(&resident)).await;
+    let outcome = supervisor.relaunch_worker(&resident).await;
+    let error = format!(
+        "{:#}",
+        outcome.expect_err("the launch fails at the spawn record")
+    );
+    assert!(
+        error.contains("persist spawned worker identity"),
+        "the launch owns the spawn-record failure: {error}"
+    );
+    // The spawned child is dead: the descriptor named it before the persist.
+    let pid = resident.descriptor.lock().await.pid;
+    assert!(pid > 0, "the child's pid was recorded before the persist");
+    assert!(
+        !crate::lease::is_process_alive(pid as u32).unwrap_or(true),
+        "the failed-launch child is killed"
     );
 }
 
