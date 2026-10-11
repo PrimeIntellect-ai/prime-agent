@@ -511,6 +511,9 @@ async fn dispose_child(child: &Arc<InlineChild>) {
 
 /// Tear every inline descendant of the root down.
 pub(crate) async fn dispose_inline_subagents(root: &Arc<InlineSessionNode>) {
+    root.disposed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    root.activity.notify_waiters();
     let children = std::mem::take(&mut *root.children.lock().await);
     for child in children {
         dispose_child(&child).await;
@@ -548,6 +551,9 @@ impl RlmSubagentHost for InlineHost {
             // serialize on the node's spawn gate so the name check and the
             // push are atomic.
             let spawn_gate = node.spawn_gate.lock().await;
+            if node.is_disposed() {
+                anyhow::bail!("Cannot spawn from a disposed inline session");
+            }
             {
                 let children = node.children.lock().await.clone();
                 for child in &children {
@@ -718,7 +724,17 @@ impl RlmSubagentHost for InlineHost {
                     replied_since_task: false,
                 }),
             });
-            node.children.lock().await.push(Arc::clone(&child));
+            // Teardown can run while the engine is being built. Check while
+            // holding the roster lock so disposal either takes this child or
+            // admission rejects it; no child can land after the teardown drain.
+            let mut children = node.children.lock().await;
+            if node.is_disposed() {
+                drop(children);
+                engine.dispose_kernel().await;
+                anyhow::bail!("Cannot spawn from a disposed inline session");
+            }
+            children.push(Arc::clone(&child));
+            drop(children);
             drop(spawn_gate);
             // The kickoff: the task prompt rides the parent's `agent_message` row
             // (TS `spawnMessage`), delivered through the one steer path.
@@ -891,6 +907,21 @@ impl RlmSubagentHost for InlineHost {
 
 /// Append one durable `session_info` name row to a node's session.
 async fn rename_session(node: &Arc<InlineSessionNode>, name: &str) -> anyhow::Result<()> {
+    let parent = node.parent_node();
+    let _name_guard = if let Some(parent) = &parent {
+        Some(parent.spawn_gate.lock().await)
+    } else {
+        None
+    };
+    if let Some(parent) = &parent {
+        for sibling in parent.children.lock().await.iter() {
+            if !Arc::ptr_eq(&sibling.node, node)
+                && sibling.node.session_name().as_deref() == Some(name)
+            {
+                return Err(spawn_name_unavailable_error(name, node.depth));
+            }
+        }
+    }
     let engine = node
         .engine
         .get()
@@ -1095,5 +1126,69 @@ impl AgentMessageController for InlineMessages {
             delivered_at,
             queued_at,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_waiting_for_admission_rejects_a_disposed_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let options = crate::mode::RunOptions {
+            app_mode: crate::mode::AppMode::Print,
+            config: crate::mode::RuntimeConfig {
+                cwd: directory.path().to_path_buf(),
+                agent_dir: directory.path().join("agent"),
+                ..Default::default()
+            },
+            session: crate::mode::SessionOptions::default(),
+            messages: Vec::new(),
+            file_args: Vec::new(),
+            daemon_socket: None,
+            list_models: None,
+            initial_message: None,
+            initial_images: Vec::new(),
+            verbose: false,
+            offline: true,
+            agents_view_requested: false,
+            attach_agent: None,
+        };
+        std::fs::create_dir_all(&options.config.agent_dir).unwrap();
+        let manager = pa_core::session::manager::SessionManager::in_memory(directory.path());
+        let mut node = root_node(
+            &options,
+            &manager,
+            Some(json!({
+                "responses": ["parent"],
+                "children": { "late": { "responses": ["child"] } },
+            })),
+        );
+        Arc::get_mut(&mut node).unwrap().max_depth = 2;
+        let gate = node.spawn_gate.lock().await;
+        let mut spawn = InlineHost(Arc::clone(&node)).spawn(RlmSpawnRequest {
+            prompt: "finish the task".to_string(),
+            name: Some("late".to_string()),
+            model: None,
+            thinking: None,
+            decision_child: false,
+            spawned_by_request_id: None,
+            cell_source_code: None,
+        });
+        std::future::poll_fn(|context| {
+            assert!(spawn.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        node.disposed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        drop(gate);
+        let result = spawn.await;
+        let admitted = node.children.lock().await.len();
+        dispose_inline_subagents(&node).await;
+        let error = result.expect_err("a disposed parent must not admit a queued spawn");
+        assert!(error.to_string().contains("disposed"), "{error:#}");
+        assert_eq!(admitted, 0);
     }
 }

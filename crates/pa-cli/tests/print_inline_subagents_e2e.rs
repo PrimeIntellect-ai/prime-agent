@@ -83,12 +83,40 @@ impl PrintLane {
         for (key, value) in env_extra {
             command.env(key, value);
         }
-        let output = command.output().expect("binary present");
-        (
-            String::from_utf8_lossy(&output.stdout).to_string(),
-            String::from_utf8_lossy(&output.stderr).to_string(),
-            output.status.code().unwrap_or(-1),
-        )
+        // Bound a broken quiescence loop without waiting for the entire CI
+        // shard to expire. Files retain diagnostics even when the child hangs.
+        let stdout_path = self.home.path().join("stdout.log");
+        let stderr_path = self.home.path().join("stderr.log");
+        command
+            .stdout(std::fs::File::create(&stdout_path).unwrap())
+            .stderr(std::fs::File::create(&stderr_path).unwrap());
+        pa_core::platform::set_new_process_group(&mut command);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let status = runtime.block_on(async {
+            let mut child = tokio::process::Command::from(command)
+                .kill_on_drop(true)
+                .spawn()
+                .expect("binary present");
+            let pid = child.id().expect("running child") as i32;
+            if let Ok(status) =
+                tokio::time::timeout(std::time::Duration::from_secs(120), child.wait()).await
+            {
+                Some(status.expect("print run exits"))
+            } else {
+                let _ = pa_core::platform::kill_process_group_or_pid(pid);
+                let _ = child.wait().await;
+                None
+            }
+        });
+        let stdout = std::fs::read_to_string(stdout_path).unwrap();
+        let stderr = std::fs::read_to_string(stderr_path).unwrap();
+        let status = status.unwrap_or_else(|| {
+            panic!("print run exceeded 120s; stderr: {stderr}\nstdout: {stdout}")
+        });
+        (stdout, stderr, status.code().unwrap_or(-1))
     }
 
     /// The one persisted parent session file the print run wrote.
@@ -917,5 +945,152 @@ fn print_inline_budget_steer_from_a_drained_reply_runs_after_it() {
     assert!(
         steer_at > reply_at,
         "the budget steer (row {steer_at}) landed after the child reply (row {reply_at})"
+    );
+}
+
+#[test]
+fn print_inline_rename_rejects_sibling_collisions_and_preserves_routing() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let parent_cell = r#"
+alpha = await rlm.spawn("answer alpha", name="alpha")
+beta = await rlm.spawn("check self rename", name="beta")
+first = await rlm.collect([beta], timeout_ms=60000)
+assert first[0].settled and first[0].answer_text == "beta checked"
+try:
+    await rlm.rename("alpha", session_id=beta)
+except Exception as error:
+    assert "unavailable" in str(error), str(error)
+else:
+    raise AssertionError("parent rename accepted a duplicate sibling name")
+rows = await rlm.list_subagents()
+assert {row.rlm_child_id: row.session_name for row in rows} == {alpha.rlm_child_id: "alpha", beta.rlm_child_id: "beta"}
+results = await rlm.collect(["alpha", "beta"], timeout_ms=60000)
+assert [(result.session_name, result.answer_text) for result in results] == [("alpha", "alpha answered"), ("beta", "beta checked")]
+assert await rlm.rename("beta", session_id=beta) == "beta"
+assert await rlm.rename("gamma", session_id=beta) == "gamma"
+renamed = await rlm.collect(["gamma"], timeout_ms=60000)
+assert renamed[0].rlm_child_id == beta.rlm_child_id
+print("RENAME ROUTING VERIFIED")
+"#;
+    let child_cell = r#"
+try:
+    await rlm.rename("alpha")
+except Exception as error:
+    assert "unavailable" in str(error), str(error)
+else:
+    raise AssertionError("self rename accepted a duplicate sibling name")
+print("SELF RENAME REJECTED")
+"#;
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [{ "type": "toolCall", "name": "ipython",
+                "arguments": { "code": parent_cell } }] },
+            "RENAMES CHECKED",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "alpha": { "responses": ["alpha answered"] },
+            "beta": { "responses": [
+                { "content": [{ "type": "toolCall", "name": "ipython",
+                    "arguments": { "code": child_cell } }] },
+                "beta checked",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(&["-p", "check rename routing"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    let entries = PrintLane::entries(&lane.parent_session_file());
+    let tool_output: String = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .pointer("/message/role")
+                .and_then(|role| role.as_str())
+                == Some("toolResult")
+        })
+        .map(serde_json::Value::to_string)
+        .collect();
+    assert!(
+        tool_output.contains("RENAME ROUTING VERIFIED"),
+        "rename checks completed without a tool error: {tool_output}"
+    );
+}
+
+#[test]
+fn print_inline_delete_cancels_an_executing_child_and_removes_it() {
+    let lane = lane();
+    let kernel = PrintLane::kernel_python();
+    let parent_cell = r#"
+import asyncio
+from pathlib import Path
+ready = asyncio.get_running_loop().create_future()
+async def accept_ready(reader, writer):
+    try:
+        assert await reader.readline() == b"ready\n"
+        ready.set_result(None)
+    finally:
+        writer.close()
+        await writer.wait_closed()
+server = await asyncio.start_server(accept_ready, "127.0.0.1", 0)
+try:
+    Path("cancel-port").write_text(str(server.sockets[0].getsockname()[1]))
+    child = await rlm.spawn("wait until cancelled", name="waiting")
+    await asyncio.wait_for(ready, timeout=30)
+    deleted = await rlm.delete_subagent(child)
+    assert deleted.status == "cancelled", deleted
+    assert await rlm.list_subagents() == []
+    try:
+        await rlm.collect([child], timeout_ms=0)
+    except Exception as error:
+        assert "No direct RLM child matches" in str(error), str(error)
+    else:
+        raise AssertionError("deleted child remained collectable")
+    Path("cancel-verified").write_text("done")
+finally:
+    server.close()
+    await server.wait_closed()
+"#;
+    let child_cell = r#"
+import asyncio, os
+from pathlib import Path
+Path("cancel-child-pid").write_text(str(os.getpid()))
+reader, writer = await asyncio.open_connection("127.0.0.1", int(Path("cancel-port").read_text()))
+writer.write(b"ready\n")
+await writer.drain()
+writer.close()
+await writer.wait_closed()
+await asyncio.Event().wait()
+Path("cancel-child-finished").write_text("unexpected")
+"#;
+    let script = serde_json::json!({
+        "responses": [
+            { "content": [{ "type": "toolCall", "name": "ipython",
+                "arguments": { "code": parent_cell } }] },
+            "CHILD CANCELLED",
+        ],
+        "repeatLastResponse": true,
+        "children": {
+            "waiting": { "responses": [
+                { "content": [{ "type": "toolCall", "name": "ipython",
+                    "arguments": { "code": child_cell } }] },
+                "unexpected completion",
+            ] },
+        },
+    });
+    let (stdout, stderr, code) = lane.run(&["-p", "cancel the child"], &script, &kernel, &[]);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(
+        lane.home.path().join("cancel-verified").exists(),
+        "deletion and routing checks completed; stderr: {stderr}\nstdout: {stdout}"
+    );
+    assert!(!lane.home.path().join("cancel-child-finished").exists());
+    let child_pid = std::fs::read_to_string(lane.home.path().join("cancel-child-pid"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !pa_core::platform::pid_exists(child_pid),
+        "cancelled child's Python process {child_pid} outlived the print run"
     );
 }
