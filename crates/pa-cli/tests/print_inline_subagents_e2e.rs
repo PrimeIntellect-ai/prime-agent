@@ -68,6 +68,13 @@ impl PrintLane {
         env_extra: &[(&str, &str)],
     ) -> (String, String, i32) {
         let bin = env!("CARGO_BIN_EXE_prime-agent");
+        // An explicitly selected kernel bypasses skill installation. Exercise
+        // the checkout's messaging and goal skills even in a fresh kernel venv.
+        let skills = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let mut python_paths = vec![skills.join("agent-message/src"), skills.join("goal/src")];
+        if let Some(existing) = std::env::var_os("PYTHONPATH") {
+            python_paths.extend(std::env::split_paths(&existing));
+        }
         let mut command = std::process::Command::new(bin);
         command
             .args(args)
@@ -75,6 +82,10 @@ impl PrintLane {
             .env("PRIME_AGENT_CODING_AGENT_DIR", &self.agent_dir)
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string())
             .env("PRIME_AGENT_KERNEL_PYTHON", kernel_python)
+            .env(
+                "PYTHONPATH",
+                std::env::join_paths(python_paths).expect("skill import paths"),
+            )
             .env_remove("RLM_DEPTH")
             .env_remove("RLM_MAX_DEPTH")
             .env_remove("PRIME_AGENT_SESSION_DIR")
