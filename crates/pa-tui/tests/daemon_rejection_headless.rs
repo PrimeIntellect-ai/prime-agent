@@ -50,6 +50,8 @@ struct MockSupervisor {
     hold_turn_ms: u64,
     /// Drop the connection when the next prompt arrives (the dead-daemon transport case).
     close_on_prompt: bool,
+    /// Rebind to s2 before closing, so the pending prompt outcome outlives its active id.
+    rebind_before_close: bool,
     /// Reject the `create` command with this message (the saved-session open refusal: "session
     /// worker create failed: Session is already active in <id>: <file>").
     reject_create: Option<String>,
@@ -71,6 +73,8 @@ struct SharedAnswers {
     reject_prompt_index: Option<usize>,
     hold_turn_ms: u64,
     close_on_prompt: bool,
+    /// Rebind to s2 before closing, so the pending prompt outcome outlives its active id.
+    rebind_before_close: bool,
     reject_create: Option<String>,
 }
 
@@ -83,6 +87,7 @@ impl MockSupervisor {
             reject_prompt_index: None,
             hold_turn_ms: 0,
             close_on_prompt: false,
+            rebind_before_close: false,
             reject_create: None,
             create_answers: Vec::new(),
         }
@@ -103,6 +108,7 @@ impl MockSupervisor {
             reject_prompt_index: self.reject_prompt_index,
             hold_turn_ms: self.hold_turn_ms,
             close_on_prompt: self.close_on_prompt,
+            rebind_before_close: self.rebind_before_close,
             reject_create: self.reject_create,
         });
         let mut connections = Vec::new();
@@ -243,7 +249,23 @@ impl SharedAnswers {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    let mut data = attach_data(id);
+                    if self.rebind_before_close && !self.prompt_requests.lock().unwrap().is_empty()
+                    {
+                        data["data"]["activeSessionId"] = json!("s2");
+                        data["data"]["snapshot"]["activeSessionId"] = json!("s2");
+                        data["data"]["snapshot"]["summary"]["id"] = json!("s2");
+                        data["data"]["snapshot"]["state"]["activeSessionId"] = json!("s2");
+                    }
+                    write_json(&mut writer, &data);
+                }
+                "detach"
+                    if self.rebind_before_close
+                        && !self.prompt_requests.lock().unwrap().is_empty() =>
+                {
+                    // attach_session has adopted s2 before detaching s1. Resolve the pending
+                    // prompt only now, after the mounted id has observably changed.
+                    break;
                 }
                 "prompt" => {
                     let index = {
@@ -251,6 +273,17 @@ impl SharedAnswers {
                         requests.push(command.clone());
                         requests.len() - 1
                     };
+                    if self.close_on_prompt && self.rebind_before_close {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "session_binding",
+                                "previousActiveSessionId": "s1",
+                                "activeSessionId": "s2",
+                            }),
+                        );
+                        continue;
+                    }
                     if self.close_on_prompt {
                         // The dead-daemon case: dropping both halves fails the in-flight request
                         // with the transport error.
@@ -627,11 +660,21 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
 }
 
 /// Handled, not fatal (operator directive: the user never loses their TUI to a daemon hiccup);
-/// the loss is surfaced twice, never silently swallowed.
+/// the loss is surfaced twice, and the close-after-send draft stays consumed so the natural
+/// resubmit never runs the prompt twice.
 #[test]
-fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
+fn dead_connection_on_prompt_keeps_the_draft_consumed_and_arms_the_reconnect() {
     let steps = vec![
         HeadlessStep::Type("hello".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "the daemon connection closed — reconnecting".to_string(),
+            timeout_ms: 2000,
+        },
+        HeadlessStep::WaitRender {
+            needle: "Daemon reconnected".to_string(),
+            timeout_ms: 4000,
+        },
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ];
@@ -639,10 +682,7 @@ fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
         supervisor.close_on_prompt = true;
     })
     .expect("a dead connection keeps the run mounted");
-    let all = run.frames.join(
-        "
-",
-    );
+    let all = run.frames.join("\n");
     assert!(
         all.contains("\u{26a0} Error: the daemon connection closed"),
         "the dead connection surfaces as the error row:\n{all}"
@@ -651,14 +691,49 @@ fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
         all.contains("the daemon connection closed — reconnecting"),
         "the reconnect driver is armed for the loss:\n{all}"
     );
+    assert_eq!(
+        run.prompt_requests.len(),
+        1,
+        "the close-after-send prompt never dispatches twice"
+    );
+    let last = run.frames.last().map(String::as_str).unwrap_or_default();
     assert!(
-        all.contains("hello"),
-        "the dead-connection draft returned to the editor:\n{all}"
+        !last.contains("hello"),
+        "the draft stays consumed after the close:\n{last}"
     );
 }
 
 /// TS `onSubmit` passes its captured `streamingBehavior` to the fallthrough prompt, so alt+enter
 /// on unknown slash text parks on the follow-up lane, not the steering lane.
+/// A queued prompt remains consumed even if a session-binding event wins the outcome race.
+#[test]
+fn close_after_rebind_keeps_the_outlived_prompt_consumed() {
+    let steps = vec![
+        HeadlessStep::Type("hello".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Daemon reconnected".to_string(),
+            timeout_ms: 4000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.close_on_prompt = true;
+        supervisor.rebind_before_close = true;
+    })
+    .expect("the rebind and connection loss keep the run mounted");
+    assert_eq!(
+        run.prompt_requests.len(),
+        1,
+        "the outlived draft never replays"
+    );
+    let all = run.frames.join("\n");
+    assert!(all.contains("Daemon reconnected"), "reconnected: {all}");
+    let last = run.frames.last().map(String::as_str).unwrap_or_default();
+    assert!(!last.contains("hello"), "the draft stays consumed: {last}");
+}
+
 #[test]
 fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
     let steps = vec![
