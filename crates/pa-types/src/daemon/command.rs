@@ -588,6 +588,13 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    GetSemanticEdges {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     GetConnectionState {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

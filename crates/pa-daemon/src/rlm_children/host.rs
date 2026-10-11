@@ -173,6 +173,16 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     rename_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
                 };
                 let record = Arc::new(Mutex::new(record));
+                if let Some(recorder) = this
+                    .semantic_edges
+                    .lock()
+                    .expect("semantic edges lock")
+                    .clone()
+                {
+                    recorder.register_child_ledger(Path::new(&created.session_dir).join(
+                        pa_core::session_engine::semantic_edges::SEMANTIC_EDGES_LEDGER_FILENAME,
+                    ));
+                }
                 this.children.lock().await.push(Arc::clone(&record));
                 this.refresh_running().await;
                 this.emit_child_update(&record).await;
@@ -455,6 +465,14 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
+            if was_running {
+                let (session_id, session_dir) = {
+                    let record = record.lock().await;
+                    (record.session_id.clone(), record.session_dir.clone())
+                };
+                this.record_child_consumed(session_id.as_deref(), &session_dir, "cancelled")
+                    .await;
+            }
             // Rows can land between the pre-kill capture and the kill
             // reaching the worker: the post-kill walk is the LAST observation
             // (the cursor keeps it free of double-billing).
@@ -563,11 +581,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .collect::<Vec<_>>();
                         match matches.len() {
                             0 => return Err(miss),
-                            1 => deleted_results.push(
-                                SupervisorChildSessions::deleted_collect_result(
-                                    &matches[0],
-                                ),
-                            ),
+                            1 => {
+                                let deleted = &matches[0];
+                                this.record_child_consumed(deleted.session_id.as_deref(), &deleted.session_dir, "cancelled").await;
+                                deleted_results.push(SupervisorChildSessions::deleted_collect_result(deleted));
+                            }
                             _ => bail!(
                                 "RLM child selector \"{target}\" is ambiguous in the current parent session"
                             ),
@@ -599,10 +617,16 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     this.wait_for_child(&active_session_id, remaining).await;
                     this.refresh_record(record).await;
                 }
-                let result = {
+                let (result, session_id, session_dir) = {
                     let record = record.lock().await;
-                    SupervisorChildSessions::collect_result(&record)
+                    (
+                        SupervisorChildSessions::collect_result(&record),
+                        record.session_id.clone(),
+                        record.session_dir.clone(),
+                    )
                 };
+                this.record_child_consumed(session_id.as_deref(), &session_dir, result.status)
+                    .await;
                 results.push(result);
             }
             // Live entries first, the deleted generations' envelopes after.

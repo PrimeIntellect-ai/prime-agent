@@ -1,0 +1,1 @@
+- ACP prompt and close responses publish cumulative model-request relationships under `ai.prime.acp/semantic-edges-v1`, using nano-rlm's continuation, subagent, message, and compaction edge vocabulary.

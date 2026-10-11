@@ -30,6 +30,13 @@ mod scripted;
 
 /// The turn behavior a worker session runs.
 pub trait SessionEngine: Send + Sync {
+    /// Snapshot cumulative model-request dependencies for this session's tree.
+    /// Engines without model requests return an empty edge list.
+    fn semantic_edges_snapshot(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + '_>> {
+        Box::pin(std::future::ready(Ok(json!({ "edges": [] }))))
+    }
     /// Consume one tagged Decision API message without starting a turn: the
     /// parent's engine consumes its decision child's `decision_api.decision`
     /// replies into its per-child slots, and the decision child consumes the

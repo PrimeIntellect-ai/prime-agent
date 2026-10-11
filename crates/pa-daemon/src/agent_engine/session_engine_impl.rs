@@ -12,6 +12,46 @@ use super::{
 use pa_core::session_engine::agent_messaging::AgentFamilyRelationship;
 
 impl SessionEngine for AgentSessionEngine {
+    fn semantic_edges_snapshot(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<Value>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let session = self.session.lock().await.clone();
+            let recorder = session
+                .as_ref()
+                .and_then(|engine| engine.session.semantic_edges())
+                .or_else(|| {
+                    self.semantic_recorder
+                        .lock()
+                        .expect("semantic recorder lock")
+                        .clone()
+                });
+            let path = self
+                .semantic_identity
+                .lock()
+                .expect("semantic identity lock")
+                .as_ref()
+                .and_then(|identity| identity.ledger_path.clone());
+            let snapshot = tokio::task::spawn_blocking(move || {
+                if let Some(recorder) = recorder {
+                    recorder.snapshot()
+                } else if let Some(path) = path {
+                    pa_core::session_engine::semantic_edges::read_semantic_edges(&path)
+                } else {
+                    Ok(pa_core::session_engine::semantic_edges::SemanticEdgeSnapshot::default())
+                }
+            })
+            .await??;
+            if let Some(telemetry) = session
+                .as_ref()
+                .and_then(|engine| engine.telemetry.as_ref())
+            {
+                telemetry.note_feature_outcome("acp_semantic_edges", "completed", None);
+            }
+            Ok(serde_json::to_value(snapshot)?)
+        })
+    }
     fn route_decision_api_event(
         &self,
         relationship: Option<AgentFamilyRelationship>,
@@ -896,10 +936,23 @@ impl SessionEngine for AgentSessionEngine {
                     .and_then(|spawn| spawn.spawned_by_request_id.clone()),
             }
         });
-        *self
-            .semantic_identity
-            .lock()
-            .expect("semantic identity lock") = semantic_identity;
+        {
+            let mut previous = self
+                .semantic_identity
+                .lock()
+                .expect("semantic identity lock");
+            if previous.as_ref().map(|identity| &identity.session_id)
+                != semantic_identity
+                    .as_ref()
+                    .map(|identity| &identity.session_id)
+            {
+                *self
+                    .semantic_recorder
+                    .lock()
+                    .expect("semantic recorder lock") = None;
+            }
+            *previous = semantic_identity;
+        }
         if let Some(children) = &self.children {
             let parent = ParentIdentity {
                 rlm_depth: identity.rlm_depth,

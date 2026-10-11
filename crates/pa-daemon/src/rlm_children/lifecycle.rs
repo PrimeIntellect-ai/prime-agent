@@ -617,6 +617,45 @@ impl SupervisorChildSessionsInner {
         recorder.record_child_returned(&child_session_id, last_committed);
     }
 
+    /// Correlate explicit retrieval or cancellation, after the child request settles.
+    pub(super) async fn record_child_consumed(
+        &self,
+        session_id: Option<&str>,
+        session_dir: &str,
+        status: &str,
+    ) {
+        if !matches!(status, "done" | "error" | "cancelled") {
+            return;
+        }
+        let recorder = self
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone();
+        let Some(recorder) = recorder else { return };
+        let cancellation_source = recorder.last_turn_request_id();
+        let Some(session_id) = session_id else { return };
+        let path = Path::new(session_dir)
+            .join(pa_core::session_engine::semantic_edges::SEMANTIC_EDGES_LEDGER_FILENAME);
+        let request_id = tokio::task::spawn_blocking(move || {
+            pa_core::session_engine::semantic_edges::read_semantic_request_id(&path)
+                .ok()
+                .flatten()
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(request_id) = request_id {
+            if status == "cancelled" {
+                if let Some(source) = cancellation_source {
+                    recorder.cancel_child(session_id, source, request_id);
+                }
+            } else {
+                recorder.collect_child_result(session_id, request_id, status == "error");
+            }
+        }
+    }
+
     /// Deliver the no-reply terminal notice for a settled child that never
     /// sent an agent message to the parent. Exactly-once: the record's
     /// notice claim collapses the races between the watcher, a natural

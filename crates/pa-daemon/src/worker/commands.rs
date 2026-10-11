@@ -94,6 +94,15 @@ impl Worker {
                 self.handle_wait_for_headless_completion(payload).await
             }
             "get_state" => self.handle_get_state(),
+            "get_semantic_edges" => {
+                if let Err(response) = self.require_created(command_type) {
+                    return response;
+                }
+                match self.engine.semantic_edges_snapshot().await {
+                    Ok(snapshot) => response_success(None, command_type, Some(snapshot)),
+                    Err(error) => response_failure(None, command_type, &error.to_string(), None),
+                }
+            }
             "get_messages" => self.handle_get_messages(),
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),

@@ -291,4 +291,7 @@ pub struct AgentSessionEngine {
     /// re-registration stays idempotent.
     pub(crate) semantic_identity:
         std::sync::Mutex<Option<pa_core::session_engine::semantic_edges::SemanticEdgeIdentity>>,
+    pub(crate) semantic_recorder: std::sync::Mutex<
+        Option<Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>>,
+    >,
 }

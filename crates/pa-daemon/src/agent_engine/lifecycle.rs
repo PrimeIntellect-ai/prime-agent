@@ -188,6 +188,7 @@ impl AgentSessionEngine {
             compaction_summary_sink: std::sync::Mutex::new(None),
             model_refusal_telemetry,
             semantic_identity: std::sync::Mutex::new(None),
+            semantic_recorder: std::sync::Mutex::new(None),
         })
     }
 
@@ -306,6 +307,16 @@ impl AgentSessionEngine {
     }
 
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
+        if let Some(recorder) = built.session.semantic_edges() {
+            let mut previous = self
+                .semantic_recorder
+                .lock()
+                .expect("semantic recorder lock");
+            if let Some(previous) = previous.as_ref() {
+                recorder.restore_ephemeral_state_from(previous);
+            }
+            *previous = Some(recorder);
+        }
         self.mirror_goal_runtime(built).await;
         if let Some(sink) = self
             .compaction_summary_sink
@@ -381,6 +392,7 @@ impl AgentSessionEngine {
             // settle watcher records a returned child's last committed
             // request into this recorder.
             children.set_semantic_edges(built.session.semantic_edges());
+            children.register_semantic_ledgers().await;
         }
         *self.turn_agent.lock().expect("turn agent lock") =
             Some(std::sync::Arc::clone(built.session.agent()));

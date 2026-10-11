@@ -61,3 +61,7 @@ pseudonymous installation identity for Prime Agent product analytics.
 
 Depends on no workspace crate (sits beside pa-types at the bottom of the
 dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
+
+ACP semantic-edge exports count `acp_semantic_edges` completed feature outcomes
+on `agent session ended`, using the existing opt-out-aware session counters.
+Request IDs and edge contents never enter telemetry.

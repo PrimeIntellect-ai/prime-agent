@@ -393,7 +393,7 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
 
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
+        json!({ "stopReason": "end_turn", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 
     let mut sequences: Vec<u64> = Vec::new();
@@ -411,7 +411,10 @@ fn acp_prompt_stream_completion_envelope_and_stop_reason_match_ts() {
 
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 }
 
 #[test]
@@ -522,7 +525,10 @@ fn acp_error_shapes_match_the_ts_goldens() {
 
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(response["result"], json!({}));
+    assert_eq!(
+        response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 }
 
 #[test]
@@ -585,7 +591,10 @@ fn acp_cancel_without_an_active_turn_is_a_noop() {
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, notifications) = client.wait_response(close, TIMEOUT);
     assert!(notifications.is_empty(), "a no-op cancel publishes nothing");
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 }
 
 #[test]
@@ -608,7 +617,10 @@ fn acp_mcp_admission_accepts_valid_servers_and_close_releases() {
         .to_string();
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 }
 
 #[test]
@@ -643,7 +655,10 @@ fn acp_mcp_admission_rejects_a_second_session_only_when_open() {
     );
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
     let replacement = client.request(
         "session/new",
         &json!({ "mcpServers": [
@@ -787,7 +802,10 @@ fn acp_daemon_attached_close_clears_the_connection_mcp_servers() {
     );
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
     let released = probe_acp_mcp_servers(&socket, &active_session_id);
     assert_eq!(
         released["success"], true,
@@ -896,7 +914,10 @@ fn acp_daemon_attached_cancels_mid_turn() {
     );
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
     drop(client);
 }
 
@@ -996,7 +1017,10 @@ fn acp_daemon_attached_close_mid_turn_answers_cancelled() {
         .into_iter()
         .find(|frame| frame["id"] == close)
         .unwrap_or_else(|| client.wait_response(close, TIMEOUT).0);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 }
 
 /// `initialize` + `session/new` on a daemon-attached child; the ACP session id.
@@ -1004,6 +1028,120 @@ fn initialize_and_new_session(client: &mut AcpChild) -> String {
     let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     new_session(client)
+}
+
+#[test]
+fn acp_semantic_edges_are_cumulative_in_prompt_and_close_responses() {
+    for args in [
+        vec!["--mode", "acp", "--provider", "faux", "--model", "faux-1"],
+        vec![
+            "--mode",
+            "acp",
+            "--provider",
+            "faux",
+            "--model",
+            "faux-1",
+            "--no-session",
+        ],
+    ] {
+        let script = json!({ "engine": "faux", "responses": ["first", "second"] });
+        let mut client = AcpChild::spawn(&args, &script);
+        let session_id = initialize_and_new_session(&mut client);
+        let mut snapshots = Vec::new();
+        for text in ["first question", "second question"] {
+            let prompt = client.request(
+                "session/prompt",
+                &json!({
+                    "sessionId": session_id, "prompt": [{"type": "text", "text": text}],
+                }),
+            );
+            let (response, updates) = client.wait_response(prompt, TIMEOUT);
+            assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+            assert!(updates
+                .iter()
+                .any(
+                    |frame| frame["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]
+                        ["phase"]
+                        == "terminalQuiescence"
+                ));
+            snapshots.push(response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"].clone());
+        }
+        assert_eq!(snapshots[0], json!({"edges": []}));
+        let edges = snapshots[1]["edges"].as_array().expect("edge payload");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["type"], "continuation");
+        let source = edges[0]["source_request_id"].as_str().unwrap();
+        let target = edges[0]["target_request_id"].as_str().unwrap();
+        assert_ne!(source, target);
+        assert_eq!((source.len(), target.len()), (32, 32));
+        let close = client.request("session/close", &json!({"sessionId": session_id}));
+        let (response, _) = client.wait_response(close, TIMEOUT);
+        assert_eq!(
+            response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"],
+            snapshots[1]
+        );
+    }
+}
+
+#[test]
+fn acp_semantic_edges_include_child_calls_and_explicitly_collected_answers() {
+    let Some(kernel_python) = kernel_python() else {
+        return;
+    };
+    let collect = json!({"content": [
+        {"type": "toolCall", "name": "ipython", "arguments": {"code": "print(await rlm.collect())"}},
+    ]});
+    let parent = json!({"engine": "faux", "responses": [
+        {"content": [{"type": "toolCall", "name": "ipython", "arguments": {"code": spawn_cell()}}]},
+        "spawn turn done", "notice seen", collect.clone(), "collected", collect, "collected again",
+    ]});
+    let child = json!({"engine": "faux", "responses": ["child answer"]});
+    let mut client = AcpChild::spawn_with_child_script(
+        &["--mode", "acp", "--provider", "faux", "--model", "faux-1"],
+        &parent,
+        &child,
+        &kernel_python,
+    );
+    let session_id = initialize_and_new_session(&mut client);
+    let mut latest = Value::Null;
+    let mut child_request = Value::Null;
+    for (index, text) in ["spawn", "collect", "collect again"].iter().enumerate() {
+        let prompt = client.request(
+            "session/prompt",
+            &json!({
+                "sessionId": session_id, "prompt": [{"type": "text", "text": text}],
+            }),
+        );
+        let (response, _) = client.wait_response(prompt, TIMEOUT);
+        assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+        latest = response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"].clone();
+        let edges = latest["edges"].as_array().unwrap();
+        let calls: Vec<_> = edges
+            .iter()
+            .filter(|edge| edge["type"] == "subagent_call")
+            .collect();
+        assert_eq!(calls.len(), 1, "{latest}");
+        if index == 0 {
+            child_request = calls[0]["target_request_id"].clone();
+        }
+        assert_eq!(calls[0]["target_request_id"], child_request);
+        let returns: Vec<_> = edges
+            .iter()
+            .filter(|edge| edge["type"] == "subagent_return")
+            .collect();
+        assert_eq!(returns.len(), usize::from(index > 0), "{latest}");
+        if let Some(returned) = returns.first() {
+            assert_eq!(returned["source_request_id"], child_request);
+            assert!(edges.iter().any(|edge| edge["type"] == "continuation"
+                && edge["target_request_id"] == returned["target_request_id"]));
+        }
+    }
+    let close = client.request("session/close", &json!({"sessionId": session_id}));
+    let (response, _) = client.wait_response(close, TIMEOUT);
+    assert_eq!(
+        response["result"],
+        json!({"_meta": {"ai.prime.acp/semantic-edges-v1": latest}})
+    );
 }
 
 fn new_session(client: &mut AcpChild) -> String {
@@ -1252,7 +1390,10 @@ fn acp_daemon_attached_close_keeps_the_worker_and_new_rebinds_it() {
 
     let close = client.request("session/close", &json!({ "sessionId": first }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
     let sessions = live_sessions(&socket);
     assert_eq!(sessions.len(), 1, "close keeps the worker: {sessions:?}");
     assert_eq!(sessions[0]["activeSessionId"], active_session_id);
@@ -1575,7 +1716,7 @@ fn acp_compact_command_publishes_the_compaction_meta_and_end_turn() {
     assert!(boundary, "updates: {updates:?}");
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
+        json!({ "stopReason": "end_turn", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 }
 
@@ -1635,10 +1776,12 @@ fn acp_goal_command_publishes_goal_meta_and_runs_the_continuation() {
         .collect();
     assert!(streamed.contains("GOAL-PROGRESS"), "updates: {updates:?}");
     assert!(streamed.contains("WRAP-UP"), "updates: {updates:?}");
-    assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
-    );
+    assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
+    let edges = prompt_response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"]["edges"]
+        .as_array()
+        .unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0]["type"], "continuation");
 }
 
 #[test]
@@ -1690,7 +1833,7 @@ fn acp_autonomous_token_limit_maps_to_max_tokens_stop_reason() {
 
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "max_tokens" })
+        json!({ "stopReason": "max_tokens", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 }
 
@@ -1724,7 +1867,7 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
     }
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
+        json!({ "stopReason": "end_turn", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 }
 
@@ -1756,7 +1899,7 @@ fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
     let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "max_tokens" })
+        json!({ "stopReason": "max_tokens", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 
     let slash = client.request(
@@ -1766,7 +1909,7 @@ fn acp_truncated_final_response_maps_to_max_tokens_stop_reason() {
     let (slash_response, _) = client.wait_response(slash, TIMEOUT);
     assert_eq!(
         slash_response["result"],
-        json!({ "stopReason": "end_turn" })
+        json!({ "stopReason": "end_turn", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
 }
 
@@ -1822,7 +1965,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "max_turn_requests" }),
+        json!({ "stopReason": "max_turn_requests", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } }),
         "the turn limit maps to the TS stop reason: {prompt_response}"
     );
     let accounted = updates.iter().find_map(|update| {
@@ -1846,7 +1989,10 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     );
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
     drop(client);
 }
 
@@ -1924,7 +2070,7 @@ fn acp_daemon_attached_forwards_cli_session_options() {
     let (turn_response, _) = client.wait_response(turn, Duration::from_mins(2));
     assert_eq!(
         turn_response["result"],
-        json!({ "stopReason": "max_turn_requests" })
+        json!({ "stopReason": "max_turn_requests", "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
     );
     drop(client);
 }
@@ -2136,10 +2282,22 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     );
     let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
     assert_eq!(
-        prompt_response["result"],
-        json!({ "stopReason": "end_turn" }),
-        "the retry recovered the turn: {prompt_response}"
+        prompt_response["result"]["stopReason"], "end_turn",
+        "{prompt_response}"
     );
+    let edges = prompt_response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"]["edges"]
+        .as_array()
+        .unwrap();
+    assert_eq!(edges.len(), 2);
+    let attempt = edges
+        .iter()
+        .find(|edge| edge["type"] == "compaction_attempt")
+        .unwrap();
+    let resumed = edges
+        .iter()
+        .find(|edge| edge["type"] == "compaction")
+        .unwrap();
+    assert_eq!(attempt["target_request_id"], resumed["source_request_id"]);
     let metas = compaction_metas(&updates);
     assert_eq!(metas.len(), 1, "one compaction meta: {metas:?}");
     assert_eq!(metas[0]["summary"], "the summary");
@@ -2213,7 +2371,10 @@ fn spawn_lane(
 ) -> (AcpChild, String, String) {
     let parent = spawn_parent_script(spawn_cell());
     let child_script = json!({ "responses": [ { "text": "kid done", "delayMs": child_hold_ms } ] });
-    let mut client = AcpChild::spawn_with_child_script(args, &parent, &child_script, kernel_python);
+    let mut scripted_args = args.to_vec();
+    scripted_args.extend(["--provider", "faux", "--model", "faux-1"]);
+    let mut client =
+        AcpChild::spawn_with_child_script(&scripted_args, &parent, &child_script, kernel_python);
     let init = client.request("initialize", &initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let session_id = new_session(&mut client);
@@ -2277,9 +2438,17 @@ fn acp_prompt_settles_after_rlm_quiescence() {
         updates.is_empty(),
         "the terminal frame is the last notification before the response: {updates:?}"
     );
+    let edges = &prompt_response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"]["edges"];
+    assert_eq!(edges.as_array().unwrap().len(), 2);
+    assert_eq!(edges[0]["target_request_id"], edges[1]["source_request_id"]);
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "end_turn" })
+        json!({
+            "stopReason": "end_turn", "_meta": {"ai.prime.acp/semantic-edges-v1": {"edges": [
+                {"source_request_id": edges[0]["source_request_id"], "target_request_id": edges[0]["target_request_id"], "type": "continuation"},
+                {"source_request_id": edges[1]["source_request_id"], "target_request_id": edges[1]["target_request_id"], "type": "continuation"},
+            ]}}
+        })
     );
 }
 
@@ -2308,9 +2477,15 @@ fn acp_cancel_during_settle_cancels_the_subagents() {
     });
     client.notify("session/cancel", &json!({ "sessionId": session_id }));
     let (prompt_response, _) = client.wait_response(prompt, TIMEOUT);
+    let edges = &prompt_response["result"]["_meta"]["ai.prime.acp/semantic-edges-v1"]["edges"];
+    assert_eq!(edges.as_array().unwrap().len(), 1);
     assert_eq!(
         prompt_response["result"],
-        json!({ "stopReason": "cancelled" }),
+        json!({
+            "stopReason": "cancelled", "_meta": {"ai.prime.acp/semantic-edges-v1": {"edges": [
+                {"source_request_id": edges[0]["source_request_id"], "target_request_id": edges[0]["target_request_id"], "type": "continuation"},
+            ]}}
+        }),
         "the cancel settles the prompt: {prompt_response}"
     );
     // The roster shows the child the stop sequence cancelled.
@@ -2537,7 +2712,10 @@ fn acp_daemon_attached_close_holds_the_input_pause_until_the_next_session_new() 
 
     let close = client.request("session/close", &json!({ "sessionId": session_id }));
     let (close_response, _) = client.wait_response(close, TIMEOUT);
-    assert_eq!(close_response["result"], json!({}));
+    assert_eq!(
+        close_response["result"],
+        json!({ "_meta": { "ai.prime.acp/semantic-edges-v1": { "edges": [] } } })
+    );
 
     let active_session_id = live_sessions(&socket)[0]["activeSessionId"]
         .as_str()

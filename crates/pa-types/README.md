@@ -3,6 +3,10 @@
 The single shared vocabulary crate. Nothing else is shared between crates.
 
 ## Scope
+The daemon protocol includes the read-only session command
+`GetSemanticEdges` (`get_semantic_edges`); its response data is an opaque
+semantic-edge snapshot owned by pa-core and published by pa-daemon.
+
 Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/stream events, session JSONL entry schema, daemon wire protocol messages, worker frames.
 
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:

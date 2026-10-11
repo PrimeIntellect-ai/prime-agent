@@ -466,6 +466,26 @@ impl SupervisorChildSessions {
             .expect("semantic edges lock") = recorder;
     }
 
+    pub(crate) fn semantic_recorder(
+        &self,
+    ) -> Option<Arc<pa_core::session_engine::semantic_edges::SemanticEdgeRecorder>> {
+        self.inner
+            .semantic_edges
+            .lock()
+            .expect("semantic edges lock")
+            .clone()
+    }
+
+    pub(crate) async fn register_semantic_ledgers(&self) {
+        if let Some(recorder) = self.semantic_recorder() {
+            for record in self.inner.children.lock().await.iter() {
+                let path = Path::new(&record.lock().await.session_dir)
+                    .join(pa_core::session_engine::semantic_edges::SEMANTIC_EDGES_LEDGER_FILENAME);
+                recorder.register_child_ledger(path);
+            }
+        }
+    }
+
     /// Whether a spawn-name reservation currently holds `name` (the TS
     /// test peeks `_pendingRlmSubagentSessionNames`; the reservation must
     /// span the whole admission and release at its settle).

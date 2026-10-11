@@ -89,6 +89,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "wait_for_headless_completion",
     "get_session_header",
     "get_state",
+    "get_semantic_edges",
     "get_connection_state",
     "get_messages",
     "get_rlm_children",
@@ -695,6 +696,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::GetState {
             active_session_id, ..
         }
+        | DaemonCommand::GetSemanticEdges {
+            active_session_id, ..
+        }
         | DaemonCommand::GetConnectionState {
             active_session_id, ..
         }
@@ -981,6 +985,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::GetSessionHeader { .. } => "get_session_header",
         DaemonCommand::GetState { .. } => "get_state",
         DaemonCommand::GetConnectionState { .. } => "get_connection_state",
+        DaemonCommand::GetSemanticEdges { .. } => "get_semantic_edges",
         DaemonCommand::GetMessages { .. } => "get_messages",
         DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
         DaemonCommand::GetSessionStats { .. } => "get_session_stats",

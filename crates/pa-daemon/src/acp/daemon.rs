@@ -1347,7 +1347,35 @@ async fn handle_session_prompt(
     state: &Arc<Mutex<DaemonAcpState>>,
     tx: producer::FrameSink,
 ) {
-    let reply = prompt_turn(id, params, &admission_id, link, state).await;
+    let daemon_session_id = state
+        .lock()
+        .await
+        .session
+        .as_ref()
+        .map(|hosted| hosted.daemon_active_session_id.clone());
+    let mut reply = prompt_turn(id.clone(), params, &admission_id, link, state).await;
+    // Wait for cancellation cleanup before freezing the cumulative response graph.
+    let mut cancel_task = state
+        .lock()
+        .await
+        .session
+        .as_ref()
+        .filter(|hosted| {
+            hosted
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.admission_id == admission_id)
+        })
+        .and_then(|hosted| hosted.cancel_task.clone());
+    if let Some(task) = cancel_task.as_mut() {
+        let _ = task.changed().await;
+    }
+    if let Some(session_id) = daemon_session_id.filter(|_| reply.get("result").is_some()) {
+        match super::semantic::snapshot(link, &session_id).await {
+            Ok(edges) => super::semantic::attach(&mut reply["result"], edges),
+            Err(error) => reply = super::internal_error(&id, &error.to_string()),
+        }
+    }
     release_turn_slot(state, &admission_id).await;
     let _ = tx.send(reply);
 }
@@ -1859,7 +1887,8 @@ async fn handle_session_close(
                     guard
                         .session
                         .take_if(|hosted| hosted.acp_session_id == session_id);
-                    Ok(())
+                    drop(guard);
+                    super::semantic::snapshot(link, &daemon_session_id).await
                 }
                 Err(error) => Err(error),
             }
@@ -1882,8 +1911,10 @@ async fn handle_session_close(
     }
     let _ = close_done.send(true);
     match close_result {
-        Ok(()) => {
-            let _ = tx.send(jsonrpc::response(&id, &json!({})));
+        Ok(edges) => {
+            let mut result = json!({});
+            super::semantic::attach(&mut result, edges);
+            let _ = tx.send(jsonrpc::response(&id, &result));
         }
         Err(error) => {
             let _ = tx.send(super::internal_error(&id, &error.to_string()));

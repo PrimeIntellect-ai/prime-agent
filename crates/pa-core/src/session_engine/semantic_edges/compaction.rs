@@ -32,6 +32,7 @@ impl SemanticEdgeRecorder {
             recorder: Arc::clone(self),
             compaction_id,
             open_slices: std::sync::Mutex::new(Vec::new()),
+            resolved_slices: std::sync::Mutex::new(std::collections::HashSet::new()),
             committed: false,
             abort: abort.cloned(),
         }
@@ -55,6 +56,7 @@ pub(crate) struct SemanticCompaction {
     /// resolve order. A split turn's two slices run concurrently on one
     /// task, so the list is interior-mutable.
     open_slices: std::sync::Mutex<Vec<String>>,
+    resolved_slices: std::sync::Mutex<std::collections::HashSet<String>>,
     committed: bool,
     /// The run's abort signal: a dropped guard records `cancelled` only
     /// when it aborted, `failed` otherwise (TS's catch classification).
@@ -100,6 +102,12 @@ impl SemanticCompaction {
     /// order and the last-resolved slice is the session's last commit (the
     /// compaction edge's source).
     fn slice_resolved(&self, request_id: &str) {
+        // A successful summary request remains an attempt even if installation fails.
+        self.recorder.finish_request(request_id);
+        self.resolved_slices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(request_id.to_string());
         let mut open = self
             .open_slices
             .lock()
@@ -114,7 +122,14 @@ impl SemanticCompaction {
     pub(crate) fn commit(&mut self) {
         self.committed = true;
         for request_id in self.take_open_slices() {
-            self.recorder.finish_request(&request_id);
+            if !self
+                .resolved_slices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&request_id)
+            {
+                self.recorder.finish_request(&request_id);
+            }
         }
         let mut state = self.recorder.state();
         self.recorder.append(
@@ -145,7 +160,14 @@ impl Drop for SemanticCompaction {
             return;
         }
         for request_id in self.take_open_slices() {
-            self.recorder.fail_request(&request_id);
+            if !self
+                .resolved_slices
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&request_id)
+            {
+                self.recorder.fail_request(&request_id);
+            }
         }
         let status = if self
             .abort

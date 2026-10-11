@@ -33,6 +33,7 @@ impl Supervisor {
             message,
             from_active_session_id,
             delivery_mode,
+            rest,
             ..
         } = command
         else {
@@ -94,7 +95,7 @@ impl Supervisor {
         {
             return fail("Agent messaging cannot target the sending session".to_string());
         }
-        let sender = match &source {
+        let mut sender = match &source {
             Some(source) => {
                 // The wake already read the summary for its scope; every
                 // other path reads it here.
@@ -111,6 +112,13 @@ impl Supervisor {
             // the client id (`createAgentSessionMessageSender`).
             None => json!({ "clientId": client_id }),
         };
+        if let Some(request_id) = rest
+            .get("semanticRequestId")
+            .and_then(Value::as_str)
+            .filter(|_| source.is_some())
+        {
+            sender["semanticRequestId"] = json!(request_id);
+        }
         let delivery = DaemonWorkerCommand::WorkerDeliverMessage {
             id: None,
             target_active_session_id: target.worker_id.clone(),

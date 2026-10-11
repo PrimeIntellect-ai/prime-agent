@@ -50,6 +50,16 @@ impl AgentSession {
         // injected row never carries images, so it clears a route left by
         // the previous turn.
         self.apply_image_model_routing(&[], &[]).await?;
+        let source = message
+            .details
+            .as_ref()
+            .and_then(|details| details.get("from"))
+            .and_then(|sender| sender.get("semanticRequestId"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|_| message.custom_type == super::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE);
+        if let (Some(source), Some(recorder)) = (source, self.semantic_edges()) {
+            recorder.receive_agent_message(source);
+        }
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))

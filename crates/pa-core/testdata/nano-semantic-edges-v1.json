@@ -1,0 +1,1560 @@
+{
+  "source": "PrimeIntellect-ai/nano-rlm@4e9d230",
+  "cases": [
+    {
+      "name": "continuation_retry",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "failed",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_failed",
+            "request_id": "failed"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "compaction_completed",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_begun",
+            "session_id": "root",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "summary",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_finished",
+            "compaction_id": "compact",
+            "status": "completed"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "after_summary",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "after_summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "summary",
+                "target_request_id": "after_summary",
+                "type": "compaction"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "compaction_failed",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_begun",
+            "session_id": "root",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "summary",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_finished",
+            "compaction_id": "compact",
+            "status": "failed"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "after_summary",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "after_summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "after_summary",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "compaction_cancelled",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_begun",
+            "session_id": "root",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "summary",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_finished",
+            "compaction_id": "compact",
+            "status": "cancelled"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "after_summary",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "after_summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "after_summary",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "child_result",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "session_registered",
+            "session_id": "child",
+            "parent_session_id": "root",
+            "spawned_by_request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_finished",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_returned",
+            "session_id": "root",
+            "child_session_id": "child",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": false
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": false
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "r2",
+                "type": "subagent_return"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "child_failed",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "session_registered",
+            "session_id": "child",
+            "parent_session_id": "root",
+            "spawned_by_request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_finished",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_returned",
+            "session_id": "root",
+            "child_session_id": "child",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": true
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": true
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "r2",
+                "type": "subagent_failed"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "child_cancelled",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "session_registered",
+            "session_id": "child",
+            "parent_session_id": "root",
+            "spawned_by_request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_finished",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_cancelled",
+            "child_session_id": "child",
+            "source_request_id": "r1",
+            "target_request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_cancel"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_cancelled",
+            "child_session_id": "child",
+            "source_request_id": "r1",
+            "target_request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_cancel"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_cancel"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_cancel"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "agent_message",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "dependency_received",
+            "request_id": "sender",
+            "kind": "agent_message"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "dependency_received",
+            "request_id": "sender",
+            "kind": "agent_message"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "failed",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_failed",
+            "request_id": "failed"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "sender",
+                "target_request_id": "r2",
+                "type": "agent_message"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "pending_compaction",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "session_registered",
+            "session_id": "child",
+            "parent_session_id": "root",
+            "spawned_by_request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_finished",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_returned",
+            "session_id": "root",
+            "child_session_id": "child",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": false
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "child_result_collected",
+            "child_session_id": "child",
+            "request_id": "c1",
+            "failed": false
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_begun",
+            "session_id": "root",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "summary",
+            "compaction_id": "compact"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "summary",
+                "type": "subagent_return"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "compaction_finished",
+            "compaction_id": "compact",
+            "status": "completed"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "summary",
+                "type": "subagent_return"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "after_summary",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "summary",
+                "type": "subagent_return"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "after_summary"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c1",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "summary",
+                "type": "compaction_attempt"
+              },
+              {
+                "source_request_id": "c1",
+                "target_request_id": "summary",
+                "type": "subagent_return"
+              },
+              {
+                "source_request_id": "summary",
+                "target_request_id": "after_summary",
+                "type": "compaction"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "spawn_retry",
+      "steps": [
+        {
+          "session": "root",
+          "event": {
+            "type": "session_registered",
+            "session_id": "root",
+            "parent_session_id": null,
+            "spawned_by_request_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "session_registered",
+            "session_id": "child",
+            "parent_session_id": "root",
+            "spawned_by_request_id": "r1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c1",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_failed",
+            "request_id": "c1"
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_started",
+            "session_id": "child",
+            "request_id": "c2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": []
+          }
+        },
+        {
+          "session": "child",
+          "event": {
+            "type": "request_finished",
+            "request_id": "c2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c2",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_started",
+            "session_id": "root",
+            "request_id": "r2",
+            "compaction_id": null
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c2",
+                "type": "subagent_call"
+              }
+            ]
+          }
+        },
+        {
+          "session": "root",
+          "event": {
+            "type": "request_finished",
+            "request_id": "r2"
+          },
+          "expected": {
+            "edges": [
+              {
+                "source_request_id": "r1",
+                "target_request_id": "c2",
+                "type": "subagent_call"
+              },
+              {
+                "source_request_id": "r1",
+                "target_request_id": "r2",
+                "type": "continuation"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

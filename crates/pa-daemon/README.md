@@ -7,7 +7,11 @@ ACP stdio transport (`acp`): the JSON-RPC serve surface for Agent
 Client Protocol clients, served over a daemon session (initialize, session/new, session/prompt, session/close,
 session/cancel, and the outgoing session/update notification with
 namespaced `_meta` correlation), owned by this crate because
-wire-protocol serving is its area; the worker turn loop owns compaction
+wire-protocol serving is its area; successful prompt and close results publish
+`_meta["ai.prime.acp/semantic-edges-v1"] = {"edges": [...]}`. Each flat edge
+contains `source_request_id`, `target_request_id`, and `type`, with nano-rlm
+continuation, subagent, agent-message, and compaction labels. The session-scoped
+`get_semantic_edges` read command obtains the cumulative pa-core snapshot; the worker turn loop owns compaction
 arms, auto-refine, and goal continuation. The compact-trigger
 auto-refine scheduling owns its surface here (`compact_autorefine.rs`
 for the daemon worker: every compaction arm plus the manual `compact`

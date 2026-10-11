@@ -1,4 +1,4 @@
-//! The ACP semantic-edge ledger (TS `semantic-edges.ts`, the WRITER only):
+//! The ACP semantic-edge ledger and nano-rlm-compatible request graph:
 //! a durable per-session append-only log of model-request events, plus the
 //! ids that thread them onto the wire and through child spawns.
 //!
@@ -7,9 +7,8 @@
 //! parent's next turn). Provenance is best-effort: the first ledger
 //! failure permanently disables the recorder with one warning, and
 //! callers stop emitting request ids on the wire rather than weakening
-//! that invariant. Edge semantics (the pure fold over one or more
-//! ledgers) stay in TS: nothing in the Rust product reads or derives
-//! edges yet, so the fold is not ported.
+//! that invariant. The graph fold publishes nano-rlm's semantic-edges-v1
+//! request relationships, including dependencies consumed by the agent.
 //!
 //! The ledger is a SEPARATE owner from the spawn ledger (`rlm_ledger.rs`):
 //! topology (spawn/delete records) and request semantics (this ledger)
@@ -18,6 +17,7 @@
 //! and the tests live in `semantic_edges/tests.rs`.
 
 mod compaction;
+mod graph;
 mod ledger;
 mod stream;
 
@@ -31,6 +31,10 @@ use std::sync::{Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 
 pub(crate) use compaction::{summary_slice_call, SemanticCompaction};
+pub use graph::{
+    read_semantic_edges, read_semantic_request_id, SemanticEdge, SemanticEdgeKind,
+    SemanticEdgeSnapshot,
+};
 pub(crate) use stream::wrap_stream_fn;
 
 /// The outbound request-id header (TS `MODEL_REQUEST_ID_HEADER`).
@@ -86,6 +90,23 @@ pub enum SemanticEdgeLedgerEvent {
         session_id: String,
         child_session_id: String,
         request_id: String,
+    },
+    ChildRegistered {
+        ledger_path: PathBuf,
+    },
+    DependencyReceived {
+        request_id: String,
+        kind: SemanticEdgeKind,
+    },
+    ChildResultCollected {
+        child_session_id: String,
+        request_id: String,
+        failed: bool,
+    },
+    ChildCancelled {
+        child_session_id: String,
+        source_request_id: String,
+        target_request_id: String,
     },
     /// An event a newer writer appended (TS `JSON.parse` accepts any line
     /// and the replay ignores unknown types): forward-compatible resume.
@@ -149,8 +170,9 @@ struct Turn {
     fingerprint: Option<[u8; 32]>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RecorderState {
+    graph: graph::Graph,
     disabled: bool,
     epoch: u64,
     last_turn: Option<Turn>,
@@ -158,9 +180,8 @@ struct RecorderState {
     open_compactions: HashSet<String>,
 }
 
-/// Append-only semantic-edge recorder for one session (TS
-/// `SemanticEdgeRecorder`): it only WRITES events; edge semantics live in
-/// the TS fold. Constructing one over an existing ledger replays it;
+/// Append-only semantic-edge recorder for one session, with its cumulative
+/// request graph. Constructing one over an existing ledger replays it;
 /// registration is idempotent across resumes.
 pub struct SemanticEdgeRecorder {
     session_id: String,
@@ -169,6 +190,83 @@ pub struct SemanticEdgeRecorder {
 }
 
 impl SemanticEdgeRecorder {
+    /// Preserve a ledgerless session's provenance when rebuilding its model runtime.
+    /// Durable sessions replay their own ledger; a different session never inherits state.
+    pub fn restore_ephemeral_state_from(&self, previous: &Self) {
+        if !std::ptr::eq(self, previous)
+            && self.ledger_path.is_none()
+            && previous.ledger_path.is_none()
+            && self.session_id == previous.session_id
+        {
+            *self.state() = previous.state().clone();
+        }
+    }
+    /// Snapshot this session and its recursively registered child ledgers.
+    /// In-memory sessions retain their graph even without a ledger file.
+    ///
+    /// # Errors
+    /// Returns a child ledger read or parse error.
+    pub fn snapshot(&self) -> std::io::Result<SemanticEdgeSnapshot> {
+        let (edges, children) = {
+            let state = self.state();
+            (state.graph.edges.clone(), state.graph.children.clone())
+        };
+        graph::snapshot_family(edges, children)
+    }
+
+    /// Register a child's durable ledger before its first prompt can run.
+    pub fn register_child_ledger(&self, path: PathBuf) {
+        let mut state = self.state();
+        if !state.graph.children.contains(&path) {
+            self.append(
+                &mut state,
+                &SemanticEdgeLedgerEvent::ChildRegistered { ledger_path: path },
+            );
+        }
+    }
+
+    /// Record the source of an agent message when its content enters context.
+    pub fn receive_agent_message(&self, request_id: &str) {
+        let mut state = self.state();
+        self.append(
+            &mut state,
+            &SemanticEdgeLedgerEvent::DependencyReceived {
+                request_id: request_id.to_string(),
+                kind: SemanticEdgeKind::AgentMessage,
+            },
+        );
+    }
+
+    /// Record an explicitly retrieved child answer or failure.
+    pub fn collect_child_result(&self, child_session_id: &str, request_id: String, failed: bool) {
+        let mut state = self.state();
+        self.append(
+            &mut state,
+            &SemanticEdgeLedgerEvent::ChildResultCollected {
+                child_session_id: child_session_id.to_string(),
+                request_id,
+                failed,
+            },
+        );
+    }
+
+    /// Record a parent request cancelling a child with a committed model call.
+    pub fn cancel_child(
+        &self,
+        child_session_id: &str,
+        source_request_id: String,
+        request_id: String,
+    ) {
+        let mut state = self.state();
+        self.append(
+            &mut state,
+            &SemanticEdgeLedgerEvent::ChildCancelled {
+                child_session_id: child_session_id.to_string(),
+                source_request_id,
+                target_request_id: request_id,
+            },
+        );
+    }
     /// Open (or reopen) this session's recorder: replay the ledger, fold the
     /// replayed events back into memory, and register the session when its
     /// id is not yet on the ledger. A missing or absent ledger starts empty;
@@ -308,7 +406,7 @@ impl SemanticEdgeRecorder {
     /// The last turn's request id (TS `lastTurnRequestId`): the id a
     /// mid-turn child spawn anchors to.
     #[must_use]
-    pub(crate) fn last_turn_request_id(&self) -> Option<String> {
+    pub fn last_turn_request_id(&self) -> Option<String> {
         self.state()
             .last_turn
             .as_ref()
@@ -379,6 +477,7 @@ fn append_locked(
 /// Fold one event back into the in-memory state (TS `_replay`): restores
 /// turn attribution and compaction epochs after a resume.
 fn replay_event(state: &mut RecorderState, session_id: &str, event: &SemanticEdgeLedgerEvent) {
+    state.graph.apply(event);
     match event {
         // Restores spawn attribution after resume; the fingerprint is
         // unknowable on disk, so a replayed turn is never reused as a
@@ -416,6 +515,10 @@ fn replay_event(state: &mut RecorderState, session_id: &str, event: &SemanticEdg
         | SemanticEdgeLedgerEvent::SessionRegistered { .. }
         | SemanticEdgeLedgerEvent::CompactionBegun { .. }
         | SemanticEdgeLedgerEvent::ChildReturned { .. }
+        | SemanticEdgeLedgerEvent::ChildRegistered { .. }
+        | SemanticEdgeLedgerEvent::DependencyReceived { .. }
+        | SemanticEdgeLedgerEvent::ChildResultCollected { .. }
+        | SemanticEdgeLedgerEvent::ChildCancelled { .. }
         | SemanticEdgeLedgerEvent::Unknown => {}
     }
 }

@@ -207,15 +207,18 @@ impl AgentMessageController for LinkAgentMessageController {
         if input.target == self.active_session_id {
             anyhow::bail!("Agent messaging cannot target the sending session");
         }
+        let sender = self.sender_block();
         // A delivery to one of this session's own children starts a follow-up turn there:
         // re-arm that child's usage observation BEFORE the delivery (a fast child can
         // settle before the await returns; a late-armed observation never bills).
         if let Some(children) = &self.children {
             children.observe_child_usage(&input.target).await;
         }
-        let receipt = match self.deliver_direct(&input).await {
+        let receipt = match self.deliver_direct(&input, &sender).await {
             DirectDelivery::Delivered(receipt) => receipt,
-            DirectDelivery::Unavailable => self.deliver_via_supervisor(input.clone()).await?,
+            DirectDelivery::Unavailable => {
+                self.deliver_via_supervisor(input.clone(), &sender).await?
+            }
             DirectDelivery::Failed(error) => return Err(anyhow::anyhow!(error)),
         };
         Ok(receipt)
@@ -237,7 +240,11 @@ enum DirectDelivery {
 impl LinkAgentMessageController {
     /// Try the direct worker-to-worker path: `Unavailable` only when the
     /// delivery command never reached the target; once sent, the outcome is final.
-    async fn deliver_direct(&self, input: &AgentMessageSendInput) -> DirectDelivery {
+    async fn deliver_direct(
+        &self,
+        input: &AgentMessageSendInput,
+        sender: &Value,
+    ) -> DirectDelivery {
         let ticket = match self
             .link
             .request_success(
@@ -263,7 +270,7 @@ impl LinkAgentMessageController {
         match crate::peer_client::deliver_message_over_peer_transport(
             &ticket,
             &input.message,
-            &self.sender_block(),
+            sender,
             None,
         )
         .await
@@ -299,6 +306,7 @@ impl LinkAgentMessageController {
     async fn deliver_via_supervisor(
         &self,
         input: AgentMessageSendInput,
+        sender: &Value,
     ) -> anyhow::Result<AgentMessageReceipt> {
         let data = self
             .link
@@ -309,6 +317,7 @@ impl LinkAgentMessageController {
                     "message": input.message,
                     "fromActiveSessionId": self.active_session_id,
                     "agentOrigin": true,
+                    "semanticRequestId": sender.get("semanticRequestId"),
                 }),
                 std::time::Duration::from_secs(30),
             )
@@ -375,6 +384,14 @@ impl LinkAgentMessageController {
                     sender[field] = json!(value);
                 }
             }
+        }
+        if let Some(request_id) = self
+            .children
+            .as_ref()
+            .and_then(|children| children.semantic_recorder())
+            .and_then(|recorder| recorder.last_turn_request_id())
+        {
+            sender["semanticRequestId"] = json!(request_id);
         }
         sender
     }

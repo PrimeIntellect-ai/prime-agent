@@ -44,6 +44,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "wait_for_headless_completion"
         | "get_session_header"
         | "get_state"
+        | "get_semantic_edges"
         | "get_connection_state"
         | "get_messages"
         | "get_rlm_children"
@@ -125,6 +126,7 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "tail_kernel_bash",
     "get_session_header",
     "get_state",
+    "get_semantic_edges",
     "get_connection_state",
     "get_messages",
     "get_rlm_children",
