@@ -97,6 +97,37 @@ fn a_long_note_wraps_within_the_width() {
     assert_eq!(joined, note, "the wrapped lines carry the whole note");
 }
 
+#[test]
+fn a_nested_note_fits_when_the_pane_is_narrower_than_its_indent() {
+    let (mut mode, index) = mode_with_row("worker", "mock-1");
+    mode.rows[index].kind = RowKind::Subagent;
+    mode.rows[index].depth = 3;
+    note_into(&mut mode, index, "checking");
+    for width in [1, 4, 8, 9] {
+        let lines = mode.render_note_details(&mode.rows[index], width);
+        assert!(!lines.is_empty());
+        let text: String = lines
+            .iter()
+            .map(|line| flat(line).trim().to_string())
+            .collect();
+        assert_eq!(text, "checking", "the note survives at width {width}");
+        for line in lines {
+            let text = flat(&line);
+            assert!(
+                str_width(&text) <= width,
+                "note exceeds width {width}: {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_zero_width_pane_has_no_note_lines() {
+    let (mut mode, index) = mode_with_row("worker", "mock-1");
+    note_into(&mut mode, index, "checking");
+    assert!(mode.render_note_details(&mode.rows[index], 0).is_empty());
+}
+
 /// A short pane keeps the selected row plus the note lines that fit.
 #[test]
 fn a_short_pane_keeps_the_row_and_the_fitting_note_lines() {
