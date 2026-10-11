@@ -189,6 +189,12 @@ impl Worker {
             .get("childScript")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // The Decision API child flag (`rlm.spawn kind="decision"`): the
+        // worker runs the decision engine instead of the agent engine.
+        let decision_child = payload
+            .get("decisionChild")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         // Set by the fresh-path arm when the name landed in its single rewrite:
         // the shared name persist must not append a second `session_info` line.
@@ -196,6 +202,7 @@ impl Worker {
         // Set by the continuing arm when it OPENED an existing session file:
         // `is_continuing` reads this arm fact, never an existence check.
         let mut opened_existing_session = false;
+        let mut restored_tier: Option<Option<pa_types::ai::ServiceTier>> = None;
         // The fresh arms defer their creation prefix to after the startup scope
         // registers, so a fresh `--models` session persists the scoped startup pick.
         let mut fresh_prefix = FreshPrefixPlan::None;
@@ -248,9 +255,10 @@ impl Worker {
                         // this worker opened — a failed open never leaks the binding into a
                         // later create.
                         self.engine.set_session_file(path.clone());
-                        // One fold serves both consumers: the model restore takes its saved
+                        // One fold serves all consumers: the model restore takes its saved
                         // context off the store this create just opened.
                         let restored = opened.restored_settings();
+                        restored_tier = opened.has_service_tier().then_some(restored.service_tier);
                         let has_thinking_level = opened.has_thinking_level();
                         let saved = crate::agent_engine::saved_session_context_from_parts(
                             &restored,
@@ -465,9 +473,6 @@ impl Worker {
                 }
             }
         }
-        let restored_tier = store
-            .has_service_tier()
-            .then(|| store.restored_settings().service_tier);
         // Restore the persisted queue snapshot (crash/respawn recovery) from
         // the worker recovery journal.
         let (steering, follow_up) = {
@@ -570,6 +575,7 @@ impl Worker {
             core.parent_active_session_id = parent_active_session_id;
             core.parent_session_id = parent_session_id;
             core.child_script.clone_from(&child_script);
+            core.decision_child = decision_child;
             (self.summary_locked(&core, inputs), rlm_depth)
         };
         // The engine's agent-level queues drain per the same modes the
@@ -590,7 +596,9 @@ impl Worker {
         }) {
             return response_failure(None, "create", &error.to_string(), None);
         }
-        self.reseed_rlm_children().await;
+        if opened_existing_session {
+            self.reseed_rlm_children().await;
+        }
         // The built-in Herdr connector binds here, per session: the pane
         // identity comes from the create payload's client env (the client
         // that owns the pane sent it), never from this process's ambient

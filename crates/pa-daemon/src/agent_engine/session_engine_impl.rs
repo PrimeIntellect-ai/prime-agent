@@ -9,9 +9,37 @@ use super::{
     ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
     SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
+use pa_core::session_engine::agent_messaging::AgentFamilyRelationship;
 
 impl SessionEngine for AgentSessionEngine {
-    /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
+    fn route_decision_api_event(
+        &self,
+        relationship: Option<AgentFamilyRelationship>,
+        sender_name: &str,
+        message: &str,
+    ) -> bool {
+        if relationship != Some(AgentFamilyRelationship::Child) {
+            return false;
+        }
+        let Ok(decision) = serde_json::from_str::<Value>(message) else {
+            return false;
+        };
+        if decision["type"] != "decision_api.decision" {
+            return false;
+        }
+        if let Some(slot) = self
+            .decision_replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(sender_name)
+        {
+            *slot = Some(decision);
+        }
+        true
+    }
+    /// TS `_clearQueuedGoalContexts`: the worker-installed purge withdraws
+    /// the queued minted goal-context turns (pause/clear/start must not
+    /// leave a stale continuation to run after the state change).    /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self
             .goal_queue_purge

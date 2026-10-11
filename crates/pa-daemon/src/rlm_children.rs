@@ -25,7 +25,8 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::rlm_child_model::{
-    assert_thinking_supported, compact_rlm_text, resolve_child_model, rlm_child_label,
+    assert_thinking_supported, cap_text, compact_rlm_text, resolve_child_model, rlm_child_label,
+    ANSWER_TEXT_MAX_CHARS,
 };
 use crate::supervisor_link::SupervisorLink;
 use crate::util::now_ms;
@@ -143,6 +144,11 @@ struct ChildRecord {
     /// notice window.
     settled: bool,
     answer_preview: Option<String>,
+    /// The full final-answer text (bounded by
+    /// [`ANSWER_TEXT_MAX_CHARS`]), the collect envelope's binding lane:
+    /// a consumer that extracts outputs (the factory's ports) needs the
+    /// whole fenced JSON, while the roster rows keep the compact preview.
+    answer_text: Option<String>,
     answer_captured: bool,
     /// A child agent message arrived since its task was admitted; the
     /// no-reply terminal notice is withheld once set.
@@ -256,6 +262,10 @@ struct DeletedChild {
     session_name: String,
     session_dir: String,
     started_at_ms: u64,
+    /// The roster status the row carried at its delete (the idempotent
+    /// re-delete receipt reports it verbatim, so a repeated retire reads
+    /// the same verdict as the first).
+    status: &'static str,
     answer_preview: Option<String>,
     /// The envelope's error: the child's own terminal error when one was
     /// recorded, else the delete reason.
@@ -651,6 +661,7 @@ impl SupervisorChildSessions {
                 settled_status: None,
                 settled: false,
                 answer_preview: None,
+                answer_text: None,
                 answer_captured: false,
                 replied_since_task: false,
                 notice_delivered: false,
@@ -741,6 +752,7 @@ impl SupervisorChildSessions {
             status: record.status(),
             settled: record.settled_status.is_some(),
             answer_preview: record.answer_preview.clone(),
+            answer_text: record.answer_text.clone(),
             error: record.error.clone(),
             duration_ms: Some(now_ms().saturating_sub(record.started_at_ms)),
             tool_use_count: None,
@@ -758,6 +770,7 @@ impl SupervisorChildSessions {
             status: "cancelled",
             settled: true,
             answer_preview: deleted.answer_preview.clone(),
+            answer_text: None,
             error: Some(deleted.error.clone()),
             duration_ms: Some(now_ms().saturating_sub(deleted.started_at_ms)),
             tool_use_count: None,

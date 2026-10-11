@@ -68,8 +68,8 @@ impl SessionUi {
                     self.dirty = true;
                 }
             }
-            ClickAction::SelectEffortRow(position) => {
-                if let Some(picker) = view.effort_picker.as_mut() {
+            ClickAction::SelectChoiceRow(position) => {
+                if let Some(picker) = view.choice_picker.as_mut() {
                     self.track_click("picker");
                     picker.select_position(position);
                     self.dirty = true;

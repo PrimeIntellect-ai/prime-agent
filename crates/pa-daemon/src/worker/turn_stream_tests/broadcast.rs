@@ -157,6 +157,7 @@ async fn a_delivered_agent_message_turn_emits_the_custom_row() {
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(json!({ "responses": ["ack"] })),
+        decision_child: false,
     };
     let worker = Arc::new(Worker::new(config, None));
     let created = worker
@@ -346,6 +347,7 @@ async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
                 { "text": "recovered reply" },
             ],
         })),
+        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker

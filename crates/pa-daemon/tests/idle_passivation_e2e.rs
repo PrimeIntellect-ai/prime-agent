@@ -295,6 +295,7 @@ async fn a_settled_child_passivates_stays_listable_and_revives_by_agent_message(
             thinking: None,
             cell_source_code: None,
             spawned_by_request_id: None,
+            decision_child: false,
         })
         .await
         .expect("spawn the child");
@@ -613,6 +614,7 @@ async fn a_parent_rename_after_a_revival_and_second_passivation_reaches_the_chil
             thinking: None,
             cell_source_code: None,
             spawned_by_request_id: None,
+            decision_child: false,
         })
         .await
         .expect("spawn the child");

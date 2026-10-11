@@ -94,6 +94,10 @@ pub(super) enum Renderer {
         width: u16,
         height: u16,
         frames: Vec<String>,
+        /// Every headless render invocation so far. The frame capture dedupes on plain text,
+        /// so restyle-only renders add no frame; this count is the style-blind render witness
+        /// timing markers report.
+        renders: usize,
     },
 }
 
@@ -287,6 +291,11 @@ impl Renderer {
                                     }
                                 }
                             }
+                            HeadlessStep::Timestamp(sender) => {
+                                if ui_tx.send(UiInput::Timestamp(sender)).is_err() {
+                                    return;
+                                }
+                            }
                             HeadlessStep::Key(key) => {
                                 if ui_tx.send(UiInput::Key(key)).is_err() {
                                     return;
@@ -300,6 +309,7 @@ impl Renderer {
                     width: plan.width,
                     height: plan.height,
                     frames: Vec::new(),
+                    renders: 0,
                 })
             }
         }
@@ -400,13 +410,24 @@ impl Renderer {
             width,
             height,
             frames,
+            renders,
         } = self
         else {
             return;
         };
         let text = crate::app::render_frame_text(view, *width, *height).join("\n");
+        *renders += 1;
         if frames.last().map(String::as_str) != Some(text.as_str()) {
             frames.push(text);
+        }
+    }
+
+    /// The headless render invocation count (0 on a terminal): timing markers carry it as the
+    /// witness for renders the deduped frame capture cannot express.
+    pub(super) fn headless_renders(&self) -> usize {
+        match self {
+            Renderer::Headless { renders, .. } => *renders,
+            Renderer::Terminal { .. } => 0,
         }
     }
 
@@ -424,11 +445,13 @@ impl Renderer {
             width,
             height,
             frames,
+            renders,
         } = self
         else {
             return;
         };
         let text = crate::app::render_frame_text(view, *width, *height).join("\n");
+        *renders += 1;
         if std::env::var("PA_TUI_DEBUG_EVENTS").is_ok() {
             eprintln!(
                 "[tui-frame] len={} has_second={} has_again={}",

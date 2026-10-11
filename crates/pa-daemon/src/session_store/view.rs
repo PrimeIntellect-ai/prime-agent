@@ -160,12 +160,13 @@ impl SessionFile {
     }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
-        let entries = self.branch_file_entries();
-        let mut context = pa_core::session::build_session_context(&entries, self.leaf_id());
         if let Some(window) = &self.window {
-            context.model.clone_from(&window.model);
-            context.thinking_level.clone_from(&window.thinking_level);
-            context.service_tier = window.service_tier;
+            let mut context = pa_core::session::SessionContext {
+                messages: Vec::new(),
+                thinking_level: window.thinking_level.clone(),
+                service_tier: window.service_tier,
+                model: window.model.clone(),
+            };
             for entry in &self.entries[window.loaded_entries..] {
                 match entry.type_.as_str() {
                     "model_change" => {
@@ -204,8 +205,11 @@ impl SessionFile {
                     _ => {}
                 }
             }
+            context
+        } else {
+            let entries = self.branch_file_entries();
+            pa_core::session::build_session_context(&entries, self.leaf_id())
         }
-        context
     }
 
     pub(crate) fn has_thinking_level(&self) -> bool {

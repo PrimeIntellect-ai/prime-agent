@@ -357,6 +357,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
             name: Some("worker-a".to_string()),
             model: None,
             thinking: None,
+            decision_child: false,
             cell_source_code: None,
             spawned_by_request_id: None,
         })

@@ -43,8 +43,9 @@ for line in sys.stdin:
         sys.stdout.flush()
         time.sleep(30)
         break
-    if req.get("code") == "big-frame":
-        sys.stdout.write(" " * (31 * 1024 * 1024) + "\n")
+    if req.get("code") in ("big-frame", "unicode-blank-frame"):
+        padding = " " * (31 * 1024 * 1024) if req.get("code") == "big-frame" else " \t\r\v\f\u0085\u00a0\u2000\u2028\u2029\u3000 "
+        sys.stdout.write(padding + "\n")
         sys.stdout.write(json.dumps({"event": "stdout", "id": req.get("id"), "text": "big"}) + "\n")
     sys.stdout.write(json.dumps({"event": "done", "id": req.get("id"), "status": "ok"}) + "\n")
     sys.stdout.flush()
@@ -119,6 +120,16 @@ async fn normal_protocol_lines_still_stream_through_the_bounded_reader() {
             .expect("execute must not fail");
         assert_eq!(result.status, ExecuteStatus::Ok);
     }
+    // The ASCII fast path must retain Unicode blank-line handling and continue
+    // dispatching the following nonblank stdout/done frames.
+    let unicode = manager
+        .execute("unicode-blank-frame", ExecuteOptions::default())
+        .await
+        .expect("Unicode blank line must not poison the reader");
+    assert_eq!(
+        (unicode.status, unicode.stdout.as_str()),
+        (ExecuteStatus::Ok, "big")
+    );
     // Give the teardown its full grace window (the fake lives until EOF).
     let _ = tokio::time::timeout(
         Duration::from_secs(10),

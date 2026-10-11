@@ -99,11 +99,21 @@ fn assemble_breakdown(
         .collect::<std::collections::HashMap<String, pa_core::mcp::McpServerConfig>>();
     let (skill_overrides, generic_servers, _manager) =
         pa_core::mcp::McpManager::prompt_gating(user_servers, &agent_dir);
-    let resources = load_resources(ResourceLoaderOptions {
+    // The decision-api skill rides the prompt only while the Decision API is
+    // configured (decisionApi.systemOneModel is set).
+    let decision_api_configured = pa_core::session_engine::decision_api::decision_api_configured(
+        pa_core::settings::SettingsManager::create(cwd, &agent_dir).settings(),
+    );
+    let mut resources = load_resources(ResourceLoaderOptions {
         extra_builtin_skill_overrides: skill_overrides,
         system_prompt: None,
         ..ResourceLoaderOptions::new(cwd.to_path_buf(), agent_dir)
     })?;
+    if !decision_api_configured {
+        resources.skills.retain(|skill| {
+            skill.name != pa_core::session_engine::decision_api::DECISION_API_SKILL_NAME
+        });
+    }
     let breakdown = pa_core::prompts::system_prompt::system_prompt_breakdown(
         &pa_core::prompts::BuildSystemPromptOptions {
             cwd: cwd.display().to_string(),

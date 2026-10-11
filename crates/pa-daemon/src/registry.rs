@@ -354,7 +354,8 @@ pub(crate) struct WorkerRegistration {
 }
 
 /// Accepted registration state per worker: the identity plus the
-/// registration count (epoch 1 = boot, epoch > 1 = re-registration after a supervisor restart).
+/// registration count (epoch 1 = boot; every later epoch is an in-place
+/// re-registration, e.g. `notify_session_created` after a create).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationRecord {
     pub(crate) registration: WorkerRegistration,

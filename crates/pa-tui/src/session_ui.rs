@@ -64,10 +64,11 @@ use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
 };
+use crate::choice_picker::{ChoicePickerAction, ChoicePurpose};
 use crate::click_dispatch::PressedClick;
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::daemon_reconnect::RecoveryKind;
-use crate::effort_picker::{self, EffortPickerAction};
+use crate::effort_picker;
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
 use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
 use crate::heartbeats_picker::{

@@ -193,7 +193,7 @@ impl SessionUi {
                     .map(str::to_string);
                 match effort_picker::effort_command(&levels, current.as_deref(), &resolved.args) {
                     effort_picker::EffortCommandOutcome::Open(picker) => {
-                        view.effort_picker = Some(picker);
+                        view.choice_picker = Some(picker);
                         self.track_feature_outcome("effort", "initiated", None);
                     }
                     effort_picker::EffortCommandOutcome::Unsupported => {

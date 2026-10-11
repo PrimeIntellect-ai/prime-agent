@@ -10,22 +10,52 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    let script = json!({
+        "responses": [{ "text": "held reply", "delayMs": 60000 }],
+    });
+    let parsed = pa_ai::faux::script::parse_faux_script(&script).expect("faux script parses");
+    let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "faux": {
+                    "api": "faux",
+                    "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-faux",
+                    "models": [{
+                        "id": "faux-1",
+                        "name": "Faux Model",
+                        "contextWindow": 128_000,
+                        "maxTokens": 16384,
+                    }],
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "defaultProvider": "faux",
+            "defaultModel": "faux-1",
+        })
+        .to_string(),
+    )
+    .unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
-        agent_dir: dir.path().join("agent"),
+        agent_dir,
         provider: None,
         model: None,
         api_key: None,
         thinking: None,
         session_dir: None,
         session_file: None,
-        faux_script: Some(
-            json!({
-                "engine": "faux",
-                "responses": [{ "text": "held reply", "delayMs": 60000 }],
-            })
-            .to_string(),
-        ),
+        faux_script: None,
         supervisor_link: None,
         telemetry_disabled: None,
         cron_store: None,
@@ -54,19 +84,13 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
             },
         );
     });
-    // Wait until the turn is live, so the abort lands mid-provider-wait.
+    // Wait until the provider request is in flight, so the abort lands
+    // mid-provider-wait.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let agent = engine.turn_agent.lock().expect("turn agent lock").clone();
-        if let Some(agent) = agent {
-            let state = engine.runtime.block_on(agent.state());
-            if state.is_streaming {
-                break;
-            }
-        }
+    while registration.call_count() < 1 {
         assert!(
             std::time::Instant::now() < deadline,
-            "the turn never started streaming"
+            "the provider request never started"
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }

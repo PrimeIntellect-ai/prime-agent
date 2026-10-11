@@ -86,19 +86,45 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let admission = async {
                 this.assert_name_available(&name, identity.rlm_depth + 1)
                     .await?;
-                let model = resolve_child_model_allowlisted(
-                    &this,
-                    request.model.as_deref(),
-                    "spawn",
-                    "subagent",
-                )
-                .await?;
+                let cwd_path = identity
+                    .cwd
+                    .clone()
+                    .unwrap_or_else(|| "/".to_string())
+                    .clone();
+                let cwd = cwd_path.clone();
+                // A decision child runs the settings decision model: the
+                // spawn refuses with the same actionable message decide()
+                // serves while the setting is unset or unresolvable, then
+                // resolves through the ordinary child-model path so the
+                // allowlist still gates the selector.
+                let model = if request.decision_child {
+                    let selector = pa_core::session_engine::decision_api::decision_model_selector(
+                        std::path::Path::new(&cwd_path),
+                        &this.agent_dir,
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                    let selector = resolve_child_model_allowlisted(
+                        &this,
+                        Some(&selector),
+                        "spawn",
+                        "subagent",
+                    )
+                    .await?;
+                    selector
+                } else {
+                    resolve_child_model_allowlisted(
+                        &this,
+                        request.model.as_deref(),
+                        "spawn",
+                        "subagent",
+                    )
+                    .await?
+                };
                 assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
                 let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
                 let child_dir = this.child_session_dir(&child_id, &identity)?;
-                let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
                 let runtime_metadata = json!({
-                    "kind": "subagent",
+                    "kind": if request.decision_child { "decision" } else { "subagent" },
                     "rlmChildId": child_id,
                     "parentActiveSessionId": this.parent_active_session_id,
                     "rlmDepth": identity.rlm_depth + 1,
@@ -131,6 +157,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     settled_status: None,
                     settled: false,
                     answer_preview: None,
+                    answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
                     notice_delivered: false,
@@ -349,7 +376,55 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             // Selector errors surface unwrapped (the TS message is the
             // product surface); only the kill below gets a delete context.
-            let record = this.resolve_record(&target, "subagent").await?;
+            let record = match this.resolve_record(&target, "subagent").await {
+                Ok(record) => record,
+                Err(miss) => {
+                    // Retirement is idempotent (the M5 class): a selector
+                    // whose delete receipt already returned answers from
+                    // the tombstone instead of erroring, so a re-delete of
+                    // a settled child (an operator retire, the factory's
+                    // cancel pass) never reports the slot as still held.
+                    let matches = this
+                        .deleted_children
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .filter(|deleted| deleted.matches(&target))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    match matches.len() {
+                        0 => return Err(miss),
+                        1 => {
+                            let deleted = &matches[0];
+                            return Ok(RlmDeleteSubagentResult {
+                                subagent: RlmSubagentEntry {
+                                    rlm_child_id: deleted.rlm_child_id.clone(),
+                                    active_session_id: Some(deleted.active_session_id.clone()),
+                                    session_id: deleted.session_id.clone(),
+                                    session_name: deleted.session_name.clone(),
+                                    session_dir: deleted.session_dir.clone(),
+                                    status: deleted.status,
+                                    activity: None,
+                                    tool_use_count: None,
+                                    duration_ms: Some(
+                                        now_ms().saturating_sub(deleted.started_at_ms),
+                                    ),
+                                    answer_preview: deleted.answer_preview.clone(),
+                                    replied_since_task: None,
+                                    progress_note: None,
+                                    label: None,
+                                    last_activity_at: Some(deleted.started_at_ms),
+                                    activity_stale_ms: None,
+                                },
+                                outcome: Some("deleted"),
+                            });
+                        }
+                        _ => bail!(
+                            "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+                        ),
+                    }
+                }
+            };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
             let no_longer_matches = {

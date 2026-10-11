@@ -9,6 +9,35 @@ use super::{
 };
 
 impl AuthStorage {
+    /// Resolve a file-backed credential without blocking the async caller on
+    /// disk locks, environment references, shell commands, or OAuth refresh.
+    /// Empty resolved values are unavailable.
+    ///
+    /// # Errors
+    /// Returns an error if storage cannot be read or parsed, or the blocking
+    /// credential resolver cannot complete.
+    #[tracing::instrument(skip_all)]
+    pub async fn resolve_api_key(
+        agent_dir: &std::path::Path,
+        provider_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let agent_dir = agent_dir.to_path_buf();
+        let provider_id = provider_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            let mut auth = Self::create(agent_dir);
+            let key = auth
+                .get_api_key(&provider_id)
+                .filter(|key| !key.trim().is_empty());
+            let errors = auth.drain_errors();
+            if !errors.is_empty() {
+                let detail = errors.join("; ");
+                anyhow::bail!("Could not resolve API credentials: {detail}");
+            }
+            Ok(key)
+        })
+        .await?
+    }
+
     pub fn get_api_key_with_source_token(
         &mut self,
         provider_id: &str,
