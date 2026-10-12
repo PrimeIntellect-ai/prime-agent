@@ -421,11 +421,13 @@ fn apply_batch(
         }
     }
     // Creating/removing a repository boundary changes whether gitignore
-    // applies. Check its marker before pruning events inside .git.
-    if rels
-        .iter()
-        .any(|rel| rel.rsplit('/').next() == Some(GIT_DIR))
-    {
+    // applies. A worktree's .git file may also change its gitdir pointer.
+    // Directory metadata alone does not change the boundary, and ordinary
+    // Git activity can emit those events. Check before pruning .git contents.
+    if rels.iter().any(|rel| {
+        rel.rsplit('/').next() == Some(GIT_DIR)
+            && (replaced.contains(rel) || base.join(rel).is_file())
+    }) {
         *state = IndexState::Unbuilt;
         return;
     }
@@ -698,6 +700,25 @@ mod freshness_tests {
             Event::new(notify::EventKind::Remove(RemoveKind::Folder)).add_path(base.clone());
         apply_batch(&mut state, &[Ok(event)], &base, &base);
         assert_matches_live_walk(&state, &base);
+    }
+
+    #[test]
+    fn git_directory_metadata_keeps_the_ready_index() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        std::fs::create_dir(base.join(".git")).expect("git init");
+        std::fs::write(base.join("visible.rs"), "visible").expect("write");
+        let mut state = snapshot(base);
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Metadata(
+            notify::event::MetadataKind::WriteTime,
+        )))
+        .add_path(base.join(".git"));
+        apply_batch(&mut state, &[Ok(event)], base, base);
+        assert!(
+            matches!(state, IndexState::Ready { .. }),
+            "ordinary Git directory metadata must not rebuild the index"
+        );
+        assert_matches_live_walk(&state, base);
     }
 
     #[test]
