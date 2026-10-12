@@ -143,7 +143,7 @@ async fn a_failed_relaunch_accumulates_to_the_give_up_cap() {
     supervisor.registry.insert(Arc::clone(&resident)).await;
     tokio::time::timeout(
         Duration::from_secs(60),
-        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0),
+        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0, None),
     )
     .await
     .expect("the watch loop gives up instead of spinning");
@@ -200,7 +200,7 @@ async fn a_stop_during_the_storm_leaves_the_terminal_state_to_the_stop() {
     supervisor.registry.insert(Arc::clone(&resident)).await;
     tokio::time::timeout(
         Duration::from_secs(60),
-        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0),
+        Arc::clone(&supervisor).watch_worker(Arc::clone(&resident), None, 0, None),
     )
     .await
     .expect("the give-up arm returns instead of spinning");
@@ -249,7 +249,8 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
         let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
             Arc::clone(&resident),
             None,
-            u64::from(worker.id())
+            u64::from(worker.id()),
+            None
         ));
         assert!(
             futures::poll!(watch.as_mut()).is_pending(),
@@ -278,13 +279,19 @@ async fn an_adopted_watch_hands_off_at_exit_without_a_timer() {
         let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
             Arc::clone(&resident),
             None,
-            u64::from(worker.id())
+            u64::from(worker.id()),
+            None
         ));
         assert!(
             futures::poll!(watch.as_mut()).is_pending(),
             "a live adopted worker keeps the watch parked"
         );
-        supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
+        supervisor.spawn_monitor(
+            Arc::clone(&resident),
+            None,
+            u64::from(std::process::id()),
+            None,
+        );
         worker.kill().expect("kill sleep");
         worker.wait().expect("reap sleep");
         watch.await;
@@ -329,7 +336,8 @@ async fn a_pid_only_replacement_keeps_the_adopted_predecessor_out_of_crash_recov
     let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
         Arc::clone(&resident),
         None,
-        u64::from(predecessor_pid)
+        u64::from(predecessor_pid),
+        None
     ));
     assert!(futures::poll!(watch.as_mut()).is_pending());
     let epoch = resident.monitor_epoch.load(Ordering::SeqCst);
@@ -402,6 +410,11 @@ async fn a_registered_replacement_pid_is_monitored_after_the_predecessor_exits()
         .spawn()
         .expect("spawn the replacement");
     let resident = adopted_watch_resident(dir.path(), predecessor.id());
+    let predecessor_journal = dir.path().join("predecessor.orphans.jsonl");
+    let retained = b"";
+    std::fs::write(&predecessor_journal, retained).unwrap();
+    resident.descriptor.lock().await.orphan_process_journal_path =
+        Some(predecessor_journal.to_string_lossy().into_owned());
     // The give-up budget is at the cap: a supervised death must reach the
     // give-up at once, so the predecessor's unbookkept exit is observable.
     resident
@@ -411,7 +424,8 @@ async fn a_registered_replacement_pid_is_monitored_after_the_predecessor_exits()
     let mut old_watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
         Arc::clone(&resident),
         None,
-        u64::from(predecessor.id())
+        u64::from(predecessor.id()),
+        None
     ));
     assert!(
         futures::poll!(old_watch.as_mut()).is_pending(),
@@ -439,6 +453,21 @@ async fn a_registered_replacement_pid_is_monitored_after_the_predecessor_exits()
         registered.success,
         "the replacement registers: {registered:?}"
     );
+    let mut registered_descriptor = resident.descriptor.lock().await.clone();
+    let unknown_journal = registered_descriptor
+        .orphan_process_journal_path
+        .clone()
+        .expect("unknown generation reserves an unused path");
+    assert_ne!(Path::new(&unknown_journal), predecessor_journal);
+    assert!(!Path::new(&unknown_journal).exists());
+    crate::descriptor::backfill_orphan_journal_path(
+        &supervisor.descriptor_dir,
+        &mut registered_descriptor,
+    );
+    assert_eq!(
+        registered_descriptor.orphan_process_journal_path.as_deref(),
+        Some(unknown_journal.as_str())
+    );
     // The predecessor's exit retires the old watch without crash bookkeeping.
     predecessor.kill().expect("kill the predecessor");
     predecessor.wait().expect("reap the predecessor");
@@ -463,6 +492,18 @@ async fn a_registered_replacement_pid_is_monitored_after_the_predecessor_exits()
     })
     .await
     .expect("the replacement's death reaches the give-up");
+    assert_eq!(
+        std::fs::read(&predecessor_journal).unwrap(),
+        retained,
+        "a mismatched registration must not reap the predecessor's journal",
+    );
+    let mut reloaded: crate::descriptor::WorkerDescriptor =
+        serde_json::from_slice(&std::fs::read(&resident.descriptor_path).unwrap()).unwrap();
+    crate::descriptor::backfill_orphan_journal_path(&supervisor.descriptor_dir, &mut reloaded);
+    assert_eq!(
+        reloaded.orphan_process_journal_path.as_deref(),
+        Some(unknown_journal.as_str())
+    );
     assert_eq!(
         resident.consecutive_failures.load(Ordering::SeqCst),
         MAX_CONSECUTIVE_FAILURES + 1
@@ -495,6 +536,14 @@ async fn a_superseded_watch_leaves_the_failure_count_to_the_new_monitor() {
         .spawn()
         .expect("spawn sleep");
     let resident = adopted_watch_resident(dir.path(), worker.id());
+    let old_journal = dir.path().join("old.orphans.jsonl");
+    let new_journal = dir.path().join("new.orphans.jsonl");
+    std::fs::write(&old_journal, "").unwrap();
+    std::fs::write(&new_journal, "replacement records").unwrap();
+    let generation = super::supervision::OrphanGeneration {
+        pid: worker.id(),
+        path: old_journal.to_string_lossy().into_owned(),
+    };
     // The cap is armed: an unsupervised crash arm would give up at once.
     resident
         .consecutive_failures
@@ -503,19 +552,32 @@ async fn a_superseded_watch_leaves_the_failure_count_to_the_new_monitor() {
     let mut watch = std::pin::pin!(Arc::clone(&supervisor).watch_worker(
         Arc::clone(&resident),
         None,
-        u64::from(worker.id())
+        u64::from(worker.id()),
+        Some(generation)
     ));
     assert!(
         futures::poll!(watch.as_mut()).is_pending(),
         "a live adopted worker keeps the watch parked"
     );
-    // The descriptor keeps the watched pid: only the generation moved on.
-    supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
+    // A new generation owns a distinct journal before the old exit arrives.
+    resident.descriptor.lock().await.orphan_process_journal_path =
+        Some(new_journal.to_string_lossy().into_owned());
+    supervisor.spawn_monitor(
+        Arc::clone(&resident),
+        None,
+        u64::from(std::process::id()),
+        None,
+    );
     worker.kill().expect("kill sleep");
     worker.wait().expect("reap sleep");
     tokio::time::timeout(Duration::from_secs(2), watch)
         .await
         .expect("the superseded watch returns at the exit");
+    assert!(
+        !old_journal.exists(),
+        "the superseded monitor still reaps its generation"
+    );
+    assert_eq!(std::fs::read(&new_journal).unwrap(), b"replacement records");
     assert_eq!(
         resident.consecutive_failures.load(Ordering::SeqCst),
         MAX_CONSECUTIVE_FAILURES,
@@ -562,6 +624,7 @@ async fn a_superseded_watch_in_backoff_does_not_relaunch_over_the_new_owner() {
         Arc::clone(&resident),
         None,
         u64::from(worker.id()),
+        None,
     ));
     tokio::task::yield_now().await;
     assert!(
@@ -581,7 +644,12 @@ async fn a_superseded_watch_in_backoff_does_not_relaunch_over_the_new_owner() {
     .await
     .expect("the crash arm counts the exit before its backoff");
     // Another arm claims the resident while the watch is backed off.
-    supervisor.spawn_monitor(Arc::clone(&resident), None, u64::from(std::process::id()));
+    supervisor.spawn_monitor(
+        Arc::clone(&resident),
+        None,
+        u64::from(std::process::id()),
+        None,
+    );
     tokio::time::timeout(Duration::from_secs(5), watch)
         .await
         .expect("the superseded watch returns after the backoff")
