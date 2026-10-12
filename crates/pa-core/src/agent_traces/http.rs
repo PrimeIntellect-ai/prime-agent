@@ -58,7 +58,7 @@ impl TraceHttp for ReqwestTraceHttp {
         cancel: Option<&'a TraceUploadCancel>,
     ) -> Pin<Box<dyn Future<Output = Result<TraceHttpResponse, TraceHttpError>> + Send + 'a>> {
         Box::pin(async move {
-            let client = reqwest::Client::builder()
+            let client = pa_ai::utils::tls::http_client_builder()
                 .timeout(std::time::Duration::from_millis(timeout_ms))
                 .build()
                 .map_err(|error| TraceHttpError::Transport(error.to_string()))?;

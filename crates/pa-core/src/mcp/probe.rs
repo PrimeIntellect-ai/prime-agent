@@ -61,7 +61,7 @@ pub struct ReqwestMcpProbe {
 impl Default for ReqwestMcpProbe {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::builder()
+            client: pa_ai::utils::tls::http_client_builder()
                 // No redirects: a redirecting endpoint must not receive the token.
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
