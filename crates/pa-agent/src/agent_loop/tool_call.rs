@@ -12,7 +12,7 @@ use crate::types::{
 
 use super::abort::race_with_abort;
 use super::run::clone_context;
-use super::tools::{FinalizedToolCallOutcome, Preparation, PreparedToolCall};
+use super::tools::{find_tool, FinalizedToolCallOutcome, Preparation, PreparedToolCall};
 use super::{AgentEventSink, AgentLoopConfig};
 
 /// Tool lookup, `prepareArguments`, schema validation, and the
@@ -25,11 +25,7 @@ pub(crate) async fn prepare_tool_call(
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
 ) -> Preparation {
-    let Some(tool) = current_context
-        .tools
-        .iter()
-        .find(|t| t.name() == tool_call.name)
-    else {
+    let Some(tool) = find_tool(&current_context.tools, &tool_call.name) else {
         return Preparation::Immediate {
             result: AgentToolResult::error(format!("Tool {} not found", tool_call.name)),
             is_error: true,

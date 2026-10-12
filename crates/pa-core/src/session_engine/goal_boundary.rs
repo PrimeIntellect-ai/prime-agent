@@ -83,13 +83,10 @@ impl SessionEngine {
         .ok()
     }
 
-    /// Mint one goal continuation: an active goal consumes one slot and returns
-    /// its context row; a failed persist fails the goal and mints nothing.
-    pub async fn mint_goal_continuation(&self) -> Option<CustomMessage> {
-        // The just-settled turn gates the mint (read before the driver lock),
-        // and a trailing failed continuation pair stops riding the context.
-        let last_turn: Option<pa_agent::types::AssistantMessage> = self
-            .session
+    /// The latest settled assistant turn in its loop form: the natural mint
+    /// gates on it and the RLM settle site's delivery decides from it.
+    pub async fn latest_settled_assistant(&self) -> Option<pa_agent::types::AssistantMessage> {
+        self.session
             .last_assistant_message()
             .await
             .and_then(|wire| match wire {
@@ -97,7 +94,14 @@ impl SessionEngine {
                     super::provider_adapter::json_round_trip(&assistant)
                 }
                 _ => None,
-            });
+            })
+    }
+
+    /// The just-settled turn that gates a goal mint, with a trailing failed
+    /// continuation pair dropped so the corpse stops riding the context (the
+    /// daemon's consult and settle sites perform the same read-and-drop).
+    async fn last_turn_for_goal_mint(&self) -> Option<pa_agent::types::AssistantMessage> {
+        let last_turn = self.latest_settled_assistant().await;
         if last_turn
             .as_ref()
             .is_some_and(|turn: &pa_agent::types::AssistantMessage| {
@@ -107,13 +111,28 @@ impl SessionEngine {
         {
             self.session.drop_failed_goal_continuation().await;
         }
+        last_turn
+    }
+
+    /// Mint one goal continuation: an active goal consumes one slot and
+    /// returns its context row — the armed RLM deferral delivers first
+    /// (whichever consult runs after the blockers clear consumes it) — and
+    /// a failed persist fails the goal and mints nothing.
+    pub async fn mint_goal_continuation(&self) -> Option<CustomMessage> {
+        let last_turn = self.last_turn_for_goal_mint().await;
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
         if !driver.owns_continuation_wakeup() {
             return None;
         }
         let mut session = persistence.lock().await;
-        match driver.next_continuation_message(&mut session, last_turn.as_ref()) {
+        let was_owed = driver.owes_continuation();
+        let minted = if was_owed {
+            driver.take_owed_continuation(&mut session, last_turn.as_ref())
+        } else {
+            driver.next_continuation_message(&mut session, last_turn.as_ref())
+        };
+        match minted {
             Ok(message) => message,
             Err(error) => {
                 let message = format!("{error:#}");
@@ -170,5 +189,53 @@ impl SessionEngine {
     /// withdrew) the minted continuation, so the next boundary mints again.
     pub async fn clear_pending_goal_continuation(&self) {
         self.goal_driver.lock().await.continuation_consumed();
+    }
+
+    /// Defer the goal continuation while descendant RLM work is unsettled
+    /// (TS quiescence): the natural turn end arms the deferral, a later
+    /// mint or the drive loop's settle site delivers it.
+    pub async fn mark_goal_continuation_owed(&self) {
+        self.goal_driver.lock().await.mark_continuation_owed();
+    }
+
+    /// Whether an active goal owns the wake-up discipline (an autonomous
+    /// hold defers behind it and drops its own continuation).
+    pub async fn goal_owns_continuation_wakeup(&self) -> bool {
+        self.goal_driver.lock().await.owns_continuation_wakeup()
+    }
+
+    /// A goal that does not own the wake-up drops an armed RLM deferral
+    /// (the daemon's consult order): the deferral dies with the goal's
+    /// loop. No deferral, no locks.
+    pub async fn drop_owed_goal_continuation(&self) {
+        {
+            let driver = self.goal_driver.lock().await;
+            if !driver.owes_continuation() {
+                return;
+            }
+        }
+        let persistence = self.session.shared_persistence();
+        let mut driver = self.goal_driver.lock().await;
+        let mut session = persistence.lock().await;
+        let _ = driver.take_owed_continuation(&mut session, /*last_turn*/ None);
+    }
+
+    /// Deliver the RLM-deferred goal continuation once descendant work
+    /// settled: an inactive goal drops the deferral; a live one mints; a
+    /// refusal keeps the deferral armed (a no-progress backoff window
+    /// retries through the boundary's wake).
+    pub async fn take_owed_goal_continuation(&self) -> Option<CustomMessage> {
+        let last_turn = self.last_turn_for_goal_mint().await;
+        let persistence = self.session.shared_persistence();
+        let mut driver = self.goal_driver.lock().await;
+        let mut session = persistence.lock().await;
+        match driver.take_owed_continuation(&mut session, last_turn.as_ref()) {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!("owed goal continuation mint failed: {error:#}");
+                // The driver restored the deferral on its failed mint.
+                None
+            }
+        }
     }
 }

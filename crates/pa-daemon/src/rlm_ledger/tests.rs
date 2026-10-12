@@ -254,6 +254,163 @@ fn moved_edge_paths_resolve_through_the_session_id() {
     assert_eq!(raw[0].child, recorded_child);
 }
 
+/// The parent-scoped live read bounds the liveness work to the opened
+/// parent's own edges: foreign edges with missing endpoints never
+/// resolve (no per-edge stats, no artifacts-tree walk), while the own
+/// edges resolve - a moved child through its session id - and a
+/// tombstoned own child is skipped before any resolution.
+#[test]
+fn live_edges_of_parent_bounds_the_liveness_work() {
+    let agent_dir = temp_dir("scoped");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+
+    let parent = sessions_dir.join("sess-p.jsonl");
+    let moved_child = sessions_dir.join("sess-a.jsonl");
+    let resident_child = sessions_dir.join("sess-b.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&moved_child, "{}").unwrap();
+    fs::write(&resident_child, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-a".into(),
+            parent: parent.to_string_lossy().into(),
+            child: "/gone-root/sess-a.jsonl".into(),
+            depth: 1,
+            name: "a".into(),
+        })
+        .unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-b".into(),
+            parent: parent.to_string_lossy().into(),
+            child: resident_child.to_string_lossy().into(),
+            depth: 1,
+            name: "b".into(),
+        })
+        .unwrap();
+    let deleted_child = sessions_dir.join("sess-d.jsonl");
+    fs::write(&deleted_child, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-d".into(),
+            parent: parent.to_string_lossy().into(),
+            child: deleted_child.to_string_lossy().into(),
+            depth: 1,
+            name: "d".into(),
+        })
+        .unwrap();
+    ledger
+        .append_delete(
+            "sub-d",
+            &deleted_child.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+        )
+        .unwrap();
+    for n in 0..50 {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: format!("sub-f{n}"),
+                parent: format!("/gone-root/sess-f{n}.jsonl"),
+                child: format!("/gone-root/sess-f{n}-child.jsonl"),
+                depth: 1,
+                name: format!("f{n}"),
+            })
+            .unwrap();
+    }
+
+    let edges = ledger.live_edges_of_parent(&parent).unwrap();
+    let ids: Vec<&str> = edges.iter().map(|edge| edge.child_id.as_str()).collect();
+    assert_eq!(ids, ["sub-a", "sub-b"], "{edges:?}");
+    assert_eq!(
+        edges[0].child,
+        canonical_session_path(&moved_child)
+            .to_string_lossy()
+            .to_string(),
+        "the moved child resolves through its session id"
+    );
+
+    let state = ledger.replay_of_parent(&parent).unwrap();
+    let mut resolver = LivePathResolver::new(agent_dir.clone(), sessions_dir.clone());
+    let scoped = resolve_live_edges(&state, &mut resolver);
+    assert_eq!(scoped.len(), 2, "{scoped:?}");
+    assert_eq!(
+        resolver.resolved.len(),
+        3,
+        "{:?}",
+        resolver.resolved.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        resolver.artifact_index.is_none(),
+        "no foreign miss walks the artifacts tree"
+    );
+    let full = ledger.replay_cached().unwrap();
+    let mut unscoped = LivePathResolver::new(agent_dir, sessions_dir);
+    assert_eq!(resolve_live_edges(&full, &mut unscoped).len(), 2);
+    assert!(unscoped.artifact_index.is_some());
+    assert_eq!(unscoped.resolved.len(), 103);
+}
+
+/// A parent that moved (recorded path gone, same stem under the sessions
+/// dir) still lists its children through the scoped read; an edge whose
+/// recorded parent merely shares the opened file's stem but resolves to
+/// another live file is not the opened parent's.
+#[test]
+fn live_edges_of_parent_follows_a_moved_parent() {
+    let agent_dir = temp_dir("scoped-moved");
+    let sessions_dir = agent_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).unwrap();
+    let ledger = ledger_over(&agent_dir, &sessions_dir);
+
+    let recorded_parent = "/old-root/sessions/sess-p.jsonl";
+    let child = sessions_dir.join("sess-c.jsonl");
+    let live_parent = sessions_dir.join("sess-p.jsonl");
+    fs::write(&child, "{}").unwrap();
+    fs::write(&live_parent, "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-1".into(),
+            parent: recorded_parent.into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "w".into(),
+        })
+        .unwrap();
+    let edges = ledger.live_edges_of_parent(&live_parent).unwrap();
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(
+        edges[0].parent,
+        canonical_session_path(&live_parent)
+            .to_string_lossy()
+            .to_string(),
+        "the moved parent still lists its children"
+    );
+
+    let elsewhere = agent_dir
+        .join("session-artifacts")
+        .join("host")
+        .join("sess-p2.jsonl");
+    fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    fs::write(&elsewhere, "{}").unwrap();
+    fs::write(sessions_dir.join("sess-p2.jsonl"), "{}").unwrap();
+    fs::write(sessions_dir.join("sess-c2.jsonl"), "{}").unwrap();
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub-2".into(),
+            parent: "/old-root/sessions/sess-p2.jsonl".into(),
+            child: sessions_dir.join("sess-c2.jsonl").to_string_lossy().into(),
+            depth: 1,
+            name: "w2".into(),
+        })
+        .unwrap();
+    let edges = ledger.live_edges_of_parent(&elsewhere).unwrap();
+    assert!(
+        edges.is_empty(),
+        "a same-stem parent resolved to another live file is not the opened parent: {edges:?}"
+    );
+}
+
 #[test]
 fn duplicate_child_path_and_bad_spawn_inputs_fail_but_bad_lines_skip() {
     let dir = temp_dir("dup");

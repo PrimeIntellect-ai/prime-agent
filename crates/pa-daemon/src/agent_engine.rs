@@ -57,7 +57,6 @@ use turn_types::{
 
 mod model;
 
-use model::persisted_rlm_max_depth;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;
@@ -101,10 +100,6 @@ pub(crate) type SettledKernelRelease =
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
-    /// Latest decision reply per live decision child; shared with its kernel
-    /// host handler (`decision_api.decision`).
-    pub(crate) decision_replies:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Value>>>>,
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.

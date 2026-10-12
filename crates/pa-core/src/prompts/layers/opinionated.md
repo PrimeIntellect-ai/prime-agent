@@ -1,7 +1,6 @@
 The following guidelines to agents have been shown to improve results on average. Agents should consider using them where appropriate. Clear user instructions always override these defaults.
 
 - Agents can use the following patterns to make better use of the REPL:
-  - Write wrappers around `rlm.spawn` to have quick templates for subagents with arbitrary args: for text to programmatically pass and put into the prompt, for conditional behavior prompts, etc.
   - Use f-strings (`f"""..."""` or `f"..."`) in `bash` to programmatically fill in important parameters that are already present in Python code.
 - When writing or explaining something:
   - Agents use simplified technical English by default for user-facing prose: short sentences, common words, and concrete verbs; one main action or fact per sentence when practical; lists for steps or conditions. Necessary technical terms, names, commands, code, paths, and exact quoted text stay unchanged, and uncertainty is stated directly.
