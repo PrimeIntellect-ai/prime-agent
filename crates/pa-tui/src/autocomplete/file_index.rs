@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::thread;
@@ -278,31 +278,56 @@ fn watch(base: &Path) -> Option<(RecommendedWatcher, Receiver<notify::Result<Eve
 /// completes even when the typing that started it moved on. `None` when the tree holds
 /// more than `cap` entries.
 fn walk_index_entries(base: &Path, cap: usize) -> Option<Vec<Box<str>>> {
-    let entries: Mutex<Option<BTreeSet<Box<str>>>> = Mutex::new(Some(BTreeSet::new()));
+    let count = AtomicUsize::new(0);
+    let sink = Mutex::new(Vec::new());
     walk_builder(base).build_parallel().run(|| {
-        Box::new(|entry| {
+        let count = &count;
+        let mut collected = ThreadEntries {
+            entries: Vec::new(),
+            sink: &sink,
+        };
+        Box::new(move |entry| {
             let Ok(entry) = entry else {
                 return WalkState::Continue;
             };
             let Some(form) = fd_printed_form(&entry, base) else {
                 return WalkState::Continue;
             };
-            let mut guard = entries.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(collected) = guard.as_mut() else {
-                return WalkState::Quit;
-            };
-            if collected.len() >= cap {
-                *guard = None;
+            if count.fetch_add(1, Ordering::Relaxed) >= cap {
                 return WalkState::Quit;
             }
-            collected.insert(Box::from(form));
+            collected.entries.push(Box::from(form));
             WalkState::Continue
         })
     });
-    let entries = entries
-        .into_inner()
-        .unwrap_or_else(PoisonError::into_inner)?;
-    Some(entries.into_iter().collect())
+    if count.into_inner() > cap {
+        return None;
+    }
+    let buffers = sink.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let mut entries = Vec::with_capacity(buffers.iter().map(Vec::len).sum());
+    for buffer in buffers {
+        entries.extend(buffer);
+    }
+    // Walk paths are unique: sorting alone yields the index order.
+    entries.sort_unstable();
+    Some(entries)
+}
+
+/// One walker thread's build entries: collected without a lock, handed to the shared
+/// sink as a whole buffer when the thread's visitor drops at the end of the walk — the
+/// buffers merge once, into an exact-capacity index, instead of growing one shared vec.
+struct ThreadEntries<'sink> {
+    entries: Vec<Box<str>>,
+    sink: &'sink Mutex<Vec<Vec<Box<str>>>>,
+}
+
+impl Drop for ThreadEntries<'_> {
+    fn drop(&mut self) {
+        self.sink
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(std::mem::take(&mut self.entries));
+    }
 }
 
 /// The one watcher-draining thread: each batch — everything queued at a wake-up, the
