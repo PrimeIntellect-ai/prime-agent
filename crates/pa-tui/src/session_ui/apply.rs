@@ -891,6 +891,9 @@ impl SessionUi {
             None
         };
         if abort_text.is_some() || stop_reason == Some("error") {
+            // Lifecycle failures can emit agent_end before any turn_end.
+            // Their terminal message must not leave a successful run open.
+            self.run_open = false;
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message
                     .get("errorMessage")

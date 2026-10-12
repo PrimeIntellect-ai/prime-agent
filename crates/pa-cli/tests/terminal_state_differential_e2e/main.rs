@@ -290,8 +290,8 @@ fn program_status_reports_the_run_and_its_settles() {
     harness.assert_terminal_state_restored("the program-status reports and clear");
 }
 
-/// A lifecycle error has no engine turn_end: its failed message and
-/// agent_end arrive before the daemon's fallback terminal frame.
+/// A lifecycle error has no engine `turn_end`: its failed message and
+/// `agent_end` arrive before the daemon's fallback terminal frame.
 #[test]
 fn program_status_lifecycle_failure_never_reports_done() {
     let _lock = harness_lock();
