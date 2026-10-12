@@ -11,7 +11,6 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-const BACKFILL_DELAY_MS: u64 = 300;
 const HISTORY_MESSAGES: usize = 4;
 
 struct MockSupervisor {
@@ -87,18 +86,27 @@ impl MockSupervisor {
                     if command.get("before").is_some() {
                         if self.hold_backfill {
                             held_backfill = Some(id.to_string());
+                            // The frame is proof the server received this request;
+                            // the headless plan cannot leave or reload before it.
+                            write_json(
+                                &mut writer,
+                                &json!({
+                                    "type": "session_event", "activeSessionId": "s1",
+                                    "event": {"type": "message_end", "message": {
+                                        "role": "assistant", "content": [{"type": "text", "text": "backfill request received"}],
+                                    }},
+                                }),
+                            );
                             continue;
                         }
-                        std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
                         write_json(&mut writer, &get_messages_response(id, self.windowed));
                         continue;
                     }
-                    // A cursor-less fetch is a transcript rebuild: the held page goes out
-                    // first and the whole head follows after the page delay, so the stale
-                    // note is queued before the rebuild can finish.
+                    // A cursor-less fetch is a transcript rebuild. Release the
+                    // obsolete response before it; the separate unit regression
+                    // injects an already-queued note to verify the epoch fence.
                     if let Some(held) = held_backfill.take() {
                         write_json(&mut writer, &get_messages_response(&held, self.windowed));
-                        std::thread::sleep(std::time::Duration::from_millis(BACKFILL_DELAY_MS));
                     }
                     write_json(&mut writer, &whole_head_response(id));
                 }
@@ -293,7 +301,7 @@ fn run_attached_with_failures(
     let plan = HeadlessPlan {
         steps,
         width: 100,
-        height: 30,
+        height: 100,
     };
     let outcome = runtime
         .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
@@ -332,6 +340,20 @@ fn run_attached_holding_backfill(
     let outcome = runtime
         .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
         .expect("interactive run");
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("backfill request received")),
+        "the plan observed the held request receipt"
+    );
+    assert!(
+        !outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("timed out waiting")),
+        "readiness barriers completed without timeouts"
+    );
     served_rx
         .recv_timeout(std::time::Duration::from_secs(10))
         .expect("the run returned, but the mock supervisor socket never closed: the obsolete transcript backfill task still holds the daemon connection");
@@ -371,7 +393,10 @@ fn a_windowed_open_backfills_history_above_the_tail() {
     let (frames, requests) = run_attached(
         true,
         vec![
-            HeadlessStep::WaitMs(1200),
+            HeadlessStep::WaitRender {
+                needle: "msg-00".to_string(),
+                timeout_ms: 5000,
+            },
             HeadlessStep::ScrollTop,
             HeadlessStep::WaitRender {
                 needle: "msg-00".to_string(),
@@ -451,8 +476,14 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
 
 #[test]
 fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
-    let (frames, requests) =
-        run_attached_holding_backfill(true, 30, vec![HeadlessStep::WaitMs(500)]);
+    let (frames, requests) = run_attached_holding_backfill(
+        true,
+        30,
+        vec![HeadlessStep::WaitRender {
+            needle: "backfill request received".to_string(),
+            timeout_ms: 5000,
+        }],
+    );
     assert_eq!(
         requests.len(),
         1,
@@ -477,16 +508,19 @@ fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered()
         true,
         50,
         vec![
-            HeadlessStep::WaitMs(500),
+            HeadlessStep::WaitRender {
+                needle: "backfill request received".to_string(),
+                timeout_ms: 5000,
+            },
             HeadlessStep::Submit("/reload".to_string()),
             HeadlessStep::WaitRender {
                 needle: "Reloaded keybindings, skills, prompts, themes".to_string(),
                 timeout_ms: 5000,
             },
-            // The whole-head response is held past the stale page, so the note is queued
-            // before the reload outcome applies; with the plan idle here the run loop
-            // drains it, and the scroll below starts at whatever then sits at the top.
-            HeadlessStep::WaitMs(600),
+            HeadlessStep::WaitGone {
+                needle: "backfill request received".to_string(),
+                timeout_ms: 5000,
+            },
             HeadlessStep::ScrollTop,
             HeadlessStep::WaitRender {
                 needle: "msg-00".to_string(),
