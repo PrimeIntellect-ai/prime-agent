@@ -88,8 +88,14 @@ pub struct BuildSystemPromptOptions<'a> {
     pub rlm_depth: Option<u32>,
     /// Human-readable parent name or id for child communication doctrine.
     pub rlm_parent_agent: Option<&'a str>,
-    /// Whether the session has no RLM child runtime (no daemon to spawn through).
+    /// Whether the session runs without a daemon (no scheduler, no
+    /// bash-completion wake-ups). The wake-up facts the daemonless line
+    /// states must match the embedding's wiring.
     pub daemonless: bool,
+    /// Whether `rlm.spawn` can create children in this session (the
+    /// daemonless print host or a daemon worker); a daemonless session
+    /// without one cannot spawn at all.
+    pub can_spawn: bool,
     /// Enabled user-configured generic MCP servers.
     pub generic_mcp_servers: Vec<String>,
 }
@@ -150,8 +156,8 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
     let tools: Vec<&str> = options
         .selected_tools
         .clone()
-        .unwrap_or_else(|| vec!["ipython"]);
-    let has_ipython = tools.contains(&"ipython");
+        .unwrap_or_else(|| vec![pa_types::ai::PYTHON_TOOL_NAME]);
+    let has_ipython = tools.contains(&pa_types::ai::PYTHON_TOOL_NAME);
     let has_file_access = has_ipython || tools.contains(&"bash");
 
     segments.push(PromptSegment::dynamic_segment(
@@ -305,14 +311,17 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
         if depth == 0 { " (root)" } else { " (not root)" }
     )];
     if options.daemonless {
-        lines.push(
-            "Subagents and completion notifications are unavailable in this session (no daemon): rlm.spawn will error, and nothing wakes you after your turn ends, so await background commands before ending it. Plan to do all work yourself."
-                .to_string(),
-        );
+        lines.push(if options.can_spawn {
+            "This session has no daemon: heartbeats never fire, and background `bash()` completions do not wake you, so await them before ending your turn. Subagent replies and exit notices still wake you, and the run waits for your subagents before it exits."
+                .to_string()
+        } else {
+            "This session has no daemon: `rlm.spawn` is unavailable, heartbeats never fire, and background `bash()` completions do not wake you, so await them before ending your turn."
+                .to_string()
+        });
     }
     if !has_ipython {
         lines.push(
-            "This session has no Python REPL (`ipython` tool): the programmatic tools described above are unavailable here."
+            "This session has no Python REPL (`python_repl` tool): the programmatic tools described above are unavailable here."
                 .to_string(),
         );
     }

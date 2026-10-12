@@ -5,12 +5,12 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
     create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
-    spawn_name_unavailable, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration,
-    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmChildTerminalNotice,
-    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
-    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
-    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
-    RENAME_TIMEOUT_MS,
+    rlm_depth_limit_error, spawn_name_unavailable_error, Arc, ChildCloseReason, ChildRecord,
+    Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result, RlmChildResult,
+    RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
+    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
+    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -57,11 +57,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             let identity = this.identity.lock().expect("identity lock").clone();
             if identity.rlm_depth >= identity.rlm_max_depth {
-                bail!(
-                    "RLM recursion depth limit reached (RLM_DEPTH={}, RLM_MAX_DEPTH={})",
+                bail!(rlm_depth_limit_error(
                     identity.rlm_depth,
                     identity.rlm_max_depth
-                );
+                ));
             }
             let child_id = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
             let name = request.name.clone().unwrap_or_else(|| {
@@ -75,7 +74,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 .is_some()
                 .then(|| {
                     if !this.reserve_spawn_name(&name) {
-                        return Err(spawn_name_unavailable(&name, identity.rlm_depth + 1));
+                        return Err(spawn_name_unavailable_error(&name, identity.rlm_depth + 1));
                     }
                     Ok(SpawnNameReservationGuard {
                         inner: Arc::clone(&this),
@@ -157,6 +156,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     settled_status: None,
                     settled: false,
                     answer_preview: None,
+                    answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
                     notice_delivered: false,
@@ -375,7 +375,55 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             // Selector errors surface unwrapped (the TS message is the
             // product surface); only the kill below gets a delete context.
-            let record = this.resolve_record(&target, "subagent").await?;
+            let record = match this.resolve_record(&target, "subagent").await {
+                Ok(record) => record,
+                Err(miss) => {
+                    // Retirement is idempotent (the M5 class): a selector
+                    // whose delete receipt already returned answers from
+                    // the tombstone instead of erroring, so a re-delete of
+                    // a settled child (an operator retire, the factory's
+                    // cancel pass) never reports the slot as still held.
+                    let matches = this
+                        .deleted_children
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .filter(|deleted| deleted.matches(&target))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    match matches.len() {
+                        0 => return Err(miss),
+                        1 => {
+                            let deleted = &matches[0];
+                            return Ok(RlmDeleteSubagentResult {
+                                subagent: RlmSubagentEntry {
+                                    rlm_child_id: deleted.rlm_child_id.clone(),
+                                    active_session_id: Some(deleted.active_session_id.clone()),
+                                    session_id: deleted.session_id.clone(),
+                                    session_name: deleted.session_name.clone(),
+                                    session_dir: deleted.session_dir.clone(),
+                                    status: deleted.status,
+                                    activity: None,
+                                    tool_use_count: None,
+                                    duration_ms: Some(
+                                        now_ms().saturating_sub(deleted.started_at_ms),
+                                    ),
+                                    answer_preview: deleted.answer_preview.clone(),
+                                    replied_since_task: None,
+                                    progress_note: None,
+                                    label: None,
+                                    last_activity_at: Some(deleted.started_at_ms),
+                                    activity_stale_ms: None,
+                                },
+                                outcome: Some("deleted"),
+                            });
+                        }
+                        _ => bail!(
+                            "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+                        ),
+                    }
+                }
+            };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
             let no_longer_matches = {

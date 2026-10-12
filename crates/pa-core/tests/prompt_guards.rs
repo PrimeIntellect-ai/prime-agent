@@ -83,7 +83,7 @@ fn cached_prefix_is_stable_across_sessions() {
         messages_path: Some("/first/session.jsonl".to_string()),
         model_prompt_extras: Some("model guidance."),
         skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
     let first = system_prompt_breakdown(&options);
@@ -552,7 +552,7 @@ fn generic_mcp_skill_renders_in_the_prompt_inventory() {
         cwd: "/w".to_string(),
         messages_path: Some("/log.jsonl".to_string()),
         skills: sorted_bundled_skills(),
-        selected_tools: Some(vec!["ipython"]),
+        selected_tools: Some(vec!["python_repl"]),
         ..Default::default()
     };
     let breakdown = system_prompt_breakdown(&options);

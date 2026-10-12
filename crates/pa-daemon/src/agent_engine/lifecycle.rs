@@ -1004,7 +1004,7 @@ impl AgentSessionEngine {
             model: Some(agent_model),
             thinking_level: Some(map_thinking_level(self.effective_thinking())),
             stream_fn: Some(stream_fn),
-            // Model tools: `ipython` only; the engine adds the kernel-backed `ipython` tool itself.
+            // Model tools: `python_repl` only; the engine adds the kernel-backed `python_repl` tool itself.
             tools: vec![],
             custom_system_prompt: create_resources.system_prompt,
             prompt_guidelines: create_resources.append_system_prompt,
@@ -1021,6 +1021,8 @@ impl AgentSessionEngine {
             }),
             progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
+            // The worker session runs under the daemon scheduler and its wake-ups.
+            daemonless: false,
             model_info: Some(model.clone()),
             // Prewarm; the depth gate keeps subagent workers lazy.
             prewarm_ipython_kernel: Some(true),
