@@ -444,8 +444,17 @@ impl Supervisor {
     ) -> Result<Child> {
         // One env definition for spawn and for the update roster's `launch_env` row
         // (spec §8: "env snapshot to respawn the worker identically").
-        let (worker_socket, cwd, launch_env) = {
-            let descriptor = resident.descriptor.lock().await;
+        let (worker_socket, cwd, launch_env, orphan_path) = {
+            let mut descriptor = resident.descriptor.lock().await.clone();
+            // Each process lifetime owns a different file. An old owner's
+            // in-flight reap must never clear a replacement's journal.
+            let orphan_path = crate::journal::orphan_journal_path(
+                &self.descriptor_dir,
+                &format!("{}-{}", resident.worker_id, uuid::Uuid::new_v4()),
+            )
+            .to_string_lossy()
+            .into_owned();
+            descriptor.orphan_process_journal_path = Some(orphan_path.clone());
             (
                 PathBuf::from(&descriptor.socket_path),
                 descriptor
@@ -461,6 +470,7 @@ impl Supervisor {
                     &uuid::Uuid::new_v4().to_string(),
                     &descriptor,
                 ),
+                orphan_path,
             )
         };
 
@@ -500,6 +510,9 @@ impl Supervisor {
             let child_pid = child.id().unwrap_or(0);
             descriptor.pid = u64::from(child_pid);
             descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
+            // Publish the path with its owner identity, never against the
+            // previous generation's pid before the spawn succeeds.
+            descriptor.orphan_process_journal_path = Some(orphan_path);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             // The spawn record's durability is per launch class
             // (`spawn_record_sync`): a fresh create rides the TS
