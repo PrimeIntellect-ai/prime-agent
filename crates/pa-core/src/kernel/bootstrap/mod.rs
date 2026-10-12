@@ -220,6 +220,14 @@ async fn ensure_kernel_python_uncached(
     }
 
     let venv = resolve_writable_kernel_venv_dir()?;
+    ensure_kernel_venv(options, python_skills, venv).await
+}
+
+async fn ensure_kernel_venv(
+    options: &EnsureKernelPythonOptions,
+    python_skills: &[BootstrapPythonSkill],
+    venv: PathBuf,
+) -> anyhow::Result<PathBuf> {
     let python = kernel_venv_python(&venv);
     let python_str = python.to_string_lossy().to_string();
     let runtime_identity = resolve_runtime_identity();
@@ -227,7 +235,7 @@ async fn ensure_kernel_python_uncached(
         return Ok(python);
     }
 
-    let release_lock = acquire_bootstrap_lock(&venv).await;
+    let release_lock = acquire_bootstrap_lock(&venv).await?;
     let result = async {
         if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
             return Ok(python);
@@ -259,4 +267,43 @@ async fn ensure_kernel_python_uncached(
     drop(release_lock);
     options.report("✓ ready");
     result.map_err(|error| format_bootstrap_failure(&error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn lock_timeout_prevents_venv_rebuild() {
+        let root = tempfile::tempdir().unwrap();
+        let venv = root.path().join("kernel-venv");
+        std::fs::create_dir(&venv).unwrap();
+        let sentinel = venv.join("owner-state");
+        std::fs::write(&sentinel, "another bootstrap owns this venv").unwrap();
+        let owner = acquire_bootstrap_lock(&venv).await.unwrap();
+        let options = EnsureKernelPythonOptions {
+            // Fail before any destructive operation or network access if the
+            // caller regresses and enters setup without acquiring the lock.
+            on_progress: Some(Arc::new(|message| {
+                panic!("bootstrap must stop at the lock error, got progress: {message}");
+            })),
+            ..Default::default()
+        };
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(121),
+            ensure_kernel_venv(&options, &[], venv),
+        )
+        .await
+        .expect("lock acquisition must have a bounded wait")
+        .expect_err("a lock timeout must propagate to the caller");
+
+        assert!(error.to_string().contains("Timed out"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "another bootstrap owns this venv"
+        );
+        assert!(root.path().join("kernel-venv.bootstrap.lock").exists());
+        drop(owner);
+    }
 }
