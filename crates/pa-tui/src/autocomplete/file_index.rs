@@ -17,7 +17,8 @@
 //! directory and falls back to the walk when the watch limit rejects the base.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::ops::Bound;
+use std::num::NonZeroUsize;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver};
@@ -28,14 +29,20 @@ use ignore::WalkState;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::fuzzy_file_search::{
-    fd_printed_form, form_name, push_joined_path, rank, to_display_path, walk_builder, AtSearch,
+    fd_printed_form, suggestions, to_display_path, top_ranked, walk_builder, AtSearch, RankedForm,
     GIT_DIR,
 };
 use super::Suggestions;
 
-/// The entry cap. Measured on a 200k-file synthetic tree: the built index costs ~72
-/// bytes per entry of resident memory (RSS delta), so a capped index holds ~72 MiB.
+/// The entry cap. Measured on 202k- and 950k-entry synthetic trees: the built index costs
+/// ~50-60 bytes per entry of resident memory (RSS delta), so a capped index holds ~60 MiB.
 pub(super) const MAX_INDEX_ENTRIES: usize = 1_000_000;
+
+/// The fewest candidates one scan thread takes: a smaller slice scans on the search
+/// thread itself. Measured on 8- and 2-core x86 VMs over 5k–202k-entry trees: `4_096` is
+/// the smallest value whose split scan is never slower than the inline scan (`2_048` lost
+/// up to 46% on 2 cores near 5k entries).
+pub(super) const SCAN_CHUNK_MIN: usize = 4_096;
 
 /// How one query addresses the index.
 pub(super) enum IndexScope {
@@ -76,7 +83,8 @@ enum IndexState {
     Unbuilt,
     Building,
     Ready {
-        entries: BTreeSet<Box<str>>,
+        /// Sorted, no duplicates: a scope's entries are one contiguous slice.
+        entries: Vec<Box<str>>,
         _watcher: RecommendedWatcher,
     },
     Disabled,
@@ -143,14 +151,14 @@ impl FileIndex {
                         // exclude it): the walk lists its contents instead.
                         IndexScope::Outside => return Answer::Walk,
                         IndexScope::Prefix(prefix)
-                            if !prefix.is_empty() && !entries.contains(prefix.as_str()) =>
+                            if !prefix.is_empty() && !contains(entries, prefix) =>
                         {
                             return Answer::Walk;
                         }
                         IndexScope::Prefix(prefix) => prefix.as_str(),
                         IndexScope::Unscoped => "",
                     };
-                    return Answer::Served(rank(candidate_forms(entries, prefix, search), search));
+                    return Answer::Served(suggestions(scan(entries, prefix, search), search));
                 }
             }
         }
@@ -199,45 +207,63 @@ impl FileIndex {
     }
 }
 
-/// The query's matched candidates over the built index — the entries under `prefix`
-/// (empty for the whole index), scope-relative where a scope applies — as borrowed
-/// forms: the regex check runs on the borrowed form and only the ranked top few ever
-/// allocate.
-fn candidate_forms<'entries>(
-    entries: &'entries BTreeSet<Box<str>>,
-    prefix: &'entries str,
-    search: &'entries AtSearch<'_>,
-) -> Box<dyn Iterator<Item = &'entries str> + 'entries> {
-    let forms: Box<dyn Iterator<Item = &Box<str>> + 'entries> = if prefix.is_empty() {
-        Box::new(entries.iter())
-    } else {
-        Box::new(
-            // The scope's own directory entry (the range's bound) is never a
-            // candidate — the walk skips its own root.
-            entries
-                .range::<str, _>((Bound::Excluded(prefix), Bound::Unbounded))
-                .take_while(move |form| form.starts_with(prefix)),
+/// The query's top ranks over the built index: the entries under `prefix` (empty for
+/// the whole index) matched and scored scope-relative, the slice split across scan
+/// threads when it is large enough to pay for them.
+fn scan<'entries>(
+    entries: &'entries [Box<str>],
+    prefix: &str,
+    search: &AtSearch<'_>,
+) -> Vec<RankedForm<'entries>> {
+    // The scope's own directory entry is never a candidate — the walk skips its own root.
+    let candidates = &entries[range_under(entries, prefix)];
+    let base = search.walk_base.to_string_lossy();
+    let scan_chunk = |chunk: &'entries [Box<str>], search: &AtSearch<'_>| {
+        let mut target = String::new();
+        top_ranked(
+            chunk
+                .iter()
+                .take_while(|_| !search.cancel.load(Ordering::Relaxed))
+                .map(|form| &form[prefix.len()..])
+                .filter(|form| search.matches(&base, form, &mut target))
+                .filter_map(|form| search.score(form)),
         )
     };
-    let base = search.walk_base.to_string_lossy().into_owned();
-    let mut target = String::new();
-    Box::new(
-        forms
-            .take_while(|_| !search.cancel.load(Ordering::Relaxed))
-            .map(move |form| &form[prefix.len()..])
-            .filter(move |form| {
-                let Some(regex) = search.regex else {
-                    return true;
-                };
-                let matched = if search.full_path_mode {
-                    push_joined_path(&mut target, &base, form);
-                    regex.is_match(&target)
-                } else {
-                    regex.is_match(form_name(form))
-                };
-                matched
-            }),
-    )
+    // `available_parallelism` reads cgroup files on Linux: only a slice worth splitting
+    // pays for it.
+    let chunks = match candidates.len() / SCAN_CHUNK_MIN {
+        0 | 1 => 1,
+        wanted => wanted.min(thread::available_parallelism().map_or(1, NonZeroUsize::get)),
+    };
+    if chunks == 1 {
+        return scan_chunk(candidates, search);
+    }
+    let scan_chunk = &scan_chunk;
+    thread::scope(|scope| {
+        let handles: Vec<_> = candidates
+            .chunks(candidates.len().div_ceil(chunks))
+            .map(|chunk| {
+                scope.spawn(move || {
+                    // A shared regex serves its lock-free cache only to the first thread
+                    // that used it; other threads take its pool's mutex on every match. A
+                    // clone brings its own pool.
+                    let regex = search.regex.cloned();
+                    scan_chunk(
+                        chunk,
+                        &AtSearch {
+                            regex: regex.as_ref(),
+                            ..*search
+                        },
+                    )
+                })
+            })
+            .collect();
+        top_ranked(handles.into_iter().flat_map(|handle| {
+            handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        }))
+    })
 }
 
 /// The recursive watcher over `base`: its events flow into the returned channel.
@@ -251,7 +277,7 @@ fn watch(base: &Path) -> Option<(RecommendedWatcher, Receiver<notify::Result<Eve
 /// One full walk under `base` with fd's rules — no result cut, no cancel: a build
 /// completes even when the typing that started it moved on. `None` when the tree holds
 /// more than `cap` entries.
-fn walk_index_entries(base: &Path, cap: usize) -> Option<BTreeSet<Box<str>>> {
+fn walk_index_entries(base: &Path, cap: usize) -> Option<Vec<Box<str>>> {
     let entries: Mutex<Option<BTreeSet<Box<str>>>> = Mutex::new(Some(BTreeSet::new()));
     walk_builder(base).build_parallel().run(|| {
         Box::new(|entry| {
@@ -273,7 +299,10 @@ fn walk_index_entries(base: &Path, cap: usize) -> Option<BTreeSet<Box<str>>> {
             WalkState::Continue
         })
     });
-    entries.into_inner().unwrap_or_else(PoisonError::into_inner)
+    let entries = entries
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner)?;
+    Some(entries.into_iter().collect())
 }
 
 /// The one watcher-draining thread: each batch — everything queued at a wake-up, the
@@ -363,6 +392,9 @@ fn apply_batch(
     let IndexState::Ready { entries, .. } = state else {
         return;
     };
+    // Every decision reads the batch's starting entries; the edits apply once per
+    // batch, because each single edit of the sorted entries shifts their tail.
+    let mut removals: Vec<Range<usize>> = Vec::new();
     let mut gone: Vec<String> = Vec::new();
     let mut inserted: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
     for rel in &rels {
@@ -378,21 +410,21 @@ fn apply_batch(
             rel.clone()
         };
         // The typed-form no-op: the common editor save changes nothing.
-        if entries.contains(form.as_str()) {
+        if contains(entries, &form) {
             continue;
         }
         let parent = parent_form(rel);
         // The parent is neither the base nor an indexed directory: the path sits
         // under an ignored or pruned tree, which the index never holds.
-        if !parent.is_empty() && !entries.contains(parent.as_str()) {
+        if !parent.is_empty() && !contains(entries, &parent) {
             continue;
         }
         // A stale entry of the other type drops before the rule check: a directory
         // replaced by a file takes its descendants with it.
         if is_directory {
-            entries.remove(rel.as_str());
+            removals.extend(find(entries, rel).map(|index| index..index + 1));
         } else {
-            remove_subtree(entries, rel);
+            remove_subtree(entries, rel, &mut removals);
         }
         inserted
             .entry(parent)
@@ -406,8 +438,10 @@ fn apply_batch(
             *state = IndexState::Unbuilt;
             return;
         }
-        remove_subtree(entries, rel);
+        remove_subtree(entries, rel, &mut removals);
     }
+    remove_ranges(entries, removals);
+    let mut additions: Vec<Box<str>> = Vec::new();
     for (parent, paths) in inserted {
         // One depth-1 walk per parent per batch: the shared rules decide what may enter.
         let parent_dir = base.join(&parent);
@@ -432,7 +466,7 @@ fn apply_batch(
             if !listed.contains(name_form.as_str()) {
                 continue;
             }
-            entries.insert(Box::from(if is_directory {
+            additions.push(Box::from(if is_directory {
                 format!("{rel}/")
             } else {
                 rel.clone()
@@ -444,8 +478,8 @@ fn apply_batch(
                     .filter_map(Result::ok)
                     .filter_map(|entry| fd_printed_form(&entry, base))
                 {
-                    entries.insert(Box::from(form));
-                    if entries.len() > MAX_INDEX_ENTRIES {
+                    additions.push(Box::from(form));
+                    if entries.len() + additions.len() > MAX_INDEX_ENTRIES {
                         // An over-cap batch disables the index, like an over-cap
                         // build does.
                         *state = IndexState::Disabled;
@@ -454,6 +488,12 @@ fn apply_batch(
                 }
             }
         }
+    }
+    if !additions.is_empty() {
+        entries.extend(additions);
+        // The stable sort takes the sorted entries as one run, so the merge stays linear.
+        entries.sort();
+        entries.dedup();
     }
     if entries.len() > MAX_INDEX_ENTRIES {
         *state = IndexState::Disabled;
@@ -487,17 +527,44 @@ fn is_ignore_rules_name(rel: &str) -> bool {
     )
 }
 
-/// Remove a path's file form, its directory form, and every entry under it.
-fn remove_subtree(entries: &mut BTreeSet<Box<str>>, rel: &str) {
+/// Whether the sorted entries hold `form`.
+fn contains(entries: &[Box<str>], form: &str) -> bool {
+    find(entries, form).is_some()
+}
+
+/// The position of `form` in the sorted entries.
+fn find(entries: &[Box<str>], form: &str) -> Option<usize> {
+    entries.binary_search_by(|entry| (**entry).cmp(form)).ok()
+}
+
+/// The sorted entries' range of forms under `prefix`, `prefix`'s own entry excluded;
+/// the empty prefix spans every entry.
+fn range_under(entries: &[Box<str>], prefix: &str) -> Range<usize> {
+    let start = entries.partition_point(|entry| **entry <= *prefix);
+    start..start + entries[start..].partition_point(|entry| entry.starts_with(prefix))
+}
+
+/// Mark a path's file form, its directory form, and every entry under it for removal.
+fn remove_subtree(entries: &[Box<str>], rel: &str, removals: &mut Vec<Range<usize>>) {
     let prefix = format!("{rel}/");
-    let stale: Vec<Box<str>> = entries
-        .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
-        .take_while(|form| form.starts_with(prefix.as_str()))
-        .cloned()
-        .collect();
-    entries.remove(rel);
-    entries.remove(prefix.as_str());
-    for form in stale {
-        entries.remove(&form);
+    removals.extend(find(entries, rel).map(|index| index..index + 1));
+    removals.extend(find(entries, &prefix).map(|index| index..index + 1));
+    removals.push(range_under(entries, &prefix));
+}
+
+/// Drop the marked ranges of the entries in one pass.
+fn remove_ranges(entries: &mut Vec<Box<str>>, mut removals: Vec<Range<usize>>) {
+    removals.retain(|range| !range.is_empty());
+    if removals.is_empty() {
+        return;
     }
+    removals.sort_unstable_by_key(|range| range.start);
+    let mut removals = removals.into_iter().peekable();
+    let mut index = 0;
+    entries.retain(|_| {
+        while removals.next_if(|range| range.end <= index).is_some() {}
+        let removed = removals.peek().is_some_and(|range| range.start <= index);
+        index += 1;
+        !removed
+    });
 }

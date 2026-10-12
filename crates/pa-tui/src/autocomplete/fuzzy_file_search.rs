@@ -25,7 +25,7 @@ use super::{
 pub(super) const GIT_DIR: &str = ".git";
 
 /// fd's `--max-results`: the walk stops once this many entries match.
-const MAX_WALK_RESULTS: usize = 100;
+pub(super) const MAX_WALK_RESULTS: usize = 100;
 /// The menu's row cap.
 pub(super) const MAX_SUGGESTIONS: usize = 20;
 
@@ -101,10 +101,9 @@ pub(super) fn fd_printed_form(entry: &DirEntry, walk_base: &Path) -> Option<Stri
     })
 }
 
-/// In full-path mode the query matches the walk-base-joined path — the string the
-/// live walk matches. The walk joins once per entry; the index pass matches every
-/// entry, so it builds into one reused buffer. `base` is the walk base as a string.
-pub(super) fn push_joined_path(target: &mut String, base: &str, form: &str) {
+/// The walk-base-joined path full-path mode matches, built into a reused buffer.
+/// `base` is the walk base as a string.
+fn push_joined_path(target: &mut String, base: &str, form: &str) {
     target.clear();
     target.push_str(base);
     if !target.ends_with(std::path::MAIN_SEPARATOR) {
@@ -113,11 +112,11 @@ pub(super) fn push_joined_path(target: &mut String, base: &str, form: &str) {
     target.push_str(form_trimmed(form));
 }
 
-/// One typed `@` token's resolved search: what the ranking needs — the typed query,
-/// the typed scope's display base rebuilt into the item paths, and the token's
-/// quoting — and how candidates match and cancel.
+/// One typed `@` token's resolved search: what the ranking needs — the typed query
+/// lowercased once, the typed scope's display base rebuilt into the item paths, and the
+/// token's quoting — and how candidates match and cancel.
 pub(super) struct AtSearch<'a> {
-    pub(super) query: &'a str,
+    pub(super) lower_query: &'a str,
     pub(super) display_base: Option<&'a str>,
     pub(super) at_prefix: &'a str,
     pub(super) is_quoted_prefix: bool,
@@ -125,6 +124,39 @@ pub(super) struct AtSearch<'a> {
     pub(super) regex: Option<&'a regex::Regex>,
     pub(super) full_path_mode: bool,
     pub(super) cancel: &'a AtomicBool,
+}
+
+impl AtSearch<'_> {
+    /// The one fd match of a printed form, shared by the walk and the index scan: the
+    /// regex against the name, or in full-path mode against the walk-base-joined path
+    /// (built into `target`). `base` is the walk base as a string; an empty query
+    /// matches every form.
+    pub(super) fn matches(&self, base: &str, form: &str, target: &mut String) -> bool {
+        let Some(regex) = self.regex else {
+            return true;
+        };
+        if self.full_path_mode {
+            push_joined_path(target, base, form);
+            regex.is_match(target)
+        } else {
+            regex.is_match(form_name(form))
+        }
+    }
+
+    /// The one scoring of a matched form, shared by the walk and the index scan: `None`
+    /// for a zero score; an empty query scores every form 1.
+    pub(super) fn score<'form>(&self, form: &'form str) -> Option<RankedForm<'form>> {
+        let score = if self.lower_query.is_empty() {
+            1
+        } else {
+            score_entry(form, self.lower_query, form.ends_with('/'))
+        };
+        (score > 0).then(|| RankedForm {
+            score,
+            depth: form_depth(form),
+            form,
+        })
+    }
 }
 
 /// The `@dir/partial` scope: the walk runs inside `base_dir` for `query`, and
@@ -161,36 +193,24 @@ fn resolve_scoped_query(base: &Path, raw_query: &str) -> Option<ScopedQuery> {
 
 /// Walk with fd's semantics: the parallel `ignore` walker, the base itself skipped, the
 /// walk cut at [`MAX_WALK_RESULTS`] or on cancel; results come back in fd's printed form.
-fn walk_directory(
-    walk_base: &Path,
-    regex: Option<&regex::Regex>,
-    full_path_mode: bool,
-    cancel: &AtomicBool,
-) -> Vec<String> {
+fn walk_directory(search: &AtSearch<'_>) -> Vec<String> {
     let found: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    let base = walk_base.to_string_lossy().into_owned();
-    walk_builder(walk_base).build_parallel().run(|| {
-        Box::new(|entry| {
-            if cancel.load(AtomicOrdering::Relaxed) {
+    let base = search.walk_base.to_string_lossy().into_owned();
+    walk_builder(search.walk_base).build_parallel().run(|| {
+        let (found, base) = (&found, base.as_str());
+        let mut target = String::new();
+        Box::new(move |entry| {
+            if search.cancel.load(AtomicOrdering::Relaxed) {
                 return WalkState::Quit;
             }
             let Ok(entry) = entry else {
                 return WalkState::Continue;
             };
-            let Some(form) = fd_printed_form(&entry, walk_base) else {
+            let Some(form) = fd_printed_form(&entry, search.walk_base) else {
                 return WalkState::Continue;
             };
-            if let Some(regex) = regex {
-                let mut target = String::new();
-                let matched = if full_path_mode {
-                    push_joined_path(&mut target, &base, &form);
-                    regex.is_match(&target)
-                } else {
-                    regex.is_match(form_name(&form))
-                };
-                if !matched {
-                    return WalkState::Continue;
-                }
+            if !search.matches(base, &form, &mut target) {
+                return WalkState::Continue;
             }
             let mut found = found.lock().unwrap_or_else(PoisonError::into_inner);
             if found.len() == MAX_WALK_RESULTS {
@@ -203,15 +223,37 @@ fn walk_directory(
     found.into_inner().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The walk thread body: resolve the typed scope, answer from the file index when it
-/// serves the query (walking once to build it on first use), fall back to the live walk
-/// otherwise, and rank. `None` means no menu: fd matched nothing, the query was an
-/// invalid regex (fd exits non-zero), or every entry scored zero.
+/// The walk thread body: answer from the file index when it serves the query (walking
+/// once to build it on first use), fall back to the live walk otherwise, and rank.
+/// `None` means no menu: fd matched nothing, the query was an invalid regex (fd exits
+/// non-zero), or every entry scored zero.
 fn search(
     base: &Path,
     index: &FileIndex,
     at_prefix: &str,
     cancel: &AtomicBool,
+) -> Option<Suggestions> {
+    resolve_search(base, at_prefix, cancel, |search, scope| {
+        match index.query(base, scope, search) {
+            Answer::Served(answered) => answered,
+            Answer::Walk => {
+                let found = walk_directory(search);
+                suggestions(
+                    top_ranked(found.iter().filter_map(|form| search.score(form))),
+                    search,
+                )
+            }
+        }
+    })
+}
+
+/// Resolve the typed `@` token — its scope, the fd pattern, the index scope — and hand
+/// the resolved search to `answer`. An invalid regex answers `None` without it.
+pub(super) fn resolve_search(
+    base: &Path,
+    at_prefix: &str,
+    cancel: &AtomicBool,
+    answer: impl FnOnce(&AtSearch<'_>, &IndexScope) -> Option<Suggestions>,
 ) -> Option<Suggestions> {
     let (raw_query, _is_at_prefix, is_quoted_prefix) = parse_path_prefix(at_prefix);
     let scoped_query = resolve_scoped_query(base, &raw_query);
@@ -233,8 +275,9 @@ fn search(
                 .ok()?,
         )
     };
+    let lower_query = query.to_lowercase();
     let search = AtSearch {
-        query: &query,
+        lower_query: &lower_query,
         display_base: scoped_query
             .as_ref()
             .map(|scoped| scoped.display_base.as_str()),
@@ -249,18 +292,7 @@ fn search(
         Some(scoped) => index_scope(&scoped.display_base),
         None => IndexScope::Unscoped,
     };
-    match index.query(base, &scope, &search) {
-        Answer::Served(answered) => answered,
-        Answer::Walk => {
-            let found = walk_directory(
-                search.walk_base,
-                search.regex,
-                search.full_path_mode,
-                search.cancel,
-            );
-            rank(found.iter().map(String::as_str), &search)
-        }
-    }
+    answer(&search, &scope)
 }
 
 /// The typed scope as an index prefix: relative, no `..` component, a leading `./`
@@ -277,7 +309,7 @@ fn index_scope(display_base: &str) -> IndexScope {
 }
 
 /// A scored candidate form, ordered by score (descending), then depth, then path.
-struct RankedForm<'a> {
+pub(super) struct RankedForm<'a> {
     score: i32,
     depth: usize,
     form: &'a str,
@@ -293,37 +325,14 @@ impl RankedForm<'_> {
     }
 }
 
-/// The one ranking, shared by the walk and the index paths, over the candidates' fd
-/// printed forms: score (the query lowercased once), drop the zero scores, and keep
-/// the best [`MAX_SUGGESTIONS`] by score, then depth, then path — bounded work, the
-/// full matched set never collects — then build the items. `None` means no menu.
-pub(super) fn rank<'a>(
-    candidates: impl Iterator<Item = &'a str>,
-    search: &AtSearch<'_>,
-) -> Option<Suggestions> {
-    let AtSearch {
-        query,
-        display_base,
-        at_prefix,
-        is_quoted_prefix,
-        ..
-    } = search;
-    let lower_query = query.to_lowercase();
-    let mut best: Vec<RankedForm<'_>> = Vec::with_capacity(MAX_SUGGESTIONS);
-    for form in candidates {
-        let score = if query.is_empty() {
-            1
-        } else {
-            score_entry(form, &lower_query, form.ends_with('/'))
-        };
-        if score <= 0 {
-            continue;
-        }
-        let ranked = RankedForm {
-            score,
-            depth: form_depth(form),
-            form,
-        };
+/// The one top-[`MAX_SUGGESTIONS`] selection, in rank order: over the walk's ranks, an
+/// index chunk's, and the merged chunk tops alike. Bounded work — the full ranked set
+/// never collects.
+pub(super) fn top_ranked<'a>(
+    ranked: impl IntoIterator<Item = RankedForm<'a>>,
+) -> Vec<RankedForm<'a>> {
+    let mut best: Vec<RankedForm<'a>> = Vec::with_capacity(MAX_SUGGESTIONS);
+    for ranked in ranked {
         if best.len() < MAX_SUGGESTIONS {
             best.push(ranked);
             if best.len() == MAX_SUGGESTIONS {
@@ -338,12 +347,23 @@ pub(super) fn rank<'a>(
             }
         }
     }
-    if best.is_empty() {
-        return None;
-    }
     // The fill phase above only sorts at capacity; a short candidate list arrives in
     // its own order.
     best.sort_unstable_by(RankedForm::cmp);
+    best
+}
+
+/// The menu of the top ranks, in their order. `None` means no menu.
+pub(super) fn suggestions(best: Vec<RankedForm<'_>>, search: &AtSearch<'_>) -> Option<Suggestions> {
+    if best.is_empty() {
+        return None;
+    }
+    let AtSearch {
+        display_base,
+        at_prefix,
+        is_quoted_prefix,
+        ..
+    } = search;
     let items: Vec<CompletionItem> = best
         .into_iter()
         .map(|ranked| {
