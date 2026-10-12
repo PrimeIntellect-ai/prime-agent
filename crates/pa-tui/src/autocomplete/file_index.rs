@@ -181,12 +181,12 @@ impl FileIndex {
             return false;
         };
         let canonical_base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
-        spawn_applier(
+        drop(spawn_applier(
             Arc::downgrade(&self.shared),
             events,
             base.to_path_buf(),
             canonical_base,
-        );
+        ));
         if let Some(entries) = walk_index_entries(base, cap) {
             self.replace(IndexState::Ready {
                 entries,
@@ -339,7 +339,7 @@ fn spawn_applier(
     events: Receiver<notify::Result<Event>>,
     base: PathBuf,
     canonical_base: PathBuf,
-) {
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         while let Ok(first) = events.recv() {
             let Some(shared) = shared.upgrade() else {
@@ -360,6 +360,8 @@ fn spawn_applier(
                     }
                     IndexState::Ready { .. } => {
                         apply_batch(&mut guard, &batch, &base, &canonical_base);
+                        #[cfg(test)]
+                        shared.ready.notify_all();
                         break;
                     }
                     // The watcher that fed this batch is gone: the state is a
@@ -368,7 +370,7 @@ fn spawn_applier(
                 }
             }
         }
-    });
+    })
 }
 
 /// Apply one watcher batch using each path's current existence. A structural event on
@@ -682,6 +684,64 @@ mod freshness_tests {
             _ => panic!("unexpected state"),
         };
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn invalidated_watcher_cannot_disable_a_rebuilt_index() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        std::fs::write(base.join("visible.rs"), "visible").expect("write");
+        let shared = Arc::new(Shared {
+            state: Mutex::new(snapshot(base)),
+            ready: Condvar::new(),
+        });
+        let (sender, events) = mpsc::channel();
+        let worker = spawn_applier(
+            Arc::downgrade(&shared),
+            events,
+            base.to_path_buf(),
+            base.to_path_buf(),
+        );
+        sender
+            .send(Ok(Event::new(notify::EventKind::Create(CreateKind::File))
+                .add_path(base.join(".ignore"))))
+            .expect("invalidate");
+        let guard = shared.state.lock().expect("lock");
+        let (mut guard, timeout) = shared
+            .ready
+            .wait_timeout_while(guard, std::time::Duration::from_secs(30), |state| {
+                matches!(state, IndexState::Ready { .. })
+            })
+            .expect("wait for invalidation");
+        assert!(!timeout.timed_out(), "watcher never invalidated its index");
+        assert!(matches!(*guard, IndexState::Unbuilt));
+        // Complete a new generation while holding the same state lock. An old
+        // callback may still have queued an error when its watcher was dropped.
+        *guard = snapshot(base);
+        let _ = sender.send(Err(notify::Error::generic("old watcher error")));
+        drop(sender);
+        drop(guard);
+        worker.join().expect("applier exits");
+        let guard = shared.state.lock().expect("lock");
+        assert!(matches!(*guard, IndexState::Ready { .. }));
+        assert_matches_live_walk(&guard, base);
+    }
+
+    #[test]
+    fn unknown_directory_modify_refreshes_descendants() {
+        for kind in [ModifyKind::Any, ModifyKind::Other] {
+            let outer = tempfile::tempdir().expect("tempdir");
+            let base = outer.path();
+            std::fs::create_dir(base.join("dir")).expect("mkdir");
+            std::fs::write(base.join("dir/old.rs"), "old").expect("write");
+            let mut state = snapshot(base);
+            std::fs::remove_dir_all(base.join("dir")).expect("remove");
+            std::fs::create_dir(base.join("dir")).expect("mkdir");
+            std::fs::write(base.join("dir/new.rs"), "new").expect("write");
+            let event = Event::new(notify::EventKind::Modify(kind)).add_path(base.join("dir"));
+            apply_batch(&mut state, &[Ok(event)], base, base);
+            assert_matches_live_walk(&state, base);
+        }
     }
 
     #[cfg(unix)]
