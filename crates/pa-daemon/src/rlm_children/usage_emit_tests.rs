@@ -808,7 +808,7 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
     let notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = notifications.clone();
     sessions.set_delete_notifier(Arc::new(move |id| {
-        observed.lock().unwrap().push(id.to_string())
+        observed.lock().unwrap().push(id.to_string());
     }));
     let roster_events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let observed = roster_events.clone();
