@@ -436,6 +436,7 @@ async fn create_session_appends_missing_resume_settings_rows() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
+        rlm_usage_store: None,
         rlm_depth: None,
         daemonless: true,
         telemetry: None,
