@@ -1100,4 +1100,34 @@ mod tests {
             fs::remove_dir_all(path.parent().unwrap()).unwrap();
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_journal_releases_ownership_while_a_duplicate_handle_survives() {
+        let path = temp_path("duplicate-owner.recovery.jsonl");
+        let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+        owner
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = owner.get_latest();
+        let inherited = owner._write_owner.try_clone().unwrap();
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(owner);
+        let successor = WorkerRecoveryJournal::open(&path)
+            .expect("logical owner drop releases its lock even while a duplicate handle survives");
+        assert_eq!(successor.get_latest(), expected);
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(inherited);
+        assert!(
+            WorkerRecoveryJournal::open(&path).is_err(),
+            "closing the old handle must not release the successor's ownership",
+        );
+        drop(successor);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
 }
