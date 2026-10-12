@@ -1125,3 +1125,205 @@ async fn close_preserves_final_usage_across_a_transient_child_file_read_failure(
     server.abort();
     let _ = server.await;
 }
+
+struct FinalWatcherSink {
+    capture: CapturingSink,
+    child_file: PathBuf,
+    attempts: std::sync::Mutex<Vec<RlmChildUsageReport>>,
+    commands: Arc<std::sync::Mutex<Vec<Value>>>,
+    recovered: std::sync::atomic::AtomicBool,
+}
+
+impl RlmChildUsageSink for FinalWatcherSink {
+    fn record(
+        &self,
+        report: RlmChildUsageReport,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move {
+            let attempt = {
+                let mut attempts = self.attempts.lock().unwrap();
+                attempts.push(report.clone());
+                attempts.len()
+            };
+            if attempt == 3 {
+                assert!(
+                    self.commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|command| command["type"] != "follow_up"),
+                    "the bounded final replay must precede the parent's terminal notice"
+                );
+            }
+            if attempt == 1 {
+                // The slice-top flush succeeds; the child's final turn lands afterward.
+                let row = json!({"type":"message","id":"a2","parentId":"a1",
+                "timestamp":"2026-09-23T00:00:03.000Z", "message": {
+                    "role":"assistant","content":[],"stopReason":"toolUse",
+                    "usage":{"input":7,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":10,
+                        "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}
+                }});
+                let mut file = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&self.child_file)
+                    .unwrap();
+                std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).unwrap();
+                self.capture.record(report).await
+            } else if attempt == 2 || !self.recovered.load(std::sync::atomic::Ordering::Relaxed) {
+                false
+            } else {
+                self.capture.record(report).await
+            }
+        })
+    }
+    fn forget(
+        &self,
+        id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.capture.forget(id)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FinalWatcherFailure {
+    Transient,
+    Persistent,
+}
+
+async fn settled_watcher_replays_only_one_failed_final_interval(failure: FinalWatcherFailure) {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let (sessions, kills, commands, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(FinalWatcherSink {
+        capture: CapturingSink::default(),
+        child_file: file.clone(),
+        attempts: std::sync::Mutex::new(Vec::new()),
+        commands: commands.clone(),
+        recovered: std::sync::atomic::AtomicBool::new(matches!(
+            failure,
+            FinalWatcherFailure::Transient
+        )),
+    });
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-final-watch", &file);
+    record.lock().await.session_dir = tmp.path().join("child-display").display().to_string();
+    sessions.inner.children.lock().await.push(record.clone());
+    let (settle_tx, mut settle_rx) = tokio::sync::mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = settle_tx.send(());
+    }));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        sessions.inner.watch_child_settle(&record),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), settle_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!sessions.any_running().await);
+    assert_eq!(
+        sessions.list_subagents().await.unwrap()[0].status,
+        "completed"
+    );
+    let complete_report = |report: &RlmChildUsageReport| {
+        (
+            report.report_id.clone(),
+            report.rlm_child_id.clone(),
+            report.batches.clone(),
+        )
+    };
+    let final_report = {
+        let attempts = sink.attempts.lock().unwrap();
+        assert_eq!(
+            attempts.len(),
+            3,
+            "one slice-top attempt and exactly two final attempts"
+        );
+        assert_eq!(complete_report(&attempts[1]), complete_report(&attempts[2]));
+        assert_ne!(
+            attempts[0].report_id, attempts[1].report_id,
+            "a new interval gets its own report identity"
+        );
+        attempts[1].clone()
+    };
+    assert_eq!(
+        final_report.batches,
+        vec![(
+            pa_types::session::ChildUsageOrigin::SpawnTask,
+            pa_types::ai::Usage {
+                input: 7,
+                output: 3,
+                total_tokens: 10,
+                ..Default::default()
+            }
+        )]
+    );
+    assert!(sink.capture.forgotten.lock().unwrap().is_empty());
+    assert_eq!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command["type"] == "follow_up")
+            .count(),
+        1
+    );
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert!(settle_rx.try_recv().is_err());
+    match failure {
+        FinalWatcherFailure::Transient => {
+            {
+                let reports = sink.capture.reports.lock().unwrap();
+                assert_eq!(reports.len(), 2);
+                assert_eq!(complete_report(&reports[1]), complete_report(&final_report));
+            }
+            assert!(record.lock().await.pending_usage_report.is_none());
+            assert_eq!(record.lock().await.attributed_rows, Some(3));
+        }
+        FinalWatcherFailure::Persistent => {
+            {
+                let held = record.lock().await;
+                let pending = held.pending_usage_report.as_ref().unwrap();
+                assert_eq!(
+                    (complete_report(&pending.0), pending.1),
+                    (complete_report(&final_report), 3)
+                );
+                assert_eq!(held.attributed_rows, Some(2));
+            }
+            sink.recovered
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            sessions
+                .close_children(ChildCloseReason::Shutdown)
+                .await
+                .unwrap();
+            assert_eq!(
+                sink.attempts.lock().unwrap().len(),
+                4,
+                "later explicit close still owns the frozen debt"
+            );
+            let reports = sink.capture.reports.lock().unwrap();
+            assert_eq!(reports.len(), 2);
+            assert_eq!(complete_report(&reports[1]), complete_report(&final_report));
+            assert_eq!(
+                sink.capture.forgotten.lock().unwrap().as_slice(),
+                &["sub-final-watch"]
+            );
+            assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert!(settle_rx.try_recv().is_err());
+        }
+    }
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn settled_watcher_replays_a_failed_final_emit_before_its_notice_and_settle() {
+    settled_watcher_replays_only_one_failed_final_interval(FinalWatcherFailure::Transient).await;
+}
+
+#[tokio::test]
+async fn settled_watcher_caps_a_persistent_final_failure_and_preserves_the_debt() {
+    settled_watcher_replays_only_one_failed_final_interval(FinalWatcherFailure::Persistent).await;
+}
