@@ -51,6 +51,7 @@ class Server(http.server.ThreadingHTTPServer):
         super().__init__(('127.0.0.1', 0), Handler)
         self.phase = 'setup'
         self.requests = {'setup': [], 'resume': []}
+        self.tool_names = {}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -65,8 +66,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         requests = self.server.requests[self.server.phase]
         requests.append(body)
         if len(requests) == 1:
+            offered = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
+            name = next((name for name in ('python_repl', 'ipython') if name in offered), None)
+            if name is None:
+                self.send_error(422, 'No supported Python REPL tool offered')
+                return
+            self.server.tool_names[self.server.phase] = name
             delta = {'tool_calls': [{'index': 0, 'id': 'call_' + self.server.phase,
-                     'type': 'function', 'function': {'name': 'ipython',
+                     'type': 'function', 'function': {'name': name,
                      'arguments': json.dumps({'code': SETUP if self.server.phase == 'setup' else READ})}}]}
             finish = 'tool_calls'
         else:
@@ -170,6 +177,7 @@ def run_case(binary, label, root):
         return {'version': version['stdout'].strip(), 'setup': setup_probe,
                 'restored': {**actual, 'cwd': '<session-cwd>'},
                 'notice': stored_notice, 'notice_before_first_request': True,
+                'offered_repl_tool_names': server.tool_names,
                 'request_counts': {k: len(v) for k, v in server.requests.items()},
                 'display': stored[0]['display'], 'details': stored[0].get('details'),
                 'setup_stdout': setup['stdout'], 'resume_stdout': resume['stdout'],
@@ -192,7 +200,9 @@ def main():
     result = {'ts_release_archive_sha256': archive_hash,
               'binaries': {label: {'path': str(path), 'sha256': sha256(path)}
                            for label, path in binaries.items()},
-              'intended_difference': RESET, 'runs': {}, 'verified': False}
+              'intended_difference': RESET,
+              'tool_name_normalization': 'Select offered python_repl or legacy ipython; identical cell code.',
+              'runs': {}, 'verified': False}
     try:
         with tempfile.TemporaryDirectory(prefix='restore-notice-parity-') as temp:
             for label, binary in binaries.items():
