@@ -250,6 +250,13 @@ pub struct ImageContent {
     pub rest: JsonMap,
 }
 
+pub const PYTHON_TOOL_NAME: &str = "python_repl";
+
+#[must_use]
+pub fn is_python_tool_name(name: &str) -> bool {
+    matches!(name, PYTHON_TOOL_NAME | "python" | "ipython")
+}
+
 /// Tool call content block (`type: "toolCall"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

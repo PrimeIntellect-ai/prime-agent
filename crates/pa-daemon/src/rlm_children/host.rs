@@ -157,6 +157,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     settled_status: None,
                     settled: false,
                     answer_preview: None,
+                    answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
                     notice_delivered: false,
@@ -375,7 +376,55 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             // Selector errors surface unwrapped (the TS message is the
             // product surface); only the kill below gets a delete context.
-            let record = this.resolve_record(&target, "subagent").await?;
+            let record = match this.resolve_record(&target, "subagent").await {
+                Ok(record) => record,
+                Err(miss) => {
+                    // Retirement is idempotent (the M5 class): a selector
+                    // whose delete receipt already returned answers from
+                    // the tombstone instead of erroring, so a re-delete of
+                    // a settled child (an operator retire, the factory's
+                    // cancel pass) never reports the slot as still held.
+                    let matches = this
+                        .deleted_children
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .filter(|deleted| deleted.matches(&target))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    match matches.len() {
+                        0 => return Err(miss),
+                        1 => {
+                            let deleted = &matches[0];
+                            return Ok(RlmDeleteSubagentResult {
+                                subagent: RlmSubagentEntry {
+                                    rlm_child_id: deleted.rlm_child_id.clone(),
+                                    active_session_id: Some(deleted.active_session_id.clone()),
+                                    session_id: deleted.session_id.clone(),
+                                    session_name: deleted.session_name.clone(),
+                                    session_dir: deleted.session_dir.clone(),
+                                    status: deleted.status,
+                                    activity: None,
+                                    tool_use_count: None,
+                                    duration_ms: Some(
+                                        now_ms().saturating_sub(deleted.started_at_ms),
+                                    ),
+                                    answer_preview: deleted.answer_preview.clone(),
+                                    replied_since_task: None,
+                                    progress_note: None,
+                                    label: None,
+                                    last_activity_at: Some(deleted.started_at_ms),
+                                    activity_stale_ms: None,
+                                },
+                                outcome: Some("deleted"),
+                            });
+                        }
+                        _ => bail!(
+                            "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+                        ),
+                    }
+                }
+            };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
             let no_longer_matches = {

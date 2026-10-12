@@ -32,8 +32,11 @@ races) plus the accepted review findings from both:
 - long state ids disambiguate their spawn names with a digest, so two
   states sharing a 20-character prefix never collide on the supervisor's
   unique sibling-name requirement;
-- a configured inline subagent name labels the spawned children verbatim
-  (the first instance), with the generated label's -i<n>/-a<n> suffixes on
+- a configured inline subagent name labels the spawned children
+  run-scoped: the spawn label prefixes the configured name with the run
+  id (the supervisor's sibling names are per-parent-session and a parent
+  outlives its runs, so a verbatim name would collide with a prior run's
+  children), with the generated label's -i<n>/-a<n> suffixes on
   re-entry, foreach fan-out, and retries; over-length names and names
   duplicated across states are rejected at write time (Macroscope review
   finding: the name was dropped, so children always got the generated
@@ -62,6 +65,7 @@ from unittest.mock import patch
 import rlm as rlm_module
 from rlm import factory as factory_module
 from rlm.factory import (
+    ANSWER_BINDING_CAP,
     ANSWER_CAPTURE_CAP,
     BACKOFF_MAX_ATTEMPTS,
     EVENT_WINDOW,
@@ -104,6 +108,11 @@ from rlm.harness import HarnessState
 # ---------------------------------------------------------------------------
 # Spec fixtures
 # ---------------------------------------------------------------------------
+
+#: The host's roster-preview cap (the daemon's ANSWER_PREVIEW_MAX_CHARS):
+#: the fake host mirrors it so the binding lane's full text is what
+#: distinguishes a binding that survives truncation from one that does not.
+HOST_ANSWER_PREVIEW_CHARS = 160
 
 
 def state(state_id: str, **overrides: Any) -> dict[str, Any]:
@@ -2330,23 +2339,38 @@ class ChildNameTest(unittest.TestCase):
 
 
 class SpawnLabelTest(unittest.TestCase):
-    """The configured inline subagent name labels spawned children.
+    """The configured inline subagent name labels spawned children run-scoped.
 
-    The first instance of a state spawns with the configured name verbatim
-    (the label agents message the child by); later instances and retries
-    keep the generated label's -i<n>/-a<n> suffixes, because one state's
-    settled children stay registered for the run's life and the supervisor
-    rejects duplicate sibling names. (Macroscope review finding: the name
-    was dropped, so every child got the generated label.)
+    Every machine child label carries the run id prefix: the supervisor's
+    sibling names are per-parent-session, and a parent session outlives
+    its runs, so a verbatim configured name would collide with a prior
+    run's settled children (they stay registered for the run's life) —
+    the M1 unresolvable-pause class. Later instances and retries keep the
+    generated label's -i<n>/-a<n> suffixes, because the supervisor rejects
+    duplicate sibling names. (Macroscope review finding: the name was
+    dropped, so every child got the generated label.)
     """
 
-    def test_configured_name_labels_the_first_instance_verbatim(self) -> None:
-        self.assertEqual(_spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1), "reviewer")
+    def test_configured_name_labels_the_first_instance_run_scoped(self) -> None:
+        self.assertEqual(
+            _spawn_label("reviewer", "0123456789abcdef", "reviewing", 0, 1),
+            "012345-reviewer",
+        )
+
+    def test_two_runs_of_one_machine_never_share_a_label(self) -> None:
+        # M1: machine child names are supervisor-global across runs; the
+        # run prefix keeps two runs of the same machine from colliding on
+        # the supervisor's unique sibling-name requirement.
+        one = _spawn_label("impl-build", "0123456789abcdef", "implement", 0, 1)
+        two = _spawn_label("impl-build", "fedcba9876543210", "implement", 0, 1)
+        self.assertEqual(one, "012345-impl-build")
+        self.assertEqual(two, "fedcba-impl-build")
+        self.assertNotEqual(one, two)
 
     def test_configured_name_keeps_the_generated_suffixes_when_disambiguating(self) -> None:
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "reviewer-i1")
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "reviewer-a2")
-        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "reviewer-i2-a3")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 1, 1), "r-reviewer-i1")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 0, 2), "r-reviewer-a2")
+        self.assertEqual(_spawn_label("reviewer", "r", "reviewing", 2, 3), "r-reviewer-i2-a3")
         self.assertNotEqual(
             _spawn_label("reviewer", "r", "reviewing", 0, 1), _spawn_label("reviewer", "r", "reviewing", 1, 1)
         )
@@ -2358,17 +2382,21 @@ class SpawnLabelTest(unittest.TestCase):
         )
 
     def test_suffixed_labels_stay_within_the_host_cap(self) -> None:
-        # A configured name at the 64-character cap still fits its first
-        # instance; a suffixed admission that would pass the cap shrinks
-        # its base with a digest of the full name, like the generated
-        # labels do (Macroscope and Cursor review findings: the overflow
-        # would fail every later spawn admission).
+        # The run prefix costs 7 characters of the 64-character cap, so a
+        # long configured name never appears verbatim: a label that would
+        # pass the cap shrinks its base with a digest of the full prefixed
+        # name, like the generated labels do (Macroscope and Cursor review
+        # findings: the overflow would fail every later spawn admission).
         long_name = "x" * SUBAGENT_NAME_MAX_LENGTH
-        self.assertEqual(_spawn_label(long_name, "r", "a", 0, 1), long_name)
+        prefixed_base = f"r-{long_name}"
+        digest = hashlib.sha256(prefixed_base.encode("utf-8")).hexdigest()[:16]
+        first = _spawn_label(long_name, "r", "a", 0, 1)
+        self.assertLessEqual(len(first), SUBAGENT_NAME_MAX_LENGTH)
+        self.assertIn(digest, first)
         second = _spawn_label(long_name, "r", "a", 1, 1)
         self.assertLessEqual(len(second), SUBAGENT_NAME_MAX_LENGTH)
         self.assertTrue(second.endswith("-i1"))
-        self.assertIn(hashlib.sha256(long_name.encode("utf-8")).hexdigest()[:16], second)
+        self.assertIn(digest, second)
         # Truncation alone could collide (two long names sharing the
         # prefix): the digest keeps them distinct.
         sharing_prefix = "x" * (SUBAGENT_NAME_MAX_LENGTH - 1) + "y"
@@ -2489,7 +2517,7 @@ class FactoryHelpTest(unittest.TestCase):
 
         # The configured inline subagent name contract.
         self.assertIn("The optional `name` labels the spawned children", flat)
-        self.assertIn("the first instance is named exactly `name`", flat)
+        self.assertIn("the spawn label is `<run6>-name`", flat)
         self.assertIn("unique across the machine's states", flat)
         self.assertIn("a name another state's name can suffix onto, `foo` vs `foo-i1`, is rejected at write time", flat)
 
@@ -2675,11 +2703,21 @@ def _node_of_name(name: str) -> str:
     """The factory node a spawn name belongs to.
 
     Generated labels are "sw-<node id>-<run>-..."; a state with a
-    configured inline subagent name spawns children named by it verbatim,
-    so such a name keys the node by the whole string.
+    configured inline subagent name spawns children labeled
+    "<run6>-<configured>" (run-scoped), so a leading 6-hex run prefix keys
+    the node by the configured base with any trailing -i<n>/-a<n>
+    disambiguation parts stripped (the test machines' configured names
+    never end in those shapes).
     """
     parts = name.split("-")
-    return parts[1] if parts[0] == "sw" and len(parts) > 2 else name
+    if parts[0] == "sw" and len(parts) > 2:
+        return parts[1]
+    if len(parts[0]) == 6 and all(char in "0123456789abcdef" for char in parts[0]):
+        base = parts[1:]
+        while len(base) > 1 and re.fullmatch(r"i[1-9][0-9]*|a[2-9][0-9]*", base[-1]):
+            base = base[:-1]
+        return "-".join(base)
+    return name
 
 
 class FakeHost:
@@ -2756,7 +2794,18 @@ class FakeHost:
             "duration_ms": 5,
         }
         if answer is not None:
-            entry["answer_preview"] = answer
+            # The real host hands the kernel a compact preview (about 160
+            # characters, whitespace-collapsed, ellipsis tail) plus the
+            # FULL final answer as the collect envelope's binding lane;
+            # the fake mirrors both, so a long fenced JSON binds from the
+            # full lane exactly like production.
+            compact = " ".join(answer.split())
+            entry["answer_preview"] = (
+                compact[:HOST_ANSWER_PREVIEW_CHARS - 3] + "..."
+                if len(compact) > HOST_ANSWER_PREVIEW_CHARS
+                else compact
+            )
+            entry["answer_text"] = answer
         if error is not None:
             entry["error"] = error
         return entry
@@ -2779,6 +2828,14 @@ class FakeHost:
             # current one, so rate_limit_first<n> fails exactly the first n.
             name = payload["kwargs"]["name"]
             node_id = _node_of_name(name)
+            # The supervisor rejects duplicate sibling names: a prior run's
+            # settled children stay registered, so a same-name admission
+            # fails exactly like the real host (the M1 class).
+            if any(child["name"] == name for child in self.children.values()):
+                raise RuntimeError(
+                    f'Agent name "{name}" is unavailable: an agent of that '
+                    "name already exists at depth 1 under this parent"
+                )
             attempted = len(
                 [
                     p
@@ -2835,12 +2892,15 @@ class FakeHost:
         if request_type == "rlm.delete_subagent":
             target = payload["target"]
             child = self.children.pop(target, None)
+            # The real host's delete receipt reports the row as cancelled
+            # (a live child's delete settles it cancelled), so the kernel's
+            # payload validation sees the same shape it sees in production.
             return {
                 "subagent": {
                     "rlm_child_id": target,
                     "session_name": child["name"] if child else "unknown",
                     "session_dir": f"/tmp/{target}",
-                    "status": "running",
+                    "status": "cancelled",
                 },
                 "outcome": "deleted",
             }
@@ -2857,6 +2917,41 @@ class DeleteFailsHost(FakeHost):
         if request_type == "rlm.delete_subagent":
             self.calls.append((request_type, payload or {}))
             raise RuntimeError("delete_subagent: child already gone")
+        return await super().__call__(request_type, payload)
+
+
+class LateAnswerHost(FakeHost):
+    """FakeHost whose FIRST collect of a late child settles it with no
+    captured answer (the host-side capture race); later collects return
+    the real answer."""
+
+    def __init__(self, clock: "FakeClock | None" = None, late_children: "set[str] | frozenset[str]" = frozenset()):
+        super().__init__(clock=clock)
+        self.late_children = set(late_children)
+        self.collects_of: dict[str, int] = {}
+
+    async def __call__(self, request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = payload or {}
+        if request_type == "rlm.collect":
+            late = [t for t in payload["targets"] if t in self.late_children and self.collects_of.get(t, 0) == 0]
+            if late:
+                for target in late:
+                    self.collects_of[target] = self.collects_of.get(target, 0) + 1
+                self.calls.append((request_type, payload))
+                self.collects += 1
+                if self.clock is not None:
+                    self.clock.advance(self.clock.advance_per_collect)
+                return {
+                    "results": [
+                        self._entry(
+                            child_id=target,
+                            name=self.children[target]["name"],
+                            status="done",
+                            settled=True,
+                        )
+                        for target in late
+                    ]
+                }
         return await super().__call__(request_type, payload)
 
 
@@ -3219,9 +3314,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
     async def test_inline_subagent_name_labels_the_spawned_child(self) -> None:
         # Macroscope review finding: the inline subagent name was dropped by
         # _resolve_subagents, so the child spawned with the generated label
-        # instead of the configured name agents message the child by. The
-        # name rides through run creation to the spawn call, and the spawned
-        # event's ledger entry carries the same label.
+        # instead of the configured name. The name rides through run creation
+        # to the spawn call (run-scoped: prefixed with the run id), and the
+        # spawned event's ledger entry carries the same label — the label
+        # agents message the child by.
         self.store_factory(
             {
                 "run": {"failure_policy": "continue"},
@@ -3233,14 +3329,67 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "done")
+        label = f"{result['run_id'][:6]}-reviewer"
         self.assertEqual(
             [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
-            ["reviewer"],
+            [label],
         )
         self.assertEqual(
             [event["name"] for event in self.all_events_of(result, "spawned")],
-            ["reviewer"],
+            [label],
         )
+
+    @async_test
+    async def test_two_runs_of_one_machine_do_not_collide_on_child_names(self) -> None:
+        # M1: machine child names are supervisor-global across runs — a
+        # prior run's settled children stay registered for the run's life
+        # (and forever when their delete failed), so a verbatim configured
+        # name made a fresh run's spawn admission fail with "Agent name ...
+        # is unavailable" and the machine paused at spawn-zero. The
+        # run-scoped label prefix keeps run 2's admissions unique; the
+        # FakeHost rejects duplicate sibling names exactly like the real
+        # supervisor, so this test fails without the prefix.
+        self.host.outcomes["impl"] = {"status": "done", "answer": "IMPL"}
+        self.host.outcomes["check"] = {"status": "done", "answer": "CHECK"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "impl",
+                        "entry": True,
+                        "subagent": {"prompt": "Build.", "name": "impl-build"},
+                        "outputs": [{"name": "built", "type": "text"}],
+                    },
+                    {
+                        "id": "check",
+                        "subagent": "worker",
+                        "inputs": [{"name": "built", "type": "text", "from": "impl.built"}],
+                    },
+                ],
+                "transitions": [{"from": "impl", "to": "check"}],
+            }
+        )
+        first = await self.start()
+        first_status = await self.settle(first)
+        self.assertEqual(first_status["state"], "done")
+        second = await self.start()
+        second_status = await self.settle(second)
+        self.assertEqual(second_status["state"], "done")
+        # Run 2's children spawn with distinct, run-scoped labels; neither
+        # admission collided with run 1's still-registered children.
+        first_label = f"{first['run_id'][:6]}-impl-build"
+        second_label = f"{second['run_id'][:6]}-impl-build"
+        self.assertNotEqual(first_label, second_label)
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(first, "spawned") if event["node"] == "impl"],
+            [first_label],
+        )
+        self.assertEqual(
+            [event["name"] for event in self.all_events_of(second, "spawned") if event["node"] == "impl"],
+            [second_label],
+        )
+        self.assertEqual(self.all_events_of(second, "node_error"), [])
 
     @async_test
     async def test_inline_subagent_name_disambiguates_reentry_and_foreach(self) -> None:
@@ -3265,9 +3414,10 @@ class FactoryExecutorTest(_ExecutorTestCase):
         result = await self.start()
         status = await self.settle(result)
         self.assertEqual(status["state"], "done")
+        run_prefix = result["run_id"][:6]
         self.assertEqual(
             [p["kwargs"]["name"] for p in self.host.calls_of("rlm.run")],
-            ["worker", "worker-i1"],
+            [f"{run_prefix}-worker", f"{run_prefix}-worker-i1"],
         )
 
         self.host.outcomes["src"] = {
@@ -3293,18 +3443,19 @@ class FactoryExecutorTest(_ExecutorTestCase):
             },
             spec_id="fan",
         )
-        result = await self.start("fan")
-        status = await self.settle(result)
+        fan_result = await self.start("fan")
+        status = await self.settle(fan_result)
         self.assertEqual(status["state"], "done")
         # The first foreach instance keeps the configured name; the second
         # disambiguates with the instance suffix.
+        fan_prefix = fan_result["run_id"][:6]
         self.assertEqual(
             [
                 p["kwargs"]["name"]
                 for p in self.host.calls_of("rlm.run")
-                if p["kwargs"]["name"].startswith("expander")
+                if f"-expander" in p["kwargs"]["name"]
             ],
-            ["expander", "expander-i1"],
+            [f"{fan_prefix}-expander", f"{fan_prefix}-expander-i1"],
         )
 
     @async_test
@@ -3569,6 +3720,124 @@ class FactoryExecutorTest(_ExecutorTestCase):
         captured = self.node_status(status, "a")["answer_preview"]
         self.assertEqual(len(captured), ANSWER_CAPTURE_CAP)
         self.assertEqual(captured, long_answer[:ANSWER_CAPTURE_CAP])
+
+    @async_test
+    async def test_json_output_longer_than_the_preview_cap_binds_from_the_full_answer(self) -> None:
+        # M2: the settle's declared fenced JSON was longer than the host's
+        # ~160-character roster preview, so the old preview-only capture
+        # truncated it mid-object and the downstream bind failed with "no
+        # JSON object containing output" although the child settled with
+        # exactly the fenced JSON. The collect envelope's full answer is
+        # the binding lane; the preview stays a preview.
+        worktree = "/Users/x/Research/pa-worktrees/rp-3354-the-very-long-worktree-name"
+        payload = {"worktree": worktree, "notes": "y" * 150}
+        long_json = f"Intro prose.\n\n```json\n{json.dumps(payload)}\n```\n\nOutro."
+        assert len(long_json) > HOST_ANSWER_PREVIEW_CHARS
+        self.host.outcomes["setup"] = {"status": "done", "answer": long_json}
+        self.host.outcomes["impl"] = {"status": "done", "answer": "DONE"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "setup",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "worktree", "type": "json"}],
+                    },
+                    {
+                        "id": "impl",
+                        "subagent": "worker",
+                        "inputs": [{"name": "worktree", "type": "json", "from": "setup.worktree"}],
+                    },
+                ],
+                "transitions": [{"from": "setup", "to": "impl"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        impl_prompt = self.host.spawn_calls("impl")[0]["prompt"]
+        self.assertIn(f"- worktree: {json.dumps(worktree)}", impl_prompt)
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # The event ledger previews compactly; the binding lane stays full:
+        # the captured answer is the raw final text (newlines intact), not
+        # the host's whitespace-collapsed roster preview.
+        captured_event = self.all_events_of(result, "answer_captured")[0]
+        self.assertLessEqual(len(captured_event["answer"]), ANSWER_CAPTURE_CAP)
+        self.assertIn("```json\n", captured_event["answer"])
+        self.assertNotIn("...", captured_event["answer"])
+
+    @async_test
+    async def test_a_json_null_output_is_a_captured_value_not_a_failure(self) -> None:
+        # Review finding (PR #3462): the capture-complete check conflated a
+        # port that parsed as JSON null with a missing port — a legit null
+        # output triggered the capture retry and recorded
+        # output_capture_failed although the bind succeeded. Presence of
+        # the key is the captured test, never the value.
+        self.host.outcomes["src"] = {"status": "done", "answer": '```json\n{"data": null}\n```'}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Proceed."},
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data", "optional": True}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+        # The null was captured and bound: the dependent renders the JSON
+        # null, not the no-value sentinel path.
+        self.assertIn("- data: null", self.host.spawn_calls("dep")[0]["prompt"])
+
+    @async_test
+    async def test_capture_failure_names_the_binding_cap_and_records_the_event(self) -> None:
+        # A declared json output bigger than the executor's binding cap
+        # fails to parse with the SIZE named in the error (not a bare
+        # missing-output sentence), and the settle records the failure in
+        # the ledger instead of passing silently.
+        huge = f'{{"blob": "{"z" * (ANSWER_BINDING_CAP + 50)}"}}'
+        self.host.outcomes["src"] = {"status": "done", "answer": f"```json\n{huge}\n```"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "blob", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": {"prompt": "Use {blob}."},
+                        "inputs": [{"name": "blob", "type": "json", "from": "src.blob", "optional": True}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        # The optional dependent still proceeds on the sentinel (the
+        # authored contract), but the source's capture failure is recorded.
+        capture_failures = self.all_events_of(result, "output_capture_failed")
+        self.assertEqual(len(capture_failures), 1)
+        self.assertIn(str(ANSWER_BINDING_CAP), capture_failures[0]["error"])
+        self.assertIn("keep the fenced JSON block compact", capture_failures[0]["error"])
 
 
     # -- foreach ----------------------------------------------------------------
@@ -4205,6 +4474,42 @@ class FactoryExecutorTest(_ExecutorTestCase):
         self.assertEqual(again, {"run_id": result["run_id"], "state": "stopped", "cancelled": []})
         run_stopped_events = [e for e in self.executor._runs[result["run_id"]].events if e["kind"] == "run_stopped"]
         self.assertEqual(len(run_stopped_events), 1)
+
+    @async_test
+    async def test_stop_delete_receipts_with_cancelled_status_complete_cleanly(self) -> None:
+        # M5: the host's delete receipt reports a cancelled row (a live
+        # child's delete settles it cancelled; a previously-cancelled
+        # settled child keeps the status verbatim), and the kernel's
+        # payload validation must accept it — the receipt raising
+        # "entry has invalid status" used to turn every factory stop into
+        # cancel_failed bookkeeping and make retirement look failed.
+        self.host.outcomes["a"] = {"status": "running"}
+        self.host.outcomes["b"] = {"status": "running"}
+        self.store_factory(
+            {
+                "nodes": [
+                    {"id": "a", "subagent": "worker"},
+                    {"id": "b", "subagent": "worker"},
+                ],
+            }
+        )
+        result = await self.start()
+        await self.wait_until(lambda: self.host.collects >= 1)
+        stopped = await rlm_module.rlm.factory.stop(result["run_id"])
+        self.assertEqual(stopped["state"], "stopped")
+        self.assertEqual(sorted(stopped["cancelled"]), ["a", "b"])
+        # The delete receipts were accepted: no cancel_failed ledger rows,
+        # and both children released their name slots on the fake host.
+        self.assertEqual(self.all_events_of(result, "cancel_failed"), [])
+        self.assertEqual(
+            [event.get("detail") for event in self.all_events_of(result, "cancelled")],
+            [None, None],
+        )
+        # A retire of the already-cancelled children (the operator's
+        # delete_subagent on a settled/cancelled row) does not raise.
+        for child_id in ("child-1", "child-2"):
+            deleted = await rlm_module.rlm.delete_subagent(child_id)
+            self.assertEqual(deleted.status, "cancelled")
 
     @async_test
     async def test_concurrent_stop_runs_one_cancellation_pass(self) -> None:
@@ -5392,6 +5697,243 @@ class FactoryExecutorTest(_ExecutorTestCase):
             [e["detail"] for e in self.all_events_of(result, "node_ready") if e.get("node") == "fan"],
             ["foreach expanded to zero items; nothing to run"] * 2,
         )
+
+    @async_test
+    async def test_optional_input_waits_for_a_live_upstream_before_spawning(self) -> None:
+        # M3: an optional input over ANOTHER state that is still running
+        # must not bind its null sentinel yet — the sentinel spawned the
+        # dependent while its upstream was in flight (the children exited
+        # "waiting" and the state bookkeeping counted them). The entry
+        # waits for the in-flight source's settle, then binds the real
+        # value; a source with no live entry keeps the loop-form sentinel.
+        self.host.outcomes["impl"] = {"status": "running"}
+        self.host.outcomes["validate"] = {"status": "done", "answer": "VALIDATED"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "impl",
+                        "subagent": "worker",
+                        "outputs": [{"name": "result", "type": "text"}],
+                    },
+                    {
+                        "id": "validate",
+                        "subagent": {"prompt": "Validate the build at {result}."},
+                        "inputs": [
+                            {"name": "result", "type": "text", "from": "impl.result", "optional": True}
+                        ],
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "impl"},
+                    {"from": "seed", "to": "validate"},
+                ],
+            }
+        )
+        result = await self.start()
+        # impl is admitted and still running; the loop must prepare nothing.
+        await self.wait_until(lambda: len(self.host.spawn_calls("impl")) == 1)
+        await self.wait_until(lambda: self.host.collects >= 3)
+        self.assertEqual(self.host.spawn_calls("validate"), [])
+        # The upstream settles with a real value; validate spawns with it
+        # bound, never the null sentinel.
+        self.host.outcomes["impl"] = {"status": "done", "answer": "WTREE-A1"}
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        validate_calls = self.host.spawn_calls("validate")
+        self.assertEqual(len(validate_calls), 1)
+        self.assertIn("WTREE-A1", validate_calls[0]["prompt"])
+        self.assertNotIn("None", validate_calls[0]["prompt"])
+
+    @async_test
+    async def test_capture_retry_rebinds_a_settle_that_raced_the_answer_capture(self) -> None:
+        # M2: the host can settle a child with no captured answer yet (the
+        # capture recovers on a later refresh). The settle-capture retry
+        # re-collects the settled child once and re-runs the capture, so
+        # the declared output binds instead of leaving the settle empty
+        # and failing the downstream bind.
+        self.host = LateAnswerHost(clock=self.clock, late_children={"child-2"})
+        repatch = patch.object(rlm_module, "host_request", self.host)
+        repatch.start()
+        self.addCleanup(repatch.stop)
+        self.host.outcomes["build"] = {
+            "status": "done",
+            "answer": '```json\n{"built": "BIN-A1"}\n```',
+        }
+        self.host.outcomes["use"] = {"status": "done", "answer": "USED"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {"id": "seed", "entry": True, "subagent": "worker"},
+                    {
+                        "id": "build",
+                        "subagent": "worker",
+                        "outputs": [{"name": "built", "type": "json"}],
+                    },
+                    {
+                        "id": "use",
+                        "subagent": {"prompt": "Use {built}."},
+                        "inputs": [{"name": "built", "type": "json", "from": "build.built"}],
+                    },
+                ],
+                "transitions": [
+                    {"from": "seed", "to": "build"},
+                    {"from": "build", "to": "use"},
+                ],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "done")
+        # The first collect of the build child settled it with no answer;
+        # the capture retry re-collected and the port bound.
+        self.assertEqual(self.host.collects_of.get("child-2"), 1)
+        self.assertEqual(
+            [call["prompt"] for call in self.host.spawn_calls("use")],
+            ['Use "BIN-A1".'],
+        )
+        self.assertEqual(self.all_events_of(result, "output_capture_failed"), [])
+
+    @async_test
+    async def test_child_exit_captures_a_provisional_answer_and_marks_needs_verify(self) -> None:
+        # M4: a child that dies without reporting is distinguishable from
+        # completed work. The exit envelope's last assistant text is
+        # captured as a PROVISIONAL answer, the state's entry row reports
+        # needs_verify with that answer, and status() carries the
+        # root-visible needs_verify signal — the exit never silently
+        # counts as settled work.
+        self.host.child_outcomes["child-1"] = {
+            "status": "error",
+            "error": "worker exited mid-flight",
+            "answer": "The CI gate ran clean on lane A; the report is at /tmp/report.md.",
+        }
+        self.store_machine(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 4},
+                "states": [
+                    {"id": "work", "entry": True, "subagent": "worker"},
+                ],
+                "transitions": [],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["needs_verify"], ["work"])
+        work = self.state_report(status, "work")
+        self.assertEqual(work["needs_verify"], True)
+        entry_row = work["entries"][0]
+        self.assertEqual(entry_row["status"], "error")
+        self.assertEqual(entry_row["needs_verify"], True)
+        self.assertIn("report is at /tmp/report.md", entry_row["provisional_answer"])
+        self.assertEqual(
+            [event["node"] for event in self.all_events_of(result, "needs_verify")],
+            ["work"],
+        )
+        # The exit is not silently counted as a settled answer: the usage
+        # stays a plain error settle and no answer_captured row lands.
+        self.assertEqual(self.all_events_of(result, "answer_captured"), [])
+        self.assertEqual(status["usage"]["settled"], 1)
+
+    @async_test
+    async def test_late_sibling_exit_after_terminal_entry_still_marks_needs_verify(self) -> None:
+        # Review finding (Macroscope): a foreach sibling exiting with a
+        # provisional answer AFTER its entry already went terminal (a
+        # sibling failed it first) hit _apply_entry_failure_policy's
+        # terminal guard before the needs_verify mark: the exit capture
+        # kept the answer on the instance, but entry.needs_verify stayed
+        # unset and no needs_verify event fired -- the late exit's work
+        # vanished from every verify surface. The mark now runs before the
+        # terminal guard, independently of the entry's failure policy.
+        self.host.outcomes["src"] = {"status": "done", "answer": '{"items": ["a", "b"]}'}
+        self.store_factory(
+            {
+                "run": {"failure_policy": "continue", "max_parallel": 8},
+                "nodes": [
+                    {"id": "src", "subagent": "worker", "outputs": [{"name": "items", "type": "json"}]},
+                    {
+                        "id": "fan",
+                        "subagent": "worker",
+                        "depends_on": ["src"],
+                        "inputs": [{"name": "items", "type": "json", "from": "src.items"}],
+                        "foreach": {"over": "items", "max": 2},
+                    },
+                ],
+            }
+        )
+        result = await self.start()
+        run = self.executor._runs[result["run_id"]]
+        # src is child-1; the fan instances are child-2 (i0) and child-3
+        # (i1). i0 fails permanently with no answer: the entry goes error
+        # while i1 is still running.
+        self.host.child_outcomes["child-2"] = {"status": "error", "error": "boom-1"}
+        self.host.child_outcomes["child-3"] = {"status": "running"}
+        await self.wait_until(
+            lambda: any(entry.status == "error" for entry in run.states["fan"].entries)
+        )
+        # i1 exits NOW with a provisional answer; the entry is already
+        # terminal, so only a pre-guard verify mark can surface it.
+        self.host.child_outcomes["child-3"] = {
+            "status": "error",
+            "error": "worker exited mid-flight",
+            "answer": "Lane B finished; results staged at /tmp/lane-b.md.",
+        }
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["needs_verify"], ["fan"])
+        fan = self.state_report(status, "fan")
+        self.assertEqual(fan["needs_verify"], True)
+        entry_row = fan["entries"][0]
+        self.assertEqual(entry_row["status"], "error")
+        self.assertEqual(entry_row["needs_verify"], True)
+        self.assertIn("results staged at /tmp/lane-b.md", entry_row["provisional_answer"])
+        self.assertEqual(
+            [event["node"] for event in self.all_events_of(result, "needs_verify")],
+            ["fan"],
+        )
+        # i0 failed with no answer; the entry failed exactly once, so the
+        # needs_verify event stays one-shot and no retry was queued.
+        self.assertEqual(len(self.host.spawn_calls("fan")), 2)
+        self.assertEqual(self.all_events_of(result, "retry"), [])
+
+    @async_test
+    async def test_paused_run_status_carries_the_last_error_and_remedy(self) -> None:
+        # M6: a paused run carries the LAST failed admission/bind error and
+        # a one-line remedy in its status payload — no root-side
+        # archaeology over pending-state lists to learn what failed.
+        self.host.outcomes["src"] = {"status": "done", "answer": "no json here"}
+        self.store_machine(
+            {
+                "run": {"failure_policy": "escalate", "max_parallel": 4},
+                "states": [
+                    {
+                        "id": "src",
+                        "entry": True,
+                        "subagent": "worker",
+                        "outputs": [{"name": "data", "type": "json"}],
+                    },
+                    {
+                        "id": "dep",
+                        "subagent": "worker",
+                        "inputs": [{"name": "data", "type": "json", "from": "src.data"}],
+                    },
+                ],
+                "transitions": [{"from": "src", "to": "dep"}],
+            }
+        )
+        result = await self.start()
+        status = await self.settle(result)
+        self.assertEqual(status["state"], "paused")
+        self.assertEqual(
+            status["pause_reason"],
+            "input 'data': no JSON object containing output 'data' in the upstream answer",
+        )
+        self.assertIn("state 'dep' failed", status["last_error"])
+        self.assertIn("no JSON object containing output 'data'", status["last_error"])
+        self.assertIn(f"rlm.factory.resume('{result['run_id']}')", status["remedy"])
 
     @async_test
     async def test_machine_required_input_over_an_errored_source_fails_the_dependent_entry(self) -> None:
@@ -8005,11 +8547,13 @@ class ScriptedHost:
 
     @staticmethod
     def answer_for(name):
-        if name.startswith("files-source"):
+        # The spawn labels are run-prefixed (run-scoped names), so the
+        # configured name matches anywhere in the label.
+        if "files-source" in name:
             return "```json\n{\"files\": [\"sample.ts\"]}\n```"
-        if name.startswith("file-reviewer"):
+        if "file-reviewer" in name:
             return "sample.ts: clean"
-        if name.startswith("review-aggregator"):
+        if "review-aggregator" in name:
             return "```json\n{\"issues\": [], \"clean\": 1}\n```"
         return "done"
 

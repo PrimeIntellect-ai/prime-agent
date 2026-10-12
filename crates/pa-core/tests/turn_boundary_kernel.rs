@@ -153,7 +153,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
         Some("running the harness cell"),
         vec![(
             "call-1",
-            "ipython",
+            "python_repl",
             json!({ "code": harness_cell(&receipt_path) }),
         )],
     );

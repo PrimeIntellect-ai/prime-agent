@@ -150,8 +150,8 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
     let tools: Vec<&str> = options
         .selected_tools
         .clone()
-        .unwrap_or_else(|| vec!["ipython"]);
-    let has_ipython = tools.contains(&"ipython");
+        .unwrap_or_else(|| vec![pa_types::ai::PYTHON_TOOL_NAME]);
+    let has_ipython = tools.contains(&pa_types::ai::PYTHON_TOOL_NAME);
     let has_file_access = has_ipython || tools.contains(&"bash");
 
     segments.push(PromptSegment::dynamic_segment(
@@ -312,7 +312,7 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
     }
     if !has_ipython {
         lines.push(
-            "This session has no Python REPL (`ipython` tool): the programmatic tools described above are unavailable here."
+            "This session has no Python REPL (`python_repl` tool): the programmatic tools described above are unavailable here."
                 .to_string(),
         );
     }
