@@ -73,6 +73,7 @@ fn existing_retry_returns_current_aggregate_after_other_child() {
 // This models complete-write/sync-error recovery; it does not induce OS fsync failure.
 std::thread_local! {
     pub(super) static FAIL_AFTER_CHILD_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static AFTER_CHILD_OBSERVE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(super) static FAIL_CHILD_CONFIRM_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static PARTIAL_CHILD_APPEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     pub(super) static FAIL_CHILD_TAIL_COMPLETION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -614,4 +615,72 @@ fn owned_tail_completion_obeys_a_managed_lease_and_refuses_a_released_one() {
     assert!(std::fs::read(&store.path).unwrap().starts_with(&partial));
     assert_eq!(attribution_rows(&store).len(), 1);
     store.lease.take().unwrap().release();
+}
+
+#[test]
+fn admitted_confirmation_finishes_while_release_drains_and_later_writes_are_refused() {
+    let (dir, mut store, target) = fixture();
+    let lease = std::sync::Arc::new(
+        crate::lease::acquire_runtime_session_lease(&store.path, dir.path()).unwrap(),
+    );
+    store.lease = Some(std::sync::Arc::clone(&lease));
+    FAIL_AFTER_CHILD_APPEND.with(|fault| fault.set(true));
+    assert!(store
+        .append_child_usage_once("release-a", &target, child(), None)
+        .is_err());
+    assert_eq!(attribution_rows(&store).len(), 1);
+    let original_bytes = std::fs::read(&store.path).unwrap();
+    let (start_tx, start_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        let releaser = std::sync::Arc::clone(&lease);
+        let release = scope.spawn(move || {
+            start_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            releaser.release();
+        });
+        let probe_lease = std::sync::Arc::clone(&lease);
+        let path = store.path.clone();
+        AFTER_CHILD_OBSERVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                start_tx.send(()).unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    if probe_lease.with_owned_mutation(&path, || Ok(())).is_err() {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "release did not refuse new admission"
+                    );
+                    std::thread::yield_now();
+                }
+            }));
+        });
+        let result = store.append_child_usage_once("release-a", &target, child(), None);
+        release.join().unwrap();
+        let mut expected = Usage::default();
+        pa_core::session_engine::rlm_usage::attribute_child_usage(&mut expected, &child());
+        assert!(
+            matches!(result.unwrap(), ChildUsageAppendResult::Created(usage) if usage == expected)
+        );
+    });
+    assert!(store.child_usage_recovery.pending.is_none());
+    assert!(store.child_usage_recovery.created.is_empty());
+    assert_eq!(std::fs::read(&store.path).unwrap(), original_bytes);
+    assert!(store
+        .persist_entry("custom", json!({"customType":"after-release"}))
+        .is_err());
+    assert!(store
+        .append_child_usage_once("release-b", &target, child(), None)
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), original_bytes);
+    let mut reopened = SessionFile::open(&store.path).unwrap();
+    assert!(matches!(
+        reopened
+            .append_child_usage_once("release-a", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Existing(_)
+    ));
+    assert_eq!(attribution_rows(&reopened).len(), 1);
 }

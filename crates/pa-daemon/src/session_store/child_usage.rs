@@ -412,6 +412,12 @@ impl SessionFile {
                 }
             }
             self.child_usage_recovery.created.insert(receipt.entry.id);
+            #[cfg(test)]
+            if let Some(hook) =
+                super::child_usage_tests::AFTER_CHILD_OBSERVE.with(|hook| hook.borrow_mut().take())
+            {
+                hook();
+            }
             Ok(Some(file))
         };
         match lease {

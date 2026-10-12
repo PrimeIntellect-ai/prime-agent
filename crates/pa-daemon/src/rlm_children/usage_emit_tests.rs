@@ -787,6 +787,7 @@ impl RlmChildUsageSink for AckPausedSink {
 enum RetirementCaller {
     Delete,
     Close,
+    InactiveAfterDelete,
 }
 
 async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
@@ -821,7 +822,7 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
     let owned = sessions.clone();
     let retirement = tokio::spawn(async move {
         match caller {
-            RetirementCaller::Delete => owned
+            RetirementCaller::Delete | RetirementCaller::InactiveAfterDelete => owned
                 .delete_subagent("sub-cancel-after-ack".into())
                 .await
                 .map(|_| ()),
@@ -848,6 +849,15 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
                 .await
                 .unwrap();
         }
+        RetirementCaller::InactiveAfterDelete => {
+            assert_eq!(
+                sessions
+                    .delete_inactive_subagent("sub-cancel-after-ack")
+                    .await
+                    .unwrap(),
+                "deleted"
+            );
+        }
         RetirementCaller::Close => {
             sessions
                 .close_children(ChildCloseReason::Shutdown)
@@ -859,7 +869,7 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
     assert!(!sessions.any_running().await);
     assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
     match caller {
-        RetirementCaller::Delete => {
+        RetirementCaller::Delete | RetirementCaller::InactiveAfterDelete => {
             tokio::time::timeout(Duration::from_secs(5), settle_rx.recv())
                 .await
                 .unwrap()
@@ -1034,6 +1044,84 @@ async fn concurrent_close_replays_debt_after_the_first_caller_retires_the_roster
         &["sub-concurrent-close"]
     );
     assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn inactive_delete_finishes_a_running_record_whose_kill_already_acknowledged() {
+    cancellation_after_ack_preserves_retirement(RetirementCaller::InactiveAfterDelete).await;
+}
+
+#[tokio::test]
+async fn close_preserves_final_usage_across_a_transient_child_file_read_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let original = std::fs::read(&file).unwrap();
+    let parked = tmp.path().join("intact-child.jsonl");
+    std::fs::rename(&file, &parked).unwrap();
+    // A directory at the requested path fails open/read on all supported platforms.
+    // The original transcript remains intact, without relying on root-sensitive permissions.
+    std::fs::create_dir(&file).unwrap();
+    let (sessions, kills, _commands, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(CapturingSink::default());
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-transient-read", &file);
+    sessions.inner.children.lock().await.push(record.clone());
+    let first = sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap_err();
+    assert!(first.to_string().contains("usage remains owed"));
+    assert!(sessions.list_subagents().await.unwrap().is_empty());
+    assert!(!sessions.any_running().await);
+    assert!(record.lock().await.pending_usage_report.is_none());
+    assert_eq!(record.lock().await.attributed_rows, Some(0));
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(&parked).unwrap(), original);
+    assert!(sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("usage remains owed"));
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    std::fs::remove_dir(&file).unwrap();
+    std::fs::rename(&parked, &file).unwrap();
+    sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap();
+    {
+        let reports = sink.reports.lock().unwrap();
+        let expected: pa_types::ai::Usage = serde_json::from_value(json!({
+            "input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,
+            "cost":{"input":0.007_531_2,"output":0.001_464_5,"cacheRead":0,"cacheWrite":0,"total":0.008_995_7}
+        })).unwrap();
+        assert_eq!(
+            reports
+                .iter()
+                .map(|report| (report.rlm_child_id.clone(), report.batches.clone()))
+                .collect::<Vec<_>>(),
+            vec![(
+                "sub-transient-read".into(),
+                vec![(pa_types::session::ChildUsageOrigin::SpawnTask, expected)]
+            )]
+        );
+    }
+    assert_eq!(
+        sink.forgotten.lock().unwrap().as_slice(),
+        &["sub-transient-read"]
+    );
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(std::fs::read(&file).unwrap(), original);
+    sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap();
+    assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
     server.abort();
     let _ = server.await;
 }
