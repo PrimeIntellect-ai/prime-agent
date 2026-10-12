@@ -62,7 +62,12 @@ pub fn resolve_child_model(
 
 /// The resolution before the allowlist gate: `None` inherits the parent model; a reference resolves
 /// parent equality first, then an exact catalog selector, then a unique short-form match.
-fn resolve_child_model_unchecked(
+/// Public for the daemonless print host: print sessions do not enforce
+/// `allowedModels`, so its children do not either.
+///
+/// # Errors
+/// Returns an error when the reference cannot be resolved against the catalog.
+pub fn resolve_child_model_unchecked(
     agent_dir: &Path,
     reference: Option<&str>,
     parent_model: Option<&str>,

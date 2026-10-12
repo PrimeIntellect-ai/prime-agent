@@ -215,9 +215,7 @@ impl RlmSubagentHost for NoRlmChildren {
         &self,
         _request: RlmCreateSessionRequest,
     ) -> RlmHostFuture<RlmCreateSessionHandle> {
-        Box::pin(async {
-            anyhow::bail!("rlm.create_session requires a daemon-backed depth-0 session");
-        })
+        Box::pin(async { Err(rlm_create_session_daemonless_error()) })
     }
     fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -264,6 +262,130 @@ pub fn no_children_collect(targets: &[String]) -> anyhow::Result<Vec<RlmChildRes
         anyhow::bail!("No direct RLM child matches \"{target}\" in the current parent session");
     }
     Ok(Vec::new())
+}
+
+// Shared spawn-site extractions (the daemon's supervisor host and the
+// daemonless inline host answer with the same text and the same layout).
+
+/// The workspace's default recursion bound (TS `DEFAULT_RLM_MAX_DEPTH`).
+pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
+
+/// The spawn refusal at the recursion bound.
+#[must_use]
+pub fn rlm_depth_limit_error(depth: u32, max_depth: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "RLM recursion depth limit reached (RLM_DEPTH={depth}, RLM_MAX_DEPTH={max_depth})"
+    )
+}
+
+/// The spawn-name refusal: one source keeps the reservation check and the
+/// availability check byte-identical across hosts.
+#[must_use]
+pub fn spawn_name_unavailable_error(name: &str, depth: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
+    )
+}
+
+/// The `rlm.create_session` refusal for daemonless sessions (the
+/// [`NoRlmChildren`] text, shared by every host that cannot create
+/// resident sessions).
+#[must_use]
+pub fn rlm_create_session_daemonless_error() -> anyhow::Error {
+    anyhow::anyhow!("rlm.create_session requires a daemon-backed depth-0 session")
+}
+
+/// The per-child session directory under the parent's artifacts tree (an
+/// ephemeral temp dir when the parent has no durable session id).
+///
+/// # Errors
+///
+/// Error when the directory cannot be created.
+pub fn rlm_child_session_dir(
+    agent_dir: &std::path::Path,
+    parent_session_id: Option<&str>,
+    child_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let base = match parent_session_id {
+        Some(session_id) => agent_dir
+            .join("session-artifacts")
+            .join(session_id)
+            .join(child_id),
+        None => std::env::temp_dir().join(format!("prime-agent-rlm-{child_id}")),
+    };
+    std::fs::create_dir_all(&base).map_err(|error| {
+        anyhow::anyhow!("create RLM child session dir {}: {error}", base.display())
+    })?;
+    Ok(base)
+}
+
+/// The last persisted `rlm_max_depth_state` custom entry in a session
+/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a
+/// resumed session re-seeds its depth bound from. `None` when absent or
+/// unreadable.
+pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
+    let path = std::path::Path::new(path?);
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
+        &mut bytes,
+    )
+    .ok()?;
+    let content = std::str::from_utf8(&bytes).ok()?;
+    content
+        .lines()
+        .rev()
+        // The exact union gate: a matching row's raw text carries either the
+        // `customType` literal or a `\u`-escape (serde never letter-escapes),
+        // so the union admits every line the reference could match;
+        // `rlm_max_depth_row` judges the candidates by the decoded fields.
+        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
+        .find_map(rlm_max_depth_row)
+}
+
+/// One candidate line's depth bound: `Some(depth)` for a matching custom
+/// row with a parseable `data.maxDepth`, `None` otherwise.
+fn rlm_max_depth_row(line: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("custom") {
+        return None;
+    }
+    if value.get("customType").and_then(serde_json::Value::as_str) != Some("rlm_max_depth_state") {
+        return None;
+    }
+    value
+        .get("data")
+        .and_then(|data| data.get("maxDepth"))
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// The depth-bound resolution and its precedence: chat override >
+/// inherited > global setting > env > default. Returns the bound with its
+/// source label (the daemon surfaces the label as `rlm_max_depth_source`).
+#[must_use]
+pub fn resolve_rlm_max_depth(
+    session_file: Option<&str>,
+    inherited: Option<u32>,
+    cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> (u64, &'static str) {
+    persisted_rlm_max_depth(session_file)
+        .map(|depth| (depth, "chat"))
+        .or_else(|| inherited.map(|depth| (u64::from(depth), "inherited")))
+        .or_else(|| {
+            crate::settings::SettingsManager::create(cwd, agent_dir)
+                .get_rlm_max_depth()
+                .map(|depth| (depth, "global"))
+        })
+        .or_else(|| {
+            std::env::var("RLM_MAX_DEPTH")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value >= 1)
+                .map(|depth| (depth, "env"))
+        })
+        .unwrap_or((u64::from(DEFAULT_RLM_MAX_DEPTH), "default"))
 }
 
 // Progress notes
