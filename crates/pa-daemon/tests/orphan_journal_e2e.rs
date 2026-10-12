@@ -2,7 +2,6 @@
 //! shutdown hook must not leak the `bash()` process groups it journaled
 //! — the worker-side kernel-teardown reap and the supervisor-side worker
 //! death reap each answer one half of that contract.
-#![allow(clippy::large_futures)]
 // 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
@@ -29,7 +28,6 @@ use serde_json::{json, Value};
 
 struct Daemon {
     child: Child,
-    #[allow(dead_code)]
     socket: PathBuf,
 }
 
@@ -65,6 +63,7 @@ fn kernel_python() -> Option<PathBuf> {
     None
 }
 
+// Ownership transfers to Daemon, whose Drop kills and waits for the child.
 #[allow(clippy::zombie_processes)]
 fn spawn_daemon(socket: &Path, agent_dir: &Path, kernel_python: Option<&Path>) -> Daemon {
     std::fs::create_dir_all(agent_dir).expect("agent dir");

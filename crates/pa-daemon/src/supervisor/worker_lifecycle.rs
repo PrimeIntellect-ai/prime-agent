@@ -798,18 +798,8 @@ impl Supervisor {
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
-                // The orphan journal dies with the descriptor too (TS
-                // `deleteWorkerDescriptor`): nothing can write it anymore, and
-                // the reap above already spent its records.
-                if let Some(orphan_path) = resident
-                    .descriptor
-                    .lock()
-                    .await
-                    .orphan_process_journal_path
-                    .clone()
-                {
-                    let _ = std::fs::remove_file(&orphan_path);
-                }
+                // The reaper alone owns orphan-journal removal. A read or
+                // identity-verified kill failure must preserve its retry records.
             }
         }
     }
@@ -819,6 +809,11 @@ impl Supervisor {
     /// a worker killed without its shutdown hook leaves them behind, and
     /// only the supervisor still knows the journal's path.
     pub(super) async fn reap_dead_worker_orphans(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        // Stop escalation and adopted-process watch failures do not prove
+        // death. Recheck here so every caller preserves a live owner's work.
+        if !self.recorded_worker_is_gone(resident).await {
+            return;
+        }
         let (pid, orphan_path) = {
             let descriptor = resident.descriptor.lock().await;
             (
@@ -1052,7 +1047,12 @@ mod tests {
         std::fs::write(&unknown_journal, retained).expect("unknown journal");
         std::fs::write(descriptor_dir.join("w-unknown.json"), "not json")
             .expect("unverifiable descriptor");
+        // A failed journal read must survive descriptor retirement for retry.
+        let orphan_path = descriptor_dir.join("w-gone.orphans.jsonl");
+        let unreadable = [0xff, 0xfe];
+        std::fs::write(&orphan_path, unreadable).expect("orphan journal");
         let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "orphanProcessJournalPath": orphan_path.to_string_lossy(),
             "version": 2,
             "workerId": "w-gone",
             "pid": pid,
@@ -1080,7 +1080,39 @@ mod tests {
             "the journal dies with the descriptor"
         );
         assert!(!descriptor_path.exists());
+        assert_eq!(std::fs::read(orphan_path).unwrap(), unreadable);
         assert_eq!(std::fs::read(unowned_journal).unwrap(), retained);
         assert_eq!(std::fs::read(unknown_journal).unwrap(), retained);
+    }
+    #[tokio::test]
+    async fn a_live_worker_keeps_its_orphan_journal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = supervisor_in(dir.path());
+        let orphan_path = supervisor.descriptor_dir.join("w-live.orphans.jsonl");
+        std::fs::write(&orphan_path, "").expect("orphan journal");
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-live",
+            "pid": std::process::id(),
+            "socketPath": "/tmp/w-live.sock",
+            "recoveryJournalPath": "/tmp/w-live.recovery.jsonl",
+            "orphanProcessJournalPath": orphan_path.to_string_lossy(),
+            "supervisorSocketPath": supervisor.options.socket_path.to_string_lossy(),
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-live",
+            "createdAt": "2026-10-07T00:00:00Z",
+            "updatedAt": "2026-10-07T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new(
+            "w-live".to_string(),
+            descriptor,
+            supervisor.descriptor_dir.join("w-live.json"),
+        );
+        supervisor.reap_dead_worker_orphans(&resident).await;
+        assert_eq!(std::fs::read(orphan_path).unwrap(), b"");
     }
 }

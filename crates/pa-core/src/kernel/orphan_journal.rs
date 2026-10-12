@@ -290,16 +290,20 @@ mod tests {
             "processStartId": "proc:1",
             "recordedAt": iso8601_now(),
         });
-        let mut journal = String::new();
-        for record in [&identity_free, &stale_identity] {
-            journal.push_str(&record.to_string());
-            journal.push('\n');
+        for record in [identity_free, stale_identity] {
+            // Separate sweeps: the reader retains only the latest row per pid.
+            std::fs::write(&path, format!("{record}\n")).expect("write journal");
+            let active = read_active_orphan_processes(&path, owner).expect("read journal");
+            assert_eq!(active.len(), 1);
+            assert_eq!(
+                active[0].process_start_id.as_deref(),
+                record["processStartId"].as_str()
+            );
+            reap_worker_orphan_processes(&path, owner as i32);
+            assert!(
+                !path.exists(),
+                "the journal is spent, not kept for a blind retry"
+            );
         }
-        std::fs::write(&path, journal).expect("write journal");
-        reap_worker_orphan_processes(&path, owner as i32);
-        assert!(
-            !path.exists(),
-            "the journal is spent, not kept for a blind retry"
-        );
     }
 }
