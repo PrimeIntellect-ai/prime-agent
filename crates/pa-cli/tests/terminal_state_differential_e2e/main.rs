@@ -290,6 +290,36 @@ fn program_status_reports_the_run_and_its_settles() {
     harness.assert_terminal_state_restored("the program-status reports and clear");
 }
 
+/// A lifecycle error has no engine turn_end: its failed message and
+/// agent_end arrive before the daemon's fallback terminal frame.
+#[test]
+fn program_status_lifecycle_failure_never_reports_done() {
+    let _lock = harness_lock();
+    let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+    harness.answer_kitty_query();
+    harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+    harness.wait_from_start(STATUS_IDLE, "the resting surface's idle report");
+
+    let mark = harness.mark();
+    harness.write(b"hi\r");
+    harness.wait_from(mark, STATUS_WORKING, "the run opened");
+
+    let mark = harness.mark();
+    harness.write(b"lifecycle-failure\r");
+    harness.wait_from(mark, b"lifecycle-failure-sentinel", "the failure rendered");
+    harness.wait_from(mark, STATUS_IDLE, "the failed run settled idle");
+    assert!(
+        !harness.output()[mark..]
+            .windows(STATUS_DONE.len())
+            .any(|window| window == STATUS_DONE),
+        "a lifecycle failure must never be reported as done"
+    );
+    harness.write(b"/exit\r");
+    harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+    assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+    harness.assert_terminal_state_restored("the lifecycle failure status route");
+}
+
 /// A provider retry remains working even after the failed attempt's
 /// `turn_end` and `agent_end`. Observe the rendered countdown before checking
 /// the last report, so an earlier transient working report cannot pass.

@@ -503,7 +503,25 @@ impl MockSupervisor {
                             "data": {},
                         }),
                     );
-                    if run_open {
+                    if command.get("message").and_then(Value::as_str) == Some("lifecycle-failure") {
+                        // Agent::handle_run_failure emits the failed message and
+                        // agent_end without turn_end. The daemon adds its error
+                        // turn_end only after the admission returns the failure.
+                        let message = json!({
+                            "role": "assistant", "content": [], "stopReason": "error",
+                            "errorMessage": "lifecycle-failure-sentinel",
+                        });
+                        for event in [
+                            json!({ "type": "message_start", "message": message }),
+                            json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "agent_end", "messages": [message] }),
+                            json!({ "type": "turn_end", "error": "lifecycle-failure-sentinel" }),
+                        ] {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = false;
+                    } else if run_open {
                         if retry_pending {
                             for event in [
                                 json!({ "type": "turn_start" }),
@@ -535,6 +553,13 @@ impl MockSupervisor {
                         // Keep the next attempt pending until the next prompt.
                         for event in [
                             json!({ "type": "turn_start" }),
+                            json!({
+                                "type": "message_end",
+                                "message": {
+                                    "role": "assistant", "content": [], "stopReason": "error",
+                                    "errorMessage": "failed-attempt-sentinel",
+                                },
+                            }),
                             json!({
                                 "type": "turn_end",
                                 "message": { "role": "assistant", "stopReason": "error" },
