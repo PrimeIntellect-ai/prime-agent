@@ -756,6 +756,7 @@ struct AckPausedSink {
     capture: CapturingSink,
     kills: Arc<std::sync::atomic::AtomicUsize>,
     after_ack: tokio::sync::Notify,
+    release: tokio::sync::Notify,
     recovered: std::sync::atomic::AtomicBool,
 }
 
@@ -769,7 +770,7 @@ impl RlmChildUsageSink for AckPausedSink {
                 && !self.recovered.load(std::sync::atomic::Ordering::Relaxed)
             {
                 self.after_ack.notify_one();
-                std::future::pending::<()>().await;
+                self.release.notified().await;
             }
             self.capture.record(report).await
         })
@@ -796,6 +797,7 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
         capture: CapturingSink::default(),
         kills: kills.clone(),
         after_ack: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
         recovered: std::sync::atomic::AtomicBool::new(false),
     });
     sink.capture
@@ -953,4 +955,85 @@ async fn delete_canceled_after_kill_ack_retries_without_a_second_kill() {
 #[tokio::test]
 async fn close_canceled_after_kill_ack_retries_without_a_second_kill() {
     cancellation_after_ack_preserves_retirement(RetirementCaller::Close).await;
+}
+
+#[tokio::test]
+async fn concurrent_close_replays_debt_after_the_first_caller_retires_the_roster() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let (sessions, kills, _commands, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(AckPausedSink {
+        capture: CapturingSink::default(),
+        kills: kills.clone(),
+        after_ack: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        recovered: std::sync::atomic::AtomicBool::new(false),
+    });
+    sink.capture
+        .fail
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-concurrent-close", &file);
+    sessions.inner.children.lock().await.push(record.clone());
+    let owned = sessions.clone();
+    let first = tokio::spawn(async move { owned.close_children(ChildCloseReason::Shutdown).await });
+    tokio::time::timeout(Duration::from_secs(5), sink.after_ack.notified())
+        .await
+        .unwrap();
+    let frozen = record.lock().await.pending_usage_report.clone().unwrap().0;
+    let mut retry = Box::pin(sessions.close_children(ChildCloseReason::Shutdown));
+    // Drive the actual second caller to its first wait while the first owns rename_lock.
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(retry.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    sink.recovered
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    sink.release.notify_one();
+    assert!(first
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("usage remains owed"));
+    let attempts = sink
+        .capture
+        .attempts
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(retry
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("usage remains owed"));
+    assert_eq!(
+        sink.capture
+            .attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        attempts + 1
+    );
+    assert!(sessions.list_subagents().await.unwrap().is_empty());
+    assert!(sink.capture.forgotten.lock().unwrap().is_empty());
+    sink.capture
+        .fail
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap();
+    {
+        let reports = sink.capture.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            (reports[0].report_id.clone(), reports[0].batches.clone()),
+            (frozen.report_id, frozen.batches)
+        );
+    }
+    assert_eq!(
+        sink.capture.forgotten.lock().unwrap().as_slice(),
+        &["sub-concurrent-close"]
+    );
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    server.abort();
+    let _ = server.await;
 }
