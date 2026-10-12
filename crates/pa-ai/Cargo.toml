@@ -53,6 +53,9 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 # Wire tests only: the WS handshake accept key (SHA-1 of key + GUID); the
 # same version the graph resolves for tokio-tungstenite's rustls chain.
 sha1 = "0.10"
+tempfile = "3"
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 [lints]
 workspace = true
