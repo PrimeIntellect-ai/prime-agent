@@ -1098,3 +1098,98 @@ fn compact_session_command_emits_the_result_on_success() {
     assert_eq!(rows.len(), 1, "the /compact echo only: {rows:?}");
     assert_eq!(rows[0]["customType"], "session_slash_command");
 }
+
+#[test]
+fn threshold_crossing_inside_one_run_compacts_before_the_next_model_turn() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"},
+                {"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]},
+                {"text":"history summary"},
+                {"text":"prefix summary"},
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    let compaction = events
+        .iter()
+        .position(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .expect("threshold crossed inside run");
+    let assistants: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, EngineEvent::AssistantMessage(_)).then_some(index)
+        })
+        .collect();
+    assert_eq!(assistants.len(), 2, "one tool turn and one final turn");
+    assert!(
+        assistants[0] < compaction && compaction < assistants[1],
+        "compaction must precede the next ordinary model call"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+}
+
+#[test]
+fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tool_turn = json!({"content":[{"type":"text","text":"x".repeat(80_000)}, {"type":"toolCall","id":"synthetic-call","name":"synthetic_missing_tool","arguments":{}}]});
+    let (engine, _dir) = faux_engine_with_settings(
+        &json!({
+            "responses": [
+                {"text":"seed reply"}, tool_turn,
+                {"text":"", "stopReason":"error", "errorMessage":"synthetic summary failure"},
+                {"text":"prefix summary"}, tool_turn,
+                {"text":"task finished"}
+            ]
+        }),
+        128_000 - FAUX_REQUEST_BUDGET - 20_000,
+    );
+    let mut events = Vec::new();
+    admit(&engine, "seed".into(), &mut events);
+    events.clear();
+    admit(&engine, "continue task".into(), &mut events);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("task finished")
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, EngineEvent::Done(Ok(())))));
+    let core = engine.session.blocking_lock().clone().unwrap();
+    let entries = engine
+        .runtime
+        .block_on(async { core.session.shared_persistence().lock().await.get_entries() });
+    let user_prompts: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            pa_types::session::FileEntry::Message {
+                message: pa_types::session::AgentMessage::User(user),
+                ..
+            } => Some(user.content.text()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_prompts, ["seed", "continue task"]);
+}

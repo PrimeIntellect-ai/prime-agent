@@ -189,26 +189,83 @@ impl AgentSessionEngine {
                         if !first {
                             drop_trailing_assistant(&agent).await;
                         }
-                        match self
-                            .run_turn_once(
-                                &agent,
-                                &prompt,
-                                first,
-                                boundary_passed,
-                                aborted,
-                                &mut **emit,
-                            )
-                            .await
-                        {
-                            Ok(TurnOnce::Message { assistant }) => {
-                                // The settled messages already reached the
-                                // transcript; this arm only carries the
-                                // final message to the retry classifier.
-                                Ok(*assistant)
+                        let mut admit_prompt = first;
+                        loop {
+                            let assistant = match self
+                                .run_turn_once(
+                                    &agent,
+                                    &prompt,
+                                    admit_prompt,
+                                    boundary_passed,
+                                    aborted,
+                                    &mut **emit,
+                                )
+                                .await
+                            {
+                                Ok(TurnOnce::Message { assistant }) => *assistant,
+                                Ok(TurnOnce::None) => {
+                                    return Err(anyhow::anyhow!("No response produced."))
+                                }
+                                Ok(TurnOnce::Aborted) => return Ok(aborted_message(&model)),
+                                Err(error) => return Err(error),
+                            };
+                            if !self
+                                .threshold_yielded
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                return Ok(assistant);
                             }
-                            Ok(TurnOnce::None) => Err(anyhow::anyhow!("No response produced.")),
-                            Ok(TurnOnce::Aborted) => Ok(aborted_message(&model)),
-                            Err(error) => Err(error),
+                            // Requested boundaries stay owned by run_turns; consuming one here
+                            // would lose its explicit stop and goal-continuation semantics.
+                            let core = self.session.lock().await.clone();
+                            let pending = match core {
+                                Some(core) => {
+                                    core.turn_boundary.compaction_scheduled().await
+                                        || core.turn_boundary.refine_pending().await
+                                }
+                                None => false,
+                            };
+                            if aborted() {
+                                return Ok(aborted_message(&model));
+                            }
+                            if pending
+                                || self
+                                    .config
+                                    .queued_steering_probe
+                                    .as_ref()
+                                    .is_some_and(|probe| probe())
+                            {
+                                return Ok(assistant);
+                            }
+                            if aborted() {
+                                return Ok(aborted_message(&model));
+                            }
+                            // Keep the retry/failover episode alive across this artificial
+                            // yield. The engine owns a multi-thread runtime; the synchronous
+                            // compaction boundary may re-enter it without holding async locks.
+                            let outcome = tokio::task::block_in_place(|| {
+                                self.run_auto_compaction(&mut **emit)
+                            });
+                            self.threshold_checks_enabled.store(
+                                outcome == crate::auto_compaction::AutoCompactionRun::Compacted,
+                                std::sync::atomic::Ordering::SeqCst,
+                            );
+                            if outcome == crate::auto_compaction::AutoCompactionRun::Cancelled
+                                || aborted()
+                            {
+                                return Ok(aborted_message(&model));
+                            }
+                            if self
+                                .config
+                                .queued_steering_probe
+                                .as_ref()
+                                .is_some_and(|probe| probe())
+                            {
+                                return Ok(assistant);
+                            }
+                            // Continue the tool run without dropping its successful assistant
+                            // or inserting another copy of the admitted user prompt.
+                            admit_prompt = false;
                         }
                     }
                 },

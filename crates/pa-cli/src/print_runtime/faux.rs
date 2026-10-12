@@ -171,6 +171,7 @@ pub(crate) async fn build_faux_engine_with(
             on_background_work_settled: None,
             queued_goal_context_purge: None,
             queued_steering_probe: None,
+            should_stop_after_turn: None,
             image_model_router: None,
         },
     )

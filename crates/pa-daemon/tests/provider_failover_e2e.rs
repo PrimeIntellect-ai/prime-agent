@@ -29,13 +29,20 @@ impl Drop for Supervisor {
 
 /// A mock OpenAI-completions provider: the first `failures` requests get a
 /// 500 with an OpenAI-style error body; the rest get one fixed SSE answer.
+#[derive(Clone, Copy)]
+enum ReplyMode {
+    Text(&'static str),
+    Threshold,
+}
+
 struct FailingMock {
     requests: Arc<Mutex<usize>>,
     port: u16,
+    reply: ReplyMode,
 }
 
 impl FailingMock {
-    fn start(failures: usize, answer: &'static str) -> FailingMock {
+    fn start(failures: usize, reply: ReplyMode) -> FailingMock {
         let requests = Arc::new(Mutex::new(0usize));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
@@ -45,11 +52,15 @@ impl FailingMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, answer, &requests);
+                    let _ = serve(stream, failures, reply, &requests);
                 });
             }
         });
-        FailingMock { requests, port }
+        FailingMock {
+            requests,
+            port,
+            reply,
+        }
     }
 
     fn url(&self) -> String {
@@ -75,7 +86,7 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
 fn serve(
     mut stream: TcpStream,
     failures: usize,
-    answer: &str,
+    reply: ReplyMode,
     requests: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -120,12 +131,38 @@ fn serve(
             .as_bytes(),
         );
     }
+    let (delta, reason) = match reply {
+        ReplyMode::Text(answer) => (json!({"role":"assistant","content":answer}), "stop"),
+        ReplyMode::Threshold => {
+            let request: Value = serde_json::from_slice(&body_bytes).expect("request JSON");
+            let summary = request["messages"]
+                .to_string()
+                .contains("context summarization assistant");
+            if summary {
+                (
+                    json!({"role":"assistant","content":"compact summary"}),
+                    "stop",
+                )
+            } else if index == 1 {
+                (
+                    json!({"role":"assistant","content":"x".repeat(80_000),"tool_calls":[{"index":0,"id":"synthetic-call","type":"function","function":{"name":"synthetic_missing_tool","arguments":"{}"}}]}),
+                    "tool_calls",
+                )
+            } else {
+                (
+                    json!({"role":"assistant","content":"finished after compaction"}),
+                    "stop",
+                )
+            }
+        }
+    };
     let mut payload = String::new();
-    for data in [
-        chunk(&json!({"role": "assistant", "content": answer}), None),
-        chunk(&json!({}), Some("stop")),
-    ] {
+    for data in [chunk(&delta, None), chunk(&json!({}), Some(reason))] {
         write!(payload, "data: {data}\n\n").expect("write to String");
+    }
+    if matches!(reply, ReplyMode::Threshold) {
+        let usage = json!({"id":"chatcmpl-test","object":"chat.completion.chunk","created":1_750_000_000,"model":"mock-1","choices":[],"usage":{"prompt_tokens":if index == 1 { 50_000 } else { 100 },"completion_tokens":10,"total_tokens":if index == 1 { 50_010 } else { 110 }}});
+        write!(payload, "data: {usage}\n\n").expect("usage SSE");
     }
     payload.push_str("data: [DONE]\n\n");
     stream.write_all(
@@ -312,7 +349,7 @@ fn setup(
                             "id": "mock-1",
                             "name": "Mock 1 (backup)",
                             "api": "openai-completions",
-                            "contextWindow": 128_000,
+                            "contextWindow": if matches!(backup.reply, ReplyMode::Threshold) { 64_000 } else { 128_000 },
                             "maxTokens": 4096
                         }
                     ]
@@ -327,6 +364,7 @@ fn setup(
     std::fs::write(
         agent_dir.join("settings.json"),
         json!({
+            "compaction": {"enabled":true,"keepRecentTokens":10},
             "retry": {
                 "enabled": true,
                 "maxRetries": 1,
@@ -385,8 +423,8 @@ fn retry_end(events: &[Value]) -> &Value {
 
 #[test]
 fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
-    let primary = FailingMock::start(usize::MAX, "never reached");
-    let backup = FailingMock::start(0, "recovered on the backup provider");
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
+    let backup = FailingMock::start(0, ReplyMode::Text("recovered on the backup provider"));
     let (_dir, _supervisor, mut client, session_id) = setup("failover", &primary, &backup);
     client.send_command(
         "p1",
@@ -473,8 +511,8 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
 
 #[test]
 fn every_provider_failing_surfaces_the_final_error() {
-    let primary = FailingMock::start(usize::MAX, "never reached");
-    let backup = FailingMock::start(usize::MAX, "never reached");
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
+    let backup = FailingMock::start(usize::MAX, ReplyMode::Text("never reached"));
     let (_dir, _supervisor, mut client, session_id) = setup("exhausted", &primary, &backup);
     client.send_command(
         "p1",
@@ -533,4 +571,72 @@ fn every_provider_failing_surfaces_the_final_error() {
         .expect("turn error")
         .contains("mock provider overloaded"));
     assert_eq!(turn_end.get("error"), None, "turn_end: {turn_end}");
+}
+
+#[test]
+fn threshold_yield_keeps_the_backup_until_the_tool_run_finishes() {
+    let primary = FailingMock::start(usize::MAX, ReplyMode::Text("never"));
+    let backup = FailingMock::start(0, ReplyMode::Threshold);
+    let (_dir, _supervisor, mut client, session_id) =
+        setup("threshold-failover", &primary, &backup);
+    client.send_command("p1", &json!({"type":"prompt_and_wait","activeSessionId":session_id,"message":"u".repeat(120_000)}));
+    let done = client.request("p1");
+    assert_eq!(done["success"], true, "{done}");
+    // Read until the authoritative run settles rather than waiting a fixed interval.
+    while !client
+        .events
+        .iter()
+        .any(|event| event["type"] == "auto_retry_end")
+    {
+        let line = client.read_line();
+        client.collect_event(&line);
+    }
+    assert_eq!(
+        primary.count(),
+        2,
+        "threshold yield must not retry the failed primary"
+    );
+    assert!(
+        backup.count() >= 3,
+        "tool turn, summary and continuation use the backup"
+    );
+    let compact = client
+        .events
+        .iter()
+        .position(|event| event["type"] == "compaction_end")
+        .expect("backup threshold compacted");
+    assert_eq!(client.events[compact]["aborted"], false);
+    assert!(
+        client.events[compact]["result"].is_object(),
+        "{:?}",
+        client.events[compact]
+    );
+    assert!(client.events[compact]["errorMessage"].is_null());
+    let final_reply = client
+        .events
+        .iter()
+        .position(|event| {
+            event["type"] == "message_end"
+                && event["message"]["content"]
+                    .to_string()
+                    .contains("finished after compaction")
+        })
+        .expect("continued after summary");
+    let restore = client
+        .events
+        .iter()
+        .position(|event| event["type"] == "auto_retry_end")
+        .unwrap();
+    assert!(
+        compact < final_reply && final_reply < restore,
+        "primary restores only after real completion"
+    );
+    assert_eq!(
+        client
+            .events
+            .iter()
+            .filter(|event| event["type"] == "auto_retry_end")
+            .count(),
+        1
+    );
 }

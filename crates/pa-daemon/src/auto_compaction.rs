@@ -20,6 +20,8 @@ pub(crate) enum AutoCompactionRun {
     /// The check fired and a compaction ran (success, skip, or failure —
     /// the `compaction_start`/`compaction_end` pair went out either way).
     Ran,
+    /// A summary committed and the retained context replaced the old context.
+    Compacted,
     /// The emit callback cancelled the run (an aborted turn): the caller
     /// stops the turn loop like any other cancelled emit.
     Cancelled,
@@ -206,6 +208,10 @@ impl AgentSessionEngine {
                 }
             }
         }
-        AutoCompactionRun::Ran
+        if matches!(outcome, Ok(Ok(CompactOutcome::Ran(_)))) {
+            AutoCompactionRun::Compacted
+        } else {
+            AutoCompactionRun::Ran
+        }
     }
 }

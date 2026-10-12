@@ -48,6 +48,7 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 
 mod goalcore;
 mod lifecycle;
+mod threshold_boundary;
 mod turn_types;
 
 use turn_types::{
@@ -191,7 +192,9 @@ pub struct AgentSessionEngine {
     /// Built once on the first prompt, reused across prompts: long-running
     /// arms clone the Arc and release this mutex before their awaits, so
     /// every read seam answers while a turn streams.
-    pub(crate) session: tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>,
+    pub(crate) session: Arc<tokio::sync::Mutex<Option<Arc<CoreSessionEngine>>>>,
+    threshold_yielded: Arc<std::sync::atomic::AtomicBool>,
+    threshold_checks_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// The build gate: at most one `build_session` in flight; the eager build
     /// and the first demand seam meet at one build.
     pub(crate) session_build: tokio::sync::Mutex<()>,
