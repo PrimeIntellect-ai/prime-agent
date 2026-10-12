@@ -1441,6 +1441,7 @@ dependencies = [
  "futures",
  "rcgen",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

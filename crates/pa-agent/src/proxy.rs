@@ -8,6 +8,8 @@ use std::fmt::Write;
 use std::sync::LazyLock;
 
 use futures::StreamExt;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 
 use crate::abort::AbortSignal;
@@ -20,30 +22,33 @@ use crate::types::{
     Usage,
 };
 
-// pa-agent is a leaf crate: use reqwest's PEM parser rather than depending on
-// pa-ai's provider transport. Cache the client so the extra bundle is read once,
-// just like the provider clients, without changing the public proxy API.
+// pa-agent is a leaf crate: use the already-resolved rustls PEM/DER parser
+// instead of a peer provider dependency. Cache once, retaining Node's valid
+// prefix if a later certificate is malformed.
 static PROXY_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let mut certs = Vec::new();
     if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") {
-        let extra_client = (|| -> anyhow::Result<reqwest::Client> {
-            let pem = std::fs::read(&path)?;
-            let certs = reqwest::Certificate::from_pem_bundle(&pem)?;
-            anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
-            let mut builder = reqwest::Client::builder();
-            for cert in certs {
-                builder = builder.add_root_certificate(cert);
+        let loaded = (|| -> anyhow::Result<()> {
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in CertificateDer::pem_file_iter(&path)? {
+                let cert = cert?;
+                roots.add(cert.clone())?;
+                certs.push(reqwest::Certificate::from_der(&cert)?);
             }
-            // Building also validates the DER inside each PEM certificate.
-            Ok(builder.build()?)
+            anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
+            Ok(())
         })();
-        match extra_client {
-            Ok(client) => return client,
-            Err(error) => eprintln!(
-                "NODE_EXTRA_CA_CERTS could not be loaded for the proxy; continuing without it: {error}"
-            ),
+        if let Err(error) = loaded {
+            eprintln!(
+                "NODE_EXTRA_CA_CERTS could not be fully loaded for the proxy; keeping certificates loaded before the error: {error}"
+            );
         }
     }
-    reqwest::Client::new()
+    let mut builder = reqwest::Client::builder();
+    for cert in certs {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().expect("proxy HTTP client")
 });
 
 #[derive(Debug, Clone, Deserialize)]

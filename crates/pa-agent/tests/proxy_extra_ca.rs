@@ -95,7 +95,12 @@ async fn the_default_proxy_stream_honors_node_extra_ca_certs() {
     });
 
     let bundle = tempfile::NamedTempFile::new().expect("CA bundle");
-    std::fs::write(bundle.path(), ca_cert.pem()).expect("write CA");
+    // Node retains the trusted prefix when a later PEM certificate has invalid DER.
+    let pem = format!(
+        "{}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+        ca_cert.pem()
+    );
+    std::fs::write(bundle.path(), pem).expect("write CA");
     let _environment = FixtureEnvironment(
         [
             "NODE_EXTRA_CA_CERTS",

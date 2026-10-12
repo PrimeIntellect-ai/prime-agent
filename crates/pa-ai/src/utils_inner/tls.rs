@@ -7,24 +7,26 @@ static EXTRA_CERTS: LazyLock<Vec<CertificateDer<'static>>> = LazyLock::new(|| {
     let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") else {
         return Vec::new();
     };
-    let certs: Result<Vec<_>, _> = CertificateDer::pem_file_iter(&path).and_then(Iterator::collect);
-    match certs {
-        Ok(certs)
-            if !certs.is_empty()
-                && certs
-                    .iter()
-                    .all(|cert| rustls::RootCertStore::empty().add(cert.clone()).is_ok()) =>
-        {
-            certs
+    let mut certs = Vec::new();
+    let loaded = (|| -> anyhow::Result<()> {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in CertificateDer::pem_file_iter(&path)? {
+            let cert = cert?;
+            roots.add(cert.clone())?;
+            certs.push(cert);
         }
-        _ => {
-            tracing::warn!(
-                path = %path.display(),
-                "NODE_EXTRA_CA_CERTS could not be read as a PEM CA bundle; continuing without it"
-            );
-            Vec::new()
-        }
+        anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
+        Ok(())
+    })();
+    if let Err(error) = loaded {
+        tracing::warn!(
+            path = %path.display(),
+            error = %error,
+            "NODE_EXTRA_CA_CERTS could not be fully loaded; keeping certificates loaded before the error"
+        );
     }
+    // Node keeps the valid prefix and stops at the first PEM or DER error.
+    certs
 });
 
 /// # Panics

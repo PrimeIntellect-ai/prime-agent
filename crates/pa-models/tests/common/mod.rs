@@ -242,7 +242,16 @@ async fn tls_catalog_server() -> TlsCatalogServer {
 pub async fn fetch_trusting_test_ca(env_var: &str) {
     let mut server = tls_catalog_server().await;
     let bundle = tempfile::NamedTempFile::new().expect("ca bundle");
-    std::fs::write(bundle.path(), &server.ca_pem).expect("write ca bundle");
+    let pem = if env_var == "NODE_EXTRA_CA_CERTS" {
+        // Keep native-loader input pure; only Node extra-cert parsing retains a prefix.
+        format!(
+            "{}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+            server.ca_pem
+        )
+    } else {
+        server.ca_pem.clone()
+    };
+    std::fs::write(bundle.path(), pem).expect("write ca bundle");
     let _environment = FixtureEnvironment(
         [
             "NODE_EXTRA_CA_CERTS",
