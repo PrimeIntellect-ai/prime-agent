@@ -1293,6 +1293,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_kernel_resolves_default_and_configured_shells() {
+        let dir = tempfile::tempdir().unwrap();
+        for shell_path in [None, Some("  /custom/git/bin/bash  "), Some(" ")] {
+            let provisioner = crate::session_engine::runtime_wiring::kernel_provisioner(
+                "shell-wiring-test".into(),
+                HostRequestHandlers::default(),
+                Vec::new(),
+                dir.path().to_path_buf(),
+                dir.path(),
+                shell_path,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                provisioner.inner.options.shell_path,
+                crate::platform::shell::resolve_kernel_bash_shell(shell_path).map(PathBuf::from),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_settings_reach_the_kernel_shell() {
+        use crate::session_engine::engine::{create_session, SessionEngineConfig};
+
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        // Project settings override the global setting before the session captures it.
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"shellPath":"/global/bash"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            r#"{"shellPath":"  /project/git/bin/bash  "}"#,
+        )
+        .unwrap();
+        let model = pa_agent::types::Model {
+            id: "shell-test".into(),
+            name: "Shell test".into(),
+            api: "test".into(),
+            provider: "test".into(),
+            base_url: "http://localhost".into(),
+            reasoning: false,
+            cost: pa_agent::types::UsageCost::default(),
+            context_window: 1_000,
+            max_tokens: 100,
+            max_tokens_explicit: false,
+        };
+        let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
+        let engine = create_session(SessionEngineConfig {
+            cwd,
+            agent_dir,
+            model: Some(model),
+            stream_fn: Some(provider.stream_fn()),
+            prewarm_ipython_kernel: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            engine.provisioner.inner.options.shell_path,
+            Some(PathBuf::from("/project/git/bin/bash")),
+        );
+    }
+
+    #[test]
     fn a_spent_stop_arm_releases_only_its_own_boot() {
         let provisioner = IpythonKernelProvisioner::new(
             PathBuf::from("/tmp"),

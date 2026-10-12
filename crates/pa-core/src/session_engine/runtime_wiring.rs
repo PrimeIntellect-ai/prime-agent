@@ -216,6 +216,7 @@ pub fn kernel_provisioner(
     python_skills: Vec<KernelPythonSkill>,
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
+    shell_path: Option<&str>,
     snapshot_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -233,7 +234,8 @@ pub fn kernel_provisioner(
             python: None,
             env,
             command_prefix: None,
-            shell_path: None,
+            shell_path: crate::platform::shell::resolve_kernel_bash_shell(shell_path)
+                .map(std::path::PathBuf::from),
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,

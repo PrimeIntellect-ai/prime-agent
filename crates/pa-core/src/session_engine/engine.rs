@@ -231,6 +231,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     );
 
     let service_tier_preference = settings.get_default_service_tier();
+    let kernel_shell_path = settings.settings().shell_path.clone();
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
@@ -423,6 +424,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         python_skills,
         cwd.clone(),
         &config.agent_dir,
+        kernel_shell_path.as_deref(),
         session_artifact_dir,
         on_restore,
         config.on_background_work_settled.clone(),
