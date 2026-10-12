@@ -7,6 +7,7 @@ use pa_agent::agent::{AgentInitialState, AgentOptions};
 use pa_agent::scripted::ScriptedProvider;
 use pa_agent::types::{AgentTool, AgentToolResult};
 use pa_types::ai::AssistantMessage;
+use std::future::Future;
 
 fn test_model() -> pa_agent::types::Model {
     serde_json::from_value(serde_json::json!({
@@ -929,4 +930,145 @@ async fn refine_plans_without_the_session_lock_and_commits_after_a_running_turn_
         live_tool_result < live_outcome,
         "the live context carries the refinement's rows after the turn's tool result"
     );
+}
+
+#[derive(Clone, Copy)]
+enum RacingTurnEnd {
+    Complete,
+    Abort,
+}
+
+/// Park the actual refinement at its final persistence lock while idle,
+/// then admit a run before releasing that lock. No timing window or test
+/// hook is needed: the global audit is written synchronously just before
+/// the pending lock acquisition, and the refiner owns the competing guard.
+async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingTurnEnd) {
+    let (tool_started, mut tool_started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tool_release, tool_release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(None, vec![("racing-call", "held", serde_json::json!({}))]);
+    provider.push_text_turn("settled");
+    let (engine, tmp) = refine_test_session_with(
+        provider,
+        vec![Arc::new(HeldTool {
+            started: tool_started,
+            release: Arc::new(tokio::sync::Mutex::new(tool_release_rx)),
+        })],
+    )
+    .await;
+    let persistence = engine.shared_persistence();
+    let (guard_tx, mut guard_rx) = tokio::sync::mpsc::unbounded_channel();
+    let refiner: crate::refinement::executor::RefinerFn = Box::new(move |_, _, _| {
+        Box::pin(async move {
+            guard_tx.send(persistence.lock_owned().await).unwrap();
+            Ok(plan_reply(EMPTY_PLAN))
+        })
+    });
+    let global_dir = tmp.path().join("harness");
+    let global_history = crate::refinement::get_refinement_history_path(&global_dir);
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let model = session_ai_model();
+    let mut refinement = Box::pin(engine.refine_with_refiner(
+        &options,
+        refine::RefinementSource::User,
+        &model,
+        refiner,
+        global_dir,
+    ));
+    let window = std::time::Duration::from_secs(3);
+    tokio::time::timeout(
+        window,
+        std::future::poll_fn(|cx| {
+            assert!(refinement.as_mut().poll(cx).is_pending());
+            if global_history.exists() {
+                std::task::Poll::Ready(())
+            } else {
+                std::task::Poll::Pending
+            }
+        }),
+    )
+    .await
+    .expect("refinement reached its commit lock after observing idle");
+    let guard = guard_rx.recv().await.unwrap();
+    assert!(engine.agent().signal().is_none());
+    engine
+        .agent()
+        .prompt_until_accepted("race the commit")
+        .await
+        .unwrap();
+    assert!(engine.agent().signal().is_some());
+    drop(guard);
+
+    // A single poll now acquires the persistence lock. Without the active
+    // run recheck, the entire refinement returns Ready and commits early.
+    std::future::poll_fn(|cx| {
+        assert!(
+            refinement.as_mut().poll(cx).is_pending(),
+            "refinement committed into an active turn"
+        );
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(engine.entries().await.iter().all(|entry| !matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome")));
+    tokio::time::timeout(window, tool_started_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    if matches!(end, RacingTurnEnd::Abort) {
+        engine.agent().abort();
+    }
+    tool_release.send(()).unwrap();
+    tokio::time::timeout(window, engine.agent().wait_for_idle())
+        .await
+        .unwrap();
+    tokio::time::timeout(window, refinement)
+        .await
+        .unwrap()
+        .unwrap();
+    let entries = engine.entries().await;
+    let outcome = entries
+        .iter()
+        .position(|entry| {
+            matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome")
+        })
+        .unwrap();
+    let tool_result = entries
+        .iter()
+        .position(|entry| {
+            matches!(
+                entry,
+                FileEntry::Message {
+                    message: SessionAgentMessage::ToolResult(_),
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(
+        tool_result < outcome,
+        "outcome follows the settled turn, including cancellation"
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| matches!(entry,
+        FileEntry::CustomMessage { payload, .. } if payload.custom_type == "refinement_outcome"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn refine_rechecks_a_turn_admitted_while_waiting_for_the_commit_lock() {
+    refinement_rechecks_a_run_admitted_during_commit_lock_wait(RacingTurnEnd::Complete).await;
+}
+
+#[tokio::test]
+async fn refine_commits_once_after_a_racing_turn_is_aborted() {
+    refinement_rechecks_a_run_admitted_during_commit_lock_wait(RacingTurnEnd::Abort).await;
 }
