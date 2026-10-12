@@ -523,3 +523,339 @@ async fn failed_final_replay_preserves_report_and_registration_for_a_bounded_ret
     assert!(record.lock().await.pending_usage_report.is_none());
     assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
 }
+
+/// A real supervisor link whose second kill fails: retirement replay must not resend it.
+async fn retirement_registry(
+    dir: &Path,
+) -> (
+    SupervisorChildSessions,
+    Arc<std::sync::atomic::AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let socket = dir.join("retirement.sock");
+    let listener = pa_types::platform::transport::bind_transport(&socket)
+        .await
+        .unwrap();
+    let kills = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed = Arc::clone(&kills);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok(stream) = listener.accept().await else {
+                return;
+            };
+            let (reader, mut writer) = stream.split();
+            let mut reader = BufReader::new(reader);
+            let hello =
+                json!({"type":"daemon_hello", "protocol":crate::protocol::current_protocol_info()});
+            writer
+                .write_all(format!("{hello}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                continue;
+            }
+            let envelope: Value = serde_json::from_str(&line).unwrap();
+            let command = envelope["command"]["type"].as_str().unwrap();
+            let id = envelope["id"].as_str().unwrap();
+            let response = if command == "kill"
+                && observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 0
+            {
+                crate::protocol::response_failure(
+                    Some(id),
+                    command,
+                    "Unknown active session: child-live",
+                    None,
+                )
+            } else {
+                crate::protocol::response_success(Some(id), command, None)
+            };
+            writer
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        }
+    });
+    let registry = SupervisorChildSessions::new(
+        Arc::new(SupervisorLink::new(socket)),
+        dir.to_path_buf(),
+        "parent-live".into(),
+        Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+            dir.to_path_buf(),
+            /*telemetry_disabled*/ true,
+        )),
+    );
+    (registry, kills, task)
+}
+
+#[tokio::test]
+async fn repeated_delete_replays_retired_usage_without_repeating_lifecycle_work() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(CapturingSink::default());
+    sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-retire-delete", &file);
+    record.lock().await.settled_status = Some("done");
+    sessions.inner.children.lock().await.push(record.clone());
+    let settled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (settle_tx, mut settle_rx) = tokio::sync::mpsc::unbounded_channel();
+    let observed = settled.clone();
+    sessions.set_settle_hook(Arc::new(move || {
+        observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = settle_tx.send(());
+    }));
+    let observed = notified.clone();
+    sessions.set_delete_notifier(Arc::new(move |_| {
+        observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    let first = sessions
+        .delete_subagent("sub-retire-delete".into())
+        .await
+        .unwrap_err();
+    assert!(first.to_string().contains("usage remains owed"));
+    tokio::time::timeout(Duration::from_secs(5), settle_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(sessions.list_subagents().await.unwrap().is_empty());
+    assert!(!sessions.any_running().await);
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    let frozen = record.lock().await.pending_usage_report.clone().unwrap().0;
+    let attempts = sink.attempts.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(sessions
+        .delete_subagent("sub-retire-delete".into())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("usage remains owed"));
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        attempts + 1
+    );
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    sink.fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    let attempts = sink.attempts.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        sessions
+            .delete_subagent("sub-retire-delete".into())
+            .await
+            .unwrap()
+            .outcome,
+        Some("deleted")
+    );
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        attempts + 1
+    );
+    {
+        let reports = sink.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            (reports[0].report_id.clone(), reports[0].batches.clone()),
+            (frozen.report_id, frozen.batches)
+        );
+    }
+    assert_eq!(
+        sink.forgotten.lock().unwrap().as_slice(),
+        &["sub-retire-delete"]
+    );
+    sessions
+        .delete_subagent("sub-retire-delete".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            kills.load(std::sync::atomic::Ordering::Relaxed),
+            settled.load(std::sync::atomic::Ordering::Relaxed),
+            notified.load(std::sync::atomic::Ordering::Relaxed)
+        ),
+        (1, 1, 1)
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn repeated_close_replays_retired_usage_without_a_second_kill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(CapturingSink::default());
+    sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-retire-close", &file);
+    sessions.inner.children.lock().await.push(record.clone());
+    let first = sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap_err();
+    assert!(first.to_string().contains("usage remains owed"));
+    assert!(sessions.list_subagents().await.unwrap().is_empty());
+    assert!(!sessions.any_running().await);
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    let frozen = record.lock().await.pending_usage_report.clone().unwrap().0;
+    let attempts = sink.attempts.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("usage remains owed"));
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        attempts + 1
+    );
+    assert!(sink.forgotten.lock().unwrap().is_empty());
+    sink.fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    let attempts = sink.attempts.load(std::sync::atomic::Ordering::Relaxed);
+    sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        attempts + 1
+    );
+    {
+        let reports = sink.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            (reports[0].report_id.clone(), reports[0].batches.clone()),
+            (frozen.report_id, frozen.batches)
+        );
+    }
+    assert_eq!(
+        sink.forgotten.lock().unwrap().as_slice(),
+        &["sub-retire-close"]
+    );
+    sessions
+        .close_children(ChildCloseReason::Shutdown)
+        .await
+        .unwrap();
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    server.abort();
+    let _ = server.await;
+}
+
+struct AckPausedSink {
+    capture: CapturingSink,
+    kills: Arc<std::sync::atomic::AtomicUsize>,
+    after_ack: tokio::sync::Notify,
+    recovered: std::sync::atomic::AtomicBool,
+}
+
+impl RlmChildUsageSink for AckPausedSink {
+    fn record(
+        &self,
+        report: RlmChildUsageReport,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
+        Box::pin(async move {
+            if self.kills.load(std::sync::atomic::Ordering::Relaxed) > 0
+                && !self.recovered.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                self.after_ack.notify_one();
+                std::future::pending::<()>().await;
+            }
+            self.capture.record(report).await
+        })
+    }
+    fn forget(
+        &self,
+        id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        self.capture.forget(id)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RetirementCaller {
+    Delete,
+    Close,
+}
+
+async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let sink = Arc::new(AckPausedSink {
+        capture: CapturingSink::default(),
+        kills: kills.clone(),
+        after_ack: tokio::sync::Notify::new(),
+        recovered: std::sync::atomic::AtomicBool::new(false),
+    });
+    sink.capture
+        .fail
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-cancel-after-ack", &file);
+    record.lock().await.settled_status = Some("done");
+    sessions.inner.children.lock().await.push(record.clone());
+    let owned = sessions.clone();
+    let retirement = tokio::spawn(async move {
+        match caller {
+            RetirementCaller::Delete => owned
+                .delete_subagent("sub-cancel-after-ack".into())
+                .await
+                .map(|_| ()),
+            RetirementCaller::Close => owned.close_children(ChildCloseReason::Shutdown).await,
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), sink.after_ack.notified())
+        .await
+        .unwrap();
+    retirement.abort();
+    assert!(retirement.await.unwrap_err().is_cancelled());
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let frozen = record.lock().await.pending_usage_report.clone().unwrap().0;
+    assert!(sink.capture.forgotten.lock().unwrap().is_empty());
+    sink.capture
+        .fail
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    sink.recovered
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    match caller {
+        RetirementCaller::Delete => {
+            sessions
+                .delete_subagent("sub-cancel-after-ack".into())
+                .await
+                .unwrap();
+        }
+        RetirementCaller::Close => {
+            sessions
+                .close_children(ChildCloseReason::Shutdown)
+                .await
+                .unwrap();
+        }
+    }
+    assert!(sessions.list_subagents().await.unwrap().is_empty());
+    assert!(!sessions.any_running().await);
+    assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    {
+        let reports = sink.capture.reports.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(
+            (reports[0].report_id.clone(), reports[0].batches.clone()),
+            (frozen.report_id, frozen.batches)
+        );
+    }
+    assert_eq!(
+        sink.capture.forgotten.lock().unwrap().as_slice(),
+        &["sub-cancel-after-ack"]
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn delete_canceled_after_kill_ack_retries_without_a_second_kill() {
+    cancellation_after_ack_preserves_retirement(RetirementCaller::Delete).await;
+}
+
+#[tokio::test]
+async fn close_canceled_after_kill_ack_retries_without_a_second_kill() {
+    cancellation_after_ack_preserves_retirement(RetirementCaller::Close).await;
+}
