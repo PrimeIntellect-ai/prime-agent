@@ -89,7 +89,7 @@ fn flush_rows_write_crlf_and_keep_zone_markers() {
     assert!(empty.is_empty());
 }
 
-fn options(selection: ModelSelection) -> InteractiveOptions {
+pub(crate) fn options(selection: ModelSelection) -> InteractiveOptions {
     InteractiveOptions {
         models: None,
         socket_path: PathBuf::from("/tmp/unused.sock"),
