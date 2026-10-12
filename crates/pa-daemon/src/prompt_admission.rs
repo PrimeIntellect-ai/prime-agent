@@ -595,6 +595,8 @@ impl Worker {
             self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
                 operation: "queue_dropped",
             });
+            // A cancelled idle admission has no turn-end event to refresh the roster.
+            self.push_roster_delta();
         }
         if abort_running {
             self.engine.abort_in_flight_turn();

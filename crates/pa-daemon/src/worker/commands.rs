@@ -387,6 +387,8 @@ impl Worker {
         // The in-flight turn's fetch cancels now, not at its next
         // streamed event.
         self.engine.abort_in_flight_turn();
+        // An idle withdrawal has no turn-end event to refresh the roster.
+        self.push_roster_delta();
     }
 
     fn handle_abort(&self) -> DaemonResponse {
