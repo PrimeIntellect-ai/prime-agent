@@ -106,11 +106,23 @@ pub(crate) fn decode_journal_lines<'a>(bytes: &'a [u8], path: &Path) -> Result<V
     Ok(lines)
 }
 
-// Keep the ownership inode stable across journal replacement and process crashes.
-// Retain the empty sidecar when retiring its journal: unlinking can admit a new
-// inode while another opener still uses the old one. OS ownership releases on
-// close or crash; directory entries/inodes can accumulate across retired paths.
-pub(crate) fn journal_write_owner(path: &Path) -> Result<File> {
+pub(crate) struct JournalWriteOwner {
+    file: File,
+}
+
+impl Drop for JournalWriteOwner {
+    fn drop(&mut self) {
+        // Closing one descriptor can leave the lock held by an inherited copy.
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!("failed to release journal ownership: {error}");
+        }
+    }
+}
+
+// Keep the sidecar inode stable: unlinking can admit a second ownership inode.
+// Empty sidecars remain after retirement; directory entries/inodes can accumulate.
+// Explicit unlock is attempted on guard drop; a failure leaves close as fallback.
+pub(crate) fn journal_write_owner(path: &Path) -> Result<JournalWriteOwner> {
     let mut ownership_path = path.as_os_str().to_os_string();
     ownership_path.push(".writer-lock");
     let file = OpenOptions::new()
@@ -122,7 +134,7 @@ pub(crate) fn journal_write_owner(path: &Path) -> Result<File> {
         .with_context(|| format!("open journal ownership {}", path.display()))?;
     pa_core::platform::try_lock_exclusive(&file)
         .with_context(|| format!("acquire journal ownership {}", path.display()))?;
-    Ok(file)
+    Ok(JournalWriteOwner { file })
 }
 
 pub(crate) fn tail_is_torn(path: &Path) -> Result<bool> {
@@ -241,7 +253,7 @@ pub struct WorkerQueueSnapshotRecord {
 /// Latest busy/operation per active session, plus the latest queue
 /// snapshot per session.
 pub struct WorkerRecoveryJournal {
-    _write_owner: File,
+    _write_owner: JournalWriteOwner,
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
     queue_snapshots: HashMap<String, WorkerQueueSnapshotRecord>,
@@ -1110,7 +1122,7 @@ mod tests {
             .record("s1", "sess1", None, true, "prompt_accepted")
             .unwrap();
         let expected = owner.get_latest();
-        let inherited = owner._write_owner.try_clone().unwrap();
+        let inherited = owner._write_owner.file.try_clone().unwrap();
         assert!(WorkerRecoveryJournal::open(&path).is_err());
 
         drop(owner);

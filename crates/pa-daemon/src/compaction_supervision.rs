@@ -181,7 +181,7 @@ pub(crate) struct TerminalCompactionRecord {
 /// worker descriptors, latest record per session. Declared records feed
 /// the replacement-worker create replay until they are consumed.
 pub(crate) struct TerminalCompactionJournal {
-    _write_owner: std::fs::File,
+    _write_owner: crate::journal::JournalWriteOwner,
     path: PathBuf,
     latest: HashMap<String, TerminalCompactionRecord>,
     /// Failed durable writes stay retryable in memory (the replay retries them).
