@@ -362,11 +362,17 @@ fn spawn_applier(
                         apply_batch(&mut guard, &batch, &base, &canonical_base);
                         #[cfg(test)]
                         shared.ready.notify_all();
+                        // Invalidation drops this watcher's ownership. Exit while
+                        // still holding the lock, before a query can rebuild and
+                        // expose its new state to any old queued callbacks.
+                        if !matches!(*guard, IndexState::Ready { .. }) {
+                            return;
+                        }
                         break;
                     }
                     // The watcher that fed this batch is gone: the state is a
                     // rebuilt or fallback one, and nothing applies to it.
-                    _ => break,
+                    IndexState::Unbuilt | IndexState::Disabled => return,
                 }
             }
         }
@@ -421,7 +427,11 @@ fn apply_batch(
                 event.kind,
                 notify::EventKind::Create(_)
                     | notify::EventKind::Remove(_)
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    | notify::EventKind::Modify(
+                        notify::event::ModifyKind::Name(_)
+                            | notify::event::ModifyKind::Any
+                            | notify::event::ModifyKind::Other,
+                    )
                     | notify::EventKind::Any
                     | notify::EventKind::Other
             ) {
