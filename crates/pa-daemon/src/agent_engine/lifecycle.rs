@@ -1,6 +1,8 @@
 //! The engine's lifecycle surface: the constructor and the session
 //! build/adopt/retire cycle, the closed-state markers, the skill
 //! expansion and session-command funnels, and the kernel host wiring.
+use std::sync::atomic::Ordering;
+
 use super::{
     execute_session_command, json_round_trip, map_thinking_level,
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
@@ -1005,7 +1007,64 @@ impl AgentSessionEngine {
             queued_goal_context_purge,
             // The steering lane owns the stop hooks (a queued steer cuts the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
-            should_stop_after_turn: Some(self.threshold_boundary_hook()),
+            should_stop_after_turn: Some({
+                let session = Arc::downgrade(&self.session);
+                let target = Arc::clone(&self.provider_target);
+                let yielded = Arc::clone(&self.threshold_yielded);
+                let enabled = Arc::clone(&self.threshold_checks_enabled);
+                Arc::new(move |context| {
+                    let session = session.clone();
+                    let target = Arc::clone(&target);
+                    let yielded = Arc::clone(&yielded);
+                    let enabled = Arc::clone(&enabled);
+                    Box::pin(async move {
+                        if context.tool_results.is_empty() || !enabled.load(Ordering::SeqCst) {
+                            return Ok(false);
+                        }
+                        let Some(session) = session.upgrade() else {
+                            return Ok(false);
+                        };
+                        let engine = session.lock().await.clone();
+                        let Some(engine) = engine else {
+                            return Ok(false);
+                        };
+                        // Capture the actual serving model before AgentEnd clears a routed override.
+                        let model = target
+                            .read()
+                            .expect("provider target lock")
+                            .as_ref()
+                            .map(|target| target.model.clone());
+                        let Some(model) = model else { return Ok(false) };
+                        let agent = engine.session.agent();
+                        let thinking = match agent.model_override() {
+                            Some(route) => route.thinking_level,
+                            None => agent.state().await.thinking_level,
+                        };
+                        let messages = context
+                            .context
+                            .messages
+                            .iter()
+                            .filter_map(|message| serde_json::to_value(message).ok())
+                            .filter_map(|value| serde_json::from_value(value).ok())
+                            .collect::<Vec<_>>();
+                        let due = pa_core::session_engine::compaction::threshold_compaction_due(
+                            &messages,
+                            model.context_window,
+                            pa_core::session_engine::compaction::request_output_budget(
+                                &model,
+                                pa_core::session_engine::provider_adapter::model_thinking_level(
+                                    thinking,
+                                ),
+                            ),
+                            &engine.session.compaction_settings(),
+                        );
+                        if due {
+                            yielded.store(true, Ordering::SeqCst);
+                        }
+                        Ok(due)
+                    })
+                })
+            }),
             // Seeded from settings at create; the live switch updates the slot ahead of any later
             // build.
             steering_mode,

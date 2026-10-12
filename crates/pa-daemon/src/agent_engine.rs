@@ -48,7 +48,6 @@ pub(crate) use tests::FAUX_TEST_LOCK;
 
 mod goalcore;
 mod lifecycle;
-mod threshold_boundary;
 mod turn_types;
 
 use turn_types::{
