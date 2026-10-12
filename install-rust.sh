@@ -2531,6 +2531,7 @@ if [ "$WINDOWS" = "yes" ] \
   fi
 fi
 launcher_tmp=""
+npm_launcher_backup=""
 cmd_tmp=""
 preserved_cmd_file=""
 windows_installed=""
@@ -2561,6 +2562,12 @@ on_exit() {
   # to publish into share_dir while this one still restores state — the
   # restore would delete that fresh payload (cross-installer data loss).
   publish_window_restore
+  # npm may have unlinked the public command before an interrupted uninstall.
+  # Restore the saved native launcher before releasing the publication lock.
+  if [ -n "${npm_launcher_backup:-}" ]; then
+    mv -f "$npm_launcher_backup" "$launcher" 2>/dev/null \
+      || echo "warning: restore the native launcher from ${npm_launcher_backup} to ${launcher}" >&2
+  fi
   [ -n "$launcher_tmp" ] && rm -f "$launcher_tmp" 2>/dev/null || true
   [ -n "${cmd_tmp:-}" ] && rm -f "$cmd_tmp" 2>/dev/null || true
   # The extraction stage is disposable on every failed path: a successful
@@ -3003,6 +3010,13 @@ try:
 except Exception:
     print("")' "${npm_root}/prime-agent/package.json")"
     if [ -n "$ts_version" ]; then
+      # npm unlinks its old bin entry even when our regular launcher has
+      # replaced that symlink. Keep a sibling copy and publish it again after
+      # uninstall (including a partial failure), without guessing npm's prefix.
+      launcher_tmp="$(mktemp "${bin_dir}/.prime-agent.XXXXXX")"
+      cp -p "$launcher" "$launcher_tmp"
+      npm_launcher_backup="$launcher_tmp"
+      launcher_tmp=""
       step_start "Removing the TypeScript npm package"
       if npm uninstall -g prime-agent >/dev/null 2>&1; then
         step_ok "Removed the TypeScript npm package" "restore: npm install -g prime-agent@${ts_version}"
@@ -3011,6 +3025,8 @@ except Exception:
         note "! The TypeScript npm command can shadow ${launcher} on PATH. Remove it:"
         todo "npm uninstall -g prime-agent"
       fi
+      mv -f "$npm_launcher_backup" "$launcher"
+      npm_launcher_backup=""
     fi
   fi
 fi
@@ -3114,13 +3130,12 @@ fi
 # --- verify: the launcher must answer --version -----------------------------------
 # Tried once. The common failure on a fresh install is the first-run kernel
 # venv bootstrap (the sidecar provisions itself on first launch), so the
-# failure prints the output plus a re-run hint instead of failing the
-# install over it.
-version_ok="yes"
+# failure must fail installation: a published payload alone does not certify
+# a working command. Kernel pre-warm remains best-effort above.
 if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
-  version_ok="no"
+  die "The installed prime-agent --version check failed: ${version_out}"
 fi
 
 # --- the summary ---------------------------------------------------------------------
@@ -3170,15 +3185,7 @@ if [ "$ts_stop_rust_stopped" = "yes" ] && [ "$rust_leftover" != "yes" ]; then
 fi
 
 printf '\n' >&2
-if [ "$version_ok" = yes ]; then
-  printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
-else
-  note "! Installed, but the first prime-agent --version run failed (it sets up"
-  note "  the kernel on first launch). Its output:"
-  printf '%s\n' "$version_out" >&2
-  note "  Run it again:"
-  todo "${launcher} --version"
-fi
+printf ' %sDone.%s Run %sprime-agent%s to start.\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$C_RESET" >&2
 dim "installed to $(tilde "$share_dir") · launcher $(tilde "$launcher")"
 if [ -n "$ts_takeover_from" ]; then
   dim "moved the TypeScript install to $(tilde "$ts_takeover_from") · undo:"

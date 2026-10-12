@@ -450,6 +450,10 @@ if [ "$1" = root ]; then echo "$TEST_NPM_ROOT"; else echo uninstall >> "$TEST_UN
                     "primeAgentRustBridge": bridge}))
                 result = subprocess.run(["sh", "-eu"], input='''
 WINDOWS=no
+bin_dir="$TEST_NPM_ROOT"
+launcher="$bin_dir/launcher"
+printf '#!/bin/sh\\nexit 0\\n' > "$launcher"
+chmod 0755 "$launcher"
 step_start() { :; }; step_ok() { :; }; step_fail() { :; }; note() { :; }; todo() { :; }
 ''' + retirement, text=True, capture_output=True, env={**self.env,
                     "PATH": str(fake_bin) + os.pathsep + self.env["PATH"],
@@ -457,6 +461,78 @@ step_start() { :; }; step_ok() { :; }; step_fail() { :; }; note() { :; }; todo()
                     "TEST_UNINSTALL_LOG": str(uninstalls), "PRIME_AGENT_PRESERVE_NPM_BRIDGE": flag})
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(uninstalls.exists(), expected)
+
+
+@unittest.skipUnless(sys.platform in ("darwin", "linux") and shutil.which("npm"),
+                     "requires npm on a historical TypeScript platform")
+class InstallerTakeoverTests(unittest.TestCase):
+    def test_npm_retirement_leaves_working_native_launcher(self):
+        installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
+        launcher_section = installer.split("# --- the launcher (the takeover lives here)", 1)[1].split(
+            "# The cmd/PowerShell launcher twin", 1)[0]
+        retirement = installer.split("# The TS npm package:", 1)[1].split(
+            "# --- the kernel pre-warm:", 1)[0]
+        recovery = installer.split("on_exit() {", 1)[1].split('  [ -n "$launcher_tmp" ]', 1)[0]
+        for shared, uninstall_fails in ((True, 0), (False, 0), (True, 1), (True, 2)):
+            with self.subTest(shared=shared, uninstall_fails=uninstall_fails), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                prefix = root / "native prefix"
+                npm_prefix = prefix if shared else root / "npm prefix"
+                package = npm_prefix / "lib/node_modules/prime-agent"
+                package.mkdir(parents=True)
+                (package / "package.json").write_text(json.dumps({
+                    "name": "prime-agent", "version": "0.9.8", "bin": {"prime-agent": "cli.js"}}))
+                (package / "cli.js").write_text("#!/usr/bin/env node\nconsole.log('0.9.8');\n")
+                (package / "cli.js").chmod(0o755)
+                (npm_prefix / "bin").mkdir()
+                (npm_prefix / "bin/prime-agent").symlink_to("../lib/node_modules/prime-agent/cli.js")
+                (prefix / "bin").mkdir(parents=True, exist_ok=True)
+                payload = prefix / "share/prime-agent"
+                payload.mkdir(parents=True)
+                (payload / "prime-agent").write_text("#!/bin/sh\nprintf '0.10.0\\n'\n")
+                (payload / "prime-agent").chmod(0o755)
+                env = {"PATH": os.environ["PATH"], "HOME": temp, "PREFIX": str(prefix),
+                       "UVPY": sys.executable, "TEST_UNINSTALL_FAIL": str(uninstall_fails),
+                       "npm_config_prefix": str(npm_prefix),
+                       "npm_config_cache": str(root / "cache"),
+                       "npm_config_userconfig": str(root / "empty-user-npmrc"),
+                       "npm_config_globalconfig": str(root / "empty-global-npmrc")}
+                result = subprocess.run(["sh", "-eu"], input='''
+bin_dir="$PREFIX/bin"
+launcher="$bin_dir/prime-agent"
+WINDOWS=no
+say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
+step_start() { :; }; step_ok() { :; }; step_fail() { :; }; todo() { :; }
+ui_stop() { :; }; publish_window_restore() { :; }
+''' + 'recover() {\n' + recovery + '\n}\n' + '''
+trap 'recover; [ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
+trap 'exit 143' TERM
+npm() {
+  command npm "$@" || return $?
+  if [ "$1" = uninstall ]; then
+    case "$TEST_UNINSTALL_FAIL" in
+      1) return 42 ;;
+      2) kill -TERM "$$" ;;
+    esac
+  fi
+}
+''' + '# --- the launcher (the takeover lives here)' + launcher_section + '# The TS npm package:' + retirement + '\n"$launcher" --version\n',
+                    env=env, text=True, capture_output=True, timeout=30)
+                self.assertFalse(package.exists(), result.stderr)
+                self.assertEqual(result.returncode, 143 if uninstall_fails == 2 else 0, result.stderr)
+                probe = subprocess.run([str(prefix / "bin/prime-agent"), "--version"],
+                                       env=env, text=True, capture_output=True, timeout=10)
+                self.assertEqual((probe.returncode, probe.stdout.strip()), (0, "0.10.0"), probe.stderr)
+                self.assertEqual(list((prefix / "bin").glob(".prime-agent.*")), [])
+
+    def test_failed_version_probe_is_install_failure(self):
+        installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
+        verification = installer.split("# --- verify: the launcher must answer --version", 1)[1].split("\n", 1)[1].split("# --- the summary", 1)[0]
+        result = subprocess.run(["sh", "-eu"], input='''
+install_probe_launcher=/nonexistent/prime-agent
+say() { :; }; die() { echo "$*" >&2; exit 1; }
+''' + verification, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0, "a broken launcher must not certify installation")
 
 
 if __name__ == "__main__":
