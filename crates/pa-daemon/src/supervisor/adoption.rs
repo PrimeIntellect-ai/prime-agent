@@ -173,6 +173,27 @@ impl Supervisor {
         self.spawn_roster_boot_seed();
     }
 
+    /// Positive owner-death evidence for the recorded pid (the inverse of
+    /// the tombstone's [`recorded_process_alive`]): the process is
+    /// provably gone, or the pid provably names a different process now.
+    /// An unobservable pid proves nothing and answers `false`.
+    async fn recorded_worker_is_gone(&self, resident: &Arc<ResidentWorker>) -> bool {
+        let (pid, expected) = {
+            let descriptor = resident.descriptor.lock().await;
+            (descriptor.pid, descriptor.process_start_id.clone())
+        };
+        let Ok(pid) = u32::try_from(pid) else {
+            return false;
+        };
+        tokio::task::spawn_blocking(move || {
+            let alive = crate::lease::is_process_alive(pid).ok();
+            let observed = crate::lease::get_process_start_id(pid);
+            !recorded_process_alive(alive, expected.as_deref(), observed.as_deref())
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Adopt one persisted worker descriptor. Serialized against worker
     /// self-registration by the per-worker adoption gate: whichever path
     /// arrives first builds the roster entry; the other finds it present.
@@ -268,6 +289,14 @@ impl Supervisor {
             }
             (adopted, None)
         } else {
+            // An unconnectable socket proves nothing about the process: a
+            // live-but-slow worker still owns its journaled `bash()` groups,
+            // so the boot reap needs the same positive owner-death evidence
+            // the tombstone probes use (TS `recoverWorker` runs its orphan
+            // sweep only once the recorded process identity is gone).
+            if self.recorded_worker_is_gone(&resident).await {
+                self.reap_dead_worker_orphans(&resident).await;
+            }
             let interrupted =
                 crate::journal::WorkerRecoveryJournal::read_interrupted(&journal_path);
             let kept = match &boot {
@@ -566,12 +595,15 @@ impl Supervisor {
                 ));
             }
         };
-        let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
+        let mut descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
         crate::descriptor::validate_descriptor(&descriptor, &self.options.socket_path)?;
         if token != descriptor.authentication_token.as_str() {
             return Err(anyhow!("Session worker authentication failed"));
         }
+        // The same boot-load backfill: a pre-upgrade descriptor wires its
+        // orphan journal here too, so a relaunch of this worker journals.
+        crate::descriptor::backfill_orphan_journal_path(&self.descriptor_dir, &mut descriptor);
         let worker_id = descriptor.worker_id.clone();
         let resident = ResidentWorker::new(
             registration.active_session_id.clone(),

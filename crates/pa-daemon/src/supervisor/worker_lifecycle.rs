@@ -282,7 +282,11 @@ impl Supervisor {
             process_start_id: None,
             socket_path: worker_socket.to_string_lossy().to_string(),
             recovery_journal_path: recovery_journal_path.to_string_lossy().to_string(),
-            orphan_process_journal_path: None,
+            orphan_process_journal_path: Some(
+                crate::journal::orphan_journal_path(&self.descriptor_dir, &worker_id)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             supervisor_socket_path: self.options.socket_path.to_string_lossy().to_string(),
             authentication_token: uuid::Uuid::new_v4().to_string(),
             worker_instance_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -779,6 +783,10 @@ impl Supervisor {
                 ));
             }
             _ => {
+                // The worker is provably gone, so its kernels can no longer
+                // run their teardown reap: kill the `bash()` groups they
+                // journaled before the descriptor dies with its files.
+                self.reap_dead_worker_orphans(resident).await;
                 // Metadata retirement historically treats failed liveness probes
                 // as gone. Journal deletion needs positive owner-death evidence:
                 // an unobservable process may still be writing durable work.
@@ -793,8 +801,50 @@ impl Supervisor {
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                // The orphan journal dies with the descriptor too (TS
+                // `deleteWorkerDescriptor`): nothing can write it anymore, and
+                // the reap above already spent its records.
+                if let Some(orphan_path) = resident
+                    .descriptor
+                    .lock()
+                    .await
+                    .orphan_process_journal_path
+                    .clone()
+                {
+                    let _ = std::fs::remove_file(&orphan_path);
+                }
             }
         }
+    }
+
+    /// Kill the `bash()` process groups a provably-dead worker's kernels
+    /// journaled (TS `recoverUncertainWorkerOperations`' orphan sweep):
+    /// a worker killed without its shutdown hook leaves them behind, and
+    /// only the supervisor still knows the journal's path.
+    pub(super) async fn reap_dead_worker_orphans(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        let (pid, orphan_path) = {
+            let descriptor = resident.descriptor.lock().await;
+            (
+                descriptor.pid,
+                descriptor.orphan_process_journal_path.clone(),
+            )
+        };
+        let Some(orphan_path) = orphan_path else {
+            return;
+        };
+        let Ok(worker_pid) = i32::try_from(pid) else {
+            return;
+        };
+        // The reap is blocking file I/O and kill signals (and on macOS a
+        // `ps` probe): keep it off the async executor, as the adoption
+        // identity probes do.
+        let _ = tokio::task::spawn_blocking(move || {
+            pa_core::kernel::orphan_journal::reap_worker_orphan_processes(
+                Path::new(&orphan_path),
+                worker_pid,
+            );
+        })
+        .await;
     }
 }
 

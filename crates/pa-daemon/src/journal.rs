@@ -11,6 +11,16 @@ use std::path::Path;
 
 pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
 
+/// The worker's orphan-process journal file suffix (TS
+/// `${workerId}.orphans.jsonl`, beside the recovery journal).
+pub(crate) const ORPHAN_JOURNAL_SUFFIX: &str = ".orphans.jsonl";
+
+/// The worker's orphan-process journal path under its descriptor dir.
+#[must_use]
+pub(crate) fn orphan_journal_path(descriptor_dir: &Path, worker_id: &str) -> std::path::PathBuf {
+    descriptor_dir.join(format!("{worker_id}{ORPHAN_JOURNAL_SUFFIX}"))
+}
+
 pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;

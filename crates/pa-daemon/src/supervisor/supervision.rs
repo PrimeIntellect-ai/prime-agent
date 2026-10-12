@@ -151,6 +151,10 @@ impl Supervisor {
             // resident RLM children here, before the restart, so a relaunched parent
             // never resumes beside an orphaned child worker.
             self.close_children_of_dead_parent(&resident).await;
+            // The dead worker's kernels cannot run their teardown reap
+            // either: kill the `bash()` groups they journaled before the
+            // relaunch replaces the recorded pid the journal is scoped to.
+            self.reap_dead_worker_orphans(&resident).await;
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_millis() as u64);

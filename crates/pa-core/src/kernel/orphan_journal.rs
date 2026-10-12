@@ -110,7 +110,8 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (year, m, d, hh, mm, ss)
 }
 
-/// Read the still-active orphan processes recorded by this host process.
+/// Read the still-active orphan processes a journal recorded for one owner
+/// pid — the host reads its own pid; the supervisor reads a dead worker's.
 ///
 /// # Errors
 ///
@@ -119,8 +120,10 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
 /// # Panics
 ///
 /// The `pid` unwrap is unreachable behind the validity filter.
-pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
-    let owner_pid = i64::from(std::process::id());
+pub fn read_active_orphan_processes(
+    path: &Path,
+    owner_pid: i64,
+) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -191,7 +194,7 @@ pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
     if kernel_pid <= 0 {
         return;
     }
-    let Ok(orphans) = read_active_orphan_processes(&path) else {
+    let Ok(orphans) = read_active_orphan_processes(&path, i64::from(std::process::id())) else {
         return;
     };
     for orphan in orphans {
@@ -204,6 +207,36 @@ pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
         if kill_orphan_process(orphan.pid) {
             record_orphan_process_state(orphan.pid, false);
         }
+    }
+}
+
+/// Kill the still-active `bash()` process groups a dead worker's kernels
+/// journaled, then clear the journal (TS `recoverUncertainWorkerOperations`'
+/// orphan sweep, owner-scoped to the worker's own pid). The journal is
+/// kept only when a kill failed and every record carried an identity, so
+/// the next recovery pass can safely retry.
+pub fn reap_worker_orphan_processes(path: &Path, worker_pid: i32) {
+    if worker_pid <= 0 {
+        return;
+    }
+    let Ok(orphans) = read_active_orphan_processes(path, i64::from(worker_pid)) else {
+        return;
+    };
+    let mut reap_failed = false;
+    let mut retry_is_safe = true;
+    for orphan in orphans {
+        if orphan.process_start_id.is_none() {
+            retry_is_safe = false;
+        }
+        if !should_reap(&orphan) {
+            continue;
+        }
+        if !kill_orphan_process(orphan.pid) {
+            reap_failed = true;
+        }
+    }
+    if !reap_failed || !retry_is_safe {
+        let _ = std::fs::remove_file(path);
     }
 }
 
