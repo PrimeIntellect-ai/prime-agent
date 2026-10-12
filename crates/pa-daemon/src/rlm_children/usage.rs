@@ -26,6 +26,9 @@ impl SupervisorChildSessionsInner {
         // would deadlock the two.
         let emit_lock = record.lock().await.emit_lock.clone();
         let emit_guard = emit_lock.lock().await;
+        if record.lock().await.usage_registration_forgotten {
+            return;
+        }
         let mut drain_fresh_interval = record.lock().await.pending_usage_report.is_some();
         loop {
             let pending = record.lock().await.pending_usage_report.clone();
@@ -89,21 +92,124 @@ impl SupervisorChildSessionsInner {
         drop(emit_guard);
     }
 
-    /// Drop one child's attribution registration after its final
-    /// observation, so sequential children do not accumulate registrations in the producer.
-    pub(super) async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+    /// Drop registration only after the final report persisted; return whether it is cleared.
+    /// A failed bounded replay leaves both the report and its registration owed.
+    pub(super) async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        if record.lock().await.usage_registration_forgotten {
+            return true;
+        }
         let sink = self.usage_sink.lock().expect("usage sink lock").clone();
         let Some(sink) = sink else {
-            return;
+            return true;
         };
         // A failed final delivery keeps its report owed, and no observation
         // follows this call: replay it once before the registration drops,
         // or the forget orphans the retained report.
-        if record.lock().await.pending_usage_report.is_some() {
-            self.emit_child_usage(record).await;
+        // Also observe the frozen child's tail if a prior caller was canceled before capturing it.
+        self.emit_child_usage(record).await;
+        let emit_lock = record.lock().await.emit_lock.clone();
+        let _emit_guard = emit_lock.lock().await;
+        let mut row = record.lock().await;
+        if row.usage_registration_forgotten {
+            return true;
         }
-        let rlm_child_id = record.lock().await.rlm_child_id.clone();
-        sink.forget(&rlm_child_id).await;
+        if row.pending_usage_report.is_some() {
+            return false;
+        }
+        // Forget touches only the producer registry and does not re-enter the child record.
+        // Serialize its acknowledgment with final emission and record the receipt without an await.
+        sink.forget(&row.rlm_child_id).await;
+        row.usage_registration_forgotten = true;
+        true
+    }
+
+    /// Keep a confirmed-dead child's final accounting reachable after roster retirement.
+    pub(super) fn retain_retired_usage(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+        intent: super::RetirementIntent,
+    ) {
+        let mut retired = self
+            .retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !retired.iter().any(|held| Arc::ptr_eq(&held.record, record)) {
+            retired.push(super::RetiredChild {
+                record: Arc::clone(record),
+                intent,
+            });
+        }
+    }
+
+    pub(super) fn retirement_intent(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+    ) -> Option<super::RetirementIntent> {
+        self.retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|held| Arc::ptr_eq(&held.record, record))
+            .map(|held| held.intent)
+    }
+
+    pub(super) fn has_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        self.retirement_intent(record).is_some()
+    }
+
+    pub(super) fn remove_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        self.retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|held| !Arc::ptr_eq(&held.record, record));
+    }
+
+    /// One bounded replay per matching receipt; never repeat a confirmed worker kill.
+    pub(super) async fn replay_retired_usage(&self, target: Option<&str>) -> bool {
+        let retired = self
+            .retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut persisted = true;
+        for retirement in retired {
+            let record = retirement.record;
+            let matches = {
+                let row = record.lock().await;
+                target.is_none_or(|target| row.matches(target))
+            };
+            if !matches {
+                continue;
+            }
+            // An interrupted caller still owns lifecycle completion through the roster.
+            if self
+                .children
+                .lock()
+                .await
+                .iter()
+                .any(|held| Arc::ptr_eq(held, &record))
+            {
+                continue;
+            }
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _guard = rename_lock.lock().await;
+            if !self
+                .retired_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|held| Arc::ptr_eq(&held.record, &record))
+            {
+                continue;
+            }
+            let usage_persisted = self.forget_child_usage(&record).await;
+            self.finish_retirement(&record).await;
+            if usage_persisted {
+                self.remove_retired_usage(&record);
+            }
+            persisted &= usage_persisted;
+        }
+        persisted
     }
 
     /// Start the follow-up usage watcher for a settled child that is
