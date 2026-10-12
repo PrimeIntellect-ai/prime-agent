@@ -422,3 +422,79 @@ async fn a_chunked_windowed_attach_streams_the_count_it_carries() {
         "the tail plus the history-before prefix is the session total"
     );
 }
+
+#[tokio::test]
+async fn a_windowed_attach_keeps_interleaved_tool_pairs_together() {
+    for scenario in [0, 1, 2] {
+        let crossing = scenario != 0;
+        let earlier_id = if scenario == 2 { "boundary" } else { "earlier" };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interleaved-tools.jsonl");
+        let mut fixture = Fixture {
+            content: header_line("interleaved-tools"),
+            prev: None,
+            id: 0,
+        };
+        for _ in 0..20 {
+            fixture.row(|prev, id| message_row(prev, id, &assistant_message("older history")));
+        }
+        let call = |id: &str| {
+            json!({
+                "role": "assistant", "timestamp": 10,
+                "content": [{"type": "toolCall", "id": id, "name": "bash", "arguments": {"command": "echo paired"}}],
+            })
+        };
+        let result = |id: &str| {
+            json!({
+                "role": "toolResult", "toolCallId": id, "toolName": "bash", "timestamp": 12,
+                "content": [{"type": "text", "text": "paired result"}], "isError": false,
+            })
+        };
+        if crossing {
+            fixture.row(|prev, id| message_row(prev, id, &call(earlier_id)));
+        }
+        fixture.row(|prev, id| message_row(prev, id, &call("boundary")));
+        if crossing {
+            fixture.row(|prev, id| message_row(prev, id, &result(earlier_id)));
+        }
+        // A user !command can finish while an agent tool is still running.
+        // Place this real message role exactly at the nominal 512-row cut.
+        fixture.row(|prev, id| {
+            message_row(
+                prev,
+                id,
+                &json!({
+                    "role": "bashExecution", "command": "echo user", "output": "user",
+                    "exitCode": 0, "cancelled": false, "truncated": false, "timestamp": 11,
+                }),
+            )
+        });
+        fixture.row(|prev, id| message_row(prev, id, &result("boundary")));
+        for _ in 0..510 {
+            fixture.row(|prev, id| message_row(prev, id, &assistant_message("newer history")));
+        }
+        std::fs::write(&path, fixture.content).unwrap();
+        let worker = worker_over(dir.path(), &path).await;
+        let full = full_messages(&worker).await;
+        let data = attach(&worker, TUI_CAPABILITIES).await;
+        let snapshot = &data["snapshot"];
+        assert_eq!(
+            snapshot["historyBefore"], 20,
+            "both matched pairs belong in the tail; unrelated older history stays omitted"
+        );
+        assert_eq!(
+            snapshot["messages"],
+            json!(full[20..]),
+            "moving the boundary preserves the complete ordered suffix"
+        );
+        let head = worker
+            .dispatch("get_messages", &json!({"before": 20}))
+            .await;
+        assert!(head.success);
+        assert_eq!(
+            head.data.unwrap()["messages"],
+            json!(full[..20]),
+            "the omitted prefix remains available without duplication"
+        );
+    }
+}
