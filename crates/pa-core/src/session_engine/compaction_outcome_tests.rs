@@ -960,7 +960,7 @@ async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingT
     let (guard_tx, mut guard_rx) = tokio::sync::mpsc::unbounded_channel();
     let refiner: crate::refinement::executor::RefinerFn = Box::new(move |_, _, _| {
         Box::pin(async move {
-            guard_tx.send(persistence.lock_owned().await).unwrap();
+            assert!(guard_tx.send(persistence.lock_owned().await).is_ok());
             Ok(plan_reply(EMPTY_PLAN))
         })
     });
