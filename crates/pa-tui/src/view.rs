@@ -518,6 +518,7 @@ impl AgentView {
             0
         };
         self.reanchor_paused_window_for_prepend();
+        let cursor_spacing_before = self.prepend_cursor_spacing(0);
         self.chat.splice(0..0, entries);
         self.entry_layout
             .splice(0..0, std::iter::repeat_n([None, None, None], count));
@@ -542,7 +543,7 @@ impl AgentView {
             .iter()
             .map(|index| index + count)
             .collect();
-        self.note_prepended_entries(count, seam_before);
+        self.note_prepended_entries(count, seam_before, cursor_spacing_before);
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot

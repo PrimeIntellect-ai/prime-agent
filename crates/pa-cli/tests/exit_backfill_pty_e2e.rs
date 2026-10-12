@@ -71,6 +71,9 @@ fn exit_backfill_child_mode() {
             .expect("the chat surface ran");
         // The composition root's exit tail (pa-cli `interactive_mode`),
         // replicated because the child drives the surface directly.
+        if let Some(SessionSelection::Attach(id)) = outcome.selection_request {
+            println!("backfill handoff selected {id}");
+        }
         if let Some(hint) = outcome.resume_hint {
             println!("\x1b[2m{hint}\x1b[22m");
         }
@@ -84,6 +87,15 @@ static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn exit_does_not_wait_for_a_pending_backfill_page() {
+    leave_with_pending_backfill(b"/exit\r");
+}
+
+#[test]
+fn resume_does_not_wait_for_a_pending_backfill_page() {
+    leave_with_pending_backfill(b"/resume s2\r");
+}
+
+fn leave_with_pending_backfill(gesture: &[u8]) {
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -104,10 +116,10 @@ fn exit_does_not_wait_for_a_pending_backfill_page() {
         "the windowed attach must have started an older-history page request before the exit"
     );
 
-    // The exit gesture: `/exit` leaves through the session-request route —
-    // no Ctrl+C pair, so no force-quit watchdog can mask a hang.
+    // Both gestures leave through the session-request route: no Ctrl+C
+    // pair, so no force-quit watchdog can mask a hang.
     let keys_sent = Instant::now();
-    harness.write(b"/exit\r");
+    harness.write(gesture);
 
     let exit_code = harness.wait_child_exit(EXIT_BOUND);
     let exit_wall = keys_sent.elapsed();
@@ -120,6 +132,12 @@ fn exit_does_not_wait_for_a_pending_backfill_page() {
 
     harness.settle();
     let output = harness.output();
+    if gesture == b"/resume s2\r" {
+        assert!(
+            find_subsequence(&output, b"backfill handoff selected s2").is_some(),
+            "the run must return the requested session to the composition root"
+        );
+    }
     assert!(
         find_subsequence(&output, STALL_MSG).is_none(),
         "the exit went through its own path, never the watchdog's"

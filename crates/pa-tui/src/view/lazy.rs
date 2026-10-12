@@ -162,13 +162,34 @@ impl AgentView {
         self.sparse_window = Some(window);
     }
 
-    pub(super) fn note_prepended_entries(&mut self, count: usize, seam_before: usize) {
+    /// A spacing-driven cursor can look past hidden assistant entries to the
+    /// prepended head, even when it is not on the first entry. Only its leading
+    /// blank can change; preserve the content row without measuring the history.
+    pub(super) fn prepend_cursor_spacing(&self, prepended: usize) -> Option<bool> {
+        let (section, _) = self.sparse_window?.cursor?;
+        let index = section.checked_sub(1)? + prepended;
+        matches!(
+            self.chat.get(index)?,
+            crate::chat::ChatEntry::Tool(_)
+                | crate::chat::ChatEntry::AgentMessage(_)
+                | crate::chat::ChatEntry::ShellCompletion(_)
+        )
+        .then(|| self.conversation_leading(index, self.entry_detail(index).tool_output_expanded()))
+    }
+
+    pub(super) fn note_prepended_entries(
+        &mut self,
+        count: usize,
+        seam_before: usize,
+        cursor_spacing_before: Option<bool>,
+    ) {
         if self.layout_width == 0 {
             return;
         }
         if let Some((index, rows)) = self.sparse_mutation {
             self.sparse_mutation = Some((index + count, rows));
         }
+        let cursor_spacing_after = self.prepend_cursor_spacing(count);
         let Some(mut window) = self.sparse_window.take() else {
             return;
         };
@@ -185,7 +206,15 @@ impl AgentView {
             Some((1, row)) if self.chat.len() > count => {
                 Some((count + 1, (row + seam_after).saturating_sub(seam_before)))
             }
-            Some((section, row)) => Some((section + count, row)),
+            Some((section, row)) => {
+                let row = match cursor_spacing_before.zip(cursor_spacing_after) {
+                    Some((before, after)) => {
+                        (row + usize::from(after)).saturating_sub(usize::from(before))
+                    }
+                    None => row,
+                };
+                Some((section + count, row))
+            }
             None => None,
         };
         self.sparse_window = Some(window);
