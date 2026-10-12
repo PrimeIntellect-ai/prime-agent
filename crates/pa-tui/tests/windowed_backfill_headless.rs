@@ -661,7 +661,7 @@ fn a_failed_rebuild_reports_cancelled_incomplete_history() {
             },
             HeadlessStep::Submit("/reload".to_string()),
             HeadlessStep::WaitRender {
-                needle: "Older history could not be loaded after transcript refresh failed"
+                needle: "Transcript refresh failed; displayed history may be incomplete or stale"
                     .to_string(),
                 timeout_ms: 5000,
             },
@@ -679,7 +679,7 @@ fn a_failed_rebuild_reports_cancelled_incomplete_history() {
     );
     assert!(
         frames.iter().any(|frame| frame
-            .contains("Older history could not be loaded after transcript refresh failed")),
+            .contains("Transcript refresh failed; displayed history may be incomplete or stale")),
         "a failed rebuild must disclose that older history is unavailable"
     );
     let last = frames.last().unwrap();

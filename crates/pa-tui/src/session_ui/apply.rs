@@ -138,7 +138,7 @@ impl SessionUi {
         else {
             if incomplete_history {
                 view.push_entry(ChatEntry::Status {
-                    text: "Older history could not be loaded after transcript refresh failed. Reopen the session to retry.".to_string(),
+                    text: "Transcript refresh failed; displayed history may be incomplete or stale. Reopen the session to retry.".to_string(),
                     kind: StatusKind::Warning,
                 });
                 self.dirty = true;
