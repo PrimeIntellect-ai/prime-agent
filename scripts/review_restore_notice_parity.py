@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 
@@ -47,11 +48,13 @@ def texts(value):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self):
+    def __init__(self, root):
         super().__init__(('127.0.0.1', 0), Handler)
         self.phase = 'setup'
         self.requests = {'setup': [], 'resume': []}
         self.tool_names = {}
+        self.root = root
+        self.snapshot_ready = False
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -77,6 +80,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                      'arguments': json.dumps({'code': SETUP if self.server.phase == 'setup' else READ})}}]}
             finish = 'tool_calls'
         else:
+            if self.server.phase == 'setup':
+                # Observe the real debounced snapshot before ending either process.
+                # Rust's existing print shutdown only disposes descendant kernels;
+                # the fixture does not claim root shutdown/flush parity.
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    paths = list(self.server.root.rglob('kernel-state.dill'))
+                    if any(path.stat().st_size > 0 for path in paths):
+                        self.server.snapshot_ready = True
+                        break
+                    threading.Event().wait(0.025)
             delta, finish = {'content': 'Fixture complete.'}, 'stop'
         def chunk(delta, reason=None):
             return {'id': 'restore-parity', 'object': 'chat.completion.chunk', 'created': 1,
@@ -136,7 +150,13 @@ def run_case(binary, label, root, observation):
                PRIME_AGENT_CODING_AGENT_DIR=str(agent), PI_SESSION_DIR=str(sessions),
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
                XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'))
-    server = Server()
+    # Both runtimes receive the same fixture skill library. This isolates the
+    # restore notice from different installed/bundled skill discovery paths.
+    library = Path(os.environ['PI_PACKAGE_DIR']) / 'skills'
+    skill_paths = sorted(str(path) for path in library.glob('*/src') if path.is_dir())
+    env['PYTHONPATH'] = os.pathsep.join(skill_paths + [env.get('PYTHONPATH', '')])
+    observation['fixture_pythonpath'] = env['PYTHONPATH']
+    server = Server(root)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     (agent / 'models.json').write_text(json.dumps({'providers': {'fixture': {
@@ -151,13 +171,18 @@ def run_case(binary, label, root, observation):
     try:
         version = invoke([str(binary), '--version'], cwd, env)
         setup = invoke(command + ['Set up the restore fixture.'], cwd, env)
+        observation.update(setup_stdout=setup['stdout'], setup_stderr=setup['stderr'],
+                           setup_requests=server.requests['setup'],
+                           snapshot_ready_before_setup_completion=server.snapshot_ready)
+        setup_probe = probe_from(server.requests['setup'], 'RESTORE_PARITY_SETUP=')
+        observation['setup'] = setup_probe
+        assert setup_probe == {'cwd': str(cwd / 'moved'), 'env': 'changed'}, setup_probe
         session_files = list(sessions.rglob('*.jsonl'))
         session_files = [p for p in session_files if json.loads(p.read_text().splitlines()[0]).get('type') == 'session']
         assert len(session_files) == 1, 'expected one persisted session: %s' % session_files
         snapshots = list(root.rglob('kernel-state.dill'))
         assert len(snapshots) == 1 and snapshots[0].stat().st_size, 'setup did not persist a kernel snapshot'
-        setup_probe = probe_from(server.requests['setup'], 'RESTORE_PARITY_SETUP=')
-        assert setup_probe == {'cwd': str(cwd / 'moved'), 'env': 'changed'}, setup_probe
+        assert server.snapshot_ready, 'debounced snapshot never became ready before setup completion'
         assert not notices_in(server.requests['setup'][0]), 'fresh session emitted a restore notice'
         server.phase = 'resume'
         resume = invoke(command + ['--resume', str(session_files[0]), 'Read the restored state.',
@@ -217,6 +242,10 @@ def main():
                            for label, path in binaries.items()},
               'intended_difference': RESET,
               'tool_name_normalization': 'Select offered python_repl or legacy ipython; identical cell code.',
+              'fixture_prerequisites': [
+                  'Wait for observable nonempty debounced snapshot before setup final answer in both binaries.',
+                  'Existing Rust print shutdown disposes descendants but does not await root snapshot; no disposal parity claimed.',
+                  'Both kernels receive the same pinned TS skills/src library via PYTHONPATH; this is fixture setup, not a production namespace claim.'],
               'runs': {}, 'verified': False}
     try:
         with tempfile.TemporaryDirectory(prefix='restore-notice-parity-') as temp:
