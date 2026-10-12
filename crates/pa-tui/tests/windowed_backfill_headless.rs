@@ -20,6 +20,7 @@ struct MockSupervisor {
     /// Hold the history backfill page instead of answering it: the plan then
     /// leaves the request in flight across an exit or a transcript rebuild.
     hold_backfill: bool,
+    reject_rebuild: bool,
     validation_state: Option<Value>,
     changed_prefix: bool,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -32,6 +33,7 @@ impl MockSupervisor {
             windowed,
             failures: 0,
             hold_backfill: false,
+            reject_rebuild: false,
             validation_state: Some(
                 json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "s1"}),
             ),
@@ -89,13 +91,7 @@ impl MockSupervisor {
                     self.requests.lock().unwrap().push(command.clone());
                     if self.failures > 0 {
                         self.failures -= 1;
-                        write_json(
-                            &mut writer,
-                            &json!({
-                                "type": "response", "id": id, "command": "get_messages",
-                                "success": false, "error": "temporary backfill rejection",
-                            }),
-                        );
+                        write_json(&mut writer, &history_failure(id));
                         continue;
                     }
                     if command.get("before").is_some() {
@@ -123,6 +119,10 @@ impl MockSupervisor {
                         write_json(&mut writer, &response);
                         continue;
                     }
+                    if self.reject_rebuild {
+                        write_json(&mut writer, &history_failure(id));
+                        continue;
+                    }
                     // A cursor-less fetch is a transcript rebuild. Release the
                     // obsolete response before it; the separate unit regression
                     // injects an already-queued note to verify the epoch fence.
@@ -137,7 +137,7 @@ impl MockSupervisor {
                         &success_response(
                             id,
                             "get_session_stats",
-                            json!({
+                            &json!({
                                 "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                                 "cost": 0.01,
                             }),
@@ -145,14 +145,21 @@ impl MockSupervisor {
                     );
                 }
                 _ => {
-                    write_json(&mut writer, &success_response(id, command_type, json!({})));
+                    write_json(&mut writer, &success_response(id, command_type, &json!({})));
                 }
             }
         }
     }
 }
 
-fn success_response(id: &str, command: &str, data: Value) -> Value {
+fn history_failure(id: &str) -> Value {
+    json!({
+        "type": "response", "id": id, "command": "get_messages",
+        "success": false, "error": "temporary history rejection",
+    })
+}
+
+fn success_response(id: &str, command: &str, data: &Value) -> Value {
     json!({
         "type": "response", "id": id, "command": command,
         "success": true, "data": data,
@@ -347,6 +354,7 @@ fn run_attached_with_validation(
 
 fn run_attached_holding_backfill(
     windowed: bool,
+    reject_rebuild: bool,
     height: u16,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
@@ -356,6 +364,7 @@ fn run_attached_holding_backfill(
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
     supervisor.hold_backfill = true;
+    supervisor.reject_rebuild = reject_rebuild;
     let (served_tx, served_rx) = std::sync::mpsc::channel::<()>();
     let handle = std::thread::spawn(move || {
         supervisor.serve();
@@ -511,7 +520,8 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
 #[test]
 fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
     let (frames, requests) = run_attached_holding_backfill(
-        true,
+        /*windowed*/ true,
+        /*reject_rebuild*/ false,
         30,
         vec![HeadlessStep::WaitRender {
             needle: "backfill request received".to_string(),
@@ -539,7 +549,8 @@ fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
 #[test]
 fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered() {
     let (frames, requests) = run_attached_holding_backfill(
-        true,
+        /*windowed*/ true,
+        /*reject_rebuild*/ false,
         50,
         vec![
             HeadlessStep::WaitRender {
@@ -630,4 +641,43 @@ fn a_changed_or_unverifiable_prefix_is_rejected_before_the_compaction_event() {
             .iter()
             .any(|frame| frame.contains("timed out waiting")));
     }
+}
+
+#[test]
+fn a_failed_rebuild_reports_cancelled_incomplete_history() {
+    let (frames, requests) = run_attached_holding_backfill(
+        /*windowed*/ true,
+        /*reject_rebuild*/ true,
+        100,
+        vec![
+            HeadlessStep::WaitRender {
+                needle: "backfill request received".to_string(),
+                timeout_ms: 5000,
+            },
+            HeadlessStep::Submit("/reload".to_string()),
+            HeadlessStep::WaitRender {
+                needle: "Older history could not be loaded after transcript refresh failed"
+                    .to_string(),
+                timeout_ms: 5000,
+            },
+        ],
+    );
+    assert_eq!(
+        requests.len(),
+        2,
+        "held prefix and failed whole-history rebuild only"
+    );
+    assert_eq!(requests[0]["before"], json!(HISTORY_MESSAGES as u64));
+    assert!(
+        requests[1].get("before").is_none(),
+        "the cancelled positional cursor is never rearmed"
+    );
+    assert!(
+        frames.iter().any(|frame| frame
+            .contains("Older history could not be loaded after transcript refresh failed")),
+        "a failed rebuild must disclose that older history is unavailable"
+    );
+    let last = frames.last().unwrap();
+    assert!(last.contains("msg-15"), "loaded tail stays visible");
+    assert!(!last.contains("msg-00"), "the held prefix was never loaded");
 }
