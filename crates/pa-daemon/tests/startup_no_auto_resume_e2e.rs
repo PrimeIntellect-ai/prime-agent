@@ -265,12 +265,16 @@ fn write_ts_era_session(agent_dir: &Path, session_id: &str, name: &str, state: &
     let sessions = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let path = sessions.join(format!("{session_id}.jsonl"));
+    // A user resume restores this directory; keep the fixture independent of
+    // machine-specific paths such as /work.
+    let cwd = agent_dir.join("project");
+    std::fs::create_dir_all(&cwd).expect("project dir");
     let lines = json_lines(vec![
         json!({
             "type": "session",
             "id": session_id,
             "timestamp": "2026-01-05T10:00:00.000Z",
-            "cwd": "/work",
+            "cwd": cwd,
         }),
         json!({
             "type": "session_info",
@@ -326,7 +330,8 @@ fn due_job(
         "activeSessionId": session_id,
         "sessionId": session_id,
         "sessionFile": session_file.to_string_lossy(),
-        "cwd": "/work",
+        "cwd": pa_core::session::manager::read_session_header(session_file)
+            .expect("session header").cwd,
         "prompt": prompt,
         "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120_000 },
         "createdAt": "2026-01-05T10:00:04.000Z",
@@ -466,6 +471,7 @@ fn a_due_scheduled_job_never_boots_its_session_at_daemon_start() {
     );
     let created = client.read_response("c1");
     assert_eq!(created["success"], true, "resume create failed: {created}");
+    assert_eq!(created["data"]["cwd"], json!(agent_dir.join("project")));
     let active_id = created["data"]["id"]
         .as_str()
         .or_else(|| created["data"]["activeSessionId"].as_str())
