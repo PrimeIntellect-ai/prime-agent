@@ -849,6 +849,15 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     // catalog read that could refresh a slice. The pause broadcast below proves the
     // supervisor has processed that mutation's generation invalidation.
     let (mut observer, _hello) = Client::connect(&socket);
+    // Hello is written before this connection subscribes to broadcasts. A local,
+    // read-only RPC response proves the subscribed command loop is now running;
+    // it neither consults a worker nor refreshes or invalidates a catalog slice.
+    observer.send_command(
+        "observer-ready",
+        &json!({ "type": "update_restore_status" }),
+    );
+    let ready = observer.read_response("observer-ready");
+    assert_eq!(ready["success"], true, "{ready}");
 
     // A worker-side mutation bumps that worker's generation: its slice is stale, so the
     // next list consults it again (the frozen mutated worker fails, TS `failed`).
