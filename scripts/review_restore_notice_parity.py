@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare real TS/Rust resume behavior, recording #3525's intended notice addition.
 
-Runs the same two-turn fixture against the pinned TS 0.9.8 release and Rust.
+Runs the same setup, resume, and acknowledgement fixture against the pinned TS 0.9.8 release and Rust.
 Both must revive a namespace while resetting cwd/env; Rust alone must disclose
 that reset. Only the exact added sentence is excluded from notice parity.
 All provider traffic, homes, sessions, and subprocesses belong to this fixture.
@@ -123,7 +123,7 @@ def notices_in(request):
             for text in texts(message.get('content')) if '[python-state-restored]' in text]
 
 
-def run_case(binary, label, root):
+def run_case(binary, label, root, observation):
     for name in ('home', 'agent', 'sessions', 'work', 'tmp'):
         (root / name).mkdir(parents=True)
     cwd, agent, sessions = root / 'work', root / 'agent', root / 'sessions'
@@ -160,11 +160,25 @@ def run_case(binary, label, root):
         assert setup_probe == {'cwd': str(cwd / 'moved'), 'env': 'changed'}, setup_probe
         assert not notices_in(server.requests['setup'][0]), 'fresh session emitted a restore notice'
         server.phase = 'resume'
-        resume = invoke(command + ['--resume', str(session_files[0]), 'Read the restored state.'], cwd, env)
+        resume = invoke(command + ['--resume', str(session_files[0]), 'Read the restored state.',
+                                   'Acknowledge the restore notice.'], cwd, env)
+        observation.update(setup_stdout=setup['stdout'], resume_stdout=resume['stdout'],
+                           stderr={'setup': setup['stderr'], 'resume': resume['stderr']},
+                           request_sequence={phase: [{'number': i + 1,
+                               'roles': [m.get('role') for m in body.get('messages', [])],
+                               'restore_notices': notices_in(body)}
+                               for i, body in enumerate(requests)]
+                               for phase, requests in server.requests.items()})
         actual = probe_from(server.requests['resume'], PROBE)
         assert actual == {'marker': 'namespace-survived', 'cwd': str(cwd), 'env': None}, actual
-        notices = notices_in(server.requests['resume'][0])
-        assert len(notices) == 1, 'restore notice must precede the first resumed model request: %s' % notices
+        # TS queues a restore triggered by the first cell for the next user turn
+        # (sendCustomMessage(nextTurn), consumed during prompt preparation).
+        # Submit the same acknowledgement prompt to both binaries and record
+        # every request, including any pre-existing delivery-timing difference.
+        notice_request_numbers = [i + 1 for i, body in enumerate(server.requests['resume'])
+                                  if notices_in(body)]
+        notices = notices_in(server.requests['resume'][-1])
+        assert len(notices) == 1, 'restore notice missing from acknowledgement request: %s' % notices
         notice = notices[0]
         assert 'revived from your previous session' in notice and 'restore_parity_marker' in notice, notice
         # Persisted/renderable notice is inspected separately from the provider request.
@@ -176,7 +190,8 @@ def run_case(binary, label, root):
         assert (RESET in stored_notice) == (label == 'rust'), stored_notice
         return {'version': version['stdout'].strip(), 'setup': setup_probe,
                 'restored': {**actual, 'cwd': '<session-cwd>'},
-                'notice': stored_notice, 'notice_before_first_request': True,
+                'notice': stored_notice, 'notice_request_numbers': notice_request_numbers,
+                'request_sequence': observation['request_sequence'],
                 'offered_repl_tool_names': server.tool_names,
                 'request_counts': {k: len(v) for k, v in server.requests.items()},
                 'display': stored[0]['display'], 'details': stored[0].get('details'),
@@ -206,11 +221,17 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix='restore-notice-parity-') as temp:
             for label, binary in binaries.items():
-                result['runs'][label] = run_case(binary, label, Path(temp) / label)
+                observation = {}
+                result['runs'][label] = observation
+                observation.update(run_case(binary, label, Path(temp) / label, observation))
         ts, rust = result['runs']['ts'], result['runs']['rust']
         assert rust['notice'].removesuffix('\n' + RESET) == ts['notice'], 'additional notice difference'
         assert rust['restored'] == ts['restored'], 'restored state differs'
-        assert rust['request_counts'] == ts['request_counts'] == {'setup': 2, 'resume': 2}
+        assert rust['request_counts'] == ts['request_counts'] == {'setup': 2, 'resume': 3}
+        result['notice_timing_equal'] = ts['notice_request_numbers'] == rust['notice_request_numbers']
+        result['timing_scope'] = ('Observed, not normalized: #3525 changes only notice_content and its tests; '
+                                  'kernel boot and next-turn queue timing are unchanged from base Rust. '
+                                  'Both binaries must deliver the notice by the acknowledgement prompt.')
         result['verified'] = True
     except Exception as error:
         result['error'] = str(error)
