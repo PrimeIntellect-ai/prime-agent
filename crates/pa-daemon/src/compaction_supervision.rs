@@ -181,6 +181,7 @@ pub(crate) struct TerminalCompactionRecord {
 /// worker descriptors, latest record per session. Declared records feed
 /// the replacement-worker create replay until they are consumed.
 pub(crate) struct TerminalCompactionJournal {
+    _write_owner: std::fs::File,
     path: PathBuf,
     latest: HashMap<String, TerminalCompactionRecord>,
     /// Failed durable writes stay retryable in memory (the replay retries them).
@@ -194,6 +195,7 @@ impl TerminalCompactionJournal {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let write_owner = crate::journal::journal_write_owner(path)?;
         let latest = Self::load(path)?;
         if crate::journal::tail_is_torn(path)? {
             let records = latest
@@ -203,6 +205,7 @@ impl TerminalCompactionJournal {
             crate::journal::rewrite_records(path, &records, crate::journal::Finalize::Synced)?;
         }
         Ok(TerminalCompactionJournal {
+            _write_owner: write_owner,
             latest,
             retryable: HashMap::new(),
             path: path.to_path_buf(),
@@ -220,7 +223,7 @@ impl TerminalCompactionJournal {
             }
         };
         let mut latest = HashMap::new();
-        for line in String::from_utf8_lossy(&bytes).lines() {
+        for line in crate::journal::decode_journal_lines(&bytes, path)? {
             if line.trim().is_empty() {
                 continue;
             }
@@ -305,6 +308,20 @@ pub(crate) fn abort_grace() -> Duration {
 }
 
 impl crate::supervisor::Supervisor {
+    pub(crate) fn with_compaction_journal<T>(
+        &self,
+        action: impl FnOnce(&mut TerminalCompactionJournal) -> Result<T>,
+    ) -> Result<T> {
+        let mut journal = self
+            .compaction_journal
+            .lock()
+            .expect("compaction journal lock");
+        let journal = journal
+            .as_mut()
+            .context("terminal compaction journal is not initialized")?;
+        action(journal)
+    }
+
     /// The `abort_compaction` supervisor arm: acknowledge immediately (TS `abortCompaction`
     /// is always instant), forward best-effort, declare terminal a run past the grace.
     pub(crate) async fn handle_abort_compaction(
@@ -461,13 +478,9 @@ impl crate::supervisor::Supervisor {
     ) {
         let session_file = resident.descriptor.lock().await.session_file.clone();
         let declared = crate::util::now_iso();
-        let terminal = {
-            let mut journal = self
-                .compaction_journal
-                .lock()
-                .expect("compaction journal lock");
+        let terminal = self.with_compaction_journal(|journal| {
             let Some(terminal) = take() else {
-                return;
+                return Ok(None);
             };
             let record = TerminalCompactionRecord {
                 version: 1,
@@ -483,7 +496,17 @@ impl crate::supervisor::Supervisor {
                     terminal.active_session_id
                 ));
             }
-            terminal
+            Ok(Some(terminal))
+        });
+        let terminal = match terminal {
+            Ok(Some(terminal)) => terminal,
+            Ok(None) => return,
+            Err(error) => {
+                self.log_line(&format!(
+                    "terminal compaction journal unavailable: {error:#}"
+                ));
+                return;
+            }
         };
         self.note_compaction_abort_declared();
         // The synthetic `compaction_end`: an abort carries `aborted: true` with no error
@@ -724,6 +747,7 @@ mod tests {
                 })
                 .unwrap();
             journal.clear("session-b").unwrap();
+            drop(journal);
             let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
             assert_eq!(reopened.pending("session-b").unwrap(), None);
         }
@@ -810,6 +834,7 @@ mod tests {
         std::fs::remove_dir(&path).unwrap();
         let pending = failing.pending("session-a").unwrap().expect("retried");
         assert_eq!(pending.reason, "threshold");
+        drop(failing);
         let reloaded = TerminalCompactionJournal::open(&path).unwrap();
         assert!(reloaded.latest.contains_key("session-a"));
 
@@ -956,6 +981,64 @@ mod tests {
         assert_eq!(reopened.pending("session-a").unwrap(), Some(&first));
         assert_eq!(reopened.pending("session-b").unwrap(), Some(&second));
         drop(reopened);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_competing_supervisor_does_not_heal_before_socket_admission() {
+        use std::io::Write;
+        let dir = std::path::PathBuf::from("/tmp").join(format!("pa-c-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let options = crate::supervisor::SupervisorOptions {
+            socket_path: dir.join("supervisor.sock"),
+            agent_dir: dir.join("agent"),
+        };
+        let descriptor_dir =
+            crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
+        std::fs::create_dir_all(&descriptor_dir).unwrap();
+        let path = descriptor_dir.join("compaction-supervision.jsonl");
+        let first = TerminalCompactionRecord {
+            version: 1,
+            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+            active_session_id: "session-a".to_string(),
+            session_file: None,
+            reason: "threshold".to_string(),
+            declared_at: "2026-10-11T00:00:00Z".to_string(),
+        };
+        let second = TerminalCompactionRecord {
+            active_session_id: "session-b".to_string(),
+            declared_at: "2026-10-11T00:00:01Z".to_string(),
+            ..first.clone()
+        };
+        let mut original = serde_json::to_vec(&first).unwrap();
+        original.push(b'\n');
+        std::fs::write(&path, original).unwrap();
+        let listener = pa_types::platform::transport::bind_transport(&options.socket_path)
+            .await
+            .unwrap();
+        // A legacy writer does not take the proposed journal sidecar lock.
+        let mut active_append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut bytes = serde_json::to_vec(&second).unwrap();
+        bytes.push(b'\n');
+        let split = bytes.len() / 2;
+        active_append.write_all(&bytes[..split]).unwrap();
+        let expected = std::fs::read(&path).unwrap();
+        let contender = crate::supervisor::Supervisor::new(options).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(std::sync::Arc::new(contender).run().await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        active_append.write_all(&bytes[split..]).unwrap();
+        active_append.sync_all().unwrap();
+        drop(active_append);
+        let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+        assert_eq!(reopened.pending("session-a").unwrap(), Some(&first));
+        assert_eq!(reopened.pending("session-b").unwrap(), Some(&second));
+        drop(reopened);
+        drop(listener);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

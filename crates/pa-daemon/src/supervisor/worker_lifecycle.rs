@@ -800,7 +800,7 @@ impl Supervisor {
 
 /// A dead process or a verified replacement identity proves the old writer
 /// is gone. Failed probes and missing live identities preserve the journal.
-fn recovery_journal_owner_is_gone(
+pub(super) fn recovery_journal_owner_is_gone(
     process_alive: Option<bool>,
     expected_start_id: Option<&str>,
     current_start_id: Option<&str>,

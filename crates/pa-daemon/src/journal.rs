@@ -84,6 +84,44 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
     Ok(())
 }
 
+// Complete records must decode exactly before recovery can replace their history.
+// Only an unterminated final JSON fragment may end with incomplete UTF-8.
+pub(crate) fn decode_journal_lines<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<&'a str>> {
+    let mut lines = Vec::new();
+    let mut records = bytes.split(|byte| *byte == b'\n').peekable();
+    while let Some(raw) = records.next() {
+        match std::str::from_utf8(raw) {
+            Ok(line) => lines.push(line),
+            Err(error) => {
+                let incomplete_final = records.peek().is_none()
+                    && !bytes.ends_with(b"\n")
+                    && serde_json::from_slice::<Value>(raw).is_err_and(|error| error.is_eof());
+                if !incomplete_final {
+                    return Err(error)
+                        .with_context(|| format!("invalid UTF-8 in journal {}", path.display()));
+                }
+            }
+        }
+    }
+    Ok(lines)
+}
+
+// Keep the ownership inode stable across journal replacement and process crashes.
+pub(crate) fn journal_write_owner(path: &Path) -> Result<File> {
+    let mut ownership_path = path.as_os_str().to_os_string();
+    ownership_path.push(".writer-lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(std::path::PathBuf::from(ownership_path))
+        .with_context(|| format!("open journal ownership {}", path.display()))?;
+    pa_core::platform::try_lock_exclusive(&file)
+        .with_context(|| format!("acquire journal ownership {}", path.display()))?;
+    Ok(file)
+}
+
 pub(crate) fn tail_is_torn(path: &Path) -> Result<bool> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -129,7 +167,7 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
             return Err(error).with_context(|| format!("read journal {}", path.display()));
         }
     };
-    for line in String::from_utf8_lossy(&bytes).lines() {
+    for line in decode_journal_lines(&bytes, path)? {
         if line.is_empty() {
             continue;
         }
@@ -200,6 +238,7 @@ pub struct WorkerQueueSnapshotRecord {
 /// Latest busy/operation per active session, plus the latest queue
 /// snapshot per session.
 pub struct WorkerRecoveryJournal {
+    _write_owner: File,
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
     queue_snapshots: HashMap<String, WorkerQueueSnapshotRecord>,
@@ -210,15 +249,18 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created, either
+    /// Returns an error when write ownership cannot be acquired, the parent directory cannot
+    /// be created, either
     /// record pass cannot read an existing journal, or the
     /// torn-tail heal cannot rewrite it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let write_owner = journal_write_owner(path)?;
         let queue_snapshots = parse_queue_snapshot_records(path)?;
         let journal = WorkerRecoveryJournal {
+            _write_owner: write_owner,
             path: path.to_path_buf(),
             latest: parse_worker_records(path)?,
             queue_snapshots,
@@ -480,10 +522,7 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
             return Err(error).with_context(|| format!("read journal {}", path.display()))
         }
     };
-    for line in String::from_utf8_lossy(&bytes)
-        .split('\n')
-        .filter(|line| !line.is_empty())
-    {
+    for line in decode_journal_lines(&bytes, path)? {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -731,6 +770,7 @@ mod tests {
         let record: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(record["busy"], false);
         assert_eq!(record["operation"], "turn_end");
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         let latest = reopened.get_latest();
         assert_eq!(latest.len(), 1);
@@ -798,6 +838,7 @@ mod tests {
         // the compact keeps the LATEST snapshot per session: the
         // settle's (empty) lanes, not the admission's parked row.
         assert_eq!(snapshot["steering"].as_array().map(Vec::len), Some(0));
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let restored = reopened.latest_queue_snapshot("s1").unwrap();
@@ -874,12 +915,14 @@ mod tests {
         file.write_all(torn).unwrap();
         drop(file);
 
+        drop(journal);
         let mut healed = WorkerRecoveryJournal::open(&path).unwrap();
         // Reload after a fresh append so the assertions exercise the healed
         // file, rather than only the state loaded before the rewrite.
         healed
             .record("s1", "sess1", Some("/a.jsonl"), true, "resumed")
             .unwrap();
+        drop(healed);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(WorkerRecoveryJournal::read_interrupted(&path));
         let latest = reopened.get_latest();
@@ -904,8 +947,10 @@ mod tests {
             .unwrap();
         drop(file);
 
+        drop(journal);
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal.record("s2", "sess2", None, false, "ready").unwrap();
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(WorkerRecoveryJournal::read_interrupted(&path));
         assert_eq!(
