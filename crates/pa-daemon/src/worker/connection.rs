@@ -210,14 +210,6 @@ impl Worker {
     ///
     /// Panics when the recovery mutex is poisoned.
     pub async fn serve(self: Arc<Self>) -> Result<()> {
-        *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
-            &self.config.recovery_journal_path,
-        )?);
-        // A worker spawned under a supervisor arms the orphan-exit monitor:
-        // nobody else reaps it if the supervisor dies without a graceful stop.
-        if !self.config.supervisor_socket_path.as_os_str().is_empty() {
-            crate::supervisor_lost::start(self.clone());
-        }
         if let Err(error) = crate::socket::prepare_socket_path(&self.config.socket_path).await {
             // The no-listener confirmation of the close handshake: an
             // exit path already parked on the confirmation proceeds (its
@@ -257,6 +249,21 @@ impl Worker {
         *self.bound_socket_identity.lock().unwrap() =
             crate::socket::socket_identity(&self.config.socket_path);
         crate::socket::restrict_socket_path(&self.config.socket_path);
+        match WorkerRecoveryJournal::open(&self.config.recovery_journal_path) {
+            Ok(journal) => *self.recovery.lock().unwrap() = Some(journal),
+            Err(error) => {
+                drop(listener);
+                let identity = self.bound_socket_identity.lock().unwrap().clone();
+                crate::socket::cleanup_socket_path_after_close(&self.config.socket_path, identity);
+                self.listener_closed.notify_one();
+                return Err(error);
+            }
+        }
+        // No journal snapshot is loaded before endpoint and write ownership.
+        if !self.config.supervisor_socket_path.as_os_str().is_empty() {
+            crate::supervisor_lost::start(self.clone());
+        }
+
         // This loop owns the bound listener and hands its close to the
         // exit paths (TS daemon-mode.ts:8011-8018 awaits `server.close()`
         // FIRST and cleans the socket path after): an exiting path
