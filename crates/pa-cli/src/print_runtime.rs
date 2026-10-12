@@ -1012,25 +1012,49 @@ fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
     config: &crate::mode::RuntimeConfig,
 ) -> Result<Model, String> {
-    let provider = config.provider.as_deref();
-    let model = config.model.as_deref();
+    let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
-    let Some(model_name) = model else {
-        let all: Vec<Model> = registry.get_all().to_vec();
-        if let Some(default) = pa_core::models::find_preferred_default_model(&available) {
-            return Ok(default.clone());
+    let saved_provider = settings.get_default_provider();
+    // Explicit selectors retain the CLI resolver's provider inference and do
+    // not inherit an unrelated saved provider.
+    if let Some(model_name) = config.model.as_deref() {
+        let resolved =
+            pa_core::models::resolve_cli_model(config.provider.as_deref(), model_name, &available);
+        if let Some(error) = resolved.error {
+            return Err(error);
         }
-        return all.first().cloned().ok_or_else(|| {
-            "No models available. Check your installation or add models to models.json.".to_string()
-        });
-    };
-    let resolved = pa_core::models::resolve_cli_model(provider, model_name, &available);
-    if let Some(error) = resolved.error {
-        return Err(error);
+        return resolved
+            .model
+            .ok_or_else(|| "No matching model found.".to_string());
     }
-    resolved
-        .model
-        .ok_or_else(|| "No matching model found.".to_string())
+    let provider = config.provider.as_deref().or(saved_provider);
+    let saved_model = settings.get_default_model().filter(|_| {
+        config.provider.as_deref().is_none_or(|provider| {
+            saved_provider.is_some_and(|saved| provider.eq_ignore_ascii_case(saved))
+        })
+    });
+    if let Some(saved_model) = saved_model {
+        // Saved IDs must exist in the authenticated catalog. Do not synthesize
+        // a fallback model, especially an unauthorized private Prime model.
+        return available.iter().find(|model| {
+            provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+                && (model.id.eq_ignore_ascii_case(saved_model)
+                    || format!("{}/{}", model.provider, model.id).eq_ignore_ascii_case(saved_model))
+        }).cloned().ok_or_else(|| format!("Configured default model \"{saved_model}\" is unavailable. Check settings.json, models.json, and provider authentication."));
+    }
+    let candidates: Vec<Model> = available
+        .into_iter()
+        .filter(|model| {
+            provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+        })
+        .collect();
+    pa_core::models::find_preferred_default_model(&candidates)
+        .or_else(|| candidates.first())
+        .cloned()
+        .ok_or_else(|| match provider {
+            Some(provider) => format!("No available models for provider \"{provider}\". Check models.json and provider authentication."),
+            None => "No authenticated models available. Configure a provider or select a model explicitly.".to_string(),
+        })
 }
 
 /// Resolve the session thinking level: the CLI flag, then the settings
