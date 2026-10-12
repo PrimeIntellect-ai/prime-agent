@@ -5,12 +5,12 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
     create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
-    spawn_name_unavailable, Arc, ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration,
-    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmChildTerminalNotice,
-    RlmCreateSessionHandle, RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture,
-    RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
-    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
-    RENAME_TIMEOUT_MS,
+    rlm_depth_limit_error, spawn_name_unavailable_error, Arc, ChildCloseReason, ChildRecord,
+    Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result, RlmChildResult,
+    RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
+    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
+    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -57,11 +57,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
         Box::pin(async move {
             let identity = this.identity.lock().expect("identity lock").clone();
             if identity.rlm_depth >= identity.rlm_max_depth {
-                bail!(
-                    "RLM recursion depth limit reached (RLM_DEPTH={}, RLM_MAX_DEPTH={})",
+                bail!(rlm_depth_limit_error(
                     identity.rlm_depth,
                     identity.rlm_max_depth
-                );
+                ));
             }
             let child_id = format!("sub-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
             let name = request.name.clone().unwrap_or_else(|| {
@@ -75,7 +74,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 .is_some()
                 .then(|| {
                     if !this.reserve_spawn_name(&name) {
-                        return Err(spawn_name_unavailable(&name, identity.rlm_depth + 1));
+                        return Err(spawn_name_unavailable_error(&name, identity.rlm_depth + 1));
                     }
                     Ok(SpawnNameReservationGuard {
                         inner: Arc::clone(&this),

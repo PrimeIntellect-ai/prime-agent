@@ -82,6 +82,7 @@ async fn engine_runs_tool_loop_and_persists() {
         rlm_subagent_host: None,
         rlm_usage_store: None,
         rlm_depth: None,
+        daemonless: true,
         telemetry: None,
         model_info: None,
         on_background_work_settled: None,
@@ -182,6 +183,7 @@ async fn spawned_child_prompt_stamps_its_depth() {
         rlm_subagent_host: None,
         rlm_usage_store: None,
         rlm_depth: Some(2),
+        daemonless: true,
         telemetry: None,
         model_info: None,
         on_background_work_settled: None,
@@ -250,6 +252,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             rlm_subagent_host: None,
             rlm_usage_store: None,
             rlm_depth: None,
+            daemonless: true,
             telemetry: None,
             model_info: None,
             on_background_work_settled: None,
@@ -369,7 +372,7 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
         .map(|tool| tool.name().to_string())
         .collect();
     assert!(
-        names.iter().any(|name| name == "ipython"),
+        names.iter().any(|name| name == "python_repl"),
         "tools: {names:?}"
     );
 }

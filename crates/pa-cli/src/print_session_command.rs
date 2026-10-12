@@ -346,6 +346,7 @@ mod tests {
                     extra_builtin_skill_overrides: Vec::new(),
                     rlm_subagent_host: None,
                     rlm_usage_store: None,
+                    daemonless: true,
                     rlm_depth: None,
                     model_info: Some(model.clone()),
                     prewarm_ipython_kernel: None,
@@ -373,6 +374,7 @@ mod tests {
             &model,
             &goal,
             &run,
+            /*root_node*/ None,
         );
         let autonomous = run.state_handle();
         Bed {

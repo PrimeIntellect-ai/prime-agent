@@ -400,10 +400,16 @@ impl Supervisor {
         };
         // Serialize against descriptor adoption for the same worker.
         let guard = self.registry.adoption_guard(active_session_id).await;
-        let resident = match self.registry.get(active_session_id).await {
-            Some(resident) => resident,
+        let (resident, re_arm_monitor) = match self.registry.get(active_session_id).await {
+            Some(resident) => {
+                // The monitor ownership reads before this registration's
+                // descriptor update overwrites the pid: a registrant naming
+                // a different process than the watched one takes the resident.
+                let pid_changed = resident.descriptor.lock().await.pid != *pid;
+                (resident, pid_changed)
+            }
             None => match self.adopt_registered_worker(&registration, token).await {
-                Ok(resident) => resident,
+                Ok(resident) => (resident, false),
                 Err(error) => {
                     let message = format!("{error:#}");
                     // The definitive unknown-worker refusal is observable (log + telemetry)
@@ -476,6 +482,13 @@ impl Supervisor {
             };
             durable_session_id
         };
+        // A pre-existing resident whose registrant named a different process
+        // (boot adoption can watch a stale on-disk pid): arm the monitor for
+        // the registrant. The generation claim retires the stale watch at its
+        // exit check.
+        if re_arm_monitor {
+            self.spawn_monitor(Arc::clone(&resident), None, *pid);
+        }
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it now (spec §10.4).
         // The settle lands after the registration is recorded, so a woken waiter's

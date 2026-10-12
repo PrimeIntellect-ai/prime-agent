@@ -129,6 +129,106 @@ pub fn rlm_ledger_path(agent_dir: &Path, sessions_dir: &Path) -> PathBuf {
     agent_dir.join(RLM_LEDGER_DIR).join(format!("{hash}.jsonl"))
 }
 
+/// The liveness pass shared by the live-edge reads: deleted edges never
+/// resolve; the survivors' recorded endpoints do - a dead endpoint drops
+/// the edge, a moved path resolves through its durable session id - and
+/// the resolved paths replace the recorded ones.
+fn resolve_live_edges(state: &ReplayState, resolver: &mut LivePathResolver) -> Vec<RlmLedgerEdge> {
+    let mut edges = Vec::with_capacity(state.edges.len());
+    for edge in &state.edges {
+        if edge.deleted.is_some() {
+            continue;
+        }
+        let (Some(child), Some(parent)) = (
+            resolver.resolve(&edge.child),
+            resolver.resolve(&edge.parent),
+        ) else {
+            continue;
+        };
+        edges.push(RlmLedgerEdge {
+            parent: parent.to_string_lossy().to_string(),
+            child: child.to_string_lossy().to_string(),
+            ..edge.clone()
+        });
+    }
+    edges
+}
+
+/// Fold parsed records into the replayed edge set, keeping only the
+/// records whose child id `keep` selects.
+fn fold_records(records: Vec<LedgerRecord>, keep: impl Fn(&str) -> bool) -> ReplayState {
+    let mut state = ReplayState::default();
+    for record in records {
+        match record {
+            LedgerRecord::Spawn {
+                child_id,
+                parent,
+                child,
+                depth,
+                name,
+            } if keep(&child_id) => {
+                let key = edge_key(&child_id, &child);
+                if let Some(at) = state.index.get(&key).copied() {
+                    state.edges[at] = RlmLedgerEdge {
+                        child_id,
+                        parent,
+                        child,
+                        depth,
+                        name,
+                        deleted: None,
+                        deleted_usage: None,
+                    };
+                } else {
+                    state.index.insert(key.clone(), state.edges.len());
+                    state.edges.push(RlmLedgerEdge {
+                        child_id,
+                        parent,
+                        child,
+                        depth,
+                        name,
+                        deleted: None,
+                        deleted_usage: None,
+                    });
+                }
+            }
+            LedgerRecord::Rename {
+                child_id,
+                child,
+                name,
+            } if keep(&child_id) => {
+                let key = edge_key(&child_id, &child);
+                if let Some(&at) = state.index.get(&key) {
+                    state.edges[at].name = name;
+                } else if let Some(at) = sole_edge_by_child_id(&state, &child_id) {
+                    state.edges[at].name = name;
+                }
+            }
+            LedgerRecord::Delete {
+                child_id,
+                child,
+                reason,
+                usage,
+            } if keep(&child_id) => {
+                let key = edge_key(&child_id, &child);
+                let at = match state.index.get(&key).copied() {
+                    Some(at) => Some(at),
+                    None => sole_edge_by_child_id(&state, &child_id),
+                };
+                if let Some(at) = at {
+                    state.edges[at].deleted = Some(reason);
+                    // The snapshot is sticky: a re-tombstone without a usage
+                    // block never clears it; a fresh capture replaces it.
+                    if let Some(usage) = usage {
+                        state.edges[at].deleted_usage = Some(usage);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    state
+}
+
 impl RlmSpawnLedger {
     /// Ledger over one sessions dir, with a caller-supplied log sink for
     /// degraded reads and seed skips.
@@ -546,23 +646,28 @@ impl RlmSpawnLedger {
         let state = self.replay_cached()?;
         let mut resolver =
             LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
-        let mut edges = Vec::with_capacity(state.edges.len());
-        for edge in &state.edges {
-            if edge.deleted.is_some() {
-                continue;
-            }
-            let (Some(child), Some(parent)) = (
-                resolver.resolve(&edge.child),
-                resolver.resolve(&edge.parent),
-            ) else {
-                continue;
-            };
-            edges.push(RlmLedgerEdge {
-                parent: parent.to_string_lossy().to_string(),
-                child: child.to_string_lossy().to_string(),
-                ..edge.clone()
-            });
-        }
+        Ok(resolve_live_edges(&state, &mut resolver))
+    }
+
+    /// The opened parent file's live edges: only the records of children
+    /// spawned by that parent file (matched by its durable session id,
+    /// the file-name stem) fold and resolve, and only those whose
+    /// resolved parent IS the parent file remain. A parent's read never
+    /// stats, or walks the artifacts tree for, another parent's edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized
+    /// ledger); a missing ledger replays empty, and only the liveness
+    /// resolution drops edges.
+    pub fn live_edges_of_parent(&self, parent_file: &Path) -> Result<Vec<RlmLedgerEdge>> {
+        self.seed_once()?;
+        let parent_file = canonical_session_path(parent_file);
+        let state = self.replay_of_parent(&parent_file)?;
+        let mut resolver =
+            LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
+        let mut edges = resolve_live_edges(&state, &mut resolver);
+        edges.retain(|edge| canonical_session_path(Path::new(&edge.parent)) == parent_file);
         Ok(edges)
     }
 
@@ -625,8 +730,38 @@ impl RlmSpawnLedger {
     }
 
     fn replay(&self) -> Result<ReplayState> {
+        Ok(fold_records(self.read_records()?, |_| true))
+    }
+
+    /// The opened parent file's subset of the replayed ledger: fold only
+    /// the records of children spawned by `parent_file` (matched by its
+    /// durable session id, the file-name stem). Every join, including
+    /// the sole-child-id fallback, stays within one child id, so the
+    /// subset fold equals the full fold restricted to that parent's
+    /// children.
+    fn replay_of_parent(&self, parent_file: &Path) -> Result<ReplayState> {
+        let records = self.read_records()?;
+        let own: HashSet<String> = records
+            .iter()
+            .filter_map(|record| match record {
+                LedgerRecord::Spawn {
+                    child_id, parent, ..
+                } if Path::new(parent).file_stem() == parent_file.file_stem() => {
+                    Some(child_id.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        Ok(fold_records(records, |child_id| own.contains(child_id)))
+    }
+
+    /// The whole ledger's parsed records within its read bounds: the
+    /// byte and record-count caps apply to the whole file; a missing
+    /// ledger reads empty, and one torn or unknown line skips that
+    /// record only.
+    fn read_records(&self) -> Result<Vec<LedgerRecord>> {
         let Ok(bytes) = fs::read(&self.path) else {
-            return Ok(ReplayState::default());
+            return Ok(Vec::new());
         };
         if bytes.len() as u64 > RLM_LEDGER_MAX_BYTES {
             bail!(
@@ -637,103 +772,36 @@ impl RlmSpawnLedger {
         // A torn write inside a multibyte name must spoil one line, not
         // the whole file.
         let content = String::from_utf8_lossy(&bytes);
-        let mut state = ReplayState::default();
-        let mut records = 0usize;
+        let mut records = Vec::new();
+        let mut lines = 0usize;
         for (index, line) in content.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
-            records += 1;
-            if records > RLM_LEDGER_MAX_RECORDS {
+            lines += 1;
+            if lines > RLM_LEDGER_MAX_RECORDS {
                 bail!(
                     "RLM ledger {} exceeds {RLM_LEDGER_MAX_RECORDS} records; refusing to read",
                     self.path.display()
                 );
             }
-            let record = match parse_ledger_line(line, index) {
-                Ok(Some(record)) => record,
+            match parse_ledger_line(line, index) {
+                Ok(Some(record)) => records.push(record),
                 Ok(None) => {
                     self.log(&format!(
                         "RLM ledger: skipped record with unknown op on line {}",
                         index + 1
                     ));
-                    continue;
                 }
                 Err(error) => {
                     self.log(&format!(
                         "RLM ledger {}: skipped {error:#}",
                         self.path.display()
                     ));
-                    continue;
-                }
-            };
-            match record {
-                LedgerRecord::Spawn {
-                    child_id,
-                    parent,
-                    child,
-                    depth,
-                    name,
-                } => {
-                    let key = edge_key(&child_id, &child);
-                    if let Some(at) = state.index.get(&key).copied() {
-                        state.edges[at] = RlmLedgerEdge {
-                            child_id,
-                            parent,
-                            child,
-                            depth,
-                            name,
-                            deleted: None,
-                            deleted_usage: None,
-                        };
-                    } else {
-                        state.index.insert(key.clone(), state.edges.len());
-                        state.edges.push(RlmLedgerEdge {
-                            child_id,
-                            parent,
-                            child,
-                            depth,
-                            name,
-                            deleted: None,
-                            deleted_usage: None,
-                        });
-                    }
-                }
-                LedgerRecord::Rename {
-                    child_id,
-                    child,
-                    name,
-                } => {
-                    let key = edge_key(&child_id, &child);
-                    if let Some(&at) = state.index.get(&key) {
-                        state.edges[at].name = name;
-                    } else if let Some(at) = sole_edge_by_child_id(&state, &child_id) {
-                        state.edges[at].name = name;
-                    }
-                }
-                LedgerRecord::Delete {
-                    child_id,
-                    child,
-                    reason,
-                    usage,
-                } => {
-                    let key = edge_key(&child_id, &child);
-                    let at = match state.index.get(&key).copied() {
-                        Some(at) => Some(at),
-                        None => sole_edge_by_child_id(&state, &child_id),
-                    };
-                    if let Some(at) = at {
-                        state.edges[at].deleted = Some(reason);
-                        // The snapshot is sticky: a re-tombstone without a usage
-                        // block never clears it; a fresh capture replaces it.
-                        if let Some(usage) = usage {
-                            state.edges[at].deleted_usage = Some(usage);
-                        }
-                    }
                 }
             }
         }
-        Ok(state)
+        Ok(records)
     }
 
     /// One durable append; the first record in a fresh file is the meta

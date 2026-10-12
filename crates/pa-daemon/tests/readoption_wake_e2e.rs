@@ -174,7 +174,7 @@ fn serve(mut stream: TcpStream, next: &AtomicUsize) -> std::io::Result<()> {
                         "id": "call-wake-1",
                         "type": "function",
                         "function": {
-                            "name": "ipython",
+                            "name": "python_repl",
                             "arguments": "{\"code\": \"bash(\\\"sleep 12; echo RW_WAKE_DONE\\\")\\nprint('watcher armed')\"}"
                         }
                     }]
