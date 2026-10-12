@@ -76,8 +76,9 @@ impl Worker {
         {
             let mut core = self.core.lock().unwrap();
             // The shutdown gate closes FIRST: a racing execute_bash must see the
-            // stop before the abort runs, or the fresh claim clears the abort and
-            // spawns a child the exit leaves running.
+            // stop before the abort runs — a claim that slipped in after the
+            // abort would register a controller nothing later cancels, and the
+            // exit leaves its child running.
             core.shutdown_requested = true;
             core.abort_requested = true;
         }
