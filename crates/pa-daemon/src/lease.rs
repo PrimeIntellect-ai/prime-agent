@@ -375,6 +375,16 @@ impl Drop for SessionLease {
     }
 }
 
+/// Counts an admitted mutation through errors and unwinding. This participates
+/// in the existing bounded release drain; it does not extend its deadline.
+struct OwnedMutationFlight<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for OwnedMutationFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl SessionLease {
     pub(crate) fn acquire_target(&self, path: &Path) -> Result<std::sync::Arc<Self>> {
         let agent_dir = self
@@ -385,25 +395,34 @@ impl SessionLease {
         acquire_runtime_session_lease(path, agent_dir).map(std::sync::Arc::new)
     }
 
-    pub(crate) fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+    /// Hold the existing append admission fence across proof, mutation and sync.
+    /// Release retains its existing ten-second drain policy: a wedged IO call
+    /// or suspended process beyond that bound is not absolute handoff safety.
+    pub(crate) fn with_owned_mutation<T>(
+        &self,
+        path: &Path,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
         self.append_in_flight
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let result = (|| {
-            anyhow::ensure!(
-                !self.released.load(std::sync::atomic::Ordering::SeqCst)
-                    && canonical_session_path(path) == self.session_path,
-                "session lease does not own append target"
-            );
+        let _flight = OwnedMutationFlight(&self.append_in_flight);
+        anyhow::ensure!(
+            !self.released.load(std::sync::atomic::Ordering::SeqCst)
+                && canonical_session_path(path) == self.session_path,
+            "session lease does not own append target"
+        );
+        action()
+    }
+
+    pub(crate) fn append(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        self.with_owned_mutation(path, || {
             pa_core::session::window::append_cached(
                 path,
                 bytes,
                 pa_core::session::window::AppendOwnership::SessionLeaseHeld,
             )?;
             Ok(())
-        })();
-        self.append_in_flight
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        result
+        })
     }
 }
 
@@ -887,6 +906,86 @@ mod tests {
         }
         let unrelated = std::io::Error::from(std::io::ErrorKind::NotFound);
         assert_eq!(reclaim_retry_delay_ms(true, &unrelated, 1), None);
+    }
+
+    #[test]
+    fn owned_mutation_release_waits_for_the_admitted_callback() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, b"{}\n").unwrap();
+        let lease = std::sync::Arc::new(acquire_runtime_session_lease(&path, dir.path()).unwrap());
+        let directory = lease.directory.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (finish_tx, finish_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let writer_lease = std::sync::Arc::clone(&lease);
+            let writer_path = path.clone();
+            let mutation = scope.spawn(move || {
+                writer_lease.with_owned_mutation(&writer_path, || {
+                    started_tx.send(()).unwrap();
+                    finish_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+                    let mut file = fs::OpenOptions::new().append(true).open(&writer_path)?;
+                    file.write_all(b"continued\n")?;
+                    file.sync_all()?;
+                    Ok(())
+                })
+            });
+            started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let releaser_lease = std::sync::Arc::clone(&lease);
+            let release = scope.spawn(move || releaser_lease.release());
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !lease.released.load(std::sync::atomic::Ordering::SeqCst)
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
+            }
+            assert!(lease.released.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                lease
+                    .append_in_flight
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            assert!(
+                directory.exists(),
+                "the admitted callback still owns the lease inside its drain bound"
+            );
+            finish_tx.send(()).unwrap();
+            mutation.join().unwrap().unwrap();
+            release.join().unwrap();
+        });
+        assert_eq!(fs::read(&path).unwrap(), b"{}\ncontinued\n");
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn owned_mutation_errors_and_unwind_do_not_leak_a_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        fs::write(&path, b"{}\n").unwrap();
+        let lease = acquire_runtime_session_lease(&path, dir.path()).unwrap();
+        assert!(lease
+            .with_owned_mutation::<()>(&path, || Err(anyhow!("injected callback error")))
+            .is_err());
+        assert_eq!(
+            lease
+                .append_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = lease.with_owned_mutation::<()>(&path, || panic!("injected callback unwind"));
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(
+            lease
+                .append_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        lease.release();
+        assert!(!lease.directory.exists());
     }
 
     #[test]
