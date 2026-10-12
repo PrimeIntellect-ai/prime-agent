@@ -1190,7 +1190,6 @@ mod tests {
             name: Some("late".to_string()),
             model: None,
             thinking: None,
-            decision_child: false,
             spawned_by_request_id: None,
             cell_source_code: None,
         });
