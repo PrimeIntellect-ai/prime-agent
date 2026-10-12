@@ -10,7 +10,7 @@ use pa_types::{
     session::{ChildUsageAttributionEntry, ChildUsageOrigin},
 };
 use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 /// Attribution-local recovery state. One write can remain unresolved; recovered
@@ -212,146 +212,212 @@ impl SessionFile {
         let Some(receipt) = self.child_usage_recovery.pending.clone() else {
             return Ok(None);
         };
-        ensure!(
-            self.path == receipt.path && header_matches_receipt(&self.header, &receipt),
-            "attribution recovery session changed"
-        );
-        let mut file = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&receipt.path)
-        {
-            Ok(file) => file,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound && receipt.start.is_none() =>
+        let lease = self.lease.clone();
+        let path = self.path.clone();
+        let observe = || {
+            ensure!(
+                self.path == receipt.path && header_matches_receipt(&self.header, &receipt),
+                "attribution recovery session changed"
+            );
+            let mut file = match std::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .open(&receipt.path)
             {
-                self.child_usage_recovery.pending = None;
-                return Ok(None);
+                Ok(file) => file,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound && receipt.start.is_none() =>
+                {
+                    self.child_usage_recovery.pending = None;
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let metadata = file.metadata()?;
+            if let Some(identity) = receipt.identity {
+                ensure!(
+                    file_identity(&metadata) == identity,
+                    "attribution recovery file replaced"
+                );
             }
-            Err(error) => return Err(error.into()),
-        };
-        let metadata = file.metadata()?;
-        if let Some(identity) = receipt.identity {
+            let header_line = super::read_first_line_bounded_from(
+                &mut file,
+                super::SESSION_LIST_HEADER_READ_MAX_BYTES,
+            )
+            .context("attribution recovery header unreadable")?;
+            let header = super::parse_session_header_line(std::str::from_utf8(&header_line)?)
+                .context("attribution recovery header invalid")?;
             ensure!(
-                file_identity(&metadata) == identity,
-                "attribution recovery file replaced"
+                header_matches_receipt(&header, &receipt),
+                "attribution recovery header changed"
             );
-        }
-        let header_line = super::read_first_line_bounded_from(
-            &mut file,
-            super::SESSION_LIST_HEADER_READ_MAX_BYTES,
-        )
-        .context("attribution recovery header unreadable")?;
-        let header = super::parse_session_header_line(std::str::from_utf8(&header_line)?)
-            .context("attribution recovery header invalid")?;
-        ensure!(
-            header_matches_receipt(&header, &receipt),
-            "attribution recovery header changed"
-        );
-        let start = if let Some(start) = receipt.start {
+            let start = if let Some(start) = receipt.start {
+                ensure!(
+                    metadata.len() >= receipt.prefix_end,
+                    "attribution recovery prefix shrank"
+                );
+                file.seek(SeekFrom::Start(
+                    receipt.prefix_end - receipt.prefix_tail.len() as u64,
+                ))?;
+                let mut tail = vec![0; receipt.prefix_tail.len()];
+                file.read_exact(&mut tail)?;
+                ensure!(
+                    tail == receipt.prefix_tail,
+                    "attribution recovery prefix changed"
+                );
+                if start > receipt.prefix_end && metadata.len() >= start {
+                    file.seek(SeekFrom::Start(receipt.prefix_end))?;
+                    let mut separator = [0];
+                    file.read_exact(&mut separator)?;
+                    ensure!(
+                        separator == *b"\n",
+                        "attribution recovery separator changed"
+                    );
+                }
+                if metadata.len() == receipt.prefix_end || metadata.len() == start {
+                    self.child_usage_recovery.pending = None;
+                    return Ok(None);
+                }
+                start
+            } else {
+                // The atomic bootstrap's own row must be its exact last line.
+                ensure!(
+                    metadata.len() >= receipt.bytes.len() as u64,
+                    "attribution bootstrap is incomplete"
+                );
+                metadata.len() - receipt.bytes.len() as u64
+            };
+            let expected_end = start + receipt.bytes.len() as u64;
+            let mut completed_tail = false;
+            if metadata.len() < expected_end {
+                // Only an append receipt has a proven row start. Bootstrap remains
+                // fail-closed rather than guessing which rewritten bytes are missing.
+                ensure!(
+                    receipt.start.is_some() && metadata.len() > start,
+                    "attribution recovery row is incomplete"
+                );
+                let present = usize::try_from(metadata.len() - start)?;
+                file.seek(SeekFrom::Start(start))?;
+                let mut partial = vec![0; present];
+                file.read_exact(&mut partial)?;
+                ensure!(
+                    partial.as_slice() == &receipt.bytes[..present],
+                    "attribution recovery owned prefix conflicts"
+                );
+                ensure!(
+                    file.metadata()?.len() == metadata.len()
+                        && file_identity(&std::fs::metadata(&receipt.path)?)
+                            == file_identity(&file.metadata()?),
+                    "attribution recovery tail changed before completion"
+                );
+                #[cfg(test)]
+                if super::child_usage_tests::FAIL_CHILD_TAIL_COMPLETION
+                    .with(|fault| fault.replace(false))
+                {
+                    anyhow::bail!("injected owned tail completion IO error");
+                }
+                // The append-mode descriptor writes only the missing owned bytes;
+                // append_cached would insert a newline into this incomplete row.
+                file.write_all(&receipt.bytes[present..])?;
+                file.flush()?;
+                pa_core::platform::fsync(&file)?;
+                ensure!(
+                    file.metadata()?.len() == expected_end,
+                    "attribution recovery tail changed during completion"
+                );
+                completed_tail = true;
+            }
+            file.seek(SeekFrom::Start(start))?;
+            let mut actual = vec![0; receipt.bytes.len()];
+            file.read_exact(&mut actual)?;
             ensure!(
-                metadata.len() >= receipt.prefix_end,
-                "attribution recovery prefix shrank"
+                actual == receipt.bytes,
+                "attribution recovery row conflicts"
             );
-            file.seek(SeekFrom::Start(
-                receipt.prefix_end - receipt.prefix_tail.len() as u64,
-            ))?;
-            let mut tail = vec![0; receipt.prefix_tail.len()];
+            file.seek(SeekFrom::End(-1))?;
+            let mut tail = [0];
             file.read_exact(&mut tail)?;
             ensure!(
-                tail == receipt.prefix_tail,
-                "attribution recovery prefix changed"
+                tail == *b"\n",
+                "attribution recovery file has an incomplete tail"
             );
-            if start > receipt.prefix_end && metadata.len() >= start {
-                file.seek(SeekFrom::Start(receipt.prefix_end))?;
-                let mut separator = [0];
-                file.read_exact(&mut separator)?;
+            if completed_tail {
                 ensure!(
-                    separator == *b"\n",
-                    "attribution recovery separator changed"
+                    file_identity(&std::fs::metadata(&receipt.path)?)
+                        == file_identity(&file.metadata()?),
+                    "attribution recovery file changed after completion"
+                );
+                // The row is now newline-closed. Empty append invalidates the old
+                // window certificate without certifying a suffix as a fresh row.
+                // Stay within the same lease fence rather than recursively admitting
+                // a second mutation while release may already be draining this one.
+                let ownership = if self.lease.is_some() {
+                    pa_core::session::window::AppendOwnership::SessionLeaseHeld
+                } else {
+                    pa_core::session::window::AppendOwnership::Unleased
+                };
+                pa_core::session::window::append_cached(&receipt.path, &[], ownership)?;
+                ensure!(
+                    file_identity(&std::fs::metadata(&receipt.path)?)
+                        == file_identity(&file.metadata()?),
+                    "attribution recovery file changed after completion sync"
                 );
             }
-            if metadata.len() == receipt.prefix_end || metadata.len() == start {
-                self.child_usage_recovery.pending = None;
-                return Ok(None);
-            }
-            start
-        } else {
-            // The atomic bootstrap's own row must be its exact last line.
-            ensure!(
-                metadata.len() >= receipt.bytes.len() as u64,
-                "attribution bootstrap is incomplete"
-            );
-            metadata.len() - receipt.bytes.len() as u64
-        };
-        ensure!(
-            metadata.len() >= start + receipt.bytes.len() as u64,
-            "attribution recovery row is incomplete"
-        );
-        file.seek(SeekFrom::Start(start))?;
-        let mut actual = vec![0; receipt.bytes.len()];
-        file.read_exact(&mut actual)?;
-        ensure!(
-            actual == receipt.bytes,
-            "attribution recovery row conflicts"
-        );
-        file.seek(SeekFrom::End(-1))?;
-        let mut tail = [0];
-        file.read_exact(&mut tail)?;
-        ensure!(
-            tail == *b"\n",
-            "attribution recovery file has an incomplete tail"
-        );
-        // Loading the exact owned JSON can normalize a cost float. Admit the
-        // complete frozen object or its complete wire-decoded object, never a
-        // fieldwise mixture or an aggregate-only exception.
-        let original = serde_json::to_value(&receipt.entry)?;
-        let decoded: SessionEntry = serde_json::from_slice(&receipt.bytes)?;
-        let decoded = serde_json::to_value(decoded)?;
-        if let Some(existing) = self.entry(&receipt.entry.id) {
-            let indexed = serde_json::to_value(existing)?;
-            ensure!(
-                indexed == original || indexed == decoded,
-                "attribution recovery indexed row conflicts"
-            );
-        } else {
-            // Normally immediate, before any later row can branch from stale state.
-            // Hydration may already have installed it; do not steal its selected leaf.
-            if self.leaf_id == receipt.entry.parent_id {
-                self.push_index(receipt.entry.clone());
-            } else {
-                // A generic in-memory append may have arrived while recovery
-                // could not read the file. Install the physical ordering first,
-                // then merge its unsaved rows without changing the selected leaf.
-                let mut full = Self::open(&receipt.path)?;
-                ensure!(
-                    header_matches_receipt(&full.header, &receipt),
-                    "attribution recovery snapshot session changed"
-                );
-                let owned = full
-                    .entry(&receipt.entry.id)
-                    .context("attribution recovery snapshot lost row")?;
-                let indexed = serde_json::to_value(owned)?;
+            // Loading the exact owned JSON can normalize a cost float. Admit the
+            // complete frozen object or its complete wire-decoded object, never a
+            // fieldwise mixture or an aggregate-only exception.
+            let original = serde_json::to_value(&receipt.entry)?;
+            let decoded: SessionEntry = serde_json::from_slice(&receipt.bytes)?;
+            let decoded = serde_json::to_value(decoded)?;
+            if let Some(existing) = self.entry(&receipt.entry.id) {
+                let indexed = serde_json::to_value(existing)?;
                 ensure!(
                     indexed == original || indexed == decoded,
-                    "attribution recovery snapshot row conflicts"
+                    "attribution recovery indexed row conflicts"
                 );
-                for entry in &self.entries {
-                    if !full.by_id.contains_key(&entry.id) {
-                        full.push_index(entry.clone());
+            } else {
+                // Normally immediate, before any later row can branch from stale state.
+                // Hydration may already have installed it; do not steal its selected leaf.
+                if self.leaf_id == receipt.entry.parent_id {
+                    self.push_index(receipt.entry.clone());
+                } else {
+                    // A generic in-memory append may have arrived while recovery
+                    // could not read the file. Install the physical ordering first,
+                    // then merge its unsaved rows without changing the selected leaf.
+                    let mut full = Self::open(&receipt.path)?;
+                    ensure!(
+                        header_matches_receipt(&full.header, &receipt),
+                        "attribution recovery snapshot session changed"
+                    );
+                    let owned = full
+                        .entry(&receipt.entry.id)
+                        .context("attribution recovery snapshot lost row")?;
+                    let indexed = serde_json::to_value(owned)?;
+                    ensure!(
+                        indexed == original || indexed == decoded,
+                        "attribution recovery snapshot row conflicts"
+                    );
+                    for entry in &self.entries {
+                        if !full.by_id.contains_key(&entry.id) {
+                            full.push_index(entry.clone());
+                        }
                     }
+                    full.leaf_id.clone_from(&self.leaf_id);
+                    full.lease.clone_from(&self.lease);
+                    full.trace_upload.clone_from(&self.trace_upload);
+                    full.child_usage_recovery
+                        .clone_from(&self.child_usage_recovery);
+                    full.anthropic_warning_shown = self.anthropic_warning_shown;
+                    *self = full;
                 }
-                full.leaf_id.clone_from(&self.leaf_id);
-                full.lease.clone_from(&self.lease);
-                full.trace_upload.clone_from(&self.trace_upload);
-                full.child_usage_recovery
-                    .clone_from(&self.child_usage_recovery);
-                full.anthropic_warning_shown = self.anthropic_warning_shown;
-                *self = full;
             }
+            self.child_usage_recovery.created.insert(receipt.entry.id);
+            Ok(Some(file))
+        };
+        match lease {
+            Some(lease) => lease.with_owned_mutation(&path, observe),
+            None => observe(),
         }
-        self.child_usage_recovery.created.insert(receipt.entry.id);
-        Ok(Some(file))
     }
 
     /// The target assistant row's current usage: the running aggregate, since

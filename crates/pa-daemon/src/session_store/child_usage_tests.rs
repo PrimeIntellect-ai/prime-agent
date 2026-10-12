@@ -613,4 +613,5 @@ fn owned_tail_completion_obeys_a_managed_lease_and_refuses_a_released_one() {
     ));
     assert!(std::fs::read(&store.path).unwrap().starts_with(&partial));
     assert_eq!(attribution_rows(&store).len(), 1);
+    store.lease.take().unwrap().release();
 }
