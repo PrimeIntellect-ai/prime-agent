@@ -134,10 +134,39 @@ impl Supervisor {
             return Err(anyhow!("Supervisor is shutting down"));
         }
         let config_object = config.as_ref().and_then(Value::as_object);
-        let cwd_value = config_object
+        let explicit_cwd = config_object
             .and_then(|config| config.get("cwd"))
-            .and_then(Value::as_str)
+            .and_then(Value::as_str);
+        // A path-only reopen follows the session, not the supervisor's launch
+        // directory. Pin the file before changing the worker's process cwd so a
+        // relative sessionPath still opens the same file. Explicit-cwd creates
+        // retain their existing relative-path semantics.
+        let session_path = match (session_path, explicit_cwd) {
+            (Some(path), None) => Some(
+                std::path::absolute(crate::paths::expand_tilde(path)?)?
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            _ => session_path.clone(),
+        };
+        let saved_cwd = if explicit_cwd.is_none() {
+            session_path
+                .as_deref()
+                .filter(|path| Path::new(path).is_file())
+                .and_then(|path| pa_core::session::manager::read_session_header(Path::new(path)))
+                .map(|header| header.cwd)
+                .filter(|cwd| !cwd.is_empty())
+        } else {
+            None
+        };
+        if let Some(cwd) = saved_cwd.as_ref().filter(|cwd| !Path::new(cwd).is_dir()) {
+            return Err(anyhow!(
+                "Saved session directory is unavailable: {cwd}. Supply an explicit cwd to reopen elsewhere."
+            ));
+        }
+        let cwd_value = explicit_cwd
             .map(str::to_string)
+            .or(saved_cwd)
             .or_else(|| {
                 std::env::current_dir()
                     .ok()

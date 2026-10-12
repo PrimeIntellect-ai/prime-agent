@@ -1048,3 +1048,45 @@ async fn startup_flush_never_blocks_the_first_frame() {
         ),
     }
 }
+
+#[test]
+fn interactive_resume_restores_saved_cwd_and_project_settings_unless_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("saved-project");
+    std::fs::create_dir_all(project.join(".prime/agent")).unwrap();
+    std::fs::write(
+        project.join(".prime/agent/settings.json"),
+        r#"{"markdown":{"codeBlockIndent":"    "}}"#,
+    )
+    .unwrap();
+    let mut options = run_options_for_continue(dir.path());
+    let saved = seed_saved_session(
+        &options.config.agent_dir.join("sessions"),
+        "cwdresume",
+        &project,
+    );
+    for explicit in [true, false] {
+        options.session.resume = Some(saved.to_string_lossy().into_owned());
+        options.session.cwd_from_flag = explicit;
+        let (tui, _) = build_tui_options(
+            &options,
+            dir.path().join("d.sock"),
+            std::sync::Arc::default(),
+        )
+        .unwrap();
+        let expected = if explicit {
+            dir.path()
+        } else {
+            project.as_path()
+        };
+        assert_eq!(
+            (&tui.cwd, tui.create_config()["cwd"].clone(), tui.session),
+            (
+                &expected.to_path_buf(),
+                serde_json::json!(expected),
+                SessionSelection::Resume(saved.clone())
+            )
+        );
+        assert_eq!(tui.code_block_indent, if explicit { "  " } else { "    " });
+    }
+}
