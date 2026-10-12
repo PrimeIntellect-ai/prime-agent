@@ -223,8 +223,13 @@ def main():
             for label, binary in binaries.items():
                 observation = {}
                 result['runs'][label] = observation
-                observation.update(run_case(binary, label, Path(temp) / label, observation))
+                try:
+                    observation.update(run_case(binary, label, Path(temp) / label, observation))
+                except Exception as error:
+                    observation['error'] = str(error)
         ts, rust = result['runs']['ts'], result['runs']['rust']
+        errors = {label: run['error'] for label, run in result['runs'].items() if 'error' in run}
+        assert not errors, errors
         assert rust['notice'].removesuffix('\n' + RESET) == ts['notice'], 'additional notice difference'
         assert rust['restored'] == ts['restored'], 'restored state differs'
         assert rust['request_counts'] == ts['request_counts'] == {'setup': 2, 'resume': 3}
