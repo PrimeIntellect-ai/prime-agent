@@ -187,3 +187,37 @@ fn prepended_history_keeps_a_top_anchored_window() {
         "a shrinking seam entry keeps the paused window's content"
     );
 }
+
+#[test]
+fn prepended_history_keeps_a_paused_tool_after_hidden_entries() {
+    let mut paused = view();
+    paused.splash_suppressed = true;
+    // Empty assistant entries occupy no rows, but make the visible tool a
+    // later entry rather than the first entry handled by seam bookkeeping.
+    for _ in 0..3 {
+        paused.push_entry(assistant_entry(""));
+    }
+    paused.push_entry(super::expansion::tests::finished_tool_card(
+        "visible-tool",
+        "visible result",
+    ));
+    for index in 0..200 {
+        paused.push_entry(body("tail", index));
+    }
+    paused.render_frame(37, 24);
+    paused.scroll_to_top();
+    paused.scroll_by(2);
+    let before = paused.render_frame(37, 24);
+    assert!(frame_text(&before).contains("echo hi"));
+    assert!(paused.sparse_window.unwrap().cursor.unwrap().0 > 1);
+
+    paused.prepend_entries(vec![super::expansion::tests::finished_tool_card(
+        "older-tool",
+        "older result",
+    )]);
+    assert_eq!(
+        paused.render_frame(37, 24),
+        before,
+        "removing a leading spacer must preserve the visible tool's content row"
+    );
+}
