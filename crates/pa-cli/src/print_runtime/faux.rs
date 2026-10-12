@@ -162,6 +162,7 @@ pub(crate) async fn build_faux_engine_with(
             additional_prompt_paths: vec![],
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host,
+            progress_note_emit: None,
             rlm_depth,
             daemonless: true,
             model_info: Some(model.clone()),
