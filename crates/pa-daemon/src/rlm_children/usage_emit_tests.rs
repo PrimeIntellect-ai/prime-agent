@@ -530,6 +530,7 @@ async fn retirement_registry(
 ) -> (
     SupervisorChildSessions,
     Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::Mutex<Vec<Value>>>,
     tokio::task::JoinHandle<()>,
 ) {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -539,6 +540,8 @@ async fn retirement_registry(
         .unwrap();
     let kills = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed = Arc::clone(&kills);
+    let commands = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_commands = Arc::clone(&commands);
     let task = tokio::spawn(async move {
         loop {
             let Ok(stream) = listener.accept().await else {
@@ -557,6 +560,10 @@ async fn retirement_registry(
                 continue;
             }
             let envelope: Value = serde_json::from_str(&line).unwrap();
+            observed_commands
+                .lock()
+                .unwrap()
+                .push(envelope["command"].clone());
             let command = envelope["command"]["type"].as_str().unwrap();
             let id = envelope["id"].as_str().unwrap();
             let response = if command == "kill"
@@ -572,7 +579,7 @@ async fn retirement_registry(
                 crate::protocol::response_success(Some(id), command, None)
             };
             writer
-                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .write_all(format!("{}\n", crate::protocol::response_line(&response)).as_bytes())
                 .await
                 .unwrap();
         }
@@ -586,14 +593,14 @@ async fn retirement_registry(
             /*telemetry_disabled*/ true,
         )),
     );
-    (registry, kills, task)
+    (registry, kills, commands, task)
 }
 
 #[tokio::test]
 async fn repeated_delete_replays_retired_usage_without_repeating_lifecycle_work() {
     let tmp = tempfile::tempdir().unwrap();
     let file = child_file(tmp.path());
-    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let (sessions, kills, _commands, server) = retirement_registry(tmp.path()).await;
     let sink = Arc::new(CapturingSink::default());
     sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
     sessions.set_usage_sink(sink.clone());
@@ -683,7 +690,7 @@ async fn repeated_delete_replays_retired_usage_without_repeating_lifecycle_work(
 async fn repeated_close_replays_retired_usage_without_a_second_kill() {
     let tmp = tempfile::tempdir().unwrap();
     let file = child_file(tmp.path());
-    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let (sessions, kills, _commands, server) = retirement_registry(tmp.path()).await;
     let sink = Arc::new(CapturingSink::default());
     sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
     sessions.set_usage_sink(sink.clone());
@@ -780,7 +787,7 @@ enum RetirementCaller {
 async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
     let tmp = tempfile::tempdir().unwrap();
     let file = child_file(tmp.path());
-    let (sessions, kills, server) = retirement_registry(tmp.path()).await;
+    let (sessions, kills, commands, server) = retirement_registry(tmp.path()).await;
     let sink = Arc::new(AckPausedSink {
         capture: CapturingSink::default(),
         kills: kills.clone(),
@@ -792,7 +799,18 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
         .store(true, std::sync::atomic::Ordering::Relaxed);
     sessions.set_usage_sink(sink.clone());
     let record = record_with_file("sub-cancel-after-ack", &file);
-    record.lock().await.settled_status = Some("done");
+    let notifications = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = notifications.clone();
+    sessions.set_delete_notifier(Arc::new(move |id| {
+        observed.lock().unwrap().push(id.to_string())
+    }));
+    let roster_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = roster_events.clone();
+    sessions.set_child_update_sink(Arc::new(move |row| observed.lock().unwrap().push(row)));
+    let (settle_tx, mut settle_rx) = tokio::sync::mpsc::unbounded_channel();
+    sessions.set_settle_hook(Arc::new(move || {
+        let _ = settle_tx.send(());
+    }));
     sessions.inner.children.lock().await.push(record.clone());
     let owned = sessions.clone();
     let retirement = tokio::spawn(async move {
@@ -834,6 +852,79 @@ async fn cancellation_after_ack_preserves_retirement(caller: RetirementCaller) {
     assert!(sessions.list_subagents().await.unwrap().is_empty());
     assert!(!sessions.any_running().await);
     assert_eq!(kills.load(std::sync::atomic::Ordering::Relaxed), 1);
+    match caller {
+        RetirementCaller::Delete => {
+            tokio::time::timeout(Duration::from_secs(5), settle_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                notifications.lock().unwrap().as_slice(),
+                &["sub-cancel-after-ack"]
+            );
+            let collected = sessions
+                .collect(vec!["sub-cancel-after-ack".into()], 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                collected
+                    .iter()
+                    .map(|row| (
+                        row.rlm_child_id.clone(),
+                        row.status,
+                        row.settled,
+                        row.error.clone()
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![(
+                    "sub-cancel-after-ack".into(),
+                    "cancelled",
+                    true,
+                    Some("Deleted by parent orchestrator".into())
+                )]
+            );
+            {
+                let events = roster_events.lock().unwrap();
+                assert_eq!(events.len(), 1);
+                let mut observed = events[0].clone();
+                observed.as_object_mut().unwrap().remove("durationMs");
+                assert_eq!(
+                    observed,
+                    json!({"id":"sub-cancel-after-ack", "activeSessionId":"child-live", "sessionName":"child", "label":"child", "status":"cancelled", "sessionDir":"", "error":"Deleted by parent orchestrator"})
+                );
+            }
+            {
+                let traffic = commands.lock().unwrap();
+                assert_eq!(
+                    traffic
+                        .iter()
+                        .filter(|row| row["type"] == "follow_up")
+                        .count(),
+                    1
+                );
+            }
+            sessions
+                .delete_subagent("sub-cancel-after-ack".into())
+                .await
+                .unwrap();
+            assert!(settle_rx.try_recv().is_err());
+            assert_eq!(notifications.lock().unwrap().len(), 1);
+        }
+        RetirementCaller::Close => {
+            assert!(notifications.lock().unwrap().is_empty());
+            assert!(roster_events.lock().unwrap().is_empty());
+            assert!(settle_rx.try_recv().is_err());
+            assert_eq!(
+                commands
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| row["type"] == "follow_up")
+                    .count(),
+                0
+            );
+        }
+    }
     {
         let reports = sink.capture.reports.lock().unwrap();
         assert_eq!(reports.len(), 1);
