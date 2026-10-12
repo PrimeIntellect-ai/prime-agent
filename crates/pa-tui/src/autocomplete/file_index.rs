@@ -371,11 +371,11 @@ fn spawn_applier(
     });
 }
 
-/// Apply one watcher batch using each path's current existence. Structural events
-/// for existing directories invalidate their potentially replaced descendants;
-/// ordinary file saves keep the typed-form fast path. A watcher error disables the
-/// index; rescan notices, repository markers, or changed ignore rules trigger a lazy
-/// rebuild. A batch exceeding [`MAX_INDEX_ENTRIES`] disables the index.
+/// Apply one watcher batch using each path's current existence. A structural event on
+/// an indexed directory re-walks its subtree; ordinary file saves keep the typed-form
+/// fast path. A watcher error disables the index; rescan notices, a structural event on
+/// the base or a `.git` marker, an event on a `.git` file, or changed ignore rules
+/// trigger a lazy rebuild. A batch exceeding [`MAX_INDEX_ENTRIES`] disables the index.
 fn apply_batch(
     state: &mut IndexState,
     batch: &[notify::Result<Event>],
@@ -447,6 +447,7 @@ fn apply_batch(
     // batch, because each single edit of the sorted entries shifts their tail.
     let mut removals: Vec<Range<usize>> = Vec::new();
     let mut gone: Vec<String> = Vec::new();
+    let mut rewalked: Vec<&str> = Vec::new();
     let mut inserted: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
     for rel in &rels {
         let metadata = std::fs::metadata(base.join(rel));
@@ -461,11 +462,19 @@ fn apply_batch(
             rel.clone()
         };
         // Replacing an indexed directory may change every descendant without
-        // child events. Rebuild lazily only for structural events; ordinary
-        // editor saves and directory metadata changes remain no-ops.
-        if is_directory && replaced.contains(rel) && (rel.is_empty() || contains(entries, &form)) {
-            *state = IndexState::Unbuilt;
-            return;
+        // child events. Only structural events re-walk its subtree (the base is the
+        // whole tree: it rebuilds lazily); ordinary editor saves and directory
+        // metadata changes remain no-ops.
+        if is_directory && replaced.contains(rel) {
+            if rel.is_empty() {
+                *state = IndexState::Unbuilt;
+                return;
+            }
+            if contains(entries, &form) {
+                removals.push(range_under(entries, &form));
+                rewalked.push(rel);
+                continue;
+            }
         }
         // The typed-form no-op: the common editor save changes nothing.
         if contains(entries, &form) {
@@ -500,6 +509,12 @@ fn apply_batch(
     }
     remove_ranges(entries, removals);
     let mut additions: Vec<Box<str>> = Vec::new();
+    for rel in rewalked {
+        if !walk_subtree(base, rel, entries.len(), &mut additions) {
+            *state = IndexState::Disabled;
+            return;
+        }
+    }
     for (parent, paths) in inserted {
         // One depth-1 walk per parent per batch: the shared rules decide what may enter.
         let parent_dir = base.join(&parent);
@@ -529,21 +544,9 @@ fn apply_batch(
             } else {
                 rel.clone()
             }));
-            if is_directory {
-                let dir = base.join(&rel);
-                for form in walk_builder(&dir)
-                    .build()
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| fd_printed_form(&entry, base))
-                {
-                    additions.push(Box::from(form));
-                    if entries.len() + additions.len() > MAX_INDEX_ENTRIES {
-                        // An over-cap batch disables the index, like an over-cap
-                        // build does.
-                        *state = IndexState::Disabled;
-                        return;
-                    }
-                }
+            if is_directory && !walk_subtree(base, &rel, entries.len(), &mut additions) {
+                *state = IndexState::Disabled;
+                return;
             }
         }
     }
@@ -556,6 +559,23 @@ fn apply_batch(
     if entries.len() > MAX_INDEX_ENTRIES {
         *state = IndexState::Disabled;
     }
+}
+
+/// Walk the directory `rel`'s subtree with the shared rules into `additions` — `false`
+/// once the index (`indexed` entries plus the additions) passes [`MAX_INDEX_ENTRIES`]:
+/// an over-cap batch disables the index, like an over-cap build does.
+fn walk_subtree(base: &Path, rel: &str, indexed: usize, additions: &mut Vec<Box<str>>) -> bool {
+    for form in walk_builder(&base.join(rel))
+        .build()
+        .filter_map(Result::ok)
+        .filter_map(|entry| fd_printed_form(&entry, base))
+    {
+        additions.push(Box::from(form));
+        if indexed + additions.len() > MAX_INDEX_ENTRIES {
+            return false;
+        }
+    }
+    true
 }
 
 /// The event path relative to the base — `None` outside it. Watcher paths may be
