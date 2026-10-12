@@ -75,6 +75,7 @@ std::thread_local! {
     pub(super) static FAIL_AFTER_CHILD_APPEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_CHILD_CONFIRM_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static PARTIAL_CHILD_APPEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(super) static FAIL_CHILD_TAIL_COMPLETION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[test]
@@ -479,14 +480,19 @@ fn recovery_preserves_complete_wire_header_extensions_across_plain_reopen() {
 }
 
 #[test]
-fn partial_owned_write_remains_owed_without_truncating_its_healthy_prefix() {
+fn conflicting_partial_owned_write_remains_owed_without_truncating_its_healthy_prefix() {
     let (_dir, mut store, target) = fixture();
     let prefix = std::fs::read(&store.path).unwrap();
     PARTIAL_CHILD_APPEND.with(|fault| fault.set(Some(12)));
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(true));
     assert!(store
         .append_child_usage_once("partial-a", &target, child(), None)
         .is_err());
-    let partial = std::fs::read(&store.path).unwrap();
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(false));
+    let mut partial = std::fs::read(&store.path).unwrap();
+    // A foreign change is not an owned prefix: retain every byte and fail closed.
+    partial[prefix.len() + 9] = b'X';
+    std::fs::write(&store.path, &partial).unwrap();
     assert!(partial.starts_with(&prefix));
     assert_eq!(partial.len(), prefix.len() + 12);
     assert!(store.child_usage_recovery.pending.is_some());
@@ -532,5 +538,79 @@ fn recovery_preserves_valid_unterminated_eof_and_rejects_a_changed_separator() {
         ChildUsageAppendResult::Created(_)
     ));
     assert_eq!(std::fs::read(&store.path).unwrap(), healthy);
+    assert_eq!(attribution_rows(&store).len(), 1);
+}
+
+#[test]
+fn exact_owned_partial_tail_completes_without_truncation_and_unblocks_generic_writes() {
+    let (_dir, mut store, target) = fixture();
+    PARTIAL_CHILD_APPEND.with(|fault| fault.set(Some(12)));
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(true));
+    assert!(store
+        .append_child_usage_once("partial-a", &target, child(), None)
+        .is_err());
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(false));
+    let partial = std::fs::read(&store.path).unwrap();
+    let mut expected = Usage::default();
+    pa_core::session_engine::rlm_usage::attribute_child_usage(&mut expected, &child());
+    let confirmed = store
+        .append_child_usage_once("partial-a", &target, child(), None)
+        .unwrap();
+    assert!(matches!(confirmed, ChildUsageAppendResult::Created(usage) if usage == expected));
+    let completed = std::fs::read(&store.path).unwrap();
+    assert!(completed.starts_with(&partial));
+    assert!(completed.len() > partial.len());
+    assert_eq!(attribution_rows(&store).len(), 1);
+    assert!(store.child_usage_recovery.pending.is_none());
+    assert!(store.child_usage_recovery.created.is_empty());
+    let c = store
+        .persist_entry(
+            "custom",
+            json!({"customType":"after-completion", "data":{}}),
+        )
+        .unwrap();
+    assert_eq!(
+        store.entry(&c).unwrap().parent_id.as_deref(),
+        Some("partial-a")
+    );
+    assert!(matches!(
+        store
+            .append_child_usage_once("partial-a", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Existing(_)
+    ));
+    assert_eq!(attribution_rows(&store).len(), 1);
+    assert!(std::fs::read(&store.path).unwrap().starts_with(&completed));
+}
+
+#[test]
+fn owned_tail_completion_obeys_a_managed_lease_and_refuses_a_released_one() {
+    let (dir, mut store, target) = fixture();
+    PARTIAL_CHILD_APPEND.with(|fault| fault.set(Some(12)));
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(true));
+    assert!(store
+        .append_child_usage_once("leased-a", &target, child(), None)
+        .is_err());
+    FAIL_CHILD_TAIL_COMPLETION.with(|fault| fault.set(false));
+    let partial = std::fs::read(&store.path).unwrap();
+    let stale = std::sync::Arc::new(
+        crate::lease::acquire_runtime_session_lease(&store.path, dir.path()).unwrap(),
+    );
+    stale.release();
+    store.lease = Some(stale);
+    assert!(store
+        .append_child_usage_once("leased-a", &target, child(), None)
+        .is_err());
+    assert_eq!(std::fs::read(&store.path).unwrap(), partial);
+    store.lease = Some(std::sync::Arc::new(
+        crate::lease::acquire_runtime_session_lease(&store.path, dir.path()).unwrap(),
+    ));
+    assert!(matches!(
+        store
+            .append_child_usage_once("leased-a", &target, child(), None)
+            .unwrap(),
+        ChildUsageAppendResult::Created(_)
+    ));
+    assert!(std::fs::read(&store.path).unwrap().starts_with(&partial));
     assert_eq!(attribution_rows(&store).len(), 1);
 }
