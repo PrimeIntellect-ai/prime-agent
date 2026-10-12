@@ -559,7 +559,7 @@ fn update_rollback_reads_the_unsuffixed_installer_slot() {
         "install-rust.sh channel beta\nversion 1.0.0\n",
     )
     .expect("slot marker");
-    std::fs::write(slot.join("prime-agent"), b"payload\n").expect("slot payload");
+    std::fs::write(slot.join("prime-agent"), b"#!/bin/sh\necho 1.0.0\n").expect("slot payload");
     make_executable(&slot.join("prime-agent"));
 
     let mut command = Command::new(&binary);
