@@ -337,6 +337,8 @@ fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
     command
         .arg("--exact")
         .arg("exit_backfill_child_mode")
+        // The parent observes the child's handoff result through the PTY.
+        .arg("--nocapture")
         .env(CHILD_SOCKET_ENV, socket)
         .env_remove("TMUX")
         .stdin(slave_as_stdio(slave))
