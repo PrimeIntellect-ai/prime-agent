@@ -1,0 +1,75 @@
+name: Prime discussion notifications
+
+on:
+  schedule:
+    - cron: '7-57/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Preview without sending messages or updating state
+        type: boolean
+        default: true
+  pull_request:
+    paths:
+      - .github/workflows/discussion-slack.yml
+      - .github/scripts/discussion-notifier/**
+
+permissions: {}
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s .github/scripts/discussion-notifier -p 'test_*.py'
+
+  notify:
+    if: >-
+      github.repository == 'PrimeIntellect-ai/prime-agent' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      discussions: read
+      actions: read
+    concurrency:
+      group: prime-discussion-notifications
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      STATE_DIR: /tmp/prime-discussion-notifier
+      PRIME_SLACK_USER_ID: ${{ vars.PRIME_SLACK_USER_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify discussion access with the workflow token
+        run: python3 .github/scripts/discussion-notifier/notify.py probe
+      - name: Plan notifications
+        env:
+          SLACK_WEBHOOK_URL: ${{ env.DRY_RUN != 'true' && secrets.SLACK_DISCUSSION_WEBHOOK_URL || '' }}
+        run: python3 .github/scripts/discussion-notifier/notify.py plan
+      # Persist reservations before Slack sees a mention. Failed or cancelled
+      # deliveries need manual review; subsequent runs must not resend them.
+      - name: Save notification reservations
+        if: env.DRY_RUN != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prime-discussion-state
+          path: ${{ env.STATE_DIR }}/state.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Send notifications
+        if: env.DRY_RUN != 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DISCUSSION_WEBHOOK_URL }}
+        run: python3 .github/scripts/discussion-notifier/notify.py send

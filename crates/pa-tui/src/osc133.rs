@@ -2,7 +2,7 @@
 //! standard prompt/output zone sequences so shell-integration users get working jumps between turns
 //! — `A` starts a marked row, `B` then `C` land at the start of the component's last row. The
 //! sequences are zero-width: `width` skips them, the ratatui paint path strips them from cell
-//! content, and `app::draw` re-emits them per row after the frame is painted.
+//! content. Only the main-screen transcript flush emits them to the terminal.
 
 use crate::Line;
 
@@ -27,15 +27,17 @@ pub fn mark_end(line: &mut Line) {
 }
 
 /// Which zone sequences a rendered row carries.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RowMarkers {
+pub(crate) struct RowMarkers {
     pub start: bool,
     pub end: bool,
 }
 
 /// Detect the zone sequences at the start of a rendered row.
+#[cfg(test)]
 #[must_use]
-pub fn row_markers(line: &Line) -> RowMarkers {
+pub(crate) fn row_markers(line: &Line) -> RowMarkers {
     let joined: String = line.iter().map(|s| s.content.as_str()).collect();
     let mut markers = RowMarkers::default();
     if joined.starts_with(ZONE_START) {
@@ -79,20 +81,6 @@ fn markers_only(content: &str) -> bool {
         }
     }
     !content.is_empty() && rest.is_empty()
-}
-
-/// Per-frame row marker plan: `(terminal row, markers)` for every marked row, in row order.
-#[must_use]
-pub fn frame_markers(frame: &[Line]) -> Vec<(usize, RowMarkers)> {
-    frame
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            let m = row_markers(line);
-            m.start || m.end
-        })
-        .map(|(row, line)| (row, row_markers(line)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -143,34 +131,5 @@ mod tests {
         let mut only_marker = vec![Span::raw(ZONE_START)];
         strip(&mut only_marker);
         assert!(only_marker.is_empty());
-    }
-
-    #[test]
-    fn frame_markers_report_marked_rows() {
-        let mut frame = vec![row(), row(), row()];
-        mark_start(&mut frame[0]);
-        mark_end(&mut frame[2]);
-        let plan = frame_markers(&frame);
-        assert_eq!(plan.len(), 2);
-        assert_eq!(
-            plan[0],
-            (
-                0,
-                RowMarkers {
-                    start: true,
-                    end: false
-                }
-            )
-        );
-        assert_eq!(
-            plan[1],
-            (
-                2,
-                RowMarkers {
-                    start: false,
-                    end: true
-                }
-            )
-        );
     }
 }

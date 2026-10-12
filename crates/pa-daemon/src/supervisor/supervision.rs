@@ -73,16 +73,30 @@ impl Supervisor {
         pid: u64,
     ) {
         let supervisor = Arc::clone(self);
-        tokio::spawn(async move {
-            supervisor.watch_worker(resident, child, pid).await;
-        });
+        tokio::spawn(supervisor.watch_worker(resident, child, pid));
     }
 
-    pub(super) async fn watch_worker(
+    /// Watch one process lifetime for the resident. The generation claim is
+    /// synchronous, so the newest arm owns the resident before its task is
+    /// even polled: a watch whose generation a later arm superseded returns
+    /// at the exit check instead of running crash bookkeeping over the new
+    /// owner's process.
+    pub(super) fn watch_worker(
+        self: Arc<Self>,
+        resident: Arc<ResidentWorker>,
+        child: Option<Child>,
+        adopted_pid: u64,
+    ) -> impl std::future::Future<Output = ()> {
+        let monitor_epoch = resident.monitor_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.watch_worker_owned(resident, child, adopted_pid, monitor_epoch)
+    }
+
+    async fn watch_worker_owned(
         self: Arc<Self>,
         resident: Arc<ResidentWorker>,
         mut child: Option<Child>,
         mut adopted_pid: u64,
+        monitor_epoch: u64,
     ) {
         loop {
             if let Some(mut child) = child.take() {
@@ -118,13 +132,19 @@ impl Supervisor {
                         tokio::time::sleep(ADOPTED_EXIT_FALLBACK_POLL).await;
                     }
                 }
-                // A relaunch elsewhere (update abandon, retry) took over the
-                // resident with a new process.
-                if self.is_stopping(&resident)
-                    || resident.descriptor.lock().await.pid != adopted_pid
-                {
+                // Manual retry still replaces the descriptor's pid without
+                // arming a monitor. Preserve that handoff fence alongside
+                // generation ownership so the predecessor's exit cannot
+                // enter crash recovery over the retry's replacement.
+                if resident.descriptor.lock().await.pid != adopted_pid {
                     return;
                 }
+            }
+            // The exit is the watched process's, not the resident's: a later
+            // monitor arm (a registration re-arm, an update abandon) owns the
+            // resident now.
+            if self.superseded(&resident, monitor_epoch) {
+                return;
             }
             self.note_daemon_event("worker_exited", Some("crash"));
             // A hard-killed parent bypasses every worker-side close (#246): close the
@@ -190,6 +210,13 @@ impl Supervisor {
                 resident.worker_id
             ));
             tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            // The backoff can span a registration re-arm or an update
+            // commit's abandon: both claim the resident while this watch
+            // slept, and a superseded watch must not relaunch a second
+            // worker next to the new owner's.
+            if self.superseded(&resident, monitor_epoch) {
+                return;
+            }
             match self.relaunch_worker(&resident).await {
                 Ok(new_child) => {
                     // No counter reset on a successful relaunch: a spawn that dies fast must
@@ -219,6 +246,13 @@ impl Supervisor {
     pub(crate) fn is_stopping(&self, resident: &Arc<ResidentWorker>) -> bool {
         self.shutting_down.load(Ordering::SeqCst)
             || resident.intentional_stop.load(Ordering::SeqCst)
+    }
+
+    /// Whether this watch no longer owns the resident's process: the stop
+    /// flag is read before the generation, so an update abandon's clear and
+    /// bump can never both slip past the same check.
+    fn superseded(&self, resident: &Arc<ResidentWorker>, monitor_epoch: u64) -> bool {
+        self.is_stopping(resident) || resident.monitor_epoch.load(Ordering::SeqCst) != monitor_epoch
     }
 
     /// Whether the supervisor is tearing down (long-lived daemon tasks
@@ -455,7 +489,7 @@ impl Supervisor {
         if std::env::var("PA_DAEMON_DEBUG").is_ok() {
             eprintln!("[supervisor] spawned worker pid {:?}", child.id());
         }
-        {
+        let spawn_record = {
             let mut descriptor = resident.descriptor.lock().await;
             // Capture the child's start identity alongside its pid (TS `getProcessStartId`
             // at spawn): the holder checks need it to recognize a recycled pid.
@@ -476,7 +510,15 @@ impl Supervisor {
             // lose the descriptor's whole payload — the recovery journal
             // pointer and the durable create command the next boot's
             // revival replays.
-            let _ = persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync);
+            persist_worker_at(&resident.descriptor_path, &descriptor, spawn_record_sync)
+        };
+        // Fail closed: a spawn record that could not land would leave the
+        // successor boot adopting this pid as live (or a recycled pid as the
+        // worker), so the launch is rolled back instead of left unrecorded.
+        if let Err(error) = spawn_record {
+            let mut child = child;
+            let _ = child.kill().await;
+            return Err(error).context("persist spawned worker identity");
         }
 
         // A worker that never comes up inside the connect budget is killed here, so a

@@ -147,17 +147,17 @@ fn unnamed_streamed_tool_call_renders_code_once_named() {
     apply_streamed_tool_card(
         &mut view,
         "call-1",
-        "ipython",
+        "python_repl",
         &json!({ "code": "fibonacci(23)" }),
     );
     let card = card_of(&view).expect("the named frame creates the card");
-    assert_eq!(card.name, "ipython");
+    assert_eq!(card.name, "python_repl");
     assert!(card.args.get("code").is_some(), "args stream into the card");
     let rows = rendered_card_text(&view);
     assert!(
         rows.iter()
             .any(|row| row.contains("python") && row.contains("fibonacci(23)")),
-        "the ipython card renders the code preview: {rows:?}"
+        "the python_repl card renders the code preview: {rows:?}"
     );
     assert!(
         rows.iter()

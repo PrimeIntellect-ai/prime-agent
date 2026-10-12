@@ -500,6 +500,12 @@ pub trait AgentTool: Send + Sync {
     fn prepare_arguments(&self, _args: &serde_json::Value) -> Option<serde_json::Value> {
         None
     }
+    /// Whether a call naming another tool should dispatch to this one
+    /// (e.g. pre-rename names replayed from history); exact name matches
+    /// win.
+    fn accepts_alias(&self, _name: &str) -> bool {
+        false
+    }
     /// Execute the tool call. Return `Err` on failure instead of encoding
     /// errors in `content`, like a `throw` in the TS reference.
     fn execute(

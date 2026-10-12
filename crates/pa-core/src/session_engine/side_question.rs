@@ -25,7 +25,7 @@ use super::provider_retry::{
 /// Returning `false` requests the run to abort.
 pub type SideQuestionSink = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
-const SIDE_QUESTION_INSTRUCTION: &str = "The user asked this via `/btw` — a temporary side thread cloned from the main conversation to answer a question without interrupting the main work. Tools (including `ipython`) are deactivated in this side thread and return an error if called; answer using only the conversation context above. The user may send follow-up side questions. Nothing here is added to the main session, so don't start or plan main-session work from this thread.";
+const SIDE_QUESTION_INSTRUCTION: &str = "The user asked this via `/btw` — a temporary side thread cloned from the main conversation to answer a question without interrupting the main work. Tools (including `python_repl`) are deactivated in this side thread and return an error if called; answer using only the conversation context above. The user may send follow-up side questions. Nothing here is added to the main session, so don't start or plan main-session work from this thread.";
 
 const SIDE_QUESTION_TOOL_BLOCKED: &str =
     "Tools are deactivated in this side thread. Answer from the conversation context.";
