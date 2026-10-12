@@ -181,16 +181,6 @@ impl SupervisorChildSessionsInner {
             if !matches {
                 continue;
             }
-            // An interrupted caller still owns lifecycle completion through the roster.
-            if self
-                .children
-                .lock()
-                .await
-                .iter()
-                .any(|held| Arc::ptr_eq(held, &record))
-            {
-                continue;
-            }
             let rename_lock = record.lock().await.rename_lock.clone();
             let _guard = rename_lock.lock().await;
             if !self
@@ -199,6 +189,16 @@ impl SupervisorChildSessionsInner {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
                 .any(|held| Arc::ptr_eq(&held.record, &record))
+            {
+                continue;
+            }
+            // An interrupted caller still owns lifecycle completion through the roster.
+            if self
+                .children
+                .lock()
+                .await
+                .iter()
+                .any(|held| Arc::ptr_eq(held, &record))
             {
                 continue;
             }
