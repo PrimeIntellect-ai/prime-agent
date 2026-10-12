@@ -253,7 +253,7 @@ fn generic_append_after_uncertain_attribution_preserves_bytes_and_branch_order()
     let observed: Vec<_> = store.branch().iter().map(|row| row.id.clone()).collect();
     assert_eq!(
         observed,
-        vec![target.clone(), "a".to_owned(), c.clone(), "b".to_owned()]
+        vec![target.clone(), "a".to_owned(), c, "b".to_owned()]
     );
     let mut reopened = SessionFile::open(&store.path).unwrap();
     let reopened_branch: Vec<_> = reopened.branch().iter().map(|row| row.id.clone()).collect();
@@ -421,9 +421,9 @@ fn nonzero_cost_hydration_confirms_the_complete_wire_decoded_owned_row() {
         output: 7,
         total_tokens: 17,
         cost: UsageCost {
-            input: pa_types::JsNumber(0.007531199999999999),
-            output: pa_types::JsNumber(0.0014644999999999999),
-            total: pa_types::JsNumber(0.0089957),
+            input: pa_types::JsNumber(0.007_531_199_999_999_999),
+            output: pa_types::JsNumber(0.001_464_499_999_999_999_9),
+            total: pa_types::JsNumber(0.008_995_7),
             ..UsageCost::default()
         },
         ..Usage::default()
@@ -454,7 +454,7 @@ fn recovery_preserves_complete_wire_header_extensions_across_plain_reopen() {
     store.header.rest.insert(
         "extension".to_owned(),
         json!({
-            "retained": true, "cost": 0.007531199999999999,
+            "retained": true, "cost": 0.007_531_199_999_999_999,
         }),
     );
     store.rewrite().unwrap();

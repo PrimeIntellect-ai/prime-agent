@@ -267,7 +267,7 @@ impl SessionFile {
                 let mut separator = [0];
                 file.read_exact(&mut separator)?;
                 ensure!(
-                    separator == [b'\n'],
+                    separator == *b"\n",
                     "attribution recovery separator changed"
                 );
             }
@@ -299,7 +299,7 @@ impl SessionFile {
         let mut tail = [0];
         file.read_exact(&mut tail)?;
         ensure!(
-            tail == [b'\n'],
+            tail == *b"\n",
             "attribution recovery file has an incomplete tail"
         );
         // Loading the exact owned JSON can normalize a cost float. Admit the
