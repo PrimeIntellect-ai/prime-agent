@@ -1096,10 +1096,10 @@ async fn close_preserves_final_usage_across_a_transient_child_file_read_failure(
         .unwrap();
     {
         let reports = sink.reports.lock().unwrap();
-        let expected: pa_types::ai::Usage = serde_json::from_value(json!({
-            "input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,
-            "cost":{"input":0.007_531_2,"output":0.001_464_5,"cacheRead":0,"cacheWrite":0,"total":0.008_995_7}
-        })).unwrap();
+        // Decode the independently pinned wire numbers once, as the transcript reader does.
+        let expected: pa_types::ai::Usage = serde_json::from_str(
+            r#"{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}"#,
+        ).unwrap();
         assert_eq!(
             reports
                 .iter()
