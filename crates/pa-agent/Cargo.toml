@@ -7,6 +7,9 @@ description = "Agent loop for Prime Agent."
 
 [dependencies]
 anyhow.workspace = true
+# The proxy transport's HTTPS client routes through the shared extra-CA TLS
+# contract (pa-types is the workspace's one shared crate).
+pa-types.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

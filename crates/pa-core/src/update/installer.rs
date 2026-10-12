@@ -510,7 +510,11 @@ pub fn installed_channel(prefix: &Path) -> Option<&'static str> {
 /// Returns an error when the request fails, answers a non-success status,
 /// or the body cannot be read or written.
 async fn fetch_script(url: &str) -> Result<(PathBuf, std::fs::File)> {
-    let response = reqwest::Client::new()
+    let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+        .map_err(anyhow::Error::msg)
+        .and_then(|builder| builder.build().map_err(anyhow::Error::msg))
+        .with_context(|| format!("build the installer client for {url}"))?;
+    let response = client
         .get(url)
         .header("User-Agent", update_user_agent(env!("CARGO_PKG_VERSION")))
         .timeout(SCRIPT_FETCH_TIMEOUT)

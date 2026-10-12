@@ -58,10 +58,14 @@ impl TraceHttp for ReqwestTraceHttp {
         cancel: Option<&'a TraceUploadCancel>,
     ) -> Pin<Box<dyn Future<Output = Result<TraceHttpResponse, TraceHttpError>> + Send + 'a>> {
         Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_millis(timeout_ms))
-                .build()
-                .map_err(|error| TraceHttpError::Transport(error.to_string()))?;
+            let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+                .and_then(|builder| {
+                    builder
+                        .timeout(std::time::Duration::from_millis(timeout_ms))
+                        .build()
+                        .map_err(|error| error.to_string())
+                })
+                .map_err(TraceHttpError::Transport)?;
             let mut request = client.put(url).body(body);
             for (name, value) in headers {
                 request = request.header(name, value);

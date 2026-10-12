@@ -12,29 +12,53 @@ use crate::utils::stream_failure::{
     ProviderHttpError,
 };
 
-static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-static H2_ALPN_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+static H2_ALPN_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+/// The crate's reqwest client construction, routed through the shared extra-CA TLS contract
+/// ([`pa_types::tls`]): when a trust variable is set the builder is preconfigured with the
+/// extra-trust rustls config (native roots plus the extras) with the ALPN shape `alpn` names —
+/// the one that matches what the builder's own settings make reqwest do today.
+///
+/// # Errors
+///
+/// Returns the loud, path-naming trust error when the trust variables name a source that cannot
+/// be loaded.
+pub fn https_client_builder(
+    alpn: pa_types::tls::TlsAlpn,
+) -> Result<reqwest::ClientBuilder, String> {
+    let builder = reqwest::Client::builder();
+    match pa_types::tls::extra_ca_client_config(alpn) {
+        Ok(Some(config)) => Ok(builder.use_preconfigured_tls(config)),
+        Ok(None) => Ok(builder),
+        Err(error) => Err(error.to_string()),
+    }
+}
 
 /// The HTTP/1.1 client every provider shares, pinned with `http1_only()` so that enabling the
 /// reqwest `http2` feature (bedrock) cannot change the transport of any other provider.
-fn client() -> &'static reqwest::Client {
+fn client() -> &'static Result<reqwest::Client, String> {
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .http1_only()
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .build()
-            .expect("reqwest client")
+        https_client_builder(pa_types::tls::TlsAlpn::Http1).and_then(|builder| {
+            builder
+                .http1_only()
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .build()
+                .map_err(|error| error.to_string())
+        })
     })
 }
 
 /// The TLS-ALPN client for bedrock https endpoints: HTTP/2 preferred (ALPN-negotiated), like the TS
 /// default transport; cleartext bedrock endpoints go through `providers/bedrock/h2.rs` instead.
-fn h2_alpn_client() -> &'static reqwest::Client {
+fn h2_alpn_client() -> &'static Result<reqwest::Client, String> {
     H2_ALPN_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .pool_idle_timeout(std::time::Duration::from_secs(90))
-            .build()
-            .expect("reqwest h2 client")
+        https_client_builder(pa_types::tls::TlsAlpn::Negotiated).and_then(|builder| {
+            builder
+                .pool_idle_timeout(std::time::Duration::from_secs(90))
+                .build()
+                .map_err(|error| error.to_string())
+        })
     })
 }
 
@@ -227,6 +251,14 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     let client = match request.transport {
         Transport::Http1 => client(),
         Transport::H2Alpn => h2_alpn_client(),
+    };
+    let client = match client {
+        Ok(client) => client,
+        // The trust variables name a source that cannot be loaded: loud and
+        // actionable (the error names the variable and the path), as a
+        // plain message — the connection-error families would flatten it
+        // to a fixed TS text.
+        Err(cause) => return Err(ProviderError::Message(cause.clone())),
     };
     let mut builder = client.request(request.method, &request.url);
     for (name, value) in &request.headers {

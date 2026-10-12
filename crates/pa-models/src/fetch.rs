@@ -52,7 +52,9 @@ pub enum FetchOutcome {
 /// each request is bounded by the timeout and the byte cap.
 #[derive(Debug)]
 pub struct CatalogFetcher {
-    client: reqwest::Client,
+    /// The built client, or the loud extra-CA trust error the construction
+    /// ran into (surfaced per request through the fetch's transport error).
+    client: Result<reqwest::Client, String>,
     timeout: Duration,
     max_bytes: usize,
 }
@@ -73,14 +75,27 @@ impl CatalogFetcher {
     ///
     /// # Panics
     ///
-    /// Panics if the reqwest client fails to build.
+    /// Panics if the reqwest client fails to build (a trust variable that
+    /// names an unloadable source surfaces per request instead).
     #[must_use]
     pub fn with_limits(timeout: Duration, max_bytes: usize) -> Self {
-        let client = reqwest::Client::builder()
-            // A moved catalog must be a client change, never a silent hop.
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("catalog reqwest client");
+        // The shared extra-CA TLS contract: a trust variable that names an
+        // unloadable source is stored and reported per fetch — the catalog
+        // fetch's own loud error channel.
+        let client = pa_types::tls::extra_ca_client_config(pa_types::tls::TlsAlpn::Http1)
+            .map_err(|error| error.to_string())
+            .and_then(|config| {
+                let builder = reqwest::Client::builder()
+                    // A moved catalog must be a client change, never a silent hop.
+                    .redirect(reqwest::redirect::Policy::none());
+                match config {
+                    Some(config) => builder
+                        .use_preconfigured_tls(config)
+                        .build()
+                        .map_err(|error| error.to_string()),
+                    None => builder.build().map_err(|error| error.to_string()),
+                }
+            });
         Self {
             client,
             timeout,
@@ -113,8 +128,17 @@ impl CatalogFetcher {
         etag: Option<&str>,
         extra_headers: &[(String, String)],
     ) -> Result<FetchOutcome, FetchError> {
-        let mut request = self
-            .client
+        let client = match &self.client {
+            Ok(client) => client,
+            // The trust variables name a source that cannot be loaded: loud
+            // and actionable through the fetch's transport error.
+            Err(cause) => {
+                return Err(FetchError::Transport {
+                    message: cause.clone(),
+                });
+            }
+        };
+        let mut request = client
             .get(url)
             .timeout(self.timeout)
             .header("accept", "application/json")

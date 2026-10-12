@@ -59,5 +59,5 @@ pseudonymous installation identity for Prime Agent product analytics.
 
 ## Placement
 
-Depends on no workspace crate (sits beside pa-types at the bottom of the
-dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
+Depends on pa-types only (the TLS trust seam the analytics sink's HTTPS
+client routes through). Consumers: pa-core, pa-daemon, pa-cli.

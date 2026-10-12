@@ -262,7 +262,15 @@ async fn proxy_run(
         "options": request_options,
     });
 
-    let client = reqwest::Client::new();
+    // The proxy transport's HTTPS client routes through the shared extra-CA
+    // TLS contract; a trust source that cannot be loaded is loud here (the
+    // proxy stream surfaces the terminal error event verbatim).
+    let client = match pa_types::tls::extra_ca_client_config(pa_types::tls::TlsAlpn::Http1) {
+        Ok(Some(config)) => reqwest::Client::builder().use_preconfigured_tls(config),
+        Ok(None) => reqwest::Client::builder(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let client = client.build().map_err(|error| error.to_string())?;
     let send = async {
         client
             .post(format!("{}/api/stream", proxy_options.proxy_url))

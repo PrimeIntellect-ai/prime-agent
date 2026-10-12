@@ -16,9 +16,27 @@ socket2 = "0.6"
 # The incident classifier's log-message patterns are the TS regexes
 # (src/cli/incident.ts); the `regex` crate keeps their semantics 1:1.
 regex = "1"
+# The TLS trust seam (`tls.rs`): the same rustls + native-root loader the
+# reqwest/tungstenite graph pins, so the shared extra-CA ClientConfig is the
+# exact type those clients preconfigure (`rustls-native-certs` also
+# implements the SSL_CERT_FILE/SSL_CERT_DIR convention).
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "tls12",
+    "ring",
+] }
+rustls-native-certs = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+# The tls.rs live-TLS pin: a loopback rustls server (tokio-rustls, the same
+# version the reqwest graph carries) plus today's default webpki roots for
+# the without-the-var refusal side.
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
+webpki-roots = "1"
 
 [lints.clippy]
 # pa-types keeps its OWN lints table (not `workspace = true`): the

@@ -12,4 +12,4 @@ No tool implementations (pa-core), no providers (pa-ai), no session persistence,
 `run_loop` (session inputs -> stream of loop events), `ToolDispatcher` trait. Loop internals `pub(crate)`.
 
 ## Depends on
-pa-types, pa-ai (one-way).
+pa-types (the TLS trust seam the proxy transport routes through).

@@ -12,6 +12,10 @@ pub const PROBE_ERROR_NETWORK: &str = "network-unreachable";
 pub const PROBE_ERROR_SERVER_REJECTED: &str = "server-rejected-handshake";
 pub const PROBE_ERROR_HTTP: &str = "http-error";
 pub const PROBE_ERROR_INVALID_RESPONSE: &str = "invalid-response";
+/// The extra-CA trust variables name a source that cannot be loaded, so no
+/// probe client exists at all. The detailed, path-naming error is printed
+/// at construction; the fixed category is what the probe reports.
+pub const PROBE_ERROR_TLS_TRUST: &str = "tls-trust-configuration-invalid";
 
 /// One probe outcome: `Ok(tool_count)` on a completed handshake, or a fixed
 /// failure category.
@@ -54,18 +58,28 @@ impl McpEndpointProbe {
 
 /// The real handshake probe.
 pub struct ReqwestMcpProbe {
-    client: reqwest::Client,
+    /// The built client, or the loud extra-CA trust error the construction
+    /// ran into (this surface's categories are fixed and safe to persist;
+    /// the detailed, path-naming error is printed at construction).
+    client: Result<reqwest::Client, String>,
     timeout: Duration,
 }
 
 impl Default for ReqwestMcpProbe {
     fn default() -> Self {
+        let client = crate::https_client::https_client_builder(pa_types::tls::TlsAlpn::Http1)
+            .and_then(|builder| {
+                builder
+                    // No redirects: a redirecting endpoint must not receive the token.
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(cause) = &client {
+            eprintln!("pa-core: MCP endpoint probe: {cause}");
+        }
         Self {
-            client: reqwest::Client::builder()
-                // No redirects: a redirecting endpoint must not receive the token.
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_default(),
+            client,
             timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
         }
     }
@@ -81,7 +95,12 @@ impl McpEndpointProbeImpl for ReqwestMcpProbe {
         let timeout = self.timeout;
         let url = url.to_string();
         let token = token.to_string();
-        Box::pin(async move { probe_endpoint(&client, &url, &token, timeout).await })
+        Box::pin(async move {
+            let Ok(client) = client else {
+                return Err(PROBE_ERROR_TLS_TRUST);
+            };
+            probe_endpoint(&client, &url, &token, timeout).await
+        })
     }
 }
 

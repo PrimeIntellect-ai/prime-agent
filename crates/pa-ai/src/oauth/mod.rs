@@ -88,10 +88,11 @@ impl CodexHttp for ReqwestCodexHttp {
     ) -> std::pin::Pin<Box<dyn Future<Output = Result<CodexHttpResponse, String>> + Send + 'a>>
     {
         Box::pin(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_millis(timeout_ms))
-                .build()
-                .map_err(|error| error.to_string())?;
+            let client =
+                crate::utils_inner::http::https_client_builder(pa_types::tls::TlsAlpn::Negotiated)?
+                    .timeout(Duration::from_millis(timeout_ms))
+                    .build()
+                    .map_err(|error| error.to_string())?;
             let response = client
                 .post(url)
                 .header("Content-Type", "application/x-www-form-urlencoded")

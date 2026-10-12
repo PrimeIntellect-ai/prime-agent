@@ -29,7 +29,10 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_millis(1500);
 /// same event ids.
 #[derive(Clone)]
 pub struct AnalyticsSink {
-    http: reqwest::Client,
+    /// The built client, or the loud extra-CA trust error the construction
+    /// ran into (a sink never fails the agent by contract, so the trust
+    /// error is printed at construction and the batches drop).
+    http: Result<reqwest::Client, String>,
     endpoint: String,
 }
 
@@ -42,16 +45,26 @@ impl AnalyticsSink {
     }
 
     /// Sink with an explicit request timeout (tests).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the reqwest HTTP client (rustls backend) cannot be built.
     #[must_use]
     pub fn with_timeout(endpoint: impl Into<String>, timeout: Duration) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-            .expect("reqwest client with rustls");
+        // The shared extra-CA TLS contract: a trust source that cannot be
+        // loaded prints its loud, path-naming error (this sink never fails
+        // the agent by contract) and the batches drop.
+        let http = pa_types::tls::extra_ca_client_config(pa_types::tls::TlsAlpn::Http1)
+            .map_err(|error| error.to_string())
+            .and_then(|config| {
+                let builder = reqwest::Client::builder().timeout(timeout);
+                match config {
+                    Some(config) => builder
+                        .use_preconfigured_tls(config)
+                        .build()
+                        .map_err(|error| error.to_string()),
+                    None => builder.build().map_err(|error| error.to_string()),
+                }
+            });
+        if let Err(cause) = &http {
+            eprintln!("pa-telemetry: analytics sink: {cause}");
+        }
         Self {
             http,
             endpoint: endpoint.into(),
@@ -78,8 +91,13 @@ impl TelemetrySink for AnalyticsSink {
             if events.is_empty() {
                 return SinkOutcome::Sent;
             }
-            let response = self
-                .http
+            // The trust variables name a source that cannot be loaded: the
+            // construction already printed the loud, path-naming error; the
+            // batches drop like any transport failure.
+            let Ok(http) = &self.http else {
+                return SinkOutcome::Dropped;
+            };
+            let response = http
                 .post(&self.endpoint)
                 .header("content-type", "application/json")
                 .header("user-agent", format!("prime-agent/{}", crate::version()))
