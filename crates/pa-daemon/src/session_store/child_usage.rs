@@ -68,6 +68,14 @@ fn header_matches_receipt(header: &super::SessionHeader, receipt: &UnconfirmedCh
     actual == receipt.header || actual == receipt.header_wire
 }
 
+/// Recovery observation updates the index; confirmation also owns the final
+/// durability proof and acknowledgment bookkeeping within the same lease flight.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildUsageRecoveryMode {
+    Observe,
+    Confirm,
+}
+
 impl SessionFile {
     /// Append one attribution row once: the row id is the retry identity, so
     /// a re-delivered report finds its own row instead of billing the child
@@ -166,7 +174,7 @@ impl SessionFile {
             self.child_usage_recovery.pending = receipt;
             // A completed own row must affect the next aggregate before this
             // store lock is released, even though its original caller sees Err.
-            if let Err(recovery) = self.observe_child_usage_write() {
+            if let Err(recovery) = self.recover_child_usage_write(ChildUsageRecoveryMode::Observe) {
                 return Err(error.context(format!("attribution remains unresolved: {recovery}")));
             }
             return Err(error);
@@ -176,41 +184,13 @@ impl SessionFile {
 
     /// Confirm an unresolved own row before another durable mutation or ACK.
     pub(super) fn confirm_child_usage_write(&mut self) -> Result<()> {
-        let Some(file) = self.observe_child_usage_write()? else {
-            return Ok(());
-        };
-        // Read proof alone never acknowledges a sync failure. A lease's empty
-        // append rechecks ownership and syncs without modifying a newline-closed
-        // file; empty payloads invalidate rather than certify a stale window cache.
-        #[cfg(test)]
-        if super::child_usage_tests::FAIL_CHILD_CONFIRM_SYNC.with(|fault| fault.replace(false)) {
-            anyhow::bail!("injected attribution confirmation sync failure");
-        }
-        ensure!(
-            file_identity(&std::fs::metadata(&self.path)?) == file_identity(&file.metadata()?),
-            "attribution confirmation file changed before sync"
-        );
-        match &self.lease {
-            Some(lease) => lease.append(&self.path, &[])?,
-            None => pa_core::platform::fsync(&file)?,
-        }
-        // Do not acknowledge a replacement raced between the read proof and sync.
-        ensure!(
-            file_identity(&std::fs::metadata(&self.path)?) == file_identity(&file.metadata()?),
-            "attribution confirmation file changed"
-        );
-        self.child_usage_recovery.pending = None;
-        if let Some(traces) = &self.trace_upload {
-            traces.persisted(&self.path);
-        }
-        // Keep the Created receipt until its own report receives acknowledgment.
-        Ok(())
+        self.recover_child_usage_write(ChildUsageRecoveryMode::Confirm)
     }
 
     /// Observe only the frozen owned row; no lenient whole-file scan or truncation.
-    fn observe_child_usage_write(&mut self) -> Result<Option<std::fs::File>> {
+    fn recover_child_usage_write(&mut self, mode: ChildUsageRecoveryMode) -> Result<()> {
         let Some(receipt) = self.child_usage_recovery.pending.clone() else {
-            return Ok(None);
+            return Ok(());
         };
         let lease = self.lease.clone();
         let path = self.path.clone();
@@ -229,7 +209,7 @@ impl SessionFile {
                     if error.kind() == std::io::ErrorKind::NotFound && receipt.start.is_none() =>
                 {
                     self.child_usage_recovery.pending = None;
-                    return Ok(None);
+                    return Ok(());
                 }
                 Err(error) => return Err(error.into()),
             };
@@ -276,7 +256,7 @@ impl SessionFile {
                 }
                 if metadata.len() == receipt.prefix_end || metadata.len() == start {
                     self.child_usage_recovery.pending = None;
-                    return Ok(None);
+                    return Ok(());
                 }
                 start
             } else {
@@ -418,7 +398,41 @@ impl SessionFile {
             {
                 hook();
             }
-            Ok(Some(file))
+            if mode == ChildUsageRecoveryMode::Confirm {
+                // This proof and sync belong to the already admitted recovery.
+                // Release may be draining it; do not start a second admission.
+                #[cfg(test)]
+                if super::child_usage_tests::FAIL_CHILD_CONFIRM_SYNC
+                    .with(|fault| fault.replace(false))
+                {
+                    anyhow::bail!("injected attribution confirmation sync failure");
+                }
+                ensure!(
+                    file_identity(&std::fs::metadata(&self.path)?)
+                        == file_identity(&file.metadata()?),
+                    "attribution confirmation file changed before sync"
+                );
+                if self.lease.is_some() {
+                    pa_core::session::window::append_cached(
+                        &self.path,
+                        &[],
+                        pa_core::session::window::AppendOwnership::SessionLeaseHeld,
+                    )?;
+                } else {
+                    pa_core::platform::fsync(&file)?;
+                }
+                ensure!(
+                    file_identity(&std::fs::metadata(&self.path)?)
+                        == file_identity(&file.metadata()?),
+                    "attribution confirmation file changed"
+                );
+                self.child_usage_recovery.pending = None;
+                if let Some(traces) = &self.trace_upload {
+                    traces.persisted(&self.path);
+                }
+                // Retain Created until its own report receives acknowledgment.
+            }
+            Ok(())
         };
         match lease {
             Some(lease) => lease.with_owned_mutation(&path, observe),

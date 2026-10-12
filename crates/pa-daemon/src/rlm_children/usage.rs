@@ -12,11 +12,11 @@ impl SupervisorChildSessionsInner {
     /// report; the cursor advances only past the rows the sink persisted
     /// (no double-billing; a failed delivery re-reads the same rows);
     /// without a sink nothing is read, a torn trailing line lands on the
-    /// next read.
-    pub(super) async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+    /// next read. Returns false if the source could not be observed or its report is still owed.
+    pub(super) async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         let sink = self.usage_sink.lock().expect("usage sink lock").clone();
         let Some(sink) = sink else {
-            return;
+            return true;
         };
         // One emission at a time per child — an interleaved re-read
         // would double-bill, and the emission lock spans the whole flow
@@ -27,10 +27,10 @@ impl SupervisorChildSessionsInner {
         let emit_lock = record.lock().await.emit_lock.clone();
         let emit_guard = emit_lock.lock().await;
         if record.lock().await.usage_registration_forgotten {
-            return;
+            return true;
         }
         let mut drain_fresh_interval = record.lock().await.pending_usage_report.is_some();
-        loop {
+        let persisted = loop {
             let pending = record.lock().await.pending_usage_report.clone();
             let (report, next) = if let Some(pending) = pending {
                 pending
@@ -47,10 +47,10 @@ impl SupervisorChildSessionsInner {
                     )
                 };
                 let Some(session_file) = session_file else {
-                    return;
+                    return true;
                 };
                 let Some(from) = from else {
-                    return;
+                    return true;
                 };
                 let path = PathBuf::from(session_file);
                 let joined = tokio::task::spawn_blocking(move || {
@@ -59,13 +59,13 @@ impl SupervisorChildSessionsInner {
                 .await
                 .ok();
                 let Some(Ok(store)) = joined else {
-                    return;
+                    return false;
                 };
                 let (batches, next) =
                     crate::rlm_child_usage::child_usage_batches(store.entries(), from);
                 if batches.is_empty() {
                     record.lock().await.attributed_rows = Some(next);
-                    return;
+                    return true;
                 }
                 let report = RlmChildUsageReport {
                     report_id: uuid::Uuid::new_v4().to_string(),
@@ -77,7 +77,8 @@ impl SupervisorChildSessionsInner {
                 record.lock().await.pending_usage_report = Some((report.clone(), next));
                 (report, next)
             };
-            if sink.record(report).await {
+            let persisted = sink.record(report).await;
+            if persisted {
                 let mut record = record.lock().await;
                 record.attributed_rows = Some(next);
                 record.pending_usage_report = None;
@@ -87,9 +88,10 @@ impl SupervisorChildSessionsInner {
                     continue;
                 }
             }
-            break;
-        }
+            break persisted;
+        };
         drop(emit_guard);
+        persisted
     }
 
     /// Drop registration only after the final report persisted; return whether it is cleared.
@@ -106,7 +108,9 @@ impl SupervisorChildSessionsInner {
         // follows this call: replay it once before the registration drops,
         // or the forget orphans the retained report.
         // Also observe the frozen child's tail if a prior caller was canceled before capturing it.
-        self.emit_child_usage(record).await;
+        if !self.emit_child_usage(record).await {
+            return false;
+        }
         let emit_lock = record.lock().await.emit_lock.clone();
         let _emit_guard = emit_lock.lock().await;
         let mut row = record.lock().await;

@@ -131,7 +131,7 @@ impl SupervisorChildSessionsInner {
                     record.active_session_id.clone(),
                 )
             };
-            if running {
+            if running && !already_terminated {
                 return Ok("running");
             }
             // Capture before the unlink: a deleted child's already-durable
