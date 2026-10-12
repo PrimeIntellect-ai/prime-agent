@@ -13,9 +13,6 @@ use serde_json::{json, Value};
 use super::meta::{prime_agent_meta, PrimeAgentCompactionMeta, PrimeAgentSessionMeta};
 use super::types::{AcpSessionUpdate, AcpToolKind, AcpToolStatus, TextBlock};
 
-/// The model-facing Python REPL tool.
-const IPYTHON_TOOL_NAME: &str = "ipython";
-
 /// Correlates streamed chunks with their owning assistant message (the
 /// daemon stream carries the delta on `assistantMessageEvent`) and bash
 /// output chunks with the run that produced them.
@@ -142,12 +139,12 @@ pub fn wire_updates(event: &Value, state: &mut WireMappingState) -> Vec<AcpSessi
                 .unwrap_or_default()
                 .to_string();
             let args = event.get("args").cloned().unwrap_or(Value::Null);
-            let cell = if tool_name == IPYTHON_TOOL_NAME {
+            let cell = if pa_types::ai::is_python_tool_name(&tool_name) {
                 args.get("code").and_then(Value::as_str).map(str::to_string)
             } else {
                 None
             };
-            let title = if tool_name == IPYTHON_TOOL_NAME {
+            let title = if pa_types::ai::is_python_tool_name(&tool_name) {
                 "Python cell".to_string()
             } else {
                 tool_name.clone()

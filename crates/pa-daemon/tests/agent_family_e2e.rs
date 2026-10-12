@@ -242,7 +242,7 @@ fn child_responses(receipts_dir: &Path) -> Value {
     let cell = child_cell(receipts_dir);
     let reply = json!([
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": { "code": cell } },
+            { "type": "toolCall", "name": "python_repl", "arguments": { "code": cell } },
         ] },
         { "text": "kid turn done" },
     ]);
@@ -424,7 +424,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
             thinking: None,
             cell_source_code: None,
             spawned_by_request_id: None,
-            decision_child: false,
         })
         .await
         .expect("spawn the child");
@@ -599,7 +598,7 @@ fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
 fn cell_turn(code: &str) -> Value {
     json!([
         { "content": [
-            { "type": "toolCall", "name": "ipython", "arguments": { "code": code } },
+            { "type": "toolCall", "name": "python_repl", "arguments": { "code": code } },
         ] },
         { "text": "cell turn done" },
     ])
@@ -633,7 +632,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         "parent-a",
         &json!([
             { "content": [
-                { "type": "toolCall", "name": "ipython", "arguments": { "code": parent_a_cell } },
+                { "type": "toolCall", "name": "python_repl", "arguments": { "code": parent_a_cell } },
             ] },
             { "text": "parent-a turn done" },
             { "text": "parent-a turn done" },
@@ -754,7 +753,6 @@ async fn family_edges_never_cross_families_end_to_end() {
                 thinking: None,
                 cell_source_code: None,
                 spawned_by_request_id: None,
-                decision_child: false,
             })
             .await
             .expect("spawn the child");
@@ -895,7 +893,6 @@ async fn family_edges_never_cross_families_end_to_end() {
             thinking: None,
             cell_source_code: None,
             spawned_by_request_id: None,
-            decision_child: false,
         })
         .await
         .expect("spawn the grandchild");
@@ -1205,7 +1202,6 @@ async fn parent_renames_a_child_end_to_end() {
             thinking: None,
             spawned_by_request_id: None,
             cell_source_code: None,
-            decision_child: false,
         })
         .await
         .expect("spawn the child");
