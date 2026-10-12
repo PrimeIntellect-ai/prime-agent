@@ -358,7 +358,12 @@ impl Supervisor {
                                 match self.relaunch_worker(resident).await {
                                     Ok(child) => {
                                         resident.consecutive_failures.store(0, Ordering::SeqCst);
-                                        self.spawn_monitor(Arc::clone(resident), Some(child), 0);
+                                        self.spawn_monitor(
+                                            Arc::clone(resident),
+                                            Some(child),
+                                            0,
+                                            None,
+                                        );
                                     }
                                     Err(error) => {
                                         self.log_line(&format!(
@@ -371,7 +376,7 @@ impl Supervisor {
                                         // path instead of leaving it unsupervised.
                                         if !self.is_stopping(resident) {
                                             resident.spawned_at_ms.store(0, Ordering::SeqCst);
-                                            self.spawn_monitor(Arc::clone(resident), None, 0);
+                                            self.spawn_monitor(Arc::clone(resident), None, 0, None);
                                         }
                                     }
                                 }
