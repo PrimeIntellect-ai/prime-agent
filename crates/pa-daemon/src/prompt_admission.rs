@@ -581,6 +581,7 @@ impl Worker {
                 core.follow_up
                     .retain(|item| item.admission_id.as_deref() != Some(admission_id));
                 self.prompt_admissions.clear(admission_id);
+                crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
             }
             let abort_running = cancel_owned
                 && status == Some(AdmissionStatus::Owned)

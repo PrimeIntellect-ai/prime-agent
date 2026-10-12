@@ -1,9 +1,9 @@
 //! The dispatch surface: command routing, the command handlers,
 //! and the abort family.
 use super::{
-    json, persist_custom_row, response_failure, response_success, KillCloseReason, Lane,
-    QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque, Worker,
-    PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
+    clear_withdrawn_progress_note, json, persist_custom_row, response_failure, response_success,
+    KillCloseReason, Lane, QueueCheckpoint, QueuedItem, Result, SessionFile, TurnSettle, VecDeque,
+    Worker, PROMPT_ABORTED_BEFORE_DELIVERY, SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 use serde_json::Value;
@@ -379,6 +379,7 @@ impl Worker {
             };
             cancel(&mut core.steering);
             cancel(&mut core.follow_up);
+            clear_withdrawn_progress_note(&core, self.engine.as_ref());
         }
         // A withdrawn continuation's pending guard already released at ITS admission,
         // so the withdraw clears nothing (a mirror clear could drop an unrelated guard).
@@ -501,12 +502,7 @@ impl Worker {
         };
         let steering: Vec<String> = drain_lane(&mut core.steering);
         let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
-        // Queued work can retain the preceding run's note across idle. Once
-        // withdrawn, no next run is guaranteed to replace or clear that note.
-        // Active work still owns its note until the normal run boundary.
-        if !core.busy {
-            self.engine.clear_progress_note();
-        }
+        clear_withdrawn_progress_note(&core, self.engine.as_ref());
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The verdict refresh rides the same checkpoint as the snapshot: a stale

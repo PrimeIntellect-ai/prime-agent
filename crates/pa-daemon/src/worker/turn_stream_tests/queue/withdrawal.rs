@@ -8,6 +8,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
         "cancel_prompt_admission",
         "agent_messages_pause",
         "agent_messages_clear",
+        "bash_consumed",
         "abort",
     ] {
         for state in ["busy", "remaining", "last"] {
@@ -73,6 +74,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                         pid: 4321,
                         command: "fixture command".to_string(),
                     },
+                    Some(engine.as_ref()),
                 );
             } else {
                 let payload = match command {
