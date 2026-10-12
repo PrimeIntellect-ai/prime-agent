@@ -501,6 +501,31 @@ async fn a_self_settled_runs_agent_end_carries_no_marker() {
     );
 }
 
+/// A completed end frame can wait in the engine channel while a new
+/// abort request sets the worker flag. Delivery must retain the run's
+/// completed outcome rather than relabeling the queued frame.
+#[tokio::test]
+async fn a_late_abort_does_not_relabel_a_completed_agent_end() {
+    let message = json!({ "role": "assistant", "stopReason": "stop" });
+    let events = gate_sighting_events(
+        vec![EngineEvent::AgentEnd {
+            messages: vec![message.clone()],
+        }],
+        true,
+        false,
+    )
+    .await;
+    let ends: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "agent_end")
+        .collect();
+    assert_eq!(
+        ends,
+        vec![&json!({ "type": "agent_end", "messages": [message] })],
+        "a late abort cannot change a completed run's queued end frame"
+    );
+}
+
 /// A settle frame that would forward on a plain flag sighting drops when
 /// `suppress_aborted_row` is set; the fallback still closes the run.
 #[tokio::test]
