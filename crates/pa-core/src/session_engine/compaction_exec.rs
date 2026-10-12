@@ -153,13 +153,23 @@ pub async fn complete_summary_call(
         messages,
         tools: None,
     };
-    let stream_options =
+    // Dropping the summary future must also retire its detached provider task.
+    // The daemon races this future against cancellation at the compaction boundary.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let mut stream_options =
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
+            signal: Some(cancel),
             max_tokens: Some(max_tokens),
             api_key,
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
+    // Keep the provider default unless the model explicitly requires thinking.
+    // Omitted reasoning disables thinking on toggle-based provider routes.
+    let minimum = pa_types::ai::clamp_thinking_level(model, pa_types::ai::ModelThinkingLevel::Off);
+    stream_options.reasoning =
+        (minimum != pa_types::ai::ModelThinkingLevel::Off).then_some(minimum);
     let assistant = match on_delta {
         None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
         Some(on_delta) => {
