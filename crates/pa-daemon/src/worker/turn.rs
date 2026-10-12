@@ -1022,7 +1022,9 @@ impl TurnRunner {
             // roster readers, which capture core then the engine note.
             // An abort-gated run may emit no later event to repair a
             // roster push that observes idle with its old note.
-            if !engine_reported_run_end && !more_queued {
+            // AgentEnd may have retained the note for work withdrawn before
+            // this settle. Recheck the lanes even when that frame was observed.
+            if !more_queued {
                 settle_engine.clear_progress_note();
             }
             core.busy = false;

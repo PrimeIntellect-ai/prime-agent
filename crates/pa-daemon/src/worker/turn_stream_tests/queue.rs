@@ -925,7 +925,7 @@ async fn queued_follow_up_keeps_the_note_until_its_final_end() {
     assert_eq!(engine.progress_note(), None);
 }
 
-/// AgentEnd's queued-work decision must be reconsidered if the queue is withdrawn
+/// `AgentEnd`'s queued-work decision must be reconsidered if the queue is withdrawn
 /// before the final idle snapshot.
 #[tokio::test]
 async fn withdrawing_follow_up_after_agent_end_clears_the_note_at_settle() {

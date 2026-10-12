@@ -501,6 +501,12 @@ impl Worker {
         };
         let steering: Vec<String> = drain_lane(&mut core.steering);
         let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
+        // Queued work can retain the preceding run's note across idle. Once
+        // withdrawn, no next run is guaranteed to replace or clear that note.
+        // Active work still owns its note until the normal run boundary.
+        if !core.busy {
+            self.engine.clear_progress_note();
+        }
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
         // The verdict refresh rides the same checkpoint as the snapshot: a stale
