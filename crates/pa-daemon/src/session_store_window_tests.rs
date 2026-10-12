@@ -341,8 +341,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         assert_eq!(scalars.message_count, 4); // summary + kept + two assistants
     }
 
-    // The kept id on a NON-bearing row never flips the keeping walk (the fold
-    // skips the row before the id check).
+    // A non-message boundary still retains every following message.
     {
         let path = dir.path().join("kept-on-custom.jsonl");
         let mut store = SessionFile::create("/tmp", None, 0);
@@ -356,7 +355,7 @@ fn scan_message_scalars_match_the_materialized_fold_across_window_shapes() {
         store.append_message(&assistant(&usage_of(2, 2, 0, 0.25), 20));
         assert_scan_matches_fold("kept id on non-bearing row", &store);
         let scalars = store.scan_message_scalars();
-        assert_eq!(scalars.message_count, 2); // summary + post-compaction assistant
+        assert_eq!(scalars.message_count, 3); // summary + retained + post-compaction assistant
     }
 
     // A kept id that does not exist keeps nothing before the compaction.
@@ -532,4 +531,57 @@ fn windowed_restored_settings_match_the_full_open() {
     file.append_message(&json!({"role":"user","content":"hello","timestamp":0}));
     file.rewrite().unwrap();
     assert_windowed_restored_settings_match_the_full_open("whole-file window", &path);
+}
+
+#[test]
+fn non_message_compaction_boundary_retains_the_persisted_timeline() {
+    for boundary_type in ["custom", "session_state"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.set_path(path.clone());
+        for i in 0..220 {
+            store
+                .append_message(&json!({"role":"user","content":format!("old {i}"),"timestamp":i}));
+        }
+        let kept = store.append_entry(
+            boundary_type,
+            json!({"customType":"test_boundary", "data":{}, "state":{"status":"active"}}),
+        );
+        store.append_entry("session_state", json!({"state":{"status":"active"}}));
+        store.append_entry(
+            "custom_message",
+            json!({"customType":"test_notice","content":"retained notice","display":true}),
+        );
+        store.append_message(&json!({"role":"user","content":"retained user","timestamp":221}));
+        store.append_message(&json!({"role":"assistant","provider":"synthetic","model":"mock","api":"openai-completions","content":[{"type":"text","text":"retained reply"}],"stopReason":"stop","timestamp":222,"usage":{"input":5,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":7,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}}}));
+        store.append_entry(
+            "compaction",
+            json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":1000}),
+        );
+        store.append_message(&json!({"role":"user","content":"after","timestamp":223}));
+        store.rewrite().unwrap();
+        let persisted = std::fs::read(&path).unwrap();
+        let full = SessionFile::open(&path).unwrap();
+        let windowed = SessionFile::open_windowed(&path).unwrap();
+        assert!(windowed.window.is_some());
+        for view in [&store, &full, &windowed] {
+            let messages = view.messages();
+            let roles: Vec<_> = messages
+                .iter()
+                .map(|message| message["role"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                roles,
+                ["compactionSummary", "custom", "user", "assistant", "user"],
+                "{boundary_type}"
+            );
+            assert_eq!(messages[0]["retainedMessageCount"], json!(3));
+            assert_eq!(messages[1]["content"], json!("retained notice"));
+            assert_eq!(messages[2]["content"], json!("retained user"));
+            assert_eq!(messages[4]["content"], json!("after"));
+            assert_eq!(view.scan_message_scalars().message_count, 5);
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), persisted);
+    }
 }
