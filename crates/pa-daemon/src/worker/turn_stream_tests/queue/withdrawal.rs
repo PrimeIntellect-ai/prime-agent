@@ -11,7 +11,7 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
         "bash_consumed",
         "abort",
     ] {
-        for state in ["busy", "remaining", "last"] {
+        for state in ["last", "busy", "remaining"] {
             let dir = tempfile::tempdir().unwrap();
             let engine = Arc::new(NoteWitnessEngine::default());
             let mut worker = Worker::new(
@@ -29,6 +29,9 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
                 None,
             );
             worker.engine = engine.clone();
+            let (roster_pushes, publication_pending) =
+                crate::roster_activity::RosterPushQueue::observed_for_test();
+            worker.roster_pushes = roster_pushes;
             // Represent a run whose AgentEnd retained its note for queued work.
             *engine.note.lock().unwrap() = Some("checking deployment".to_string());
             worker.register_prompt_admission("owned-note");
@@ -102,6 +105,16 @@ async fn queue_withdrawals_clear_only_the_last_idle_notes() {
             );
             let expected = (state != "last").then(|| "checking deployment".to_string());
             assert_eq!(engine.progress_note(), expected, "{command}/{state}");
+            drop(core);
+            if matches!(command, "cancel_prompt_admission" | "abort") {
+                assert!(publication_pending(), "{command}/{state}: no roster push");
+                let (core, inputs) = worker.summary_inputs();
+                let summary = crate::worker::summary::session_summary(&core, inputs);
+                assert_eq!(
+                    summary.progress_note, expected,
+                    "{command}/{state}: summary"
+                );
+            }
         }
     }
 }

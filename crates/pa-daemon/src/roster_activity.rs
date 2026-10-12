@@ -94,6 +94,19 @@ impl RosterPushQueue {
         Self { inner: None }
     }
 
+    /// Observe command-triggered publication without an asynchronous consumer.
+    #[cfg(test)]
+    pub(crate) fn observed_for_test() -> (Self, impl Fn() -> bool) {
+        let state = Arc::new(PushState {
+            notify: tokio::sync::Notify::new(),
+            pending: std::sync::atomic::AtomicBool::new(false),
+        });
+        let observed = Arc::clone(&state);
+        (Self { inner: Some(state) }, move || {
+            observed.pending.load(std::sync::atomic::Ordering::SeqCst)
+        })
+    }
+
     /// Enqueue one flush request: the first request of a burst wakes
     /// the consumer, every later one only keeps the flag set.
     pub(crate) fn push(&self) {
