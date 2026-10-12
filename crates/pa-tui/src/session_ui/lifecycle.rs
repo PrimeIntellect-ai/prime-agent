@@ -815,7 +815,8 @@ mod backfill_tests {
                 write.write_all(&reply).await.unwrap();
             }
         });
-        let mut options = crate::interactive::tests::options(Default::default());
+            let mut options =
+                crate::interactive::tests::options(crate::interactive::ModelSelection::default());
         options.socket_path = socket.clone();
         options.session = SessionSelection::Attach("s1".to_string());
         let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
