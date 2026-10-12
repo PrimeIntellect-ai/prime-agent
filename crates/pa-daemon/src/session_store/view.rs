@@ -443,6 +443,44 @@ impl SessionFile {
         {
             cut -= 1;
         }
+        // User bash and other message rows can land between a call and its
+        // result. Match the same last-pending call as transcript replay, then
+        // move only across pairs intersecting the cut. Reverse result order
+        // also catches an earlier pair exposed by moving the boundary back.
+        let mut pending: std::collections::HashMap<&str, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut pairs = Vec::new();
+        for (index, message) in visited.iter().enumerate() {
+            match message.get("role").and_then(Value::as_str) {
+                Some("assistant") => {
+                    if let Some(content) = message.get("content").and_then(Value::as_array) {
+                        for block in content {
+                            if let Some(id) = block.get("id").and_then(Value::as_str).filter(|_| {
+                                block.get("type").and_then(Value::as_str) == Some("toolCall")
+                            }) {
+                                pending.entry(id).or_default().push(index);
+                            }
+                        }
+                    }
+                }
+                Some("toolResult") => {
+                    if let Some(call) = message
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| pending.get_mut(id))
+                        .and_then(Vec::pop)
+                    {
+                        pairs.push((call, index));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (call, result) in pairs.into_iter().rev() {
+            if call < cut && result >= cut {
+                cut = call;
+            }
+        }
         if let Some(retained) = visited
             .first()
             .filter(|first| first.get("role").and_then(Value::as_str) == Some("compactionSummary"))
