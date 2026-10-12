@@ -13,6 +13,11 @@ use serde_json::{json, Value};
 
 const HISTORY_MESSAGES: usize = 4;
 
+enum RebuildResponse {
+    FullHistory,
+    Reject,
+}
+
 struct MockSupervisor {
     listener: UnixListener,
     windowed: bool,
@@ -20,7 +25,7 @@ struct MockSupervisor {
     /// Hold the history backfill page instead of answering it: the plan then
     /// leaves the request in flight across an exit or a transcript rebuild.
     hold_backfill: bool,
-    reject_rebuild: bool,
+    rebuild_response: RebuildResponse,
     validation_state: Option<Value>,
     changed_prefix: bool,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -33,7 +38,7 @@ impl MockSupervisor {
             windowed,
             failures: 0,
             hold_backfill: false,
-            reject_rebuild: false,
+            rebuild_response: RebuildResponse::FullHistory,
             validation_state: Some(
                 json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "s1"}),
             ),
@@ -119,7 +124,7 @@ impl MockSupervisor {
                         write_json(&mut writer, &response);
                         continue;
                     }
-                    if self.reject_rebuild {
+                    if matches!(self.rebuild_response, RebuildResponse::Reject) {
                         write_json(&mut writer, &history_failure(id));
                         continue;
                     }
@@ -354,7 +359,7 @@ fn run_attached_with_validation(
 
 fn run_attached_holding_backfill(
     windowed: bool,
-    reject_rebuild: bool,
+    rebuild_response: RebuildResponse,
     height: u16,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
@@ -364,7 +369,7 @@ fn run_attached_holding_backfill(
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
     supervisor.hold_backfill = true;
-    supervisor.reject_rebuild = reject_rebuild;
+    supervisor.rebuild_response = rebuild_response;
     let (served_tx, served_rx) = std::sync::mpsc::channel::<()>();
     let handle = std::thread::spawn(move || {
         supervisor.serve();
@@ -521,7 +526,7 @@ fn a_rejected_backfill_retries_then_reports_incomplete_history() {
 fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
     let (frames, requests) = run_attached_holding_backfill(
         /*windowed*/ true,
-        /*reject_rebuild*/ false,
+        RebuildResponse::FullHistory,
         30,
         vec![HeadlessStep::WaitRender {
             needle: "backfill request received".to_string(),
@@ -550,7 +555,7 @@ fn an_exit_with_backfill_in_flight_releases_the_daemon_connection() {
 fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered() {
     let (frames, requests) = run_attached_holding_backfill(
         /*windowed*/ true,
-        /*reject_rebuild*/ false,
+        RebuildResponse::FullHistory,
         50,
         vec![
             HeadlessStep::WaitRender {
@@ -647,7 +652,7 @@ fn a_changed_or_unverifiable_prefix_is_rejected_before_the_compaction_event() {
 fn a_failed_rebuild_reports_cancelled_incomplete_history() {
     let (frames, requests) = run_attached_holding_backfill(
         /*windowed*/ true,
-        /*reject_rebuild*/ true,
+        RebuildResponse::Reject,
         100,
         vec![
             HeadlessStep::WaitRender {
