@@ -72,6 +72,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
                     })
                 };
                 usage_scan.fold_child_attribution(
+                    &entry.id,
                     entry.fields.get("targetId").and_then(Value::as_str),
                     usage_field("childUsage"),
                     usage_field("aggregateUsage"),

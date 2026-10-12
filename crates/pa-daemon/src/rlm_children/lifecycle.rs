@@ -485,7 +485,7 @@ impl SupervisorChildSessionsInner {
                 self.refresh_record(record).await;
                 // The run's final rows are attributed before the terminal
                 // notice rides the parent's follow-up route.
-                self.emit_child_usage(record).await;
+                self.emit_final_child_usage(record).await;
                 // TS records the return before delivering the notice: the
                 // pending edge must be on the parent's ledger before the
                 // notice's follow-up turn mints its own request.
@@ -533,7 +533,7 @@ impl SupervisorChildSessionsInner {
                 if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
                     // A dead child keeps whatever rows its file already
                     // holds; capture them before the terminal notice.
-                    self.emit_child_usage(record).await;
+                    self.emit_final_child_usage(record).await;
                     if self
                         .settle_failed(
                             record,
