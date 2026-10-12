@@ -212,7 +212,7 @@ async fn a_completed_end_keeps_its_outcome_when_a_listener_aborts() {
 #[tokio::test]
 async fn an_abort_after_tools_is_carried_by_the_end_without_an_aborted_message() {
     let echo = EchoTool::new("echo");
-    let (agent, provider, _) = scripted_agent(vec![echo]).await;
+    let (agent, provider, _) = scripted_agent(vec![echo.clone()]).await;
     provider.push_tool_call_turn(
         None,
         vec![("call", "echo", serde_json::json!({ "text": "done" }))],
@@ -227,7 +227,13 @@ async fn an_abort_after_tools_is_carried_by_the_end_without_an_aborted_message()
                 let outcomes = Arc::clone(&outcomes);
                 Box::pin(async move {
                     match event {
-                        AgentEvent::TurnEnd { .. } => agent.abort(),
+                        AgentEvent::TurnEnd { tool_results, .. } => {
+                            assert_eq!(tool_results.len(), 1);
+                            assert_eq!(tool_results[0].tool_call_id, "call");
+                            assert!(!tool_results[0].is_error);
+                            assert_eq!(single_text(&tool_results[0].content), "echo:done");
+                            agent.abort();
+                        }
                         AgentEvent::AgentEnd { aborted, messages } => {
                             let assistant_stops: Vec<StopReason> = messages
                                 .iter()
@@ -249,9 +255,14 @@ async fn an_abort_after_tools_is_carried_by_the_end_without_an_aborted_message()
         .await;
     agent.prompt("go").await.unwrap();
     subscription.unsubscribe().await;
+    assert_eq!(echo.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(provider.calls().len(), 1);
+    // The scripted helper retains Stop on its message even for a tool-call
+    // event. The completed tool above proves cancellation happened after tools,
+    // while the assistant itself still has no Aborted stop reason.
     assert_eq!(
         *outcomes.lock().unwrap(),
-        vec![(true, vec![StopReason::ToolUse])]
+        vec![(true, vec![StopReason::Stop])]
     );
 }
 
