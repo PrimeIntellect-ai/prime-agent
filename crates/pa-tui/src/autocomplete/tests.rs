@@ -600,3 +600,307 @@ fn render_shows_the_source_tag_as_a_trailing_segment() {
         "the selected description renders: {all}"
     );
 }
+
+/// The `@` suggestion items of one provider query, waiting for the background search.
+fn at_values(provider: &CombinedAutocompleteProvider, text: &str) -> Vec<CompletionItem> {
+    match provider.get_suggestions(&[text.to_string()], 0, text.chars().count(), false) {
+        Some(SuggestionLookup::Searching(search)) => search
+            .results
+            .recv()
+            .expect("the search finishes")
+            .map(|suggestions| suggestions.items)
+            .unwrap_or_default(),
+        other => panic!("expected a searching lookup, got {other:?}"),
+    }
+}
+
+/// The parity fixture: nested directories, a hidden file, a pruned `.git`, a gitignored
+/// directory (the `.git` directory makes the gitignore rules apply), a directory entry,
+/// and mixed case.
+fn parity_fixture() -> tempfile::TempDir {
+    let outer = tempfile::TempDir::new().expect("temp dir");
+    let base = outer.path().join("base");
+    std::fs::create_dir_all(base.join(".git/objects")).expect("mkdir");
+    std::fs::write(base.join(".git/config"), "git").expect("write");
+    std::fs::write(base.join(".gitignore"), "ignored/\n").expect("write");
+    std::fs::create_dir_all(base.join("src/deep")).expect("mkdir");
+    std::fs::create_dir_all(base.join("ignored")).expect("mkdir");
+    std::fs::write(base.join("src/partial_match.rs"), "x").expect("write");
+    std::fs::write(base.join("src/ExactCase.rs"), "x").expect("write");
+    std::fs::write(base.join("src/deep/other.rs"), "x").expect("write");
+    std::fs::write(base.join("ignored/never.rs"), "x").expect("write");
+    std::fs::write(base.join(".hidden"), "x").expect("write");
+    std::fs::write(base.join("README.md"), "x").expect("write");
+    outer
+}
+
+/// The index answers exactly what the walk answers: one provider on the built index,
+/// one forced onto the walk path (an over-cap build disables its index), across the
+/// scope and case shapes the two paths could drift on.
+#[test]
+fn at_index_matches_the_walk_suggestions() {
+    let outer = parity_fixture();
+    let base = outer.path().join("base");
+    let indexed = provider(base.to_str().expect("utf8"));
+    let walked = provider(base.to_str().expect("utf8"));
+    assert!(indexed
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
+    assert!(!walked.file_index.build(&base, 1));
+    for query in [
+        "",
+        "match",
+        "par",
+        "README.md",
+        "ExactCase",
+        "deep/other",
+        "src/",
+        "src/deep/",
+        "src/par",
+        "src/deep/o",
+        "./READ",
+        "ignored/ne",
+    ] {
+        assert_eq!(
+            at_values(&indexed, &format!("@{query}")),
+            at_values(&walked, &format!("@{query}")),
+            "query @{query}"
+        );
+    }
+}
+
+/// A xorshift generator: the random trees need no dependency.
+struct XorShift(u64);
+
+impl XorShift {
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        usize::try_from(self.0 % bound as u64).expect("below a usize bound")
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len())]
+    }
+}
+
+/// A random tree of at least `entries` index entries under `base`, returned as their
+/// printed forms: nested directories; names mixing ASCII case, Unicode (case-fold
+/// outliers included), and regex metacharacters; a hidden file; and a gitignored
+/// directory beside `.git`.
+fn random_tree(base: &std::path::Path, rng: &mut XorShift, entries: usize) -> Vec<String> {
+    const WORDS: [&str; 16] = [
+        "src", "Lib", "main", "README", "Test", "util", "MODULE", "café", "Straße", "İzmir",
+        "ſtate", "日本", "文件", "🦀crab", "naïve", "data",
+    ];
+    const MARKS: [&str; 12] = ["", ".", "-", "#", "&", "~", "+", "(", "[", "$", "_", ""];
+    const EXTENSIONS: [&str; 6] = ["", ".rs", ".md", ".TXT", ".tar.gz", ".json"];
+    std::fs::create_dir_all(base.join(".git")).expect("mkdir");
+    std::fs::write(base.join(".git/config"), "git").expect("write");
+    std::fs::write(base.join(".gitignore"), "ignored/\n").expect("write");
+    std::fs::create_dir_all(base.join("ignored")).expect("mkdir");
+    std::fs::write(base.join("ignored/Ignored-main.rs"), "x").expect("write");
+    std::fs::write(base.join(".hidden-main.rs"), "x").expect("write");
+    let mut dirs = vec![String::new()];
+    let mut forms = vec![".gitignore".to_string(), ".hidden-main.rs".to_string()];
+    while forms.len() < entries {
+        let parent = dirs[rng.below(dirs.len())].clone();
+        let stem = format!(
+            "{parent}{}{}{}{}",
+            rng.pick(&WORDS),
+            rng.pick(&MARKS),
+            rng.pick(&WORDS),
+            forms.len()
+        );
+        if parent.matches('/').count() < 4 && rng.below(8) == 0 {
+            std::fs::create_dir(base.join(&stem)).expect("mkdir");
+            dirs.push(format!("{stem}/"));
+            forms.push(format!("{stem}/"));
+        } else {
+            let rel = format!("{stem}{}", rng.pick(&EXTENSIONS));
+            std::fs::write(base.join(&rel), "x").expect("write");
+            forms.push(rel);
+        }
+    }
+    forms
+}
+
+/// Queries over a random tree: the bare query, metacharacter and Unicode fragments (an
+/// invalid regex among them), and from real entries their exact names, prefixes,
+/// substrings, case variants, scoped, `./` scoped, and full-path shapes.
+fn random_queries(forms: &[String], rng: &mut XorShift) -> Vec<String> {
+    let mut queries: Vec<String> = [
+        "", ".", "-", "#", "&", "~", "+", "(", "[", "$", ".*", "s.c", "[a-z]+0", "é", "ß", "SS",
+        "İ", "i", "ſ", "s", "日本", "🦀", "MAIN", "./", "./main", "ignored/",
+    ]
+    .map(String::from)
+    .to_vec();
+    queries.push("ignored/Ig".to_string());
+    for _ in 0..8 {
+        let form = &forms[rng.below(forms.len())];
+        let path = fuzzy_file_search::form_trimmed(form);
+        let name: Vec<char> = fuzzy_file_search::form_name(form).chars().collect();
+        let start = rng.below(name.len());
+        let end = start + 1 + rng.below(name.len() - start);
+        let part: String = name[start..end].iter().collect();
+        queries.push(name.iter().collect());
+        queries.push(name[..end].iter().collect());
+        queries.push(part.to_uppercase());
+        queries.push(part.to_lowercase());
+        if let Some((parent, _)) = path.rsplit_once('/') {
+            let parent_name = parent.rsplit('/').next().unwrap_or_default();
+            queries.push(format!("{parent}/{part}"));
+            queries.push(format!("./{parent}/"));
+            queries.push(format!("{parent_name}/{part}"));
+        }
+        queries.push(part);
+    }
+    queries
+}
+
+/// The index answers what the full, uncut walk ranks — fd's walk rules, the shared
+/// matcher, and the shared ranking — on random trees, one small and one large enough
+/// for a multi-chunk scan; where the walk's result cut cannot apply (at most
+/// [`fuzzy_file_search::MAX_WALK_RESULTS`] matches), the walk provider answers the same.
+#[test]
+fn at_index_matches_the_walk_on_random_trees() {
+    const SEEDS: u64 = 1;
+    let large = (2 * file_index::SCAN_CHUNK_MIN).max(32_768) + 1_000;
+    for seed in 0..SEEDS {
+        for entries in [300, large] {
+            let mut rng = XorShift(0x9E37_79B9_7F4A_7C15 ^ seed);
+            let outer = tempfile::TempDir::new().expect("temp dir");
+            let base = outer.path().join("base");
+            let forms = random_tree(&base, &mut rng, entries);
+            let indexed = provider(base.to_str().expect("utf8"));
+            let walked = provider(base.to_str().expect("utf8"));
+            assert!(indexed
+                .file_index
+                .build(&base, file_index::MAX_INDEX_ENTRIES));
+            assert!(!walked.file_index.build(&base, 1));
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let mut walks: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+            for query in random_queries(&forms, &mut rng) {
+                let at_prefix = format!("@{query}");
+                let mut matched = 0;
+                let expected =
+                    fuzzy_file_search::resolve_search(&base, &at_prefix, &cancel, |search, _| {
+                        let walk =
+                            walks
+                                .entry(search.walk_base.to_path_buf())
+                                .or_insert_with(|| {
+                                    fuzzy_file_search::walk_builder(search.walk_base)
+                                        .build()
+                                        .filter_map(Result::ok)
+                                        .filter_map(|entry| {
+                                            fuzzy_file_search::fd_printed_form(
+                                                &entry,
+                                                search.walk_base,
+                                            )
+                                        })
+                                        .collect()
+                                });
+                        let walk_base = search.walk_base.to_string_lossy();
+                        let mut target = String::new();
+                        let found: Vec<&String> = walk
+                            .iter()
+                            .filter(|form| search.matches(&walk_base, form, &mut target))
+                            .collect();
+                        matched = found.len();
+                        fuzzy_file_search::suggestions(
+                            fuzzy_file_search::top_ranked(
+                                found.into_iter().filter_map(|form| search.score(form)),
+                            ),
+                            search,
+                        )
+                    })
+                    .map(|suggestions| suggestions.items)
+                    .unwrap_or_default();
+                let context = format!("seed {seed}, {entries} entries, query {at_prefix}");
+                assert_eq!(at_values(&indexed, &at_prefix), expected, "{context}");
+                if matched <= fuzzy_file_search::MAX_WALK_RESULTS {
+                    assert_eq!(at_values(&walked, &at_prefix), expected, "{context}");
+                }
+            }
+        }
+    }
+}
+
+/// Watched changes land: a new file and a new directory with a file appear in the
+/// index, and vanish with their deletion. The bounded polling waits on external
+/// OS events.
+#[test]
+fn at_index_tracks_watcher_events() {
+    let outer = parity_fixture();
+    let base = outer.path().join("base");
+    let provider = provider(base.to_str().expect("utf8"));
+    assert!(provider
+        .file_index
+        .build(&base, file_index::MAX_INDEX_ENTRIES));
+    let values = |query: &str| {
+        at_values(&provider, &format!("@{query}"))
+            .into_iter()
+            .map(|item| item.value)
+            .collect::<Vec<_>>()
+    };
+    let settle = |present: bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let settled = if present {
+                values("watched.rs").contains(&"@watched.rs".to_string())
+                    && values("watched_dir").contains(&"@watched_dir/".to_string())
+                    && values("inside").contains(&"@watched_dir/inside.rs".to_string())
+            } else {
+                values("watched.rs").is_empty()
+                    && values("watched_dir").is_empty()
+                    && values("inside").is_empty()
+            };
+            if settled {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the watcher never settled the entries (present={present})"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    };
+    std::fs::write(base.join("watched.rs"), "x").expect("write");
+    std::fs::create_dir_all(base.join("watched_dir")).expect("mkdir");
+    std::fs::write(base.join("watched_dir/inside.rs"), "x").expect("write");
+    settle(true);
+    // A directory replaced by a file drops the directory's descendants too.
+    std::fs::remove_dir_all(base.join("watched_dir")).expect("remove");
+    std::fs::write(base.join("watched_dir"), "x").expect("write");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let replaced = values("inside").is_empty()
+            && values("watched_dir").contains(&"@watched_dir".to_string());
+        if replaced {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher never settled the replaced directory"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::fs::remove_file(base.join("watched.rs")).expect("remove");
+    std::fs::remove_file(base.join("watched_dir")).expect("remove");
+    settle(false);
+    // A deleted session base drops the whole index: the next query rebuilds into
+    // whatever the tree still holds (nothing) instead of serving stale entries.
+    std::fs::remove_dir_all(base).expect("remove");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if values("par").is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher never dropped the deleted base's index"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
