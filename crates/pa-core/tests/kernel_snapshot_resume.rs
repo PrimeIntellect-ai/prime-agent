@@ -91,7 +91,7 @@ fn ipython_tool_call_step(call_id: &str, code: &str) -> FauxResponseStep {
         vec![pa_types::ai::AssistantContentBlock::ToolCall(
             pa_types::ai::ToolCall {
                 id: call_id.to_string(),
-                name: "ipython".to_string(),
+                name: "python_repl".to_string(),
                 arguments: serde_json::json!({ "code": code })
                     .as_object()
                     .cloned()

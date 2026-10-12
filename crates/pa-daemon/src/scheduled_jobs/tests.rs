@@ -15,7 +15,6 @@ fn persisted_worker_config(dir: &std::path::Path) -> crate::worker::WorkerConfig
         recovery_journal_path: dir.join("recovery.jsonl"),
         telemetry_disabled: None,
         script: Some(serde_json::json!({ "responses": ["ack", "ack", "ack", "ack"] })),
-        decision_child: false,
     }
 }
 

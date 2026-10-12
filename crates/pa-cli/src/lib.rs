@@ -59,6 +59,7 @@ pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
 pub(crate) mod print_goal;
+pub(crate) mod print_rlm;
 pub mod print_runtime;
 pub(crate) mod print_session_command;
 pub mod update_flow;

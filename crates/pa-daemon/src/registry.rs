@@ -108,6 +108,10 @@ pub(crate) struct ResidentWorker {
     /// Unix-millis spawn time of the current child (0 for an adopted pid): only a lifetime past the
     /// stable window earns a counter reset (spawn-dies-fast churn accumulates).
     pub(crate) spawned_at_ms: AtomicU64,
+    /// The resident's monitor generation: the latest `spawn_monitor` claim.
+    /// A watch whose generation was superseded returns at the exit check
+    /// instead of running crash bookkeeping over the new owner's process.
+    pub(crate) monitor_epoch: AtomicU64,
     /// The worker advertised `direct_peer_transport` in its `worker_auth` response.
     pub(crate) peer_transport_capable: AtomicBool,
     /// The last-good heartbeats catalog answer, tagged with its generation: served when the worker
@@ -173,6 +177,7 @@ impl ResidentWorker {
             intentional_stop: AtomicBool::new(false),
             consecutive_failures: AtomicU32::new(0),
             spawned_at_ms: AtomicU64::new(0),
+            monitor_epoch: AtomicU64::new(0),
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),
@@ -354,7 +359,8 @@ pub(crate) struct WorkerRegistration {
 }
 
 /// Accepted registration state per worker: the identity plus the
-/// registration count (epoch 1 = boot, epoch > 1 = re-registration after a supervisor restart).
+/// registration count (epoch 1 = boot; every later epoch is an in-place
+/// re-registration, e.g. `notify_session_created` after a create).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RegistrationRecord {
     pub(crate) registration: WorkerRegistration,

@@ -272,7 +272,7 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
             "engine": "faux",
             "responses": [
                 { "content": [
-                    { "type": "toolCall", "name": "ipython", "arguments": {
+                    { "type": "toolCall", "name": "python_repl", "arguments": {
                         "code": mcp_cell(&receipt),
                     } },
                 ] },
@@ -408,7 +408,7 @@ fn begin_login_host_request_is_live_in_the_worker() {
             "engine": "faux",
             "responses": [
                 { "content": [
-                    { "type": "toolCall", "name": "ipython", "arguments": {
+                    { "type": "toolCall", "name": "python_repl", "arguments": {
                         "code": cell,
                     } },
                 ] },
