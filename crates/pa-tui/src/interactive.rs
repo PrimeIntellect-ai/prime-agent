@@ -58,7 +58,7 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// Which session the interactive run opens.
 #[derive(Debug, Clone, PartialEq, Eq)]

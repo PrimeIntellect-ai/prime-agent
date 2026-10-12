@@ -103,6 +103,13 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct WindowedTranscript {
+    pub messages: Vec<Value>,
+    pub omitted: usize,
+    pub last_user_prompt_ms: Option<u64>,
+}
+
 /// The windowed sequence's summary scalars (newest timestamp, message count),
 /// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
