@@ -8,6 +8,8 @@ use std::sync::Arc;
 struct CapturingSink {
     reports: std::sync::Mutex<Vec<RlmChildUsageReport>>,
     fail: std::sync::atomic::AtomicBool,
+    forgotten: std::sync::Mutex<Vec<String>>,
+    attempts: std::sync::atomic::AtomicUsize,
 }
 
 impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
@@ -17,6 +19,8 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>> {
         let (reports, fail) = (&self.reports, &self.fail);
         Box::pin(async move {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if fail.load(std::sync::atomic::Ordering::Relaxed) {
                 return false;
             }
@@ -27,9 +31,12 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
 
     fn forget(
         &self,
-        _rlm_child_id: &str,
+        rlm_child_id: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {})
+        let child_id = rlm_child_id.to_owned();
+        Box::pin(async move {
+            self.forgotten.lock().unwrap().push(child_id);
+        })
     }
 }
 
@@ -146,11 +153,13 @@ async fn emit_keeps_the_cursor_until_the_sink_persists() {
     let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-emit5");
-    assert!(record
-        .lock()
-        .await
-        .attributed_rows
-        .is_some_and(|rows| rows > 0));
+    assert!(
+        record
+            .lock()
+            .await
+            .attributed_rows
+            .is_some_and(|rows| rows > 0)
+    );
 }
 
 /// A failed final observation keeps its report owed; the follow-up forget
@@ -175,11 +184,13 @@ async fn forget_replays_the_retained_report_before_unregistering() {
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-forget1");
     assert!(record.lock().await.pending_usage_report.is_none());
-    assert!(record
-        .lock()
-        .await
-        .attributed_rows
-        .is_some_and(|rows| rows > 0));
+    assert!(
+        record
+            .lock()
+            .await
+            .attributed_rows
+            .is_some_and(|rows| rows > 0)
+    );
 }
 
 #[tokio::test]
@@ -461,4 +472,58 @@ async fn canceled_interval_keeps_identity_and_drains_new_rows_before_forget() {
                 .len()
         )
     );
+}
+
+#[tokio::test]
+async fn failed_final_replay_preserves_report_and_registration_for_a_bounded_retry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = child_file(tmp.path());
+    let sessions = registry(tmp.path());
+    let sink = Arc::new(CapturingSink::default());
+    sessions.set_usage_sink(sink.clone());
+    let record = record_with_file("sub-owed-final", &file);
+    sink.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.emit_child_usage(&record).await;
+    let frozen = record.lock().await.pending_usage_report.clone().unwrap();
+    sessions.inner.forget_child_usage(&record).await;
+    assert!(
+        sink.forgotten.lock().unwrap().is_empty(),
+        "an owed report must remain registered"
+    );
+    assert_eq!(
+        sink.attempts.load(std::sync::atomic::Ordering::Relaxed),
+        2,
+        "one initial attempt plus one bounded final replay"
+    );
+    {
+        let held = record.lock().await.pending_usage_report.clone().unwrap();
+        assert_eq!(held.0.report_id, frozen.0.report_id);
+        assert_eq!(held.0.batches, frozen.0.batches);
+        assert_eq!(held.1, frozen.1);
+    }
+    sink.fail.store(false, std::sync::atomic::Ordering::Relaxed);
+    sessions.inner.forget_child_usage(&record).await;
+    {
+        let reports = sink.reports.lock().unwrap();
+        let observed: Vec<_> = reports
+            .iter()
+            .map(|report| {
+                (
+                    report.report_id.clone(),
+                    report.rlm_child_id.clone(),
+                    report.batches.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![(frozen.0.report_id, frozen.0.rlm_child_id, frozen.0.batches)]
+        );
+    }
+    assert_eq!(
+        sink.forgotten.lock().unwrap().as_slice(),
+        &["sub-owed-final"]
+    );
+    assert!(record.lock().await.pending_usage_report.is_none());
+    assert_eq!(sink.attempts.load(std::sync::atomic::Ordering::Relaxed), 3);
 }

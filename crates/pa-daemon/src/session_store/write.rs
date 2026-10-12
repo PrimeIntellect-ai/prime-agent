@@ -3,8 +3,8 @@
 //! serializes writers onto the file.
 
 use super::{
-    fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
-    SessionFile, SessionHeader, Value, Write,
+    Context, HashMap, PathBuf, Result, Serialize, SessionEntry, SessionFile, SessionHeader, Value,
+    Write, fs, json, new_entry_id,
 };
 
 impl SessionEntry {
@@ -232,6 +232,13 @@ impl SessionFile {
                     pa_core::session::window::AppendOwnership::Unleased,
                 )
                 .with_context(|| format!("append to {}", self.path.display()))?,
+            }
+            #[cfg(test)]
+            if entry.type_ == "child_usage_attributed"
+                && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
+                    .with(|fault| fault.replace(false))
+            {
+                anyhow::bail!("injected post-append pre-index error");
             }
             // The line is in the file now: index it so the in-memory leaf matches what a
             // reload sees.
