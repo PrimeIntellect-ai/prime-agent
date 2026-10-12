@@ -322,7 +322,7 @@ pub(crate) async fn fetch_prime_inference_model_catalog(
     timeout_ms: u64,
     allow_empty: bool,
 ) -> Result<(serde_json::Value, Vec<PrimeInferenceCatalogEntry>), String> {
-    let client = reqwest::Client::builder()
+    let client = pa_ai::utils::tls::http_client_builder()
         .timeout(std::time::Duration::from_millis(timeout_ms))
         .build()
         .map_err(|error| error.to_string())?;
