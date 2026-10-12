@@ -669,6 +669,72 @@ mod freshness_tests {
         assert_eq!(actual, expected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn saving_backslash_filename_preserves_live_walk_results() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        let path = base.join(r"a\b.rs");
+        std::fs::write(&path, "before").expect("write");
+        let mut state = snapshot(base);
+        std::fs::write(&path, "after").expect("save");
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(path);
+        apply_batch(&mut state, &[Ok(event)], base, base);
+        assert_matches_live_walk(&state, base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_non_utf8_filename_preserves_live_walk_results() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        let path = base.join(std::ffi::OsString::from_vec(b"invalid-\xff.rs".to_vec()));
+        std::fs::write(&path, "before").expect("write");
+        let mut state = snapshot(base);
+        std::fs::write(&path, "after").expect("save");
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(path);
+        apply_batch(&mut state, &[Ok(event)], base, base);
+        assert_matches_live_walk(&state, base);
+    }
+
+    #[test]
+    fn overlapping_directory_refreshes_count_each_descendant_once() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        std::fs::create_dir_all(base.join("dir/nested")).expect("mkdir");
+        std::fs::write(base.join("dir/nested/file.rs"), "file").expect("write");
+        let mut state = snapshot(base);
+        // Fill the unaffected portion in memory: exercising the cap must not
+        // require creating a million files on the test runner.
+        let IndexState::Ready { entries, .. } = &mut state else {
+            panic!("ready snapshot");
+        };
+        for index in entries.len()..MAX_INDEX_ENTRIES {
+            entries.push(format!("unaffected-{index:07}.rs").into_boxed_str());
+        }
+        entries.sort();
+        let expected = entries.clone();
+        let events = [
+            Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
+                .add_path(base.join("dir"))),
+            Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
+                .add_path(base.join("dir/nested"))),
+        ];
+        apply_batch(&mut state, &events, base, base);
+        let IndexState::Ready { entries, .. } = state else {
+            panic!("overlapping refreshes must not disable an index within the cap");
+        };
+        assert_eq!(entries, expected);
+    }
+
     #[test]
     fn directory_renamed_onto_indexed_empty_destination_refreshes_descendants() {
         let outer = tempfile::tempdir().expect("tempdir");
