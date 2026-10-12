@@ -582,12 +582,18 @@ fn threshold_yield_keeps_the_backup_until_the_tool_run_finishes() {
     client.send_command("p1", &json!({"type":"prompt_and_wait","activeSessionId":session_id,"message":"u".repeat(120_000)}));
     let done = client.request("p1");
     assert_eq!(done["success"], true, "{done}");
-    // Read until the authoritative run settles rather than waiting a fixed interval.
+    // Read until the authoritative run settles, with a bound even if unrelated
+    // events keep arriving and every individual read succeeds.
+    let settle_deadline = Instant::now() + Duration::from_secs(30);
     while !client
         .events
         .iter()
         .any(|event| event["type"] == "auto_retry_end")
     {
+        assert!(
+            Instant::now() < settle_deadline,
+            "retry episode did not settle"
+        );
         let line = client.read_line();
         client.collect_event(&line);
     }
