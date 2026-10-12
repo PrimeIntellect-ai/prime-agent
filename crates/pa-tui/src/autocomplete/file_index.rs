@@ -399,11 +399,19 @@ fn apply_batch(
         if event.kind.is_access() {
             continue;
         }
-        for rel in event
+        for raw_rel in event
             .paths
             .iter()
             .filter_map(|path| event_rel(path, base, canonical_base))
         {
+            let rel = to_display_path(&raw_rel.to_string_lossy());
+            // Display keys normalize separators and replace invalid UTF-8. They
+            // cannot locate every real filename (or distinguish all collisions).
+            // Rebuild through the shared walker instead of mutating a wrong key.
+            if Path::new(&rel) != raw_rel {
+                *state = IndexState::Unbuilt;
+                return;
+            }
             // A directory's name event may be the only event for an entire
             // moved subtree. Its current existence cannot prove it is still
             // the indexed directory, especially after coalesced replacements.
@@ -447,9 +455,18 @@ fn apply_batch(
     // batch, because each single edit of the sorted entries shifts their tail.
     let mut removals: Vec<Range<usize>> = Vec::new();
     let mut gone: Vec<String> = Vec::new();
-    let mut rewalked: Vec<&str> = Vec::new();
+    let mut rewalked: BTreeSet<&str> = BTreeSet::new();
     let mut inserted: BTreeMap<String, Vec<(String, bool)>> = BTreeMap::new();
     for rel in &rels {
+        // An ancestor's scheduled walk already observes every child change;
+        // do not walk or count them again. Check each component boundary: a
+        // sibling such as dir-other can sort between dir and dir/nested.
+        if rel
+            .match_indices('/')
+            .any(|(index, _)| rewalked.contains(&rel[..index]))
+        {
+            continue;
+        }
         let metadata = std::fs::metadata(base.join(rel));
         let Ok(metadata) = metadata else {
             gone.push(rel.clone());
@@ -472,7 +489,7 @@ fn apply_batch(
             }
             if contains(entries, &form) {
                 removals.push(range_under(entries, &form));
-                rewalked.push(rel);
+                rewalked.insert(rel);
                 continue;
             }
         }
@@ -581,12 +598,10 @@ fn walk_subtree(base: &Path, rel: &str, indexed: usize, additions: &mut Vec<Box<
 /// The event path relative to the base — `None` outside it. Watcher paths may be
 /// canonical (macOS reports `/private/var` for a `/var` tempdir), so both the base and
 /// its canonical form are stripped.
-fn event_rel(path: &Path, base: &Path, canonical_base: &Path) -> Option<String> {
-    let rel = path
-        .strip_prefix(base)
+fn event_rel<'a>(path: &'a Path, base: &Path, canonical_base: &Path) -> Option<&'a Path> {
+    path.strip_prefix(base)
         .or_else(|_| path.strip_prefix(canonical_base))
-        .ok()?;
-    Some(to_display_path(&rel.to_string_lossy()))
+        .ok()
 }
 
 /// The parent directory's index form: `""` for the base, else `a/b/`.
@@ -686,7 +701,8 @@ mod freshness_tests {
         assert_matches_live_walk(&state, base);
     }
 
-    #[cfg(unix)]
+    // macOS APFS rejects invalid UTF-8 names before the watcher can see them.
+    #[cfg(target_os = "linux")]
     #[test]
     fn saving_non_utf8_filename_preserves_live_walk_results() {
         use std::os::unix::ffi::OsStringExt;
