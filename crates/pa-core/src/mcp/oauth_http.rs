@@ -80,10 +80,10 @@ impl ReqwestOAuthHttp {
     #[must_use]
     pub fn new() -> Self {
         ReqwestOAuthHttp {
-            client: reqwest::Client::builder()
+            client: pa_ai::utils::tls::http_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .expect("reqwest client construction cannot fail with no TLS config"),
+                .expect("oauth client"),
         }
     }
 }
