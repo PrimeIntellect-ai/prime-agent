@@ -258,4 +258,48 @@ mod tests {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil_from_unix(1_700_000_000), (2023, 11, 14, 22, 13, 20));
     }
+
+    /// The worker reap's journal-clearing rule for the records a live-reap
+    /// e2e cannot stage: a dead pid journaled identity-free (the kill is
+    /// attempted; whether it fails or hits a reused pid, a blind retry is
+    /// unsafe, so the journal is spent) and the same pid journaled with a
+    /// stale identity (the start-id check never reaps a reused pid).
+    #[test]
+    fn worker_reap_spends_stale_and_identity_free_records() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("w.orphans.jsonl");
+        let owner = i64::from(std::process::id());
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn short-lived child");
+        let dead_pid = child.id() as i32;
+        let _ = child.wait();
+        let identity_free = json!({
+            "version": 1,
+            "pid": dead_pid,
+            "ownerPid": owner,
+            "active": true,
+            "recordedAt": iso8601_now(),
+        });
+        let stale_identity = json!({
+            "version": 1,
+            "pid": dead_pid,
+            "ownerPid": owner,
+            "active": true,
+            "processStartId": "proc:1",
+            "recordedAt": iso8601_now(),
+        });
+        let mut journal = String::new();
+        for record in [&identity_free, &stale_identity] {
+            journal.push_str(&record.to_string());
+            journal.push('\n');
+        }
+        std::fs::write(&path, journal).expect("write journal");
+        reap_worker_orphan_processes(&path, owner as i32);
+        assert!(
+            !path.exists(),
+            "the journal is spent, not kept for a blind retry"
+        );
+    }
 }
