@@ -248,7 +248,8 @@ pub(crate) struct SessionUi {
     pub(crate) run_open: bool,
     /// The outcome the chat surface reports at rest (the OSC 7501
     /// done/error input): the run's normal end or a terminal
-    /// `goal_update`, cleared at the next turn's start and at attach.
+    /// `goal_update`, cleared at the next turn's start, at attach, and
+    /// when the session closes.
     pub(crate) settled: Option<crate::program_status::Status>,
     /// Completed turns observed on this connection. A prompt ACK may arrive
     /// after its entire streamed turn; it must not restart the loader then.

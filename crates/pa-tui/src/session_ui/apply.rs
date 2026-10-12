@@ -274,6 +274,10 @@ impl SessionUi {
                     self.run_open = false;
                     view.working = None;
                     view.retry = None;
+                    view.retry = None;
+                    // The closed session cannot run again: its remembered
+                    // settle owes the dead surface nothing.
+                    self.settled = None;
                     self.bash_list_epoch += 1;
                     self.factory_list_epoch += 1;
                     self.bash_activities = serde_json::json!({"activities": []});

@@ -391,6 +391,7 @@ impl MockSupervisor {
         let mut events_seen = 0;
         let mut run_open = false;
         let mut retry_pending = false;
+        let mut settled_done = false;
         let mut in_tools = false;
         write_json(
             &mut writer,
@@ -482,6 +483,27 @@ impl MockSupervisor {
                     retry_pending = false;
                     run_open = false;
                 }
+                "get_last_assistant_text" if settled_done => {
+                    // The test's read-only /copy request triggers an external
+                    // session close after the run settled normally: the dead
+                    // surface must drop the settled outcome.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "session_closed", "activeSessionId": "s1",
+                            "reason": "killed",
+                        }),
+                    );
+                    settled_done = false;
+                }
                 // The scripted run: a prompt opens a multi-step run (a
                 // step's turn_end/turn_start pair mid-run; a `finish`
                 // message also completes the thread goal on the way), a
@@ -548,6 +570,7 @@ impl MockSupervisor {
                         events_seen += 1;
                         push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
                         run_open = false;
+                        settled_done = true;
                     } else if command.get("message").and_then(Value::as_str) == Some("retry") {
                         // A failed attempt settles before its retry countdown starts.
                         // Keep the next attempt pending until the next prompt.
