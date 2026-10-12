@@ -368,7 +368,7 @@ impl Supervisor {
                 *self
                     .compaction_journal
                     .lock()
-                    .expect("compaction journal lock") = Some(journal)
+                    .expect("compaction journal lock") = Some(journal);
             }
             Err(error) => {
                 drop(listener);
