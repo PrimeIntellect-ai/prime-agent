@@ -130,6 +130,7 @@ async fn faux_engine_with_telemetry(
         extra_builtin_skill_overrides: Vec::new(),
         rlm_subagent_host: None,
         rlm_depth: None,
+        daemonless: true,
         model_info: Some(model.clone()),
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
@@ -541,6 +542,7 @@ async fn autonomous_continuation_turns_cross_the_boundary_arms() {
         &model,
         &goal,
         &run,
+        /*root_node*/ None,
     );
     admit(
         &mut boundary,

@@ -57,7 +57,6 @@ use turn_types::{
 
 mod model;
 
-use model::persisted_rlm_max_depth;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;

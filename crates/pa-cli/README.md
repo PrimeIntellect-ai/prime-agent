@@ -36,6 +36,16 @@ the first turn; the in-loop continuation hook runs an active goal's natural
 continuations inside the one agent run; the budget-limit steer and the
 threshold-held continuation drain as this invocation's follow-up runs
 with the TS session-action phase frames.
+Inline subagents (print_rlm.rs): the daemonless print session hosts
+`rlm.spawn` children in-process over a tree of session nodes — the
+`RlmSubagentHost` impl (depth gate, name uniqueness, model resolution,
+the child session/engine build, the kickoff row), the
+`AgentMessageController` (family roster, one steer-lane delivery path),
+the quiescence drive that holds the run open until every admitted
+descendant settles and its replies and notices drain (the #2270 fix),
+the goal/autonomous deferral behind unsettled work, and the exit
+disposal (kernels snapshotted, drivers joined; no child outlives the
+process).
 Session slash commands (`print_session_command.rs`, the #253 residue): print
 prompts that are `/compact`, `/refine`, `/goal`, or `/autonomous` execute
 through the pa-core session-command executor (the daemon worker's seam — no
