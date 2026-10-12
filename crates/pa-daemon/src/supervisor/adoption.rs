@@ -249,6 +249,7 @@ impl Supervisor {
         let alive = (descriptor.stop_requested_at.is_none() || recorded_process_alive)
             && socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
+        let orphan_generation = super::supervision::OrphanGeneration::from_descriptor(&descriptor);
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         // The durable pending FIRST: a failed identity persist left a side record carrying the
@@ -353,9 +354,10 @@ impl Supervisor {
                             Arc::clone(&resident),
                             Some(child),
                             u64::from(child_pid),
+                            None,
                         );
                     }
-                    None => self.spawn_monitor(Arc::clone(&resident), None, pid),
+                    None => self.spawn_monitor(Arc::clone(&resident), None, pid, orphan_generation),
                 }
                 // The adopted worker joins the roster from its live state.
                 self.refresh_roster_entry(&resident).await;
@@ -457,11 +459,17 @@ impl Supervisor {
         // The registration's durable id is optional on the wire: a re-registering worker
         // that does not report it still owns its persisted descriptor. Both reads share
         // this one lock acquisition — a second one let the create path race into a stall.
-        let durable_session_id = {
+        let (durable_session_id, orphan_generation) = {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
+            // A registrant must not inherit the predecessor's journal merely
+            // because registration updates its pid. Spawn publishes the path
+            // and pid together; only that already-matching pair is cleanup evidence.
+            let orphan_generation =
+                super::supervision::OrphanGeneration::from_descriptor(&descriptor)
+                    .filter(|generation| u64::from(generation.pid) == *pid);
             let previous_worker_instance_id = descriptor.worker_instance_id.clone();
             // A REPLACEMENT registration flips the roster's stale-delta slot to the replacement
             // BEFORE it is exposed anywhere: a predecessor's pull or frame still in flight must
@@ -470,6 +478,20 @@ impl Supervisor {
                 let replacement = worker_instance_id.clone().unwrap_or_default();
                 let mut roster = self.roster.lock().unwrap();
                 roster.note_worker_generation(&resident.worker_id, &replacement);
+            }
+            if descriptor.pid != *pid {
+                // The old monitor retains the predecessor's cleanup identity.
+                // The registrant's path is unknown: reserve an unused generation
+                // path so boot backfill cannot restore the predecessor's legacy
+                // path. This does not claim the live registrant writes this file.
+                descriptor.orphan_process_journal_path = Some(
+                    crate::journal::orphan_journal_path(
+                        &self.descriptor_dir,
+                        &format!("{}-{}", descriptor.worker_id, uuid::Uuid::new_v4()),
+                    )
+                    .to_string_lossy()
+                    .into_owned(),
+                );
             }
             descriptor.pid = *pid;
             // Refresh the identity from the live registrant: a recycled pid must not keep
@@ -509,14 +531,14 @@ impl Supervisor {
                     .and_then(|file| Path::new(file).file_stem())
                     .map(|stem| stem.to_string_lossy().to_string()),
             };
-            durable_session_id
+            (durable_session_id, orphan_generation)
         };
         // A pre-existing resident whose registrant named a different process
         // (boot adoption can watch a stale on-disk pid): arm the monitor for
         // the registrant. The generation claim retires the stale watch at its
         // exit check.
         if re_arm_monitor {
-            self.spawn_monitor(Arc::clone(&resident), None, *pid);
+            self.spawn_monitor(Arc::clone(&resident), None, *pid, orphan_generation);
         }
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it now (spec §10.4).
@@ -605,6 +627,8 @@ impl Supervisor {
         // orphan journal here too, so a relaunch of this worker journals.
         crate::descriptor::backfill_orphan_journal_path(&self.descriptor_dir, &mut descriptor);
         let worker_id = descriptor.worker_id.clone();
+        let orphan_generation = super::supervision::OrphanGeneration::from_descriptor(&descriptor)
+            .filter(|generation| u64::from(generation.pid) == registration.pid);
         let resident = ResidentWorker::new(
             registration.active_session_id.clone(),
             descriptor,
@@ -625,6 +649,17 @@ impl Supervisor {
             {
                 let mut descriptor = resident.descriptor.lock().await;
                 if descriptor.pid != registration.pid {
+                    // A tombstoned registrant also has an unknown journal path.
+                    // Reserve an unused generation instead of None, which boot
+                    // backfill could bind to the predecessor's legacy journal.
+                    descriptor.orphan_process_journal_path = Some(
+                        crate::journal::orphan_journal_path(
+                            &self.descriptor_dir,
+                            &format!("{}-{}", descriptor.worker_id, uuid::Uuid::new_v4()),
+                        )
+                        .to_string_lossy()
+                        .into_owned(),
+                    );
                     descriptor.pid = registration.pid;
                 }
                 if let Some(start_id) = crate::lease::get_process_start_id(registration.pid as u32)
@@ -658,7 +693,12 @@ impl Supervisor {
         // client commands may reach it immediately.
         resident.note_session_ready();
         self.registry.insert(Arc::clone(&resident)).await;
-        self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
+        self.spawn_monitor(
+            Arc::clone(&resident),
+            None,
+            registration.pid,
+            orphan_generation,
+        );
         self.log_line(&format!(
             "adopted session worker {worker_id} via self-registration"
         ));

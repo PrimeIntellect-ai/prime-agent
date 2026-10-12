@@ -465,7 +465,7 @@ impl Supervisor {
         // now be routed to this worker — nothing overtakes the session's create.
         resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
-        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid));
+        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid), None);
         Ok((resident, create_summary))
     }
 
