@@ -107,6 +107,9 @@ pub(crate) fn decode_journal_lines<'a>(bytes: &'a [u8], path: &Path) -> Result<V
 }
 
 // Keep the ownership inode stable across journal replacement and process crashes.
+// Retain the empty sidecar when retiring its journal: unlinking can admit a new
+// inode while another opener still uses the old one. OS ownership releases on
+// close or crash; directory entries/inodes can accumulate across retired paths.
 pub(crate) fn journal_write_owner(path: &Path) -> Result<File> {
     let mut ownership_path = path.as_os_str().to_os_string();
     ownership_path.push(".writer-lock");
