@@ -169,6 +169,14 @@ struct ChildRecord {
     /// The parent session closed while this child ran: the settle watcher
     /// exits without a notice — none is owed to a session being torn down.
     closed_by_parent: bool,
+    /// Confirmed retirement completed its roster, notice and settle bookkeeping.
+    retirement_finished: bool,
+    /// Claim the synchronous delete notifier once across interrupted retirement retries.
+    retirement_notified: bool,
+    /// Claim the retirement roster event once even if a later await is canceled.
+    retirement_roster_emitted: bool,
+    /// The final unregister acknowledged completion; retries must not repeat it.
+    usage_registration_forgotten: bool,
     /// The child's durable session file: the usage walk's source.
     session_file: Option<String>,
     /// Rows of [`ChildRecord::session_file`] already folded into the
@@ -177,6 +185,8 @@ struct ChildRecord {
     /// nothing has been observed since the reseed, and the first delivery
     /// primes the cursor at the file's tail.
     attributed_rows: Option<usize>,
+    /// Frozen before delivery: cancellation and retries keep the same row identities.
+    pending_usage_report: Option<(RlmChildUsageReport, usize)>,
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
@@ -312,6 +322,18 @@ pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 pub(crate) type ChildUpdateSink = std::sync::Arc<dyn Fn(Value) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy)]
+enum RetirementIntent {
+    Delete { was_running: bool },
+    Close,
+}
+
+#[derive(Clone)]
+struct RetiredChild {
+    record: Arc<Mutex<ChildRecord>>,
+    intent: RetirementIntent,
+}
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -324,6 +346,8 @@ struct SupervisorChildSessionsInner {
     // an await, so sync engine paths can set it without a runtime `block_on`.
     identity: std::sync::Mutex<ParentIdentity>,
     children: Mutex<Vec<Arc<Mutex<ChildRecord>>>>,
+    /// Confirmed-dead children whose final usage remains owed. Not roster or slot owners.
+    retired_usage: std::sync::Mutex<Vec<RetiredChild>>,
     /// Spawn-name reservations held until admission is durable, so
     /// parallel same-name spawns cannot both admit (default names never reserve).
     pending_spawn_names: std::sync::Mutex<std::collections::HashSet<String>>,
@@ -389,6 +413,7 @@ impl SupervisorChildSessions {
                 parent_session_name: std::sync::Mutex::new(None),
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
+                retired_usage: std::sync::Mutex::new(Vec::new()),
                 pending_spawn_names: std::sync::Mutex::new(std::collections::HashSet::new()),
                 deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 turn_done: tokio::sync::watch::Sender::new(0),
@@ -672,8 +697,13 @@ impl SupervisorChildSessions {
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,
+                retirement_finished: false,
+                retirement_notified: false,
+                retirement_roster_emitted: false,
+                usage_registration_forgotten: false,
                 session_file: None,
                 attributed_rows: Some(0),
+                pending_usage_report: None,
                 usage_watch_live: false,
                 usage_rearm: false,
                 emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -840,30 +870,6 @@ impl SupervisorChildSessionsInner {
             }
             record.last_emitted_status = Some(status);
             record.snapshot_value()
-        };
-        sink(row);
-    }
-
-    pub(crate) async fn emit_child_removal(&self, record: &Arc<Mutex<ChildRecord>>) {
-        let sink = self
-            .child_update_sink
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(sink) = sink else {
-            return;
-        };
-        let row = {
-            let record = record.lock().await;
-            json!({
-                "id": record.rlm_child_id,
-                "activeSessionId": record.active_session_id,
-                "sessionName": record.session_name,
-                "label": record.session_name,
-                "status": "cancelled",
-                "sessionDir": record.session_dir,
-                "error": "Deleted by parent orchestrator",
-            })
         };
         sink(row);
     }

@@ -166,6 +166,7 @@ impl AgentSessionEngine {
             link,
             children,
             usage_producer: std::sync::Mutex::new(None),
+            rlm_usage_store: std::sync::Mutex::new(None),
             quota_park: std::sync::Arc::new(std::sync::Mutex::new(None)),
             quota_parked_this_run: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             autonomous_driver,
@@ -271,6 +272,13 @@ impl AgentSessionEngine {
             .compaction_summary_sink
             .lock()
             .expect("compaction summary sink lock") = Some(sink);
+    }
+
+    pub(crate) fn set_rlm_usage_store(
+        &self,
+        store: std::sync::Arc<dyn pa_core::session_engine::rlm_usage::RlmChildUsageStore>,
+    ) {
+        *self.rlm_usage_store.lock().expect("rlm usage store lock") = Some(store);
     }
 
     /// Installs the worker's accepted-note announcer, threaded into every
@@ -927,6 +935,11 @@ impl AgentSessionEngine {
             .lock()
             .expect("goal queue purge lock")
             .clone();
+        let rlm_usage_store = self
+            .rlm_usage_store
+            .lock()
+            .expect("rlm usage store lock")
+            .clone();
         let progress_note_emit = self
             .progress_note_emit
             .lock()
@@ -989,6 +1002,7 @@ impl AgentSessionEngine {
             rlm_subagent_host: self.children.clone().map(|children| {
                 children as Arc<dyn pa_core::session_engine::rlm_host::RlmSubagentHost>
             }),
+            rlm_usage_store,
             progress_note_emit,
             rlm_depth: Some(self.rlm_depth.load(std::sync::atomic::Ordering::Relaxed)),
             // The worker session runs under the daemon scheduler and its wake-ups.
