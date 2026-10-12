@@ -1139,7 +1139,7 @@ pub fn build_client(
             config.install_id = id;
             let mut sinks: Vec<Arc<dyn pa_telemetry::TelemetrySink>> = Vec::new();
             if let Some(endpoint) = telemetry_endpoint() {
-                sinks.push(Arc::new(pa_telemetry::AnalyticsSink::new(
+                sinks.push(Arc::new(pa_telemetry::AnalyticsSink::with_http_builder(
                     endpoint,
                     pa_ai::utils::tls::http_client_builder(),
                 )));

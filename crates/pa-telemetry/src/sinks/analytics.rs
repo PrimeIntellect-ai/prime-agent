@@ -35,20 +35,37 @@ pub struct AnalyticsSink {
 
 impl AnalyticsSink {
     /// Sink posting to `endpoint` (the product passes [`ANALYTICS_ENDPOINT`];
-    /// tests pass a local stub) with `http_builder` and the TS-parity 1.5s
-    /// request timeout.
+    /// tests pass a local stub) with the TS-parity 1.5s request timeout.
     #[must_use]
-    pub fn new(endpoint: impl Into<String>, http_builder: reqwest::ClientBuilder) -> Self {
-        Self::with_timeout(endpoint, DEFAULT_REQUEST_TIMEOUT, http_builder)
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self::with_timeout(endpoint, DEFAULT_REQUEST_TIMEOUT)
     }
 
     /// Sink with an explicit request timeout (tests).
     ///
     /// # Panics
     ///
-    /// Panics if the reqwest HTTP client from `http_builder` cannot be built.
+    /// Panics if the reqwest HTTP client cannot be built.
     #[must_use]
-    pub fn with_timeout(
+    pub fn with_timeout(endpoint: impl Into<String>, timeout: Duration) -> Self {
+        Self::with_timeout_and_builder(endpoint, timeout, reqwest::Client::builder())
+    }
+
+    /// Sink using the caller's HTTP trust configuration and the TS-parity
+    /// 1.5s request timeout. Product composition supplies its extra CA roots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supplied HTTP client builder cannot be built.
+    #[must_use]
+    pub fn with_http_builder(
+        endpoint: impl Into<String>,
+        http_builder: reqwest::ClientBuilder,
+    ) -> Self {
+        Self::with_timeout_and_builder(endpoint, DEFAULT_REQUEST_TIMEOUT, http_builder)
+    }
+
+    fn with_timeout_and_builder(
         endpoint: impl Into<String>,
         timeout: Duration,
         http_builder: reqwest::ClientBuilder,
