@@ -42,8 +42,7 @@ impl MockSupervisor {
 
     fn serve(mut self) {
         let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
+        let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
         let mut held_backfill: Option<String> = None;
 
@@ -70,9 +69,8 @@ impl MockSupervisor {
             let command_type = command
                 .get("type")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
+                .unwrap_or_default();
+            match command_type {
                 "attach" => {
                     write_json(&mut writer, &attach_response(id, self.windowed));
                 }
@@ -136,33 +134,29 @@ impl MockSupervisor {
                 "get_session_stats" => {
                     write_json(
                         &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
+                        &success_response(
+                            id,
+                            "get_session_stats",
+                            json!({
                                 "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                                 "cost": 0.01,
-                            },
-                        }),
+                            }),
+                        ),
                     );
                 }
                 _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
+                    write_json(&mut writer, &success_response(id, command_type, json!({})));
                 }
             }
         }
     }
+}
+
+fn success_response(id: &str, command: &str, data: Value) -> Value {
+    json!({
+        "type": "response", "id": id, "command": command,
+        "success": true, "data": data,
+    })
 }
 
 fn write_json(writer: &mut UnixStream, value: &Value) {
