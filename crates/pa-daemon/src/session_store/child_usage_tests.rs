@@ -79,11 +79,9 @@ std::thread_local! {
 fn completed_append_error_retry_keeps_one_physical_attribution() {
     let (_dir, mut store, target) = fixture();
     FAIL_AFTER_CHILD_APPEND.with(|fault| fault.set(true));
-    assert!(
-        store
-            .append_child_usage_once("report-a", &target, child(), None)
-            .is_err()
-    );
+    assert!(store
+        .append_child_usage_once("report-a", &target, child(), None)
+        .is_err());
     assert_eq!(
         attribution_rows(&store).len(),
         1,

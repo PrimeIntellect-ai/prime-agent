@@ -153,13 +153,11 @@ async fn emit_keeps_the_cursor_until_the_sink_persists() {
     let reports = sink.reports.lock().expect("reports lock").clone();
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-emit5");
-    assert!(
-        record
-            .lock()
-            .await
-            .attributed_rows
-            .is_some_and(|rows| rows > 0)
-    );
+    assert!(record
+        .lock()
+        .await
+        .attributed_rows
+        .is_some_and(|rows| rows > 0));
 }
 
 /// A failed final observation keeps its report owed; the follow-up forget
@@ -184,13 +182,11 @@ async fn forget_replays_the_retained_report_before_unregistering() {
     assert_eq!(reports.len(), 1);
     assert_eq!(reports[0].rlm_child_id, "sub-forget1");
     assert!(record.lock().await.pending_usage_report.is_none());
-    assert!(
-        record
-            .lock()
-            .await
-            .attributed_rows
-            .is_some_and(|rows| rows > 0)
-    );
+    assert!(record
+        .lock()
+        .await
+        .attributed_rows
+        .is_some_and(|rows| rows > 0));
 }
 
 #[tokio::test]
