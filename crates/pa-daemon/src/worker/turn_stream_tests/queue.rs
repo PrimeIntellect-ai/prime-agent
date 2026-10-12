@@ -770,10 +770,15 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
 struct NoteWitnessEngine {
     note: Mutex<Option<String>>,
     note_at_notice_turn: Mutex<Option<String>>,
+    withdraw_follow_up_after_end: Mutex<Option<Arc<Mutex<SessionCore>>>>,
     turns: std::sync::atomic::AtomicUsize,
 }
 
 impl SessionEngine for NoteWitnessEngine {
+    fn progress_note(&self) -> Option<String> {
+        self.note.lock().unwrap().clone()
+    }
+
     fn clear_progress_note(&self) {
         *self.note.lock().unwrap() = None;
     }
@@ -796,6 +801,10 @@ impl SessionEngine for NoteWitnessEngine {
         emit(EngineEvent::AgentEnd {
             messages: Vec::new(),
         });
+        if let Some(core) = self.withdraw_follow_up_after_end.lock().unwrap().take() {
+            // A queue withdrawal can land after AgentEnd but before the runner settles.
+            core.lock().unwrap().follow_up.clear();
+        }
     }
 
     fn run_side_question(
@@ -880,6 +889,116 @@ async fn the_async_completion_notice_delivery_keeps_the_live_note() {
     assert!(
         engine.note.lock().unwrap().is_none(),
         "the lanes-empty run end cleared the note"
+    );
+}
+
+/// An ordinary queued follow-up retains the note until its own final end, like steering.
+#[tokio::test]
+async fn queued_follow_up_keeps_the_note_until_its_final_end() {
+    let engine = Arc::new(NoteWitnessEngine::default());
+    let runner = burst_runner(engine.clone());
+    runner
+        .core
+        .lock()
+        .unwrap()
+        .follow_up
+        .push_back(queued_prompt(
+            "also check the deployment",
+            TurnPolicy::Queued,
+        ));
+    runner
+        .run_turn(
+            engine.clone(),
+            vec![queued_prompt("review", TurnPolicy::Queued)],
+        )
+        .await;
+    assert_eq!(
+        engine.progress_note().as_deref(),
+        Some("halfway through the review")
+    );
+    let follow_up = runner.core.lock().unwrap().follow_up.pop_front().unwrap();
+    runner.run_turn(engine.clone(), vec![follow_up]).await;
+    assert_eq!(
+        engine.note_at_notice_turn.lock().unwrap().as_deref(),
+        Some("halfway through the review")
+    );
+    assert_eq!(engine.progress_note(), None);
+}
+
+/// AgentEnd's queued-work decision must be reconsidered if the queue is withdrawn
+/// before the final idle snapshot.
+#[tokio::test]
+async fn withdrawing_follow_up_after_agent_end_clears_the_note_at_settle() {
+    let engine = Arc::new(NoteWitnessEngine::default());
+    let runner = burst_runner(engine.clone());
+    runner
+        .core
+        .lock()
+        .unwrap()
+        .follow_up
+        .push_back(queued_prompt("withdraw this follow-up", TurnPolicy::Queued));
+    *engine.withdraw_follow_up_after_end.lock().unwrap() = Some(Arc::clone(&runner.core));
+    runner
+        .run_turn(
+            engine.clone(),
+            vec![queued_prompt("review", TurnPolicy::Queued)],
+        )
+        .await;
+    assert!(!runner.core.lock().unwrap().busy);
+    assert_eq!(
+        engine.progress_note(),
+        None,
+        "idle must not retain the canceled work's note"
+    );
+}
+
+/// Clearing queued work while a run is active preserves its note, but clearing the
+/// last queued work after the run settled ends the retained note's lifetime.
+#[tokio::test]
+async fn clearing_an_idle_queue_drops_the_retained_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Arc::new(NoteWitnessEngine::default());
+    let mut worker = Worker::new(
+        WorkerConfig {
+            socket_path: dir.path().join("worker.sock"),
+            supervisor_socket_path: dir.path().join("supervisor.sock"),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "note-session".to_string(),
+            agent_dir: dir.path().join("agent"),
+            recovery_journal_path: dir.path().join("recovery.jsonl"),
+            telemetry_disabled: Some(true),
+            script: Some(json!({ "responses": ["unused"] })),
+            decision_child: false,
+        },
+        None,
+    );
+    worker.engine = engine.clone();
+    *engine.note.lock().unwrap() = Some("checking deployment".to_string());
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.created = true;
+        core.busy = true;
+        core.follow_up
+            .push_back(queued_prompt("queued", TurnPolicy::Queued));
+    }
+    assert!(worker.dispatch("clear_queue", &json!({})).await.success);
+    assert_eq!(
+        engine.progress_note().as_deref(),
+        Some("checking deployment")
+    );
+    {
+        let mut core = worker.core.lock().unwrap();
+        core.busy = false;
+        core.queued_input_suspended = true;
+        core.follow_up
+            .push_back(queued_prompt("queued", TurnPolicy::Queued));
+    }
+    assert!(worker.dispatch("clear_queue", &json!({})).await.success);
+    assert_eq!(
+        engine.progress_note(),
+        None,
+        "no remaining work can replace the stale note"
     );
 }
 
