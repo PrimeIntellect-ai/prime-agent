@@ -113,8 +113,12 @@ pub(crate) struct JournalWriteOwner {
 impl Drop for JournalWriteOwner {
     fn drop(&mut self) {
         // Closing one descriptor can leave the lock held by an inherited copy.
-        if let Err(error) = self.file.unlock() {
-            tracing::warn!("failed to release journal ownership: {error}");
+        if let Err(error) = pa_core::platform::unlock_file(&self.file) {
+            // Drop has no error channel; report without panicking if stderr is unavailable.
+            let _ = writeln!(
+                std::io::stderr(),
+                "Prime Agent: failed to release journal ownership: {error}"
+            );
         }
     }
 }
