@@ -274,3 +274,59 @@ fn the_orphan_exit_preserves_the_session_and_allows_dead_owner_lease_reclaim() {
         "the session file survives the lease release"
     );
 }
+
+/// TS `isSessionActive` counts `isBashRunning`: an orphaned worker waits for a
+/// running user bash instead of exiting under it, so the command finishes and
+/// its row lands in the session file. The command is the work being waited on,
+/// not a readiness signal: an idle orphan exits at the second availability
+/// check after the client's close (checks every 5s, a 4s window), so a worker
+/// that ignored the run would exit while the 20s command still runs.
+#[test]
+fn an_orphaned_worker_waits_for_a_running_user_bash() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let canonical_dir = std::fs::canonicalize(dir.path()).expect("canonical dir");
+    let supervisor_socket = dir.path().join("never-bound-supervisor.sock");
+    let mut worker = spawn_worker_with_window(dir.path(), &supervisor_socket, "4000");
+    let worker_socket = dir.path().join("worker.sock");
+    wait_worker_socket(&worker_socket);
+    let session_file = canonical_dir.join("orphan-bash-session.jsonl");
+    let mut client = WorkerClient::connect(&worker_socket, "orphan-e2e-bootstrap-token");
+    let created = client.request(
+        "create",
+        &serde_json::json!({"sessionPath": session_file.to_string_lossy()}),
+    );
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let command = "sleep 20; echo finished";
+    let started = client.request("execute_bash", &serde_json::json!({ "command": command }));
+    assert_eq!(started["success"], true, "execute_bash failed: {started}");
+    drop(client);
+
+    assert!(
+        wait_exit(&mut worker.child, Duration::from_secs(40)),
+        "the orphaned worker exited once the command settled"
+    );
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&session_file)
+        .expect("session file")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|entry| entry["message"].clone())
+        .filter(|message| message["role"] == "bashExecution")
+        .map(|row| {
+            serde_json::json!({
+                "command": row["command"],
+                "output": row["output"],
+                "exitCode": row["exitCode"],
+                "cancelled": row["cancelled"],
+            })
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![serde_json::json!({
+            "command": command,
+            "output": "finished\n",
+            "exitCode": 0,
+            "cancelled": false,
+        })]
+    );
+}

@@ -76,10 +76,12 @@ async fn monitor(worker: Arc<Worker>) {
         if since.elapsed() < window {
             continue;
         }
-        let ongoing = worker.core.lock().unwrap().has_ongoing_work();
+        let ongoing =
+            worker.core.lock().unwrap().has_ongoing_work() || worker.user_bash.is_running();
         if ongoing {
-            // TS `hasOngoingSessionWork`: an active run owns the worker a little
-            // longer; its turn end lets the next check reconsider.
+            // TS `hasOngoingSessionWork` (`isSessionActive`, which counts
+            // `isBashRunning`): an active run or a running user bash owns the
+            // worker a little longer; its end lets the next check reconsider.
             continue;
         }
         exit_orphaned(&worker, since).await;

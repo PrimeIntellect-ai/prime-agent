@@ -82,8 +82,10 @@ impl Worker {
             core.abort_requested = true;
         }
         // The running user bash goes with the stop: the passivation stop must
-        // never leave the user's process running after the worker exits.
-        self.user_bash.abort().await;
+        // never leave the user's process running after the worker exits. Each
+        // run kills its tree in its own task, so the stop waits (bounded) for
+        // the runs to settle (TS `abortBashForClose`).
+        self.user_bash.abort_and_settle().await;
         // TS `shutdown` closes through `session.abort()` -> `requestAbort()`:
         // the in-flight turn's fetch cancels now, not at its next event.
         self.engine.abort_in_flight_turn();

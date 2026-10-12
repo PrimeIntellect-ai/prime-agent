@@ -10,11 +10,18 @@ use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::sync::Mutex;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::worker::Worker;
 
+/// How long a run still reads output after its shell exits (TS `EXIT_STDIO_GRACE_MS`): a
+/// background process holding the inherited pipes must not hold the run open.
+const EXIT_STDIO_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
+/// How long a closing session waits for its aborted runs to settle (TS
+/// `UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS`).
+const CLOSE_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 /// Streaming window: chunks are retained (spilled to disk beyond this).
 const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 /// Streaming retention cap: the in-memory tail (TS `maxOutputBytes`).
@@ -32,10 +39,10 @@ pub(crate) struct UserBash {
     /// Awaited bash runs in flight (TS `_bashAbortControllers.size`):
     /// they count toward `isBashRunning` without claiming the slot.
     awaited: AtomicUsize,
-    /// An abort was requested: the settled result reports cancelled.
-    abort_requested: AtomicBool,
-    /// The in-flight process (user bash or an awaited run): `abort_bash` kills it.
-    child: Mutex<Option<tokio::process::Child>>,
+    /// Each invocation owns its cancellation state; a later start cannot clear an earlier abort.
+    controllers: std::sync::Mutex<Vec<std::sync::Weak<CancellationToken>>>,
+    /// Signals each settle (the slot's release or an awaited run's end).
+    settled: Notify,
 }
 
 impl UserBash {
@@ -43,26 +50,26 @@ impl UserBash {
         Self {
             running: AtomicBool::new(false),
             awaited: AtomicUsize::new(0),
-            abort_requested: AtomicBool::new(false),
-            child: Mutex::new(None),
+            controllers: std::sync::Mutex::new(Vec::new()),
+            settled: Notify::new(),
         }
     }
 
-    /// Claim the slot; `false` when a user command is already running. A fresh claim clears a stale
-    /// abort request (TS clears at each start), so a leftover flag cannot cancel a later run.
-    fn claim(&self) -> bool {
-        let claimed = self
-            .running
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
-        if claimed {
-            self.abort_requested.store(false, Ordering::SeqCst);
+    /// Claim and register synchronously, before the spawned task can race an abort.
+    fn claim(&self) -> Option<Arc<CancellationToken>> {
+        let mut controllers = self.controllers.lock().unwrap();
+        if self.running.swap(true, Ordering::SeqCst) {
+            return None;
         }
-        claimed
+        let cancellation = Arc::new(CancellationToken::new());
+        controllers.retain(|controller| controller.strong_count() > 0);
+        controllers.push(Arc::downgrade(&cancellation));
+        Some(cancellation)
     }
 
     fn release(&self) {
         self.running.store(false, Ordering::SeqCst);
+        self.settled.notify_waiters();
     }
 
     /// Whether a user bash or an awaited bash run is in flight (TS `isBashRunning`).
@@ -73,18 +80,48 @@ impl UserBash {
     /// Count one awaited run (`execute_bash_and_wait`) toward [`Self::is_running`]; the returned
     /// bracket decrements on drop, so a dropped future cannot leave the count stuck on.
     pub(crate) fn begin_awaited(&self) -> AwaitedRun<'_> {
+        let mut controllers = self.controllers.lock().unwrap();
+        let cancellation = Arc::new(CancellationToken::new());
+        controllers.retain(|controller| controller.strong_count() > 0);
+        controllers.push(Arc::downgrade(&cancellation));
         self.awaited.fetch_add(1, Ordering::SeqCst);
-        AwaitedRun { user_bash: self }
+        AwaitedRun {
+            user_bash: self,
+            cancellation,
+        }
     }
 
-    /// Kill the in-flight process (TS `abortBash` aborts every
-    /// controller); the settled runs report cancelled.
-    pub(crate) async fn abort(&self) {
-        self.abort_requested.store(true, Ordering::SeqCst);
-        let mut child = self.child.lock().await;
-        if let Some(child) = child.as_mut() {
-            let _ = child.start_kill();
-        }
+    /// Notify every in-flight run to kill its process tree (TS `abortBash`
+    /// aborts every controller); the settled runs report cancelled.
+    pub(crate) fn abort(&self) {
+        let mut controllers = self.controllers.lock().unwrap();
+        controllers.retain(|controller| {
+            if let Some(controller) = controller.upgrade() {
+                controller.cancel();
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// [`Self::abort`], then wait (bounded) until no run is in flight: each run kills its tree
+    /// in its own task, so a close must not exit ahead of the kills (TS `abortBashForClose`).
+    pub(crate) async fn abort_and_settle(&self) {
+        self.abort();
+        let settled = async {
+            loop {
+                // Armed before the check, so a settle in between still wakes this wait.
+                let notified = self.settled.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if !self.is_running() {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        let _ = tokio::time::timeout(CLOSE_SETTLE_TIMEOUT, settled).await;
     }
 }
 
@@ -166,14 +203,14 @@ impl Worker {
         };
         // Claim the slot synchronously (TS claims before the async dispatch
         // could slip a second command through).
-        if !self.user_bash.claim() {
+        let Some(cancellation) = self.user_bash.claim() else {
             return response_failure(
                 None,
                 "execute_bash",
                 "A bash command is already running",
                 None,
             );
-        }
+        };
         let exclude_from_context = payload
             .get("excludeFromContext")
             .and_then(Value::as_bool)
@@ -215,7 +252,7 @@ impl Worker {
                 cwd: &cwd,
                 prefix: prefix.as_deref(),
                 shell_path: shell_path.as_deref(),
-                user_bash: &user_bash,
+                cancellation: &cancellation,
                 on_chunk: Some((Arc::clone(&core), Arc::clone(&events))),
             })
             .await;
@@ -271,11 +308,6 @@ impl Worker {
                 None,
             );
         };
-        // A fresh run owns a fresh abort state (each TS invocation owns its
-        // own controller).
-        self.user_bash
-            .abort_requested
-            .store(false, Ordering::SeqCst);
         let (cwd, prefix, shell_path) = {
             let core = self.core.lock().unwrap();
             let settings =
@@ -297,7 +329,7 @@ impl Worker {
             cwd: &cwd,
             prefix: prefix.as_deref(),
             shell_path: shell_path.as_deref(),
-            user_bash: &user_bash,
+            cancellation: &awaited.cancellation,
             // The awaited path emits nothing (TS passes no `onChunk`).
             on_chunk: None,
         })
@@ -326,11 +358,11 @@ impl Worker {
 
     /// `abort_bash` (TS `abortBash`): kill the in-flight command; the
     /// settled run reports cancelled. Always a success.
-    pub(crate) async fn handle_abort_bash(&self) -> DaemonResponse {
+    pub(crate) fn handle_abort_bash(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("abort_bash") {
             return response;
         }
-        self.user_bash.abort().await;
+        self.user_bash.abort();
         response_success(None, "abort_bash", None)
     }
 }
@@ -360,11 +392,13 @@ fn merge_identity(mut event: Value, identity: &Value) -> Value {
 /// `isBashRunning` flag, released even when the run's future is dropped mid-await.
 pub(crate) struct AwaitedRun<'a> {
     user_bash: &'a UserBash,
+    cancellation: Arc<CancellationToken>,
 }
 
 impl Drop for AwaitedRun<'_> {
     fn drop(&mut self) {
         self.user_bash.awaited.fetch_sub(1, Ordering::SeqCst);
+        self.user_bash.settled.notify_waiters();
     }
 }
 
@@ -399,7 +433,7 @@ struct RunBash<'a> {
     cwd: &'a str,
     prefix: Option<&'a str>,
     shell_path: Option<&'a str>,
-    user_bash: &'a UserBash,
+    cancellation: &'a CancellationToken,
     /// The streaming emit target for each sanitized chunk; `None` on
     /// the awaited path, which emits nothing.
     on_chunk: Option<(
@@ -499,20 +533,33 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group on POSIX, so a kill reaches every process the
+    // command started (TS `detached: true`); Windows tree kills go through
+    // `taskkill /T`.
+    #[cfg(unix)]
+    pa_core::platform::process::set_new_process_group(command.as_std_mut());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return spawn_failure(error.to_string()),
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    {
-        let mut slot = run.user_bash.child.lock().await;
-        // A late abort that arrived before the process spawned kills it
-        // immediately; the flag still settles the run cancelled.
-        if run.user_bash.abort_requested.load(Ordering::SeqCst) {
+    // Only this run kills its tree, and only before it reaps the child: a
+    // reaped pid can be reused. A failed tree kill still stops the shell.
+    let kill_tree = |child: &mut tokio::process::Child| {
+        let killed = child
+            .id()
+            .is_some_and(|pid| pa_core::platform::process::kill_process_group_or_pid(pid as i32));
+        if !killed {
             let _ = child.start_kill();
         }
-        *slot = Some(child);
+    };
+    let abort = run.cancellation.cancelled();
+    tokio::pin!(abort);
+    // Cancellation remains sticky even if another command starts before this task runs.
+    let mut killed = run.cancellation.is_cancelled();
+    if killed {
+        kill_tree(&mut child);
     }
     let stream = std::sync::Arc::new(std::sync::Mutex::new(OutputStream {
         chunks: Vec::new(),
@@ -537,30 +584,39 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     };
     let stdout_pump = stdout.map(|pipe| pump(Box::new(pipe)));
     let stderr_pump = stderr.map(|pipe| pump(Box::new(pipe)));
-    match (stdout_pump, stderr_pump) {
-        (Some(stdout_pump), Some(stderr_pump)) => {
-            futures::future::join(stdout_pump, stderr_pump).await;
+    let mut pumps = Box::pin(async move {
+        match (stdout_pump, stderr_pump) {
+            (Some(stdout_pump), Some(stderr_pump)) => {
+                futures::future::join(stdout_pump, stderr_pump).await;
+            }
+            (Some(pump), None) | (None, Some(pump)) => pump.await,
+            (None, None) => {}
         }
-        (Some(pump), None) | (None, Some(pump)) => pump.await,
-        (None, None) => {}
+    });
+    let mut pumps_done = false;
+    // The run settles on the shell's exit, not on its pipes closing
+    // (abort_bash may kill it meanwhile; a signal death reports no exit code).
+    let status = loop {
+        tokio::select! {
+            // If both are ready, kill while the unreaped child still pins its PID.
+            biased;
+            () = &mut abort, if !killed => {
+                killed = true;
+                kill_tree(&mut child);
+            }
+            status = child.wait() => break status,
+            () = &mut pumps, if !pumps_done => pumps_done = true,
+        }
+    };
+    // Descendants still holding the pipes (a `cmd &`) get the grace, then the
+    // pipes close (TS `waitForChildProcess`).
+    if !pumps_done {
+        let _ = tokio::time::timeout(EXIT_STDIO_GRACE, &mut pumps).await;
     }
-    // Take the child back for the exit status (abort_bash may have killed
-    // it meanwhile; a signal death reports no exit code).
-    let mut child = {
-        let mut slot = run.user_bash.child.lock().await;
-        slot.take()
-    };
-    let exit_code = match child.as_mut() {
-        Some(child) => child
-            .wait()
-            .await
-            .ok()
-            .and_then(|status| status.code())
-            .map(i64::from),
-        None => None,
-    };
-    let cancelled = run.user_bash.abort_requested.load(Ordering::SeqCst);
-    // The reader tasks joined, so this is the last reference; a poisoned
+    drop(pumps);
+    let exit_code = status.ok().and_then(|status| status.code()).map(i64::from);
+    let cancelled = run.cancellation.is_cancelled();
+    // The pumps are dropped, so this is the last reference; a poisoned
     // lock (a reader panicked) keeps whatever it collected.
     let mut stream = match Arc::try_unwrap(stream) {
         Ok(mutex) => mutex
@@ -917,6 +973,30 @@ mod tests {
     }
 
     #[test]
+    fn an_abort_stays_with_every_admitted_run_when_another_run_starts() {
+        let user_bash = UserBash::new();
+        let streamed = user_bash.claim().expect("claim slot");
+        let first = user_bash.begin_awaited();
+        let second = user_bash.begin_awaited();
+        user_bash.abort();
+        let later = user_bash.begin_awaited();
+        assert_eq!(
+            [
+                streamed.is_cancelled(),
+                first.cancellation.is_cancelled(),
+                second.cancellation.is_cancelled(),
+                later.cancellation.is_cancelled()
+            ],
+            [true, true, true, false],
+        );
+        user_bash.abort();
+        assert!(later.cancellation.is_cancelled());
+        user_bash.release();
+        drop((first, second, later));
+        assert!(!user_bash.is_running());
+    }
+
+    #[test]
     fn an_abandoned_awaited_run_releases_the_flag() {
         let user_bash = UserBash::new();
         assert!(!user_bash.is_running());
@@ -1040,6 +1120,182 @@ mod tests {
         assert!(
             rows[0].get("exitCode").is_none(),
             "killed runs carry no exit code"
+        );
+    }
+
+    /// The next `session_event` of `event_type` (bounded: a missing event fails the test).
+    #[cfg(unix)]
+    async fn next_session_event(
+        events: &mut tokio::sync::broadcast::Receiver<Arc<crate::worker::OutboundFrame>>,
+        event_type: &str,
+    ) -> Value {
+        let next = async {
+            loop {
+                let frame = events.recv().await.expect("the event stream stays live");
+                if frame.outbound_type != "session_event" {
+                    continue;
+                }
+                let outbound: Value = serde_json::from_slice(&frame.payload).expect("event JSON");
+                if outbound["event"]["type"] == json!(event_type) {
+                    return outbound["event"].clone();
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), next)
+            .await
+            .unwrap_or_else(|_| panic!("no {event_type} event arrived"))
+    }
+
+    /// The child a running user bash command forked (the shell runs `sh`, which execs `sleep`).
+    /// The child holds a FIFO's write end, so the FIFO reader's EOF is the child's death.
+    #[cfg(unix)]
+    struct ForkedChild {
+        /// Killed on drop until [`Self::assert_killed`] saw the death: a failing run leaks nothing.
+        pid: Option<i32>,
+        gone: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    #[cfg(unix)]
+    impl ForkedChild {
+        async fn start(
+            worker: &Worker,
+            cwd: &std::path::Path,
+            events: &mut tokio::sync::broadcast::Receiver<Arc<crate::worker::OutboundFrame>>,
+        ) -> Self {
+            let fifo = cwd.join("child-alive");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("run mkfifo");
+            assert!(made.success(), "mkfifo failed: {made}");
+            let response = worker
+                .dispatch(
+                    "execute_bash",
+                    &json!({
+                        "activeSessionId": "bash-session",
+                        "command": r#"sh -c 'exec 3<>child-alive; echo "ready $$"; exec sleep 60'; echo after"#,
+                    }),
+                )
+                .await;
+            assert!(response.success, "failed: {response:?}");
+            let ready = next_session_event(events, "bash_output").await;
+            let pid = ready["chunk"]
+                .as_str()
+                .and_then(|chunk| chunk.trim().strip_prefix("ready "))
+                .and_then(|pid| pid.parse().ok());
+            assert!(pid.is_some(), "the child reports its pid: {ready}");
+            // The child opened its end before `ready`, so this open returns at once.
+            let mut reader = std::fs::File::open(&fifo).expect("open the fifo");
+            let gone = tokio::task::spawn_blocking(move || {
+                std::io::copy(&mut reader, &mut std::io::sink()).expect("drain the fifo");
+            });
+            ForkedChild {
+                pid,
+                gone: Some(gone),
+            }
+        }
+
+        async fn assert_killed(&mut self) {
+            let gone = self.gone.take().expect("awaited once");
+            tokio::time::timeout(std::time::Duration::from_secs(10), gone)
+                .await
+                .expect("the command's child is still running")
+                .expect("the fifo reader joins");
+            self.pid = None;
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ForkedChild {
+        fn drop(&mut self) {
+            if let Some(pid) = self.pid {
+                let _ = pa_core::platform::process::kill_pid(
+                    pid,
+                    pa_core::platform::process::Signal::Kill,
+                );
+            }
+        }
+    }
+
+    /// `abort_bash` kills every process the command started, not just the shell: a surviving
+    /// child would keep running and hold the output pipes open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abort_bash_kills_the_commands_child_processes() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let mut events = worker.events.subscribe();
+        let mut child = ForkedChild::start(&worker, cwd.path(), &mut events).await;
+        let aborted = worker
+            .dispatch("abort_bash", &json!({ "activeSessionId": "bash-session" }))
+            .await;
+        assert!(aborted.success, "failed: {aborted:?}");
+        child.assert_killed().await;
+        assert_eq!(
+            next_session_event(&mut events, "bash_end").await,
+            json!({
+                "type": "bash_end",
+                "exitCode": null,
+                "cancelled": true,
+                "truncated": false,
+            })
+        );
+    }
+
+    /// The graceful stop's abort reaches the command's children too: the worker's exit never
+    /// leaves the user's processes running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_the_running_commands_child_processes() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let mut events = worker.events.subscribe();
+        let mut child = ForkedChild::start(&worker, cwd.path(), &mut events).await;
+        let stopped = worker.dispatch("shutdown", &json!({})).await;
+        assert!(stopped.success, "failed: {stopped:?}");
+        assert!(
+            !worker.user_bash.is_running(),
+            "the stop answered before the aborted run settled"
+        );
+        child.assert_killed().await;
+    }
+
+    /// A command that backgrounds a process settles when its shell exits: the background process
+    /// holding the inherited output pipes does not hold the run open (TS `waitForChildProcess`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_backgrounded_process_does_not_hold_the_run_open() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let settled = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            worker.dispatch(
+                "execute_bash_and_wait",
+                &json!({
+                    "activeSessionId": "bash-session",
+                    "command": "sleep 60 & echo $! > background.pid; echo started",
+                }),
+            ),
+        )
+        .await;
+        // The background process outlives the run (TS leaves it running too).
+        if let Some(pid) = std::fs::read_to_string(cwd.path().join("background.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok())
+        {
+            let _ =
+                pa_core::platform::process::kill_pid(pid, pa_core::platform::process::Signal::Kill);
+        }
+        let response = settled.expect("the run waited on the backgrounded process");
+        assert!(response.success, "failed: {response:?}");
+        assert_eq!(
+            response.data,
+            Some(json!({
+                "output": "started\n",
+                "exitCode": 0,
+                "cancelled": false,
+                "truncated": false,
+            }))
         );
     }
 
