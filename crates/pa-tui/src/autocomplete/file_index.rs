@@ -371,11 +371,11 @@ fn spawn_applier(
     });
 }
 
-/// Apply one watcher batch to the index by each path's CURRENT existence — event kinds
-/// differ per editor and platform, and existence covers create, remove, rename, and
-/// modify uniformly. A watcher error disables the index; a rescan notice or a changed
-/// `.gitignore`/`.ignore` file drops it to `Unbuilt` for a lazy rebuild; a batch that
-/// grows it past [`MAX_INDEX_ENTRIES`] disables it.
+/// Apply one watcher batch using each path's current existence. Structural events
+/// for existing directories invalidate their potentially replaced descendants;
+/// ordinary file saves keep the typed-form fast path. A watcher error disables the
+/// index; rescan notices, repository markers, or changed ignore rules trigger a lazy
+/// rebuild. A batch exceeding [`MAX_INDEX_ENTRIES`] disables the index.
 fn apply_batch(
     state: &mut IndexState,
     batch: &[notify::Result<Event>],
@@ -387,6 +387,7 @@ fn apply_batch(
         return;
     }
     let mut rels: BTreeSet<String> = BTreeSet::new();
+    let mut replaced: BTreeSet<String> = BTreeSet::new();
     for event in batch.iter().flatten() {
         if event.need_rescan() {
             *state = IndexState::Unbuilt;
@@ -398,12 +399,35 @@ fn apply_batch(
         if event.kind.is_access() {
             continue;
         }
-        rels.extend(
-            event
-                .paths
-                .iter()
-                .filter_map(|path| event_rel(path, base, canonical_base)),
-        );
+        for rel in event
+            .paths
+            .iter()
+            .filter_map(|path| event_rel(path, base, canonical_base))
+        {
+            // A directory's name event may be the only event for an entire
+            // moved subtree. Its current existence cannot prove it is still
+            // the indexed directory, especially after coalesced replacements.
+            if matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Remove(_)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    | notify::EventKind::Any
+                    | notify::EventKind::Other
+            ) {
+                replaced.insert(rel.clone());
+            }
+            rels.insert(rel);
+        }
+    }
+    // Creating/removing a repository boundary changes whether gitignore
+    // applies. Check its marker before pruning events inside .git.
+    if rels
+        .iter()
+        .any(|rel| rel.rsplit('/').next() == Some(GIT_DIR))
+    {
+        *state = IndexState::Unbuilt;
+        return;
     }
     let rels: Vec<String> = rels
         .iter()
@@ -434,6 +458,13 @@ fn apply_batch(
         } else {
             rel.clone()
         };
+        // Replacing an indexed directory may change every descendant without
+        // child events. Rebuild lazily only for structural events; ordinary
+        // editor saves and directory metadata changes remain no-ops.
+        if is_directory && replaced.contains(rel) && (rel.is_empty() || contains(entries, &form)) {
+            *state = IndexState::Unbuilt;
+            return;
+        }
         // The typed-form no-op: the common editor save changes nothing.
         if contains(entries, &form) {
             continue;
@@ -650,6 +681,22 @@ mod freshness_tests {
                 .add_path(base.join("dest"))),
         ];
         apply_batch(&mut state, &events, &base, &base);
+        assert_matches_live_walk(&state, &base);
+    }
+
+    #[test]
+    fn coalesced_base_replacement_drops_the_old_tree() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path().join("base");
+        std::fs::create_dir(&base).expect("mkdir");
+        std::fs::write(base.join("old.rs"), "old").expect("write");
+        let mut state = snapshot(&base);
+        std::fs::rename(&base, outer.path().join("old")).expect("rename out");
+        std::fs::create_dir(&base).expect("mkdir");
+        std::fs::write(base.join("new.rs"), "new").expect("write");
+        let event =
+            Event::new(notify::EventKind::Remove(RemoveKind::Folder)).add_path(base.clone());
+        apply_batch(&mut state, &[Ok(event)], &base, &base);
         assert_matches_live_walk(&state, &base);
     }
 
