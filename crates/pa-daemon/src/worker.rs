@@ -25,11 +25,12 @@ pub use queue::Lane;
 pub use queue::QueuePriority;
 pub(crate) use queue::{
     admit_autonomous_follow_up, admit_bash_completion_notice, admit_goal_follow_up,
-    checkpoint_queue_recovery, enqueue_priority, gather_delivery_batch, parse_custom_message,
-    parse_prompt_images, queue_lanes, restore_queue_snapshot, restored_turn_policy,
-    withdraw_bash_completion_notice, QueueCheckpoint, QueueLanes, QueuedItem, TurnPolicy,
-    TurnSettle, ABORTED_TURN_SETTLE_ERROR, PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED,
-    QUEUED_PROMPT_DELETED, SIDE_QUESTION_SETTLE_TIMEOUT,
+    checkpoint_queue_recovery, clear_withdrawn_progress_note, enqueue_priority,
+    gather_delivery_batch, parse_custom_message, parse_prompt_images, queue_lanes,
+    restore_queue_snapshot, restored_turn_policy, withdraw_bash_completion_notice, QueueCheckpoint,
+    QueueLanes, QueuedItem, TurnPolicy, TurnSettle, ABORTED_TURN_SETTLE_ERROR,
+    PROMPT_ABORTED_BEFORE_DELIVERY, QUEUED_INPUT_SUSPENDED, QUEUED_PROMPT_DELETED,
+    SIDE_QUESTION_SETTLE_TIMEOUT,
 };
 
 mod create;
@@ -460,6 +461,7 @@ impl Worker {
                 concrete.set_autonomous_admission(autonomous_sink);
                 let purge_core = Arc::clone(&core);
                 let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
                 let autonomous_purge: std::sync::Arc<dyn Fn() + Send + Sync> =
                     std::sync::Arc::new(move || {
                         {
@@ -470,6 +472,9 @@ impl Worker {
                             core.steering.retain(|item| {
                                 item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
                             });
+                            if let Some(engine) = purge_engine.upgrade() {
+                                clear_withdrawn_progress_note(&core, engine.as_ref());
+                            }
                         }
                         // The withdraw settles the rows: dropping the last
                         // queued row must not leave busy=true promising a
@@ -525,11 +530,15 @@ impl Worker {
                 // goal-context turns.
                 let purge_core = Arc::clone(&core);
                 let purge_recovery = Arc::clone(&recovery);
+                let purge_engine = Arc::downgrade(concrete);
                 let queue_purge: std::sync::Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                     {
                         let mut core = purge_core.lock().unwrap();
                         core.steering.retain(|item| !is_goal_context_item(item));
                         core.follow_up.retain(|item| !is_goal_context_item(item));
+                        if let Some(engine) = purge_engine.upgrade() {
+                            clear_withdrawn_progress_note(&core, engine.as_ref());
+                        }
                     }
                     // Same settle as the autonomous withdraw: a pause/clear
                     // cannot leave busy=true.
@@ -621,10 +630,33 @@ impl Worker {
                 });
                 let withdraw_core = Arc::clone(&core);
                 let withdraw_recovery = Arc::clone(&recovery);
+                let withdraw_engine = Arc::downgrade(concrete);
                 let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
-                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, &notice);
+                    let engine = withdraw_engine.upgrade();
+                    withdraw_bash_completion_notice(
+                        &withdraw_recovery,
+                        &withdraw_core,
+                        &notice,
+                        engine.as_deref().map(|engine| engine as &dyn SessionEngine),
+                    );
                 });
                 concrete.set_bash_notice_sinks(completion, consumed);
+                // The accepted note frames as a session event on the pump.
+                let note_core = Arc::clone(&core);
+                let note_events = events.clone();
+                let note_emit: pa_core::session_engine::rlm_host::RlmProgressNoteEmit =
+                    Arc::new(move |message, timestamp| {
+                        emit_worker_event_with(
+                            &note_core,
+                            &note_events,
+                            json!({
+                                "type": "rlm_progress_note",
+                                "message": message,
+                                "timestamp": timestamp,
+                            }),
+                        );
+                    });
+                concrete.set_progress_note_emit(note_emit);
             }
             // The live roster activity feed (TS `observeRosterEvent`): busy
             // flips and trigger events coalesce into `worker_roster_delta`

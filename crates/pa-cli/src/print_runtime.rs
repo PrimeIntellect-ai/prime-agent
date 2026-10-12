@@ -755,6 +755,7 @@ pub(crate) async fn build_headless_engine_with(
                 .collect(),
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host,
+            progress_note_emit: None,
             rlm_depth,
             daemonless: true,
             model_info: Some(model.clone()),

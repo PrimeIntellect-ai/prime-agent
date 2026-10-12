@@ -56,6 +56,11 @@ pseudonymous installation identity for Prime Agent product analytics.
 - `parse_bool_override(value)`, `existing_install_id(agent_dir)`
 - Sinks: `AnalyticsSink` (+ `ANALYTICS_ENDPOINT`), `FileSink`, `NoopSink`, `MockSink`
   (+ `RecordedBatch`)
+- `AnalyticsSink::new(endpoint)` and `with_timeout(endpoint, duration)` retain
+  their default HTTP clients. `with_http_builder(endpoint, builder)` lets the
+  caller supply its trust configuration while retaining the product timeout;
+  pa-core composition supplies the shared extra-CA builder without adding a
+  workspace dependency to this leaf crate.
 
 ## Placement
 
