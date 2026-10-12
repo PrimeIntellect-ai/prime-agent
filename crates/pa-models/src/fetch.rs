@@ -76,7 +76,7 @@ impl CatalogFetcher {
     /// Panics if the reqwest client fails to build.
     #[must_use]
     pub fn with_limits(timeout: Duration, max_bytes: usize) -> Self {
-        let client = reqwest::Client::builder()
+        let client = pa_ai::utils::tls::http_client_builder()
             // A moved catalog must be a client change, never a silent hop.
             .redirect(reqwest::redirect::Policy::none())
             .build()

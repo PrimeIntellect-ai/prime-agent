@@ -111,6 +111,7 @@ impl Worker {
                         }
                     }
                 }
+                crate::worker::clear_withdrawn_progress_note(&core, self.engine.as_ref());
                 (status, true)
             } else {
                 (status, false)
