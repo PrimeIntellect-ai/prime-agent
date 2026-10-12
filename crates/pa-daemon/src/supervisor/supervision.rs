@@ -166,17 +166,30 @@ impl Supervisor {
                 descriptor.lifecycle = DaemonWorkerLifecycle::Failed;
                 descriptor.last_failure_at = Some(util::now_iso());
                 let journal_path = descriptor.recovery_journal_path.clone();
+                let owner_pid = descriptor.pid as u32;
+                let owner_start_id = descriptor.process_start_id.clone();
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
                 // The give-up settles its own revival evidence: the journal's busy records
                 // are what a later boot reads as "interrupted live work" — the give-up
                 // verdict must outlive them.
-                if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
-                    std::path::Path::new(&journal_path),
-                    "worker_gave_up",
+                if super::worker_lifecycle::recovery_journal_owner_is_gone(
+                    is_process_alive(owner_pid).ok(),
+                    owner_start_id.as_deref(),
+                    crate::lease::get_process_start_id(owner_pid).as_deref(),
                 ) {
+                    if let Err(error) = crate::journal::WorkerRecoveryJournal::settle_busy_records(
+                        std::path::Path::new(&journal_path),
+                        "worker_gave_up",
+                    ) {
+                        self.log_line(&format!(
+                            "session worker {} give-up journal settle failed: {error:#}",
+                            resident.worker_id
+                        ));
+                    }
+                } else {
                     self.log_line(&format!(
-                        "session worker {} give-up journal settle failed: {error:#}",
+                        "session worker {} give-up journal preserved: owner death is unproven",
                         resident.worker_id
                     ));
                 }
@@ -298,12 +311,12 @@ impl Supervisor {
             // discloses the aborted run in the rebuilt transcript, and the record is
             // consumed by the reply.
             let pending = {
-                let mut journal = self
-                    .compaction_journal
-                    .lock()
-                    .expect("compaction journal lock");
-                match journal.pending(&descriptor.root_active_session_id) {
-                    Ok(pending) => pending.cloned(),
+                match self.with_compaction_journal(|journal| {
+                    Ok(journal
+                        .pending(&descriptor.root_active_session_id)?
+                        .cloned())
+                }) {
+                    Ok(pending) => pending,
                     Err(error) => {
                         self.log_line(&format!(
                             "terminal compaction journal retry failed for {}: {error:#}",
@@ -393,11 +406,8 @@ impl Supervisor {
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             if persisted {
-                if let Err(error) = self
-                    .compaction_journal
-                    .lock()
-                    .expect("compaction journal lock")
-                    .consume(&root_active_session_id)
+                if let Err(error) =
+                    self.with_compaction_journal(|journal| journal.consume(&root_active_session_id))
                 {
                     self.log_line(&format!(
                         "terminal compaction journal consume failed for {root_active_session_id}: {error:#}"
@@ -718,19 +728,17 @@ impl Supervisor {
                                     }
                                 }
                                 Some("compaction_end") => {
-                                    let clear_error = {
-                                        let mut journal = reader_supervisor
-                                            .compaction_journal
-                                            .lock()
-                                            .expect("compaction journal lock");
-                                        reader_resident.compaction.observe_end();
-                                        active_session_id.as_deref().and_then(|active_session_id| {
-                                            // A failed clear keeps the record pending
-                                            // (write-before-forget, so memory and disk agree);
-                                            // retried by the next forwarded end.
-                                            journal.clear(active_session_id).err()
+                                    let clear_error = reader_supervisor
+                                        .with_compaction_journal(|journal| {
+                                            reader_resident.compaction.observe_end();
+                                            if let Some(active_session_id) =
+                                                active_session_id.as_deref()
+                                            {
+                                                journal.clear(active_session_id)?;
+                                            }
+                                            Ok(())
                                         })
-                                    };
+                                        .err();
                                     if let Some(error) = clear_error {
                                         reader_supervisor.log_line(&format!(
                                             "terminal compaction journal clear failed for {active_session_id:?}: {error:#}"
