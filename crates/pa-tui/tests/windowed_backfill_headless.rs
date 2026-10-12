@@ -20,6 +20,8 @@ struct MockSupervisor {
     /// Hold the history backfill page instead of answering it: the plan then
     /// leaves the request in flight across an exit or a transcript rebuild.
     hold_backfill: bool,
+    validation_state: Option<Value>,
+    changed_prefix: bool,
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -30,6 +32,10 @@ impl MockSupervisor {
             windowed,
             failures: 0,
             hold_backfill: false,
+            validation_state: Some(
+                json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "s1"}),
+            ),
+            changed_prefix: false,
             requests,
         }
     }
@@ -70,6 +76,17 @@ impl MockSupervisor {
                 "attach" => {
                     write_json(&mut writer, &attach_response(id, self.windowed));
                 }
+                "get_connection_state" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id, "command": "get_connection_state",
+                            "success": self.validation_state.is_some(),
+                            "data": self.validation_state,
+                            "error": if self.validation_state.is_none() { json!("validation rejected") } else { Value::Null },
+                        }),
+                    );
+                }
                 "get_messages" => {
                     self.requests.lock().unwrap().push(command.clone());
                     if self.failures > 0 {
@@ -99,7 +116,13 @@ impl MockSupervisor {
                             );
                             continue;
                         }
-                        write_json(&mut writer, &get_messages_response(id, self.windowed));
+                        let mut response = get_messages_response(id, self.windowed);
+                        if self.changed_prefix {
+                            // Simulate a compaction that happened before the prefix read,
+                            // while its completion event has not yet been delivered.
+                            response["data"]["messages"] = json!(all_messages()[4..8]);
+                        }
+                        write_json(&mut writer, &response);
                         continue;
                     }
                     // A cursor-less fetch is a transcript rebuild. Release the
@@ -187,6 +210,7 @@ fn attach_response(id: &str, windowed: bool) -> Value {
             "model": "faux-1",
             "isStreaming": false,
             "isCompacting": false,
+            "compactionCount": 0,
             "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
         },
         "messages": snapshot_messages,
@@ -286,12 +310,28 @@ fn run_attached_with_failures(
     failures: usize,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
+    run_attached_with_validation(
+        windowed, failures, /*changed_prefix*/ false, None, steps,
+    )
+}
+
+fn run_attached_with_validation(
+    windowed: bool,
+    failures: usize,
+    changed_prefix: bool,
+    validation_state: Option<Value>,
+    steps: Vec<HeadlessStep>,
+) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
     supervisor.failures = failures;
+    if changed_prefix {
+        supervisor.validation_state = validation_state;
+        supervisor.changed_prefix = true;
+    }
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -555,4 +595,45 @@ fn a_reload_rebuild_during_an_in_flight_backfill_keeps_rows_unique_and_ordered()
         Some("msg-00"),
         "the rebuild's true top renders the first message: {final_frame}"
     );
+}
+
+#[test]
+fn a_changed_or_unverifiable_prefix_is_rejected_before_the_compaction_event() {
+    for state in [
+        Some(json!({"compactionCount": 1, "sessionId": "sess-1", "activeSessionId": "s1"})),
+        Some(json!({"sessionId": "sess-1", "activeSessionId": "s1"})),
+        Some(json!({"compactionCount": 0, "sessionId": "replacement", "activeSessionId": "s1"})),
+        Some(
+            json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "replacement"}),
+        ),
+        None,
+    ] {
+        let (frames, requests) = run_attached_with_validation(
+            /*windowed*/ true,
+            /*failures*/ 0,
+            /*changed_prefix*/ true,
+            state,
+            vec![HeadlessStep::WaitRender {
+                needle: "Older history could not be loaded".to_string(),
+                timeout_ms: 5000,
+            }],
+        );
+        for frame in &frames {
+            let markers = collapsed_markers(frame);
+            assert!(
+                markers.windows(2).all(|pair| pair[0] < pair[1]),
+                "the changed prefix must never duplicate existing tail rows: {frame}"
+            );
+        }
+        assert_eq!(requests.len(), 1, "one prefix read before validation");
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("Older history could not be loaded")),
+            "mismatched or unverified history is reported rather than silently prepended"
+        );
+        assert!(!frames
+            .iter()
+            .any(|frame| frame.contains("timed out waiting")));
+    }
 }
