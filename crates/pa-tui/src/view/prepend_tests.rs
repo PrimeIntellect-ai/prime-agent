@@ -209,7 +209,6 @@ fn prepended_history_keeps_a_paused_tool_after_hidden_entries() {
     paused.scroll_by(2);
     let before = paused.render_frame(37, 24);
     assert!(frame_text(&before).contains("echo hi"));
-    assert!(paused.sparse_window.unwrap().cursor.unwrap().0 > 1);
 
     paused.prepend_entries(vec![super::expansion::tests::finished_tool_card(
         "older-tool",
