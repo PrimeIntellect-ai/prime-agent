@@ -24,6 +24,8 @@ uuid = { version = "1", features = ["v4", "v7"] }
 [dev-dependencies]
 filetime = "0.2"
 tempfile = "3"
+# The orphan-journal e2e signals and probes process groups directly.
+nix = { version = "0.29", features = ["signal", "process"] }
 socket2 = "0.6"
 # The supervisor property suite draws sibling rosters for the live
 # rename ladder; the plain std features are enough (no fork/timeout).

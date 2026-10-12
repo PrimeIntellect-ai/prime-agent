@@ -179,6 +179,42 @@ async fn a_relaunch_spawn_record_serves_the_durable_persist() {
     .expect("parse the spawn record");
     assert_eq!(persisted.lifecycle, DaemonWorkerLifecycle::Starting);
     assert!(persisted.pid > 0, "the spawned pid rides the record");
+
+    let first_path = persisted
+        .orphan_process_journal_path
+        .expect("first journal");
+    std::fs::write(&first_path, "").expect("old generation journal");
+    assert!(supervisor.relaunch_worker(&resident).await.is_err());
+    let replacement: DaemonWorkerDescriptor =
+        serde_json::from_slice(&std::fs::read(&descriptor_path).expect("replacement spawn record"))
+            .expect("parse replacement");
+    let replacement_path = replacement
+        .orphan_process_journal_path
+        .as_ref()
+        .expect("replacement journal");
+    assert_ne!(&first_path, replacement_path, "each spawn owns its journal");
+    let launch_env = crate::descriptor::worker_launch_env(
+        &supervisor.options.agent_dir,
+        &supervisor.options.socket_path.to_string_lossy(),
+        "replacement-nonce",
+        &replacement,
+    );
+    assert_eq!(
+        launch_env.get(pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV),
+        Some(replacement_path),
+        "the persisted replacement path is the worker launch environment",
+    );
+    let retained = b"replacement-owned journal records\n";
+    std::fs::write(replacement_path, retained).expect("replacement journal");
+    pa_core::kernel::orphan_journal::reap_worker_orphan_processes(
+        Path::new(&first_path),
+        i32::try_from(persisted.pid).expect("worker pid"),
+    );
+    assert!(
+        !Path::new(&first_path).exists(),
+        "the old journal was swept"
+    );
+    assert_eq!(std::fs::read(replacement_path).unwrap(), retained);
 }
 
 /// A spawn record that cannot land (the descriptor path is occupied) must
