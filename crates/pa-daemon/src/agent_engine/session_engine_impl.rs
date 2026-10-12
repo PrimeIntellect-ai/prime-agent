@@ -3,11 +3,11 @@
 //! turn state machine, and the export/telemetry reads.
 
 use super::{
-    artifact_reference, json, map_thinking_level, now_millis, persisted_rlm_max_depth,
-    AgentSessionEngine, Arc, BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun,
-    CompactionOutcome, CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection,
-    ParentIdentity, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
-    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
+    BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
+    CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
+    PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
+    StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 use pa_core::session_engine::agent_messaging::AgentFamilyRelationship;
 
@@ -837,28 +837,13 @@ impl SessionEngine for AgentSessionEngine {
                 .ok_or_else(|| anyhow::anyhow!("unknown thinking level \"{thinking}\""))?;
         }
         // The depth bound's precedence: chat override > inherited > global
-        // setting > env > default.
-        let (max_depth, source) = persisted_rlm_max_depth(identity.session_file.as_deref())
-            .map(|depth| (depth, "chat"))
-            .or_else(|| {
-                identity
-                    .rlm_max_depth
-                    .map(|depth| (u64::from(depth), "inherited"))
-            })
-            .or_else(|| {
-                let settings =
-                    pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
-                settings.get_rlm_max_depth().map(|depth| (depth, "global"))
-            })
-            .or_else(|| {
-                std::env::var("RLM_MAX_DEPTH")
-                    .ok()
-                    .filter(|value| !value.is_empty())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|value| *value >= 1)
-                    .map(|depth| (depth, "env"))
-            })
-            .unwrap_or((u64::from(DEFAULT_RLM_MAX_DEPTH), "default"));
+        // setting > env > default (the shared resolver).
+        let (max_depth, source) = pa_core::session_engine::rlm_host::resolve_rlm_max_depth(
+            identity.session_file.as_deref(),
+            identity.rlm_max_depth,
+            &self.cwd(),
+            &self.config.agent_dir,
+        );
         *self.rlm_max_depth_source.lock().expect("depth source lock") = source;
         // The semantic-edge identity (TS `semanticEdgeLedgerPath` +
         // provenance): a spawned child's ledger lives in its rlm session

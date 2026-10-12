@@ -24,6 +24,10 @@ use pa_types::session::CustomMessage;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use pa_core::session_engine::rlm_host::{
+    rlm_child_session_dir, rlm_depth_limit_error, spawn_name_unavailable_error,
+};
+
 use crate::rlm_child_model::{
     assert_thinking_supported, cap_text, compact_rlm_text, resolve_child_model, rlm_child_label,
     ANSWER_TEXT_MAX_CHARS,
@@ -31,7 +35,7 @@ use crate::rlm_child_model::{
 use crate::supervisor_link::SupervisorLink;
 use crate::util::now_ms;
 
-pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
+pub use pa_core::session_engine::rlm_host::DEFAULT_RLM_MAX_DEPTH;
 
 /// Close reasons: `Killed` — jobs cancel, the session file archives;
 /// `Shutdown` — the resume entry survives, so a later scheduled wake can
@@ -890,7 +894,7 @@ impl SupervisorChildSessionsInner {
         let children = self.children.lock().await;
         for record in children.iter() {
             if record.lock().await.session_name == name {
-                return Err(spawn_name_unavailable(name, depth));
+                return Err(spawn_name_unavailable_error(name, depth));
             }
         }
         Ok(())
@@ -915,26 +919,9 @@ impl SupervisorChildSessionsInner {
 
     /// The per-child session directory under the parent's artifacts tree.
     fn child_session_dir(&self, child_id: &str, identity: &ParentIdentity) -> Result<PathBuf> {
-        let base = match &identity.session_id {
-            Some(session_id) => self
-                .agent_dir
-                .join("session-artifacts")
-                .join(session_id)
-                .join(child_id),
-            // No persistent parent artifacts dir: an ephemeral temp dir.
-            None => std::env::temp_dir().join(format!("prime-agent-rlm-{child_id}")),
-        };
-        std::fs::create_dir_all(&base)
-            .with_context(|| format!("create RLM child session dir {}", base.display()))?;
-        Ok(base)
+        rlm_child_session_dir(&self.agent_dir, identity.session_id.as_deref(), child_id)
+            .with_context(|| format!("spawn RLM child session dir {child_id}"))
     }
-}
-
-/// One source so the reservation refusal and the availability check stay byte-identical.
-fn spawn_name_unavailable(name: &str, depth: u32) -> anyhow::Error {
-    anyhow!(
-        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
-    )
 }
 
 mod host;

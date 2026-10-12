@@ -49,6 +49,12 @@ pub struct SessionEngineConfig {
     /// The session's depth in the RLM recursion tree (0 for top-level
     /// sessions); gates the `refine.*` host requests.
     pub rlm_depth: Option<u32>,
+    /// Whether the session runs without a daemon: nothing outside the
+    /// session itself (no scheduler, no bash-completion wake) starts a
+    /// turn. Set explicitly by the embedding; print sessions are
+    /// daemonless with or without an inline-subagent host, daemon
+    /// workers are not.
+    pub daemonless: bool,
     /// The full registry model (input modalities for `model.info`); the
     /// engine derives minimal facts from `model` when absent.
     pub model_info: Option<pa_types::ai::Model>,
@@ -518,7 +524,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         // A spawned child's prompt must read "depth: N (not root)" with
         // the child-agent reply doctrine, never the root identity.
         rlm_depth: config.rlm_depth,
-        daemonless: config.rlm_subagent_host.is_none(),
+        daemonless: config.daemonless,
+        can_spawn: config.rlm_subagent_host.is_some(),
         generic_mcp_servers,
         prompt_guidelines: Some(prompt_guidelines),
         ..Default::default()
