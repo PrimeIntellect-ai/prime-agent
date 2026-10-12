@@ -710,7 +710,9 @@ mod freshness_tests {
         let outer = tempfile::tempdir().expect("tempdir");
         let base = outer.path();
         std::fs::create_dir_all(base.join("dir/nested")).expect("mkdir");
+        std::fs::create_dir(base.join("dir-other")).expect("mkdir sibling");
         std::fs::write(base.join("dir/nested/file.rs"), "file").expect("write");
+        std::fs::write(base.join("dir-other/sibling.rs"), "sibling").expect("write");
         let mut state = snapshot(base);
         // Fill the unaffected portion in memory: exercising the cap must not
         // require creating a million files on the test runner.
@@ -725,6 +727,8 @@ mod freshness_tests {
         let events = [
             Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
                 .add_path(base.join("dir"))),
+            Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
+                .add_path(base.join("dir-other"))),
             Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
                 .add_path(base.join("dir/nested"))),
         ];
