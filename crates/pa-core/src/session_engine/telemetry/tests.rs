@@ -542,7 +542,13 @@ async fn session_counters_ride_session_ended() {
 /// `telemetry.json` (one user across both products) and mirrors events to
 /// the local JSONL file under that id.
 #[tokio::test]
+// This test's delivery task reads the same process-wide env as the assertion.
+// The current-thread runtime's task never acquires this test-only mutex.
+#[allow(clippy::await_holding_lock)]
 async fn build_client_reuses_the_ts_installation_id_and_mirrors() {
+    let _env_lock = crate::packages::test_support::ENV_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).unwrap();
