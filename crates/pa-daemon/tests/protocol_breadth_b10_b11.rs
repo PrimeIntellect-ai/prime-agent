@@ -694,7 +694,7 @@ fn wave_b10_heartbeat_snapshot_fallback() {
 
     // Freeze the worker: the supervisor's 5s forward cannot answer, and the last-good
     // snapshot keeps the row in the merged catalog.
-    let pid = worker_pid(&agent_dir);
+    let pid = worker_pid(&agent_dir, &session_id);
     stop(pid);
     client.send_command("s3", &json!({ "type": "heartbeats_list" }));
     let response = client.read_response("s3");
@@ -759,7 +759,7 @@ fn wave_b10_single_worker_slice_is_byte_identical() {
 
     // Freeze the worker: the served slices answer both catalogs fast, byte-identical
     // to the fresh-forward responses.
-    let pid = worker_pid(&agent_dir);
+    let pid = worker_pid(&agent_dir, &session_id);
     stop(pid);
     let started = Instant::now();
     client.send_command("fresh2", &json!({ "type": "heartbeats_list" }));
@@ -828,8 +828,9 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
 
     // Both slices serve without re-consulting: both workers frozen, the second list still
     // answers fast.
-    let pid_a = worker_pid(&agent_dir);
-    let pid_b = second_worker_pid(&agent_dir, pid_a);
+    let pid_a = worker_pid(&agent_dir, &session_a);
+    let pid_b = worker_pid(&agent_dir, &session_b);
+    assert_ne!(pid_a, pid_b, "sessions must own distinct workers");
     stop(pid_a);
     stop(pid_b);
     let started = Instant::now();
@@ -844,6 +845,20 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
         "a re-forward to a frozen worker would hold the 5s timeout: {served:?}"
     );
 
+    // A fresh observer has no earlier heartbeat broadcasts buffered and issues no
+    // catalog read that could refresh a slice. The pause broadcast below proves the
+    // supervisor has processed that mutation's generation invalidation.
+    let (mut observer, _hello) = Client::connect(&socket);
+    // Hello is written before this connection subscribes to broadcasts. A local,
+    // read-only RPC response proves the subscribed command loop is now running;
+    // it neither consults a worker nor refreshes or invalidates a catalog slice.
+    observer.send_command(
+        "observer-ready",
+        &json!({ "type": "update_restore_status" }),
+    );
+    let ready = observer.read_response("observer-ready");
+    assert_eq!(ready["success"], true, "{ready}");
+
     // A worker-side mutation bumps that worker's generation: its slice is stale, so the
     // next list consults it again (the frozen mutated worker fails, TS `failed`).
     cont(pid_a);
@@ -857,6 +872,9 @@ fn wave_b10_catalog_slices_served_without_reforwarding() {
     );
     let response = client_b.read_response("pause");
     assert_eq!(response["success"], true, "{response}");
+    observer.next_line_of_type(&mut std::collections::VecDeque::new(), "heartbeats_changed");
+    assert_eq!(worker_pid(&agent_dir, &session_a), pid_a);
+    assert_eq!(worker_pid(&agent_dir, &session_b), pid_b);
     stop(pid_a);
     stop(pid_b);
     client_a.send_command("list3", &json!({ "type": "heartbeats_list" }));
@@ -874,41 +892,6 @@ fn heartbeat_prompts(response: &Value) -> Vec<String> {
         .iter()
         .filter_map(|heartbeat| heartbeat["job"]["prompt"].as_str().map(str::to_string))
         .collect()
-}
-
-/// A second resident worker's pid (distinct from `first`).
-fn second_worker_pid(agent_dir: &std::path::Path, first: u32) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut pids = Vec::new();
-        for entry in std::fs::read_dir(agent_dir.join("daemon-workers")).expect("dir") {
-            let Ok(entry) = entry else { continue };
-            for descriptor in std::fs::read_dir(entry.path()).expect("worker dir") {
-                let Ok(descriptor) = descriptor else { continue };
-                let path = descriptor.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let Ok(value): Result<Value, _> = serde_json::from_str(&text) else {
-                    continue;
-                };
-                if let Some(pid) = value["pid"].as_u64().filter(|pid| *pid as u32 != first) {
-                    pids.push(pid as u32);
-                }
-            }
-        }
-        if let Some(pid) = pids.first() {
-            return *pid;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "second worker descriptor never appeared"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// Create one scripted live session on `client` (the `scripted_session` helper's shape,
@@ -946,7 +929,7 @@ fn create_scripted_session(
 }
 
 /// The resident worker's pid from its persisted descriptor.
-fn worker_pid(agent_dir: &std::path::Path) -> u32 {
+fn worker_pid(agent_dir: &std::path::Path, active_session_id: &str) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("daemon-workers"))
@@ -959,17 +942,20 @@ fn worker_pid(agent_dir: &std::path::Path) -> u32 {
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
             .collect();
         paths.sort();
-        if let Some(path) = paths.last() {
+        for path in paths {
             let descriptor: Value =
                 serde_json::from_str(&std::fs::read_to_string(path).expect("descriptor read"))
                     .expect("descriptor parse");
-            if let Some(pid) = descriptor["pid"].as_u64() {
+            if descriptor["rootActiveSessionId"] != active_session_id {
+                continue;
+            }
+            if let Some(pid) = descriptor["pid"].as_u64().filter(|pid| *pid > 0) {
                 return pid as u32;
             }
         }
         assert!(
             Instant::now() < deadline,
-            "worker descriptor never appeared"
+            "matching worker descriptor never appeared"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -984,6 +970,25 @@ fn stop(pid: u32) {
             .success(),
         "SIGSTOP {pid} failed"
     );
+    // kill's exit status acknowledges sending the signal, not completion of the
+    // worker's group stop. Observe the state before issuing any catalog command.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "stat="])
+            .output()
+            .expect("read worker process state");
+        assert!(output.status.success(), "cannot inspect worker {pid}");
+        let state = String::from_utf8_lossy(&output.stdout);
+        if state.trim_start().starts_with('T') {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker {pid} did not stop: {state}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn cont(pid: u32) {

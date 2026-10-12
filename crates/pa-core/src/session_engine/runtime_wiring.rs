@@ -35,6 +35,7 @@ pub struct RlmWiring {
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
     pub subagent_host: Option<Arc<dyn RlmSubagentHost>>,
+    pub usage_store: Option<Arc<dyn super::rlm_usage::RlmChildUsageStore>>,
     /// Announces every accepted `rlm.progress.note`; `None` keeps the store
     /// the only surface.
     pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
@@ -166,7 +167,8 @@ pub fn wire_session_runtime(
         Arc::new(registry)
     });
     let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
-        session.clone(),
+        rlm.usage_store
+            .unwrap_or_else(|| Arc::new(super::rlm_usage::SessionUsageStore(session.clone()))),
     ));
     // The daemon supplies the child-session host; an embedding without
     // one keeps the no-children behavior, whose self-rename appends the
