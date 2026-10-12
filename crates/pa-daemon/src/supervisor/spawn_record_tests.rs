@@ -20,6 +20,9 @@ fn spawn_record_witness(tag: &str) -> (Arc<Supervisor>, std::path::PathBuf) {
         Supervisor::new(SupervisorOptions {
             socket_path: dir.join("daemon.sock"),
             agent_dir,
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
         })
         .expect("supervisor"),
     );
@@ -41,6 +44,9 @@ async fn a_known_resident_registration_writes_nothing_to_disk() {
         Supervisor::new(SupervisorOptions {
             socket_path: dir.join("daemon.sock"),
             agent_dir: agent_dir.clone(),
+            tcp_port: None,
+            tcp_bind_host: None,
+            remote_agent_mesh: None,
         })
         .expect("supervisor"),
     );

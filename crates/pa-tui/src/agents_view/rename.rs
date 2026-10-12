@@ -72,6 +72,11 @@ impl AgentsViewMode {
     /// Enter the rename composer over the prompt: the search query stays untouched; the armed
     /// confirm is already cleared by the key router's preamble.
     pub(super) fn enter_rename_mode(&mut self) {
+        // Renames ride the local daemon or the local file; a tailnet
+        // peer's name changes on its own machine (TS #2516).
+        if self.guard_remote_row("rename") {
+            return;
+        }
         let Some((target, name)) = self.rename_target() else {
             // An agent or subagent row with neither target reports (TS
             // :1876-1878); any other selection stays silent (:1871).

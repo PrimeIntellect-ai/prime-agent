@@ -565,6 +565,7 @@ async fn subagent_session_stays_a_distinct_store_entry() {
             cwd: None,
             session_dir: None,
             include_client_owned: None,
+            include_remote_mesh: None,
             rest: Map::default(),
         })
         .await

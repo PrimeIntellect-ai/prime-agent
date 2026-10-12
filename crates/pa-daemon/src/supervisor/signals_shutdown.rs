@@ -55,7 +55,10 @@ impl Supervisor {
         // The workers are all stopped now, so the accept loop may exit; the gate alone
         // is not enough — an inbound connection could fall the loop out mid-stop.
         self.accept_exit.store(true, Ordering::SeqCst);
-        self.shutdown_notify.notify_one();
+        // Both accept loops (unix + the tailnet TCP listener) wait on this
+        // notify: waking every waiter releases the mesh listener with the
+        // unix one (the loop-top flag checks make a spurious wake a no-op).
+        self.shutdown_notify.notify_waiters();
     }
 
     /// The OS-signal drain step (the loop in `crate::signal_drain` runs this once per

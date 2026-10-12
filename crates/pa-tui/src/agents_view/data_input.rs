@@ -451,6 +451,11 @@ impl AgentsViewMode {
         // confirm (the hint reads "stop" for live work, "delete" otherwise), the second press on
         // the same row executes, any other key clears the arm.
         if !has_query && self.keybindings.matches(key, "app.agents.delete") {
+            // Stopping or deleting a tailnet peer happens on its machine
+            // (TS #2516); the view stays read-only context for it.
+            if self.guard_remote_row("stop or delete") {
+                return;
+            }
             self.confirm_delete_for_selected(was_delete_armed);
             return;
         }

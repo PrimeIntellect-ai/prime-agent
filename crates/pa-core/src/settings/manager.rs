@@ -779,6 +779,28 @@ impl SettingsManager {
         self.global.rlm_max_depth
     }
 
+    /// The daemon mesh listener's TCP port (global scope only, TS #2517):
+    /// an integer between 1 and 65535, else unset.
+    #[must_use]
+    pub fn get_daemon_port(&self) -> Option<u16> {
+        self.global
+            .daemon_port
+            .filter(|port| (1..=u64::from(u16::MAX)).contains(port))
+            .map(|port| port as u16)
+    }
+
+    /// The daemon mesh listener's bind host (global scope only, TS #2517):
+    /// a non-empty trimmed string, else unset.
+    #[must_use]
+    pub fn get_daemon_tcp_bind_host(&self) -> Option<String> {
+        self.global
+            .daemon_tcp_bind_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_string)
+    }
+
     /// `number | "off" | "none"` -> finite minutes or Off; malformed falls
     /// back to the default (90).
     #[must_use]
@@ -1233,5 +1255,35 @@ mod tests {
         assert_eq!(manager.get_image_model(), None);
         let manager = SettingsManager::in_memory(&Settings::default());
         assert_eq!(manager.get_image_model(), None);
+    }
+    /// TS #2517's daemon mesh listener settings: the global `daemonPort`
+    /// reads back as a port only in 1..=65535, and `daemonTcpBindHost`
+    /// reads back trimmed; the project and runtime scopes never provide
+    /// them (the listener policy is global-scope only).
+    #[test]
+    fn daemon_tcp_listener_settings_read_from_the_global_scope() {
+        let settings = Settings {
+            daemon_port: Some(4700),
+            daemon_tcp_bind_host: Some("  100.64.1.2  ".to_string()),
+            ..Settings::default()
+        };
+        let manager = SettingsManager::in_memory(&settings);
+        assert_eq!(manager.get_daemon_port(), Some(4700));
+        assert_eq!(
+            manager.get_daemon_tcp_bind_host().as_deref(),
+            Some("100.64.1.2")
+        );
+
+        // Out-of-range and malformed values read as unset (the supervisor
+        // refuses to start the listener on an invalid port from the env,
+        // but a bad settings value simply disables it).
+        let settings = Settings {
+            daemon_port: Some(0),
+            daemon_tcp_bind_host: Some("   ".to_string()),
+            ..Settings::default()
+        };
+        let manager = SettingsManager::in_memory(&settings);
+        assert_eq!(manager.get_daemon_port(), None);
+        assert_eq!(manager.get_daemon_tcp_bind_host(), None);
     }
 }

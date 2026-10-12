@@ -920,6 +920,9 @@ mod tests {
             Supervisor::new(crate::supervisor::SupervisorOptions {
                 socket_path: dir.path().join("daemon.sock"),
                 agent_dir: agent_dir.clone(),
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
             })
             .expect("supervisor"),
         );
@@ -1088,6 +1091,9 @@ mod tests {
             Supervisor::new(crate::supervisor::SupervisorOptions {
                 socket_path: dir.path().join("daemon.sock"),
                 agent_dir: agent_dir.clone(),
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
             })
             .expect("supervisor"),
         );
@@ -1148,6 +1154,9 @@ mod tests {
             Supervisor::new(crate::supervisor::SupervisorOptions {
                 socket_path: dir.path().join("daemon.sock"),
                 agent_dir: agent_dir.clone(),
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
             })
             .expect("supervisor"),
         );

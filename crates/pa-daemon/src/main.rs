@@ -32,6 +32,9 @@ async fn main() -> Result<()> {
                 None => pa_daemon::paths::agent_dir()?,
             };
             let options = pa_daemon::supervisor::SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: socket_path
                     .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path),
                 agent_dir,

@@ -954,6 +954,9 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         Arc::new(
             Supervisor::new(crate::supervisor::SupervisorOptions {
+                tcp_port: None,
+                tcp_bind_host: None,
+                remote_agent_mesh: None,
                 socket_path: dir.join("daemon.sock"),
                 agent_dir,
             })

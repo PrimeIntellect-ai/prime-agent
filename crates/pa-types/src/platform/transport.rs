@@ -53,6 +53,16 @@ impl TransportListener for tokio::net::UnixListener {
     }
 }
 
+/// TCP streams carry the same JSONL daemon protocol as `AF_UNIX` sockets
+/// (the tailnet mesh listener, TS #2517): one stream per accepted mesh
+/// peer, authenticated per line by the supervisor's TCP arm.
+impl TransportStream for tokio::net::TcpStream {
+    fn split(self: Box<Self>) -> (Box<dyn AsyncReadHalf>, Box<dyn AsyncWriteHalf>) {
+        let (reader, writer) = tokio::net::TcpStream::into_split(*self);
+        (Box::new(reader), Box::new(writer))
+    }
+}
+
 /// `AF_UNIX` `sun_path` capacity: 108 bytes including the terminating NUL.
 #[cfg(unix)]
 const MAX_SUN_PATH: usize = 107;

@@ -50,10 +50,14 @@ async fn roster_summaries(
 ) -> anyhow::Result<Vec<Value>> {
     // TS uses the supervisor's pushed in-memory peer roster, not `list` (which refreshes
     // every worker serially): surface the unavailable supervisor, never a false empty family.
+    // The budget is the shared `list_agent_peers` window (TS #2516
+    // `AGENT_PEER_LIST_REQUEST_TIMEOUT_MS`): the supervisor's own mesh
+    // refresh for the command stays inside half of it, so the local
+    // siblings and the response fit in the rest.
     let data = link
         .request_success(
             json!({ "type": "list_agent_peers", "workerToken": worker_token }),
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(crate::protocol::AGENT_PEER_LIST_REQUEST_TIMEOUT_MS),
         )
         .await?;
     Ok(data
