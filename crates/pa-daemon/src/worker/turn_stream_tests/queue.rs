@@ -435,7 +435,6 @@ async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups()
                 "follow-up reply"
             ],
         })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -627,7 +626,6 @@ async fn abort_and_send_queued_acks_before_the_follow_up_delivery() {
                 { "text": "follow-up reply", "delayMs": 60000 },
             ],
         })),
-        decision_child: false,
     };
     let worker = std::sync::Arc::new(Worker::new(config, None));
     let created = worker
@@ -969,7 +967,6 @@ async fn clearing_an_idle_queue_drops_the_retained_note() {
             recovery_journal_path: dir.path().join("recovery.jsonl"),
             telemetry_disabled: Some(true),
             script: Some(json!({ "responses": ["unused"] })),
-            decision_child: false,
         },
         None,
     );

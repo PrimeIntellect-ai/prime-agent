@@ -147,7 +147,6 @@ async fn summary_retry_resolves_the_selection_that_owns_the_locked_core() {
             recovery_journal_path: dir.path().join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({ "responses": [] })),
-            decision_child: false,
         },
         None,
     );
@@ -204,7 +203,6 @@ async fn the_attach_state_carries_the_stats_context_usage() {
             recovery_journal_path: dir.path().join("recovery.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({"responses":[]})),
-            decision_child: false,
         },
         None,
     );
@@ -251,7 +249,6 @@ async fn the_attach_state_carries_the_stats_context_usage() {
             recovery_journal_path: dir.path().join("recovery2.jsonl"),
             telemetry_disabled: None,
             script: Some(json!({"responses":[]})),
-            decision_child: false,
         },
         None,
     );
