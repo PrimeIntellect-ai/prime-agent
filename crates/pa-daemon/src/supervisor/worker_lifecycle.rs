@@ -809,15 +809,13 @@ impl Supervisor {
     /// a worker killed without its shutdown hook leaves them behind, and
     /// only the supervisor still knows the journal's path.
     pub(super) async fn reap_dead_worker_orphans(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
-        // Stop escalation and adopted-process watch failures do not prove
-        // death. Recheck here so every caller preserves a live owner's work.
-        if !self.recorded_worker_is_gone(resident).await {
-            return;
-        }
-        let (pid, orphan_path) = {
+        // Capture one generation: a concurrent retry or registration may
+        // replace the descriptor while the blocking identity probe runs.
+        let (pid, start_id, orphan_path) = {
             let descriptor = resident.descriptor.lock().await;
             (
                 descriptor.pid,
+                descriptor.process_start_id.clone(),
                 descriptor.orphan_process_journal_path.clone(),
             )
         };
@@ -831,6 +829,15 @@ impl Supervisor {
         // `ps` probe): keep it off the async executor, as the adoption
         // identity probes do.
         let _ = tokio::task::spawn_blocking(move || {
+            // Stop escalation and adopted-process watch failures do not
+            // prove death. The proof and reap must use the same owner pid.
+            if !recovery_journal_owner_is_gone(
+                crate::lease::is_process_alive(worker_pid as u32).ok(),
+                start_id.as_deref(),
+                crate::lease::get_process_start_id(worker_pid as u32).as_deref(),
+            ) {
+                return;
+            }
             pa_core::kernel::orphan_journal::reap_worker_orphan_processes(
                 Path::new(&orphan_path),
                 worker_pid,

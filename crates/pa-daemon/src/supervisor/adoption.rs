@@ -177,7 +177,7 @@ impl Supervisor {
     /// the tombstone's [`recorded_process_alive`]): the process is
     /// provably gone, or the pid provably names a different process now.
     /// An unobservable pid proves nothing and answers `false`.
-    pub(super) async fn recorded_worker_is_gone(&self, resident: &Arc<ResidentWorker>) -> bool {
+    async fn recorded_worker_is_gone(&self, resident: &Arc<ResidentWorker>) -> bool {
         let (pid, expected) = {
             let descriptor = resident.descriptor.lock().await;
             (descriptor.pid, descriptor.process_start_id.clone())
