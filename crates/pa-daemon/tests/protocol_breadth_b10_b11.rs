@@ -955,7 +955,7 @@ fn worker_pid(agent_dir: &std::path::Path, active_session_id: &str) -> u32 {
         }
         assert!(
             Instant::now() < deadline,
-            "worker descriptor for {active_session_id} never appeared"
+            "matching worker descriptor never appeared"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
