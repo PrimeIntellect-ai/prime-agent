@@ -80,7 +80,7 @@ HTTPS requests trust your operating system's trust store together with the bundl
 export NODE_EXTRA_CA_CERTS=/path/to/your-ca.pem
 ```
 
-The variable is read once at startup, and the background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
+Each transport reads the variable once when its first client is initialized. The background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
 
 ## Getting Started
 

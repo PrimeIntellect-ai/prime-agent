@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::LazyLock;
 
 use futures::StreamExt;
 use serde::Deserialize;
@@ -18,6 +19,32 @@ use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, ThinkingContent, ToolCall,
     Usage,
 };
+
+// pa-agent is a leaf crate: use reqwest's PEM parser rather than depending on
+// pa-ai's provider transport. Cache the client so the extra bundle is read once,
+// just like the provider clients, without changing the public proxy API.
+static PROXY_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") {
+        let extra_client = (|| -> anyhow::Result<reqwest::Client> {
+            let pem = std::fs::read(&path)?;
+            let certs = reqwest::Certificate::from_pem_bundle(&pem)?;
+            anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
+            let mut builder = reqwest::Client::builder();
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+            // Building also validates the DER inside each PEM certificate.
+            Ok(builder.build()?)
+        })();
+        match extra_client {
+            Ok(client) => return client,
+            Err(error) => eprintln!(
+                "NODE_EXTRA_CA_CERTS could not be loaded for the proxy; continuing without it: {error}"
+            ),
+        }
+    }
+    reqwest::Client::new()
+});
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -262,7 +289,7 @@ async fn proxy_run(
         "options": request_options,
     });
 
-    let client = reqwest::Client::new();
+    let client = &*PROXY_CLIENT;
     let send = async {
         client
             .post(format!("{}/api/stream", proxy_options.proxy_url))
