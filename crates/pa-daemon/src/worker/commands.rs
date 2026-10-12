@@ -477,6 +477,19 @@ impl Worker {
             })
             .unwrap_or_default();
         let core = self.core.lock().unwrap();
+        // Validate ancestry atomically with the positional read. Appends keep the
+        // attached leaf on this branch; navigation to another branch does not.
+        let history_leaf = payload.get("historyLeafId").filter(|_| before.is_some());
+        if let Some(anchor) = history_leaf {
+            let valid = anchor.as_str().is_some_and(|leaf| {
+                core.store
+                    .as_ref()
+                    .is_some_and(|store| store.branch().iter().any(|entry| entry.id == leaf))
+            });
+            if !valid {
+                return response_failure(None, "get_messages", "History branch changed", None);
+            }
+        }
         let mut messages: Vec<Value> = match (core.store.as_ref(), before) {
             (Some(store), Some(before)) => store.messages_before(before),
             (Some(store), None) => store.messages(),
@@ -485,7 +498,11 @@ impl Worker {
         if crate::snapshot_stream::wants_image_elision(&capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
         }
-        response_success(None, "get_messages", Some(json!({ "messages": messages })))
+        let mut data = json!({ "messages": messages });
+        if let Some(anchor) = history_leaf {
+            data["historyLeafId"] = anchor.clone();
+        }
+        response_success(None, "get_messages", Some(data))
     }
 
     fn handle_get_queue(&self) -> DaemonResponse {

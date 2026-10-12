@@ -165,16 +165,22 @@ impl SessionUi {
         let active_session_id = self.active_session_id.clone();
         let epoch = self.transcript_epoch;
         let compaction_count = self.backfill_compaction_count;
+        let leaf_id = self.backfill_leaf_id.clone();
         let session_id = self.session_id.clone();
         let notes = self.backfill_notes.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let entries: Result<Vec<ChatEntry>> = async {
+                let leaf_id =
+                    leaf_id.ok_or_else(|| anyhow::anyhow!("missing history branch anchor"))?;
                 let command = DaemonCommand::GetMessages {
                     id: None,
                     active_session_id: active_session_id.clone(),
                     before: Some(before as u64),
                     capabilities: Some(crate::session_ui::attach_capabilities()),
-                    rest: Map::default(),
+                    rest: Map::from_iter([(
+                        "historyLeafId".to_owned(),
+                        Value::String(leaf_id.clone()),
+                    )]),
                 };
                 // A read-only request can safely retry once on a live link. Keep
                 // the same cursor; a second failure must not masquerade as an empty page.
@@ -185,6 +191,10 @@ impl SessionUi {
                     }
                     Err(_) => client.request_ok(command).await?,
                 };
+                // Require the echo so workers that ignore the optional anchor fail closed.
+                if data.get("historyLeafId").and_then(Value::as_str) != Some(leaf_id.as_str()) {
+                    return Err(anyhow::anyhow!("unverified history branch anchor"));
+                }
                 // Validate after the prefix read: a compaction that changed its
                 // indices has already advanced the persisted count, even if its
                 // end event has not reached the UI yet. Ordinary appends do not.

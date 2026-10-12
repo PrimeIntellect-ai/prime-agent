@@ -171,6 +171,7 @@ impl SessionUi {
             transcript_stale: false,
             transcript_epoch: 0,
             backfill_compaction_count: None,
+            backfill_leaf_id: None,
             transcript_backfill: None,
             pending_backfill: None,
             backfill_seam: crate::snapshot::BackfillSeam::Preserve,
@@ -520,6 +521,9 @@ impl SessionUi {
         self.transcript_backfill = None;
         self.backfill_seam = reconstructed.backfill_seam;
         self.backfill_compaction_count = attach.snapshot["state"]["compactionCount"].as_u64();
+        self.backfill_leaf_id = attach.snapshot["state"]["leafId"]
+            .as_str()
+            .map(str::to_owned);
         self.pending_backfill =
             Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())

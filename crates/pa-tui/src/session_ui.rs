@@ -355,6 +355,7 @@ pub(crate) struct SessionUi {
     pub(crate) transcript_stale: bool,
     transcript_epoch: u64,
     backfill_compaction_count: Option<u64>,
+    backfill_leaf_id: Option<String>,
     /// Dropping or replacing the handle aborts an obsolete backfill task. An
     /// already-running decode finishes on the blocking pool and its result is
     /// discarded: the aborted task never sends it, and an already-queued note
