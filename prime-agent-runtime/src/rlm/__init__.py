@@ -182,7 +182,6 @@ async def spawn(
     name: str,
     model: str | None = None,
     thinking: str | None = None,
-    kind: str | None = None,
 ) -> RLMSpawnHandle:
     """Spawn a recursive Prime Agent child and return once its task is admitted.
 
@@ -190,20 +189,14 @@ async def spawn(
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
-    ``kind`` selects a dedicated child kind; ``"decision"`` spawns the Decision API
-    child (the model comes from the decisionApi.systemOneModel setting).
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
-    if kind is not None and kind != "decision":
-        raise TypeError(f"kind must be 'decision' or None, got {kind!r}")
     kwargs: dict[str, Any] = {"name": name}
     if model is not None:
         kwargs["model"] = model
     if thinking is not None:
         kwargs["thinking"] = thinking
-    if kind is not None:
-        kwargs["kind"] = kind
     # Wire type stays "rlm.run" so kernels and hosts of different versions stay compatible.
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
     return _spawn_handle_from_payload(payload)
@@ -646,9 +639,8 @@ class _RLMNamespace:
         name: str,
         model: str | None = None,
         thinking: str | None = None,
-        kind: str | None = None,
     ) -> RLMSpawnHandle:
-        return await spawn(prompt, name=name, model=model, thinking=thinking, kind=kind)
+        return await spawn(prompt, name=name, model=model, thinking=thinking)
 
     async def create_session(
         self,
