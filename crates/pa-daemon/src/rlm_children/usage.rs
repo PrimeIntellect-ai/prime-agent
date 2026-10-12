@@ -94,6 +94,18 @@ impl SupervisorChildSessionsInner {
         persisted
     }
 
+    /// Replay a failed terminal observation once before its watcher retires.
+    /// This caps observations, not elapsed time; a second failure stays owed to the existing owner.
+    pub(super) async fn emit_final_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        if self.emit_child_usage(record).await {
+            return;
+        }
+        if record.lock().await.closed_by_parent {
+            return;
+        }
+        self.emit_child_usage(record).await;
+    }
+
     /// Drop registration only after the final report persisted; return whether it is cleared.
     /// A failed bounded replay leaves both the report and its registration owed.
     pub(super) async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
@@ -286,7 +298,7 @@ impl SupervisorChildSessionsInner {
                         if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
                             // A dead child keeps whatever rows its file
                             // already holds; capture them, then stop.
-                            self.emit_child_usage(&record).await;
+                            self.emit_final_child_usage(&record).await;
                             record.lock().await.usage_watch_live = false;
                             return;
                         }
@@ -335,7 +347,7 @@ impl SupervisorChildSessionsInner {
                             // side of a socket).
                             tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
                             if matches!(self.child_busy(&active_session_id).await, Ok(false)) {
-                                self.emit_child_usage(&record).await;
+                                self.emit_final_child_usage(&record).await;
                                 break;
                             }
                         }
@@ -350,7 +362,7 @@ impl SupervisorChildSessionsInner {
                                 // A dead child keeps whatever rows its
                                 // file already holds; capture them, then
                                 // stop.
-                                self.emit_child_usage(&record).await;
+                                self.emit_final_child_usage(&record).await;
                                 break;
                             }
                         }
@@ -361,7 +373,7 @@ impl SupervisorChildSessionsInner {
                 // The turn never showed busy: it completed between two
                 // polls (bill its rows) or never started (the cursor walk
                 // is a no-op).
-                self.emit_child_usage(&record).await;
+                self.emit_final_child_usage(&record).await;
             }
             // The tail: a delivery that arrived while this watcher was live
             // re-arms it; otherwise it retires. The flag read and clear
