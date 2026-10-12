@@ -57,7 +57,6 @@ use turn_types::{
 
 mod model;
 
-use model::persisted_rlm_max_depth;
 pub(crate) use model::saved_session_context_from_parts;
 
 mod config;
@@ -101,10 +100,6 @@ pub(crate) type SettledKernelRelease =
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
-    /// Latest decision reply per live decision child; shared with its kernel
-    /// host handler (`decision_api.decision`).
-    pub(crate) decision_replies:
-        Arc<std::sync::Mutex<std::collections::HashMap<String, Option<Value>>>>,
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
@@ -220,6 +215,15 @@ pub struct AgentSessionEngine {
     /// session. `None` without a worker pump.
     compaction_summary_sink:
         std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
+    /// The built session's progress-note store, mirrored at every build
+    /// adoption; `None` until the first build.
+    pub(crate) progress_notes: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::rlm_host::RlmProgressNotes>>,
+    >,
+    /// The worker's accepted-note announcer, threaded into every session
+    /// build; `None` without a worker pump.
+    progress_note_emit:
+        std::sync::Mutex<Option<pa_core::session_engine::rlm_host::RlmProgressNoteEmit>>,
     /// The attribution producer the children registry's sink last got:
     /// children outlive a rebuild, so their spawn registrations are adopted
     /// forward.

@@ -35,6 +35,9 @@ pub struct RlmWiring {
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
     pub subagent_host: Option<Arc<dyn RlmSubagentHost>>,
+    /// Announces every accepted `rlm.progress.note`; `None` keeps the store
+    /// the only surface.
+    pub progress_note_emit: Option<super::rlm_host::RlmProgressNoteEmit>,
 }
 
 /// The embedding's cron wiring for the kernel's `rlm_heartbeat.*` host
@@ -175,6 +178,7 @@ pub fn wire_session_runtime(
         model_registry,
         subagent_host,
         rlm_usage.clone(),
+        rlm.progress_note_emit,
     ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
     SessionKernelWiring {
@@ -210,7 +214,6 @@ pub fn kernel_provisioner(
     session_id: String,
     handlers: HostRequestHandlers,
     python_skills: Vec<KernelPythonSkill>,
-    preimport_filter: crate::kernel::provisioner::PythonSkillPreimportFilter,
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
     snapshot_dir: Option<std::path::PathBuf>,
@@ -234,7 +237,6 @@ pub fn kernel_provisioner(
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,
-            preimport_filter: Some(preimport_filter),
             // Only persistent sessions (which have an artifact dir) get
             // a revivable snapshot (TS `snapshotDir`).
             snapshot_dir,

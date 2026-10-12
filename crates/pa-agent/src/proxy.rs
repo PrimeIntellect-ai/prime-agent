@@ -5,8 +5,11 @@
 
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::LazyLock;
 
 use futures::StreamExt;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use serde::Deserialize;
 
 use crate::abort::AbortSignal;
@@ -18,6 +21,35 @@ use crate::types::{
     AssistantContent, AssistantMessage, Model, StopReason, TextContent, ThinkingContent, ToolCall,
     Usage,
 };
+
+// pa-agent is a leaf crate: use the already-resolved rustls PEM/DER parser
+// instead of a peer provider dependency. Cache once, retaining Node's valid
+// prefix if a later certificate is malformed.
+static PROXY_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let mut certs = Vec::new();
+    if let Some(path) = std::env::var_os("NODE_EXTRA_CA_CERTS") {
+        let loaded = (|| -> anyhow::Result<()> {
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in CertificateDer::pem_file_iter(&path)? {
+                let cert = cert?;
+                roots.add(cert.clone())?;
+                certs.push(reqwest::Certificate::from_der(&cert)?);
+            }
+            anyhow::ensure!(!certs.is_empty(), "empty CA bundle");
+            Ok(())
+        })();
+        if let Err(error) = loaded {
+            eprintln!(
+                "NODE_EXTRA_CA_CERTS could not be fully loaded for the proxy; keeping certificates loaded before the error: {error}"
+            );
+        }
+    }
+    let mut builder = reqwest::Client::builder();
+    for cert in certs {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().expect("proxy HTTP client")
+});
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -262,7 +294,7 @@ async fn proxy_run(
         "options": request_options,
     });
 
-    let client = reqwest::Client::new();
+    let client = &*PROXY_CLIENT;
     let send = async {
         client
             .post(format!("{}/api/stream", proxy_options.proxy_url))

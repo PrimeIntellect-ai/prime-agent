@@ -106,18 +106,6 @@ pub fn worker_launch_env(
             orphan_journal_path.clone(),
         );
     }
-    if descriptor
-        .create_command
-        .rest
-        .get("decisionChild")
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        env.insert(
-            crate::worker::WORKER_DECISION_CHILD_ENV.to_string(),
-            "1".to_string(),
-        );
-    }
     if let Some(dir) = &descriptor.session_dir {
         env.insert(crate::paths::SESSION_DIR_ENV.to_string(), dir.clone());
     }
