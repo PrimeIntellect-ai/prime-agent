@@ -1,7 +1,6 @@
 use super::select_model;
 use crate::mode::RuntimeConfig;
-use pa_core::auth::manager::{AuthStorage, NoOAuth};
-use pa_core::auth::types::AuthStorageData;
+use pa_core::auth::{AuthStorage, AuthStorageData, NoOAuth};
 use pa_core::models::ModelRegistry;
 use serde_json::json;
 use std::sync::Arc;
