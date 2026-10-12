@@ -919,4 +919,137 @@ mod tests {
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
+
+    #[test]
+    fn corrupt_complete_queue_bytes_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-queue.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            let item = WorkerQueueItemRecord {
+                message: "safeXinstruction".to_string(),
+                priority: None,
+                preview: None,
+                custom_message: None,
+                queue_key: None,
+                queue_visible: true,
+                policy: queue_policy_default(),
+            };
+            journal.record_queue_snapshot("s1", &[item], &[]).unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"safeXinstruction";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 4] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            let result = WorkerRecoveryJournal::open(&path);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(
+                result.is_err(),
+                "complete corrupt queued prompts must block recovery"
+            );
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_complete_worker_identifiers_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-verdict.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            journal
+                .record("badXsession", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"badXsession";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 3] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            assert!(WorkerRecoveryJournal::read_latest(&path).is_err());
+            assert!(WorkerRecoveryJournal::open(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_complete_worker_record_without_newline_survives_healing() {
+        let path = temp_path("complete-eof.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = journal.get_latest();
+        drop(journal);
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, bytes).unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn competing_worker_writers_cannot_replace_an_active_append() {
+        for contender in ["open", "settle"] {
+            let path = temp_path("active-append.recovery.jsonl");
+            let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+            owner
+                .record("s1", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            let first = owner.get_latest().pop().unwrap();
+            let record = WorkerRecoveryRecord {
+                active_session_id: "s2".to_string(),
+                session_id: "sess2".to_string(),
+                session_file: None,
+                busy: true,
+                operation: "prompt_accepted".to_string(),
+                recorded_at: "2026-10-11T00:00:01Z".to_string(),
+            };
+            let mut bytes = serde_json::to_vec(&record).unwrap();
+            bytes.push(b'\n');
+            let split = bytes.len() / 2;
+            let mut active_append = OpenOptions::new().append(true).open(&path).unwrap();
+            active_append.write_all(&bytes[..split]).unwrap();
+            let expected = fs::read(&path).unwrap();
+            let result = match contender {
+                "open" => WorkerRecoveryJournal::open(&path).map(drop),
+                "settle" => WorkerRecoveryJournal::settle_busy_records(&path, "worker_gave_up"),
+                _ => unreachable!("known contender"),
+            };
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            assert!(
+                result.is_err(),
+                "a rival writer must not acquire the active journal"
+            );
+            active_append.write_all(&bytes[split..]).unwrap();
+            active_append.sync_all().unwrap();
+            drop(active_append);
+            drop(owner);
+            let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+            let mut latest = reopened.get_latest();
+            latest.sort_by(|left, right| left.active_session_id.cmp(&right.active_session_id));
+            assert_eq!(latest, vec![first, record]);
+            drop(reopened);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
 }
