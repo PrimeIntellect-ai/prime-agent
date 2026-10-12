@@ -1262,6 +1262,7 @@ mod tests {
             crate::session_engine::runtime_wiring::RlmWiring {
                 model_registry: None,
                 subagent_host: None,
+                usage_store: None,
                 progress_note_emit: Some(Arc::new(move |message, timestamp| {
                     sink.lock().unwrap().push((message.to_string(), timestamp));
                 })),
