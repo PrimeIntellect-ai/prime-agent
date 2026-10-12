@@ -110,6 +110,8 @@ pub enum EngineEvent {
     /// their own events; this frame carries only the accumulated payload.
     AgentEnd {
         messages: Vec<Value>,
+        /// Immutable cancellation outcome from the loop producer.
+        aborted: bool,
     },
     /// A durable custom message (wire `role: "custom"`): recorded into the
     /// session store, framed to clients as a `message_start` + `message_end` pair.

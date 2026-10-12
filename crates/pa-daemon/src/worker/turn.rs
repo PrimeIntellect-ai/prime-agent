@@ -461,7 +461,7 @@ impl TurnRunner {
                         )
                 ) || matches!(
                     &event,
-                    EngineEvent::AgentEnd { messages }
+                    EngineEvent::AgentEnd { messages, .. }
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
@@ -532,7 +532,8 @@ impl TurnRunner {
                         // pane working.
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, .. } => {
+                        let more_queued = !core.steering.is_empty() || !core.follow_up.is_empty();
                         herdr
                             .lock()
                             .unwrap()
@@ -853,12 +854,12 @@ impl TurnRunner {
                     // wire fact that separates the aborted settle from a
                     // normal one.
                     EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, aborted } => {
                         let mut frame = json!({
                             "type": "agent_end",
                             "messages": messages,
                         });
-                        if core.abort_requested {
+                        if aborted {
                             frame["aborted"] = json!(true);
                         }
                         vec![frame]

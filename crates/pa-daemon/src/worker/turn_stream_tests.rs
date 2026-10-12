@@ -129,6 +129,8 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 #[derive(Default)]
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
+    frames: Vec<EngineEvent>,
+    before_delivery: Mutex<Option<Box<dyn Fn() + Send>>>,
     boundaries: Mutex<Vec<Option<String>>>,
     turns_done: std::sync::atomic::AtomicUsize,
 }
@@ -151,7 +153,11 @@ impl SessionEngine for GateProbeEngine {
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) {
         for frame in &self.frames {
-            if !emit(frame.clone()) {
+            let queued_frame = frame.clone();
+            if let Some(before_delivery) = self.before_delivery.lock().unwrap().as_ref() {
+                before_delivery();
+            }
+            if !emit(queued_frame) {
                 return;
             }
         }
@@ -198,23 +204,24 @@ impl SessionEngine for GateProbeEngine {
     }
 }
 
-/// One gated sighting battery: the scripted frames through the worker's turn with
-/// the abort flag (and the suppressed-row class) preset.
+/// One gated sighting battery: change the worker flags after producing each
+/// scripted frame, immediately before delivering it to the worker callback.
 async fn gate_sighting_events(
     frames: Vec<EngineEvent>,
     abort_requested: bool,
     suppress_aborted_row: bool,
 ) -> Vec<Value> {
-    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+    let engine = Arc::new(GateProbeEngine {
         frames,
         ..GateProbeEngine::default()
     });
-    let runner = burst_runner(Arc::clone(&engine));
-    {
-        let mut core = runner.core.lock().unwrap();
+    let runner = burst_runner(engine.clone());
+    let core = Arc::clone(&runner.core);
+    *engine.before_delivery.lock().unwrap() = Some(Box::new(move || {
+        let mut core = core.lock().unwrap();
         core.abort_requested = abort_requested;
         core.suppress_aborted_row = suppress_aborted_row;
-    }
+    }));
     let mut subscription = runner.events.subscribe();
     runner
         .run_turn(
@@ -439,6 +446,7 @@ async fn an_abort_between_steps_marks_the_runs_agent_end() {
                 tool_results: Vec::new(),
             },
             EngineEvent::AgentEnd {
+                aborted: true,
                 messages: vec![tool_message],
             },
         ],
@@ -482,6 +490,7 @@ async fn a_self_settled_runs_agent_end_carries_no_marker() {
                 tool_results: Vec::new(),
             },
             EngineEvent::AgentEnd {
+                aborted: false,
                 messages: vec![tool_message],
             },
         ],
@@ -509,6 +518,7 @@ async fn a_late_abort_does_not_relabel_a_completed_agent_end() {
     let message = json!({ "role": "assistant", "stopReason": "stop" });
     let events = gate_sighting_events(
         vec![EngineEvent::AgentEnd {
+            aborted: false,
             messages: vec![message.clone()],
         }],
         true,
@@ -523,6 +533,30 @@ async fn a_late_abort_does_not_relabel_a_completed_agent_end() {
         ends,
         vec![&json!({ "type": "agent_end", "messages": [message] })],
         "a late abort cannot change a completed run's queued end frame"
+    );
+}
+
+/// The queued end also retains cancellation after the worker's request
+/// flag has been cleared for a later delivery.
+#[tokio::test]
+async fn an_aborted_end_keeps_its_marker_after_the_request_flag_clears() {
+    let message = json!({ "role": "assistant", "stopReason": "toolUse" });
+    let events = gate_sighting_events(
+        vec![EngineEvent::AgentEnd {
+            aborted: true,
+            messages: vec![message.clone()],
+        }],
+        false,
+        false,
+    )
+    .await;
+    let ends: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["type"] == "agent_end")
+        .collect();
+    assert_eq!(
+        ends,
+        vec![&json!({ "type": "agent_end", "messages": [message], "aborted": true })]
     );
 }
 

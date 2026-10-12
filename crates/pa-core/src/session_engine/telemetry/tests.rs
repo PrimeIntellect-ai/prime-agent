@@ -248,6 +248,7 @@ async fn emits_aggregate_metrics_without_content() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -314,6 +315,7 @@ async fn post_run_compaction_counts_into_the_open_run() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -342,6 +344,7 @@ async fn compaction_between_runs_is_not_counted() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -355,6 +358,7 @@ async fn compaction_between_runs_is_not_counted() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -362,6 +366,7 @@ async fn compaction_between_runs_is_not_counted() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -382,6 +387,7 @@ async fn error_and_aborted_outcomes() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -392,6 +398,7 @@ async fn error_and_aborted_outcomes() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -476,6 +483,7 @@ async fn tool_calls_fold_into_run_aggregates() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -596,6 +604,7 @@ async fn multiple_runs_merge_into_session_totals() {
         emit(
             &fixture,
             AgentEvent::AgentEnd {
+                aborted: false,
                 messages: Vec::new(),
             },
         );
@@ -628,6 +637,7 @@ async fn the_prompt_trigger_and_run_index_ride_the_completed_run() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -661,6 +671,7 @@ async fn continuation_run_reports_continuation_trigger() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -695,6 +706,7 @@ fn attempt(fixture: &Fixture, message: AssistantMessage) {
     emit(
         fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -861,6 +873,7 @@ async fn run_completed_v2_enrichment() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -900,6 +913,7 @@ async fn stream_gap_tracks_the_largest_quiet_stretch() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -929,6 +943,7 @@ async fn bot_edges_the_trigger_lands_and_terminal_outcome_maps() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -1028,6 +1043,7 @@ async fn legacy_events_reach_the_analytics_endpoint_in_the_ts_shape() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -1282,6 +1298,7 @@ async fn off_period_run_facts_never_send() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -1298,6 +1315,7 @@ async fn off_period_run_facts_never_send() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -1428,6 +1446,7 @@ async fn a_run_active_when_telemetry_turns_off_is_severed_not_merged() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
@@ -1446,6 +1465,7 @@ async fn a_run_active_when_telemetry_turns_off_is_severed_not_merged() {
     emit(
         &fixture,
         AgentEvent::AgentEnd {
+            aborted: false,
             messages: Vec::new(),
         },
     );
