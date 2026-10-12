@@ -582,11 +582,9 @@ pub(crate) async fn build_headless_engine_with(
                 return Err("a scripted child builds through the faux builder".to_string());
             }
         },
-        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => select_model(
-            &mut registry,
-            config.provider.as_deref(),
-            config.model.as_deref(),
-        )?,
+        HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
+            select_model(&mut registry, config)?
+        }
     };
     // Resolve request auth once: the stored team / `PRIME_TEAM_ID` reach the wire through these
     // headers (children resolve against the same catalog the spawn used).
@@ -1012,9 +1010,10 @@ async fn session_header_json(
 
 fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
-    provider: Option<&str>,
-    model: Option<&str>,
+    config: &crate::mode::RuntimeConfig,
 ) -> Result<Model, String> {
+    let provider = config.provider.as_deref();
+    let model = config.model.as_deref();
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     let Some(model_name) = model else {
         let all: Vec<Model> = registry.get_all().to_vec();
@@ -1958,3 +1957,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "print_model_tests.rs"]
+mod print_model_tests;

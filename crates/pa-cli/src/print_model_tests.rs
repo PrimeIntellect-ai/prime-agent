@@ -1,0 +1,117 @@
+use super::select_model;
+use crate::mode::RuntimeConfig;
+use pa_core::auth::manager::{AuthStorage, NoOAuth};
+use pa_core::auth::types::AuthStorageData;
+use pa_core::models::ModelRegistry;
+use serde_json::json;
+use std::sync::Arc;
+
+fn fixture(settings: serde_json::Value) -> (tempfile::TempDir, RuntimeConfig, ModelRegistry) {
+    let dir = tempfile::tempdir().unwrap();
+    let config = RuntimeConfig {
+        cwd: dir.path().join("project"),
+        agent_dir: dir.path().join("agent"),
+        ..Default::default()
+    };
+    std::fs::create_dir_all(&config.cwd).unwrap();
+    std::fs::create_dir_all(&config.agent_dir).unwrap();
+    std::fs::write(config.agent_dir.join("settings.json"), settings.to_string()).unwrap();
+    let path = config.agent_dir.join("models.json");
+    std::fs::write(&path, json!({"providers": {
+        "my-gateway": {"baseUrl": "http://127.0.0.1:9/v1", "apiKey": "synthetic-only",
+            "api": "openai-completions", "models": [{"id": "my-group/my-model"}, {"id": "other"}]},
+        "other-gateway": {"baseUrl": "http://127.0.0.1:9/v1", "apiKey": "synthetic-only",
+            "api": "openai-completions", "models": [{"id": "other"}]}
+    }}).to_string()).unwrap();
+    let auth = AuthStorage::in_memory_without_env(&AuthStorageData::default(), Arc::new(NoOAuth));
+    let registry = ModelRegistry::create(auth, path);
+    (dir, config, registry)
+}
+
+#[test]
+fn print_model_uses_saved_gateway_and_full_model_metadata() {
+    for id in ["my-group/my-model", "my-gateway/my-group/my-model"] {
+        let (_dir, config, mut registry) = fixture(json!({
+            "defaultProvider":"my-gateway", "defaultModel":id
+        }));
+        let expected = registry
+            .get_all()
+            .iter()
+            .find(|m| m.provider == "my-gateway" && m.id == "my-group/my-model")
+            .unwrap()
+            .clone();
+        assert_eq!(select_model(&mut registry, &config).unwrap(), expected);
+    }
+}
+
+#[test]
+fn print_model_explicit_and_partial_flags_override_defaults() {
+    for (provider, model, expected) in [
+        (
+            Some("other-gateway"),
+            Some("other"),
+            ("other-gateway", "other"),
+        ),
+        (
+            None,
+            Some("other-gateway/other"),
+            ("other-gateway", "other"),
+        ),
+        (
+            Some("my-gateway"),
+            None,
+            ("my-gateway", "my-group/my-model"),
+        ),
+        (Some("other-gateway"), None, ("other-gateway", "other")),
+    ] {
+        let (_dir, mut config, mut registry) =
+            fixture(json!({"defaultProvider":"my-gateway", "defaultModel":"my-group/my-model"}));
+        config.provider = provider.map(str::to_string);
+        config.model = model.map(str::to_string);
+        let selected = select_model(&mut registry, &config).unwrap();
+        assert_eq!((selected.provider.as_str(), selected.id.as_str()), expected);
+    }
+}
+
+#[test]
+fn print_model_invalid_saved_or_explicit_selection_fails_locally() {
+    for settings in [
+        json!({"defaultProvider":"missing", "defaultModel":"missing"}),
+        json!({"defaultProvider":"my-gateway", "defaultModel":"missing"}),
+    ] {
+        let (_dir, config, mut registry) = fixture(settings);
+        assert!(select_model(&mut registry, &config).is_err());
+    }
+    let (_dir, mut config, mut registry) = fixture(json!({}));
+    config.provider = Some("missing".into());
+    assert!(select_model(&mut registry, &config).is_err());
+}
+
+#[test]
+fn print_model_without_configured_auth_does_not_select_a_bundled_fixture() {
+    let dir = tempfile::tempdir().unwrap();
+    let auth = AuthStorage::in_memory_without_env(&AuthStorageData::default(), Arc::new(NoOAuth));
+    let mut registry = ModelRegistry::create(auth, dir.path().join("models.json"));
+    let config = RuntimeConfig {
+        cwd: dir.path().into(),
+        agent_dir: dir.path().into(),
+        ..Default::default()
+    };
+    assert!(select_model(&mut registry, &config).is_err());
+}
+
+#[test]
+fn print_model_only_flag_preserves_catalog_resolution_without_saved_provider() {
+    let (_dir, mut config, mut registry) =
+        fixture(json!({"defaultProvider":"my-gateway", "defaultModel":"my-group/my-model"}));
+    config.model = Some("other".into());
+    let available = registry
+        .get_available()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected = pa_core::models::resolve_cli_model(None, "other", &available)
+        .model
+        .unwrap();
+    assert_eq!(select_model(&mut registry, &config).unwrap(), expected);
+}
