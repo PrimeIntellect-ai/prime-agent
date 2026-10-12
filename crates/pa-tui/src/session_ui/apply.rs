@@ -153,12 +153,14 @@ impl SessionUi {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let epoch = self.transcript_epoch;
+        let compaction_count = self.backfill_compaction_count;
+        let session_id = self.session_id.clone();
         let notes = self.backfill_notes.clone();
         let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             let entries: Result<Vec<ChatEntry>> = async {
                 let command = DaemonCommand::GetMessages {
                     id: None,
-                    active_session_id,
+                    active_session_id: active_session_id.clone(),
                     before: Some(before as u64),
                     capabilities: Some(crate::session_ui::attach_capabilities()),
                     rest: Map::default(),
@@ -172,6 +174,24 @@ impl SessionUi {
                     }
                     Err(_) => client.request_ok(command).await?,
                 };
+                // Validate after the prefix read: a compaction that changed its
+                // indices has already advanced the persisted count, even if its
+                // end event has not reached the UI yet. Ordinary appends do not.
+                let state = client
+                    .request_ok(DaemonCommand::GetConnectionState {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        rest: Map::default(),
+                    })
+                    .await?;
+                if compaction_count.is_none()
+                    || state.get("compactionCount").and_then(Value::as_u64) != compaction_count
+                    || state.get("sessionId").and_then(Value::as_str) != Some(session_id.as_str())
+                    || state.get("activeSessionId").and_then(Value::as_str)
+                        != Some(active_session_id.as_str())
+                {
+                    return Err(anyhow::anyhow!("history changed during backfill"));
+                }
                 let Some(Value::Array(messages)) = data.get_mut("messages").map(Value::take) else {
                     return Err(anyhow::anyhow!("missing messages in history response"));
                 };

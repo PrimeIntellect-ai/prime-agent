@@ -170,6 +170,7 @@ impl SessionUi {
             prompt_in_flight: 0,
             transcript_stale: false,
             transcript_epoch: 0,
+            backfill_compaction_count: None,
             transcript_backfill: None,
             pending_backfill: None,
             backfill_seam: crate::snapshot::BackfillSeam::Preserve,
@@ -518,6 +519,7 @@ impl SessionUi {
         self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
         self.transcript_backfill = None;
         self.backfill_seam = reconstructed.backfill_seam;
+        self.backfill_compaction_count = attach.snapshot["state"]["compactionCount"].as_u64();
         self.pending_backfill =
             Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())
