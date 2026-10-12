@@ -1180,3 +1180,5 @@ async fn an_aborted_run_never_exposes_an_idle_summary_with_its_old_note() {
     assert!(!core.lock().unwrap().busy);
     assert!(engine.progress_note().is_none());
 }
+
+mod withdrawal;
