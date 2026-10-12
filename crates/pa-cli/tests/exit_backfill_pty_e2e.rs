@@ -516,6 +516,7 @@ fn attach_data(id: &str) -> Value {
                     "activeSessionId": "s1",
                     "cwd": "/tmp",
                     "sessionId": "sess-1",
+                    "leafId": "attach-leaf",
                     "sessionName": "exit backfill e2e",
                     "model": null,
                     "isStreaming": false,

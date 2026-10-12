@@ -498,3 +498,111 @@ async fn a_windowed_attach_keeps_interleaved_tool_pairs_together() {
         );
     }
 }
+
+async fn branched_worker() -> (tempfile::TempDir, std::sync::Arc<Worker>) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("branched-tail.jsonl");
+    let mut fixture = Fixture {
+        content: header_line("branched-tail"),
+        prev: None,
+        id: 0,
+    };
+    fixture.content.push_str(&message_row(
+        /*prev*/ None,
+        "sibling",
+        &assistant_message("other branch"),
+    ));
+    for index in 0..600 {
+        fixture.row(|prev, id| {
+            message_row(prev, id, &assistant_message(&format!("original {index}")))
+        });
+    }
+    std::fs::write(&path, fixture.content).unwrap();
+    let worker = worker_over(dir.path(), &path).await;
+    (dir, worker)
+}
+
+#[tokio::test]
+async fn anchored_backfill_rejects_other_client_branch_navigation() {
+    for target in ["sibling", "m0000300"] {
+        let (_dir, worker) = branched_worker().await;
+        let data = attach(&worker, TUI_CAPABILITIES).await;
+        let snapshot = &data["snapshot"];
+        let leaf = snapshot["state"]["leafId"].as_str().expect("attached leaf");
+        assert_eq!(snapshot["historyBefore"], 88);
+        let navigated = worker
+            .dispatch(
+                "navigate_tree",
+                &json!({"clientId": "other-client", "targetId": target}),
+            )
+            .await;
+        assert!(navigated.success, "navigation failed: {navigated:?}");
+        let current = full_messages(&worker).await;
+        assert_eq!(current.len(), if target == "sibling" { 1 } else { 300 });
+        let state = worker.dispatch("get_connection_state", &json!({})).await;
+        assert!(state.success, "state failed: {state:?}");
+        assert_eq!(
+            state.data.unwrap()["compactionCount"],
+            snapshot["state"]["compactionCount"],
+            "the existing compaction fence cannot detect this branch change"
+        );
+        let backfill = worker
+            .dispatch(
+                "get_messages",
+                &json!({"before": snapshot["historyBefore"], "historyLeafId": leaf}),
+            )
+            .await;
+        assert!(
+            !backfill.success,
+            "a prefix from {target} must not join the old attach tail: {backfill:?}"
+        );
+        assert_eq!(
+            full_messages(&worker).await,
+            current,
+            "legacy full reads remain available"
+        );
+    }
+}
+
+#[tokio::test]
+async fn anchored_backfill_accepts_descendant_appends_and_restored_branch() {
+    let (_dir, worker) = branched_worker().await;
+    let original = full_messages(&worker).await;
+    let data = attach(&worker, TUI_CAPABILITIES).await;
+    let snapshot = &data["snapshot"];
+    let leaf = snapshot["state"]["leafId"].as_str().expect("attached leaf");
+    let appended = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({"activeSessionId": "windowed-session", "message": "append on this branch"}),
+        )
+        .await;
+    assert!(appended.success, "append failed: {appended:?}");
+    assert!(full_messages(&worker).await.len() > original.len());
+    for restore in [false, true] {
+        if restore {
+            for target in ["sibling", leaf] {
+                let navigated = worker
+                    .dispatch(
+                        "navigate_tree",
+                        &json!({"clientId": "other-client", "targetId": target}),
+                    )
+                    .await;
+                assert!(navigated.success, "navigation failed: {navigated:?}");
+            }
+        }
+        let backfill = worker
+            .dispatch(
+                "get_messages",
+                &json!({"before": snapshot["historyBefore"], "historyLeafId": leaf}),
+            )
+            .await;
+        assert!(backfill.success, "coherent prefix rejected: {backfill:?}");
+        let returned = backfill.data.expect("backfill data");
+        assert_eq!(returned["messages"], json!(original[..88]));
+        assert_eq!(
+            returned["historyLeafId"], leaf,
+            "the worker acknowledges that it honored the anchor"
+        );
+    }
+}

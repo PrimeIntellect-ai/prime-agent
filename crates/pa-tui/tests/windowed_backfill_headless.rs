@@ -12,6 +12,7 @@ use pa_tui::interactive::{
 use serde_json::{json, Value};
 
 const HISTORY_MESSAGES: usize = 4;
+const HISTORY_LEAF_ID: &str = "attached-branch-leaf";
 
 enum RebuildResponse {
     FullHistory,
@@ -28,6 +29,7 @@ struct MockSupervisor {
     rebuild_response: RebuildResponse,
     validation_state: Option<Value>,
     changed_prefix: bool,
+    history_leaf_id: Option<&'static str>,
     requests: Arc<Mutex<Vec<Value>>>,
 }
 
@@ -43,6 +45,7 @@ impl MockSupervisor {
                 json!({"compactionCount": 0, "sessionId": "sess-1", "activeSessionId": "s1"}),
             ),
             changed_prefix: false,
+            history_leaf_id: Some(HISTORY_LEAF_ID),
             requests,
         }
     }
@@ -115,7 +118,7 @@ impl MockSupervisor {
                             );
                             continue;
                         }
-                        let mut response = get_messages_response(id, self.windowed);
+                        let mut response = get_messages_response(id, &self);
                         if self.changed_prefix {
                             // Simulate a compaction that happened before the prefix read,
                             // while its completion event has not yet been delivered.
@@ -132,7 +135,7 @@ impl MockSupervisor {
                     // obsolete response before it; the separate unit regression
                     // injects an already-queued note to verify the epoch fence.
                     if let Some(held) = held_backfill.take() {
-                        write_json(&mut writer, &get_messages_response(&held, self.windowed));
+                        write_json(&mut writer, &get_messages_response(&held, &self));
                     }
                     write_json(&mut writer, &whole_head_response(id));
                 }
@@ -217,6 +220,7 @@ fn attach_response(id: &str, windowed: bool) -> Value {
             "isStreaming": false,
             "isCompacting": false,
             "compactionCount": 0,
+            "leafId": HISTORY_LEAF_ID,
             "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
         },
         "messages": snapshot_messages,
@@ -244,19 +248,23 @@ fn attach_response(id: &str, windowed: bool) -> Value {
     })
 }
 
-fn get_messages_response(id: &str, windowed: bool) -> Value {
-    let messages = if windowed {
+fn get_messages_response(id: &str, supervisor: &MockSupervisor) -> Value {
+    let messages = if supervisor.windowed {
         all_messages()[..4].to_vec()
     } else {
         Vec::new()
     };
-    json!({
+    let mut response = json!({
         "type": "response",
         "id": id,
         "command": "get_messages",
         "success": true,
         "data": { "messages": messages },
-    })
+    });
+    if let Some(history_leaf_id) = supervisor.history_leaf_id {
+        response["data"]["historyLeafId"] = json!(history_leaf_id);
+    }
+    response
 }
 
 fn whole_head_response(id: &str) -> Value {
@@ -317,7 +325,12 @@ fn run_attached_with_failures(
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
     run_attached_with_validation(
-        windowed, failures, /*changed_prefix*/ false, None, steps,
+        windowed,
+        failures,
+        /*changed_prefix*/ false,
+        None,
+        Some(HISTORY_LEAF_ID),
+        steps,
     )
 }
 
@@ -326,6 +339,7 @@ fn run_attached_with_validation(
     failures: usize,
     changed_prefix: bool,
     validation_state: Option<Value>,
+    history_leaf_id: Option<&'static str>,
     steps: Vec<HeadlessStep>,
 ) -> (Vec<String>, Vec<Value>) {
     std::env::remove_var("TMUX");
@@ -334,6 +348,7 @@ fn run_attached_with_validation(
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut supervisor = MockSupervisor::bind(&socket, windowed, Arc::clone(&requests));
     supervisor.failures = failures;
+    supervisor.history_leaf_id = history_leaf_id;
     if changed_prefix {
         supervisor.validation_state = validation_state;
         supervisor.changed_prefix = true;
@@ -475,6 +490,61 @@ fn a_windowed_open_backfills_history_above_the_tail() {
         json!(HISTORY_MESSAGES as u64),
         "the backfill requests the omitted history range"
     );
+    assert_eq!(
+        requests[0]["historyLeafId"],
+        json!(HISTORY_LEAF_ID),
+        "the prefix request stays anchored to the attached branch"
+    );
+}
+
+#[test]
+fn an_unverified_history_leaf_echo_keeps_the_attached_tail_and_reports_incomplete_history() {
+    // An older worker omits the echo; a wrong echo belongs to another branch.
+    // Both otherwise return a successful prefix and matching session/compaction
+    // state, so only the branch-anchor validation can reject these responses.
+    for history_leaf_id in [None, Some("another-branch-leaf")] {
+        let (frames, requests) = run_attached_with_validation(
+            /*windowed*/ true,
+            /*failures*/ 0,
+            /*changed_prefix*/ false,
+            None,
+            history_leaf_id,
+            vec![HeadlessStep::WaitRender {
+                needle: "Older history could not be loaded".to_string(),
+                timeout_ms: 5000,
+            }],
+        );
+        assert_eq!(
+            requests.len(),
+            1,
+            "unverified branch history is not retried"
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("Older history could not be loaded")),
+            "an absent or wrong history anchor must fail visibly: {history_leaf_id:?}"
+        );
+        assert_eq!(requests[0]["historyLeafId"], json!(HISTORY_LEAF_ID));
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame.contains("timed out waiting")),
+            "the warning is an observed result, not a headless timeout"
+        );
+        assert!(
+            frames.iter().all(|frame| (0..HISTORY_MESSAGES)
+                .all(|index| !frame.contains(&format!("msg-{index:02}")))),
+            "no frame may expose the unverified prefix"
+        );
+        assert_eq!(
+            collapsed_markers(frames.last().expect("the warning frame renders")),
+            (HISTORY_MESSAGES..16)
+                .map(|index| format!("msg-{index:02}"))
+                .collect::<Vec<_>>(),
+            "the complete attached tail remains ordered and visible"
+        );
+    }
 }
 
 #[test]
@@ -623,6 +693,7 @@ fn a_changed_or_unverifiable_prefix_is_rejected_before_the_compaction_event() {
             /*failures*/ 0,
             /*changed_prefix*/ true,
             state,
+            Some(HISTORY_LEAF_ID),
             vec![HeadlessStep::WaitRender {
                 needle: "Older history could not be loaded".to_string(),
                 timeout_ms: 5000,
