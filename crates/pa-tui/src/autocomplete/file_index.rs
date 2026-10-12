@@ -593,3 +593,84 @@ fn remove_ranges(entries: &mut Vec<Box<str>>, mut removals: Vec<Range<usize>>) {
         !removed
     });
 }
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+
+    fn snapshot(base: &Path) -> IndexState {
+        IndexState::Ready {
+            entries: walk_index_entries(base, MAX_INDEX_ENTRIES).expect("walk"),
+            _watcher: notify::recommended_watcher(|_: notify::Result<Event>| {}).expect("watcher"),
+        }
+    }
+
+    fn assert_matches_live_walk(state: &IndexState, base: &Path) {
+        let expected = walk_index_entries(base, MAX_INDEX_ENTRIES).expect("live walk");
+        let actual = match state {
+            IndexState::Ready { entries, .. } => entries.clone(),
+            IndexState::Unbuilt => walk_index_entries(base, MAX_INDEX_ENTRIES).expect("rebuild"),
+            _ => panic!("unexpected state"),
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn directory_renamed_onto_indexed_empty_destination_refreshes_descendants() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path().join("base");
+        std::fs::create_dir_all(base.join("dest")).expect("mkdir");
+        let mut state = snapshot(&base);
+        let source = outer.path().join("source");
+        std::fs::create_dir(&source).expect("mkdir");
+        std::fs::write(source.join("new.rs"), "new").expect("write");
+        std::fs::remove_dir(base.join("dest")).expect("remove empty destination");
+        std::fs::rename(&source, base.join("dest")).expect("rename");
+        let event = Event::new(notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(base.join("dest"));
+        apply_batch(&mut state, &[Ok(event)], &base, &base);
+        assert_matches_live_walk(&state, &base);
+    }
+
+    #[test]
+    fn coalesced_directory_replacement_removes_old_descendants() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path().join("base");
+        std::fs::create_dir_all(base.join("dest")).expect("mkdir");
+        std::fs::write(base.join("dest/old.rs"), "old").expect("write");
+        let mut state = snapshot(&base);
+        std::fs::rename(base.join("dest"), outer.path().join("old")).expect("rename out");
+        std::fs::create_dir(base.join("dest")).expect("mkdir");
+        std::fs::write(base.join("dest/new.rs"), "new").expect("write");
+        let events = [
+            Ok(Event::new(notify::EventKind::Remove(RemoveKind::Folder))
+                .add_path(base.join("dest"))),
+            Ok(Event::new(notify::EventKind::Create(CreateKind::Folder))
+                .add_path(base.join("dest"))),
+        ];
+        apply_batch(&mut state, &events, &base, &base);
+        assert_matches_live_walk(&state, &base);
+    }
+
+    #[test]
+    fn git_marker_creation_and_removal_refresh_ignore_rules() {
+        let outer = tempfile::tempdir().expect("tempdir");
+        let base = outer.path();
+        std::fs::write(base.join(".gitignore"), "generated/\n").expect("write");
+        std::fs::create_dir(base.join("generated")).expect("mkdir");
+        std::fs::write(base.join("generated/output.rs"), "generated").expect("write");
+        let mut state = snapshot(base);
+        std::fs::create_dir(base.join(".git")).expect("git init");
+        let event =
+            Event::new(notify::EventKind::Create(CreateKind::Folder)).add_path(base.join(".git"));
+        apply_batch(&mut state, &[Ok(event)], base, base);
+        assert_matches_live_walk(&state, base);
+        let mut state = snapshot(base);
+        std::fs::remove_dir(base.join(".git")).expect("remove git marker");
+        let event =
+            Event::new(notify::EventKind::Remove(RemoveKind::Folder)).add_path(base.join(".git"));
+        apply_batch(&mut state, &[Ok(event)], base, base);
+        assert_matches_live_walk(&state, base);
+    }
+}
