@@ -38,8 +38,9 @@ pub(crate) fn without_refinements(messages: Vec<AgentMessage>) -> Vec<AgentMessa
 pub(crate) fn convert_to_llm(
     settings: crate::settings::SettingsManager,
 ) -> pa_agent::agent_loop::ConvertToLlmFn {
+    let settings = std::sync::Arc::new(settings);
     std::sync::Arc::new(move |messages| {
-        let settings = settings.clone();
+        let settings = std::sync::Arc::clone(&settings);
         Box::pin(async move {
             let enabled =
                 tokio::task::spawn_blocking(move || settings.reopen().get_harness_refinements())
@@ -98,6 +99,71 @@ mod tests {
         assert_eq!(convert(messages.clone()).await.unwrap(), expected);
         settings.set_harness_refinements(true).unwrap();
         assert_eq!(convert(messages).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cold_and_resumed_disabled_sessions_omit_saved_harness_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join("agent");
+        let mut settings = SettingsManager::create(tmp.path(), &agent_dir);
+        settings.set_harness_refinements(false).unwrap();
+        let model: pa_agent::types::Model = serde_json::from_value(serde_json::json!({
+            "id":"m", "name":"m", "api":"test", "provider":"test", "baseUrl":"http://localhost",
+            "reasoning":false, "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},
+            "contextWindow":10000, "maxTokens":100
+        }))
+        .unwrap();
+        for resumed in [false, true] {
+            let mut manager = crate::session::manager::SessionManager::in_memory(tmp.path());
+            manager.materialize_session_file(Some(tmp.path().join(if resumed {
+                "resumed"
+            } else {
+                "cold"
+            })));
+            if resumed {
+                manager
+                    .append_custom_message(
+                        "harness_digest",
+                        UserContent::Text("saved memory".to_string()),
+                        false,
+                        None,
+                    )
+                    .unwrap();
+                manager.append_message(user("Continue my work")).unwrap();
+            }
+            let provider =
+                std::sync::Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
+            let engine =
+                super::super::engine::create_session(super::super::engine::SessionEngineConfig {
+                    cwd: tmp.path().to_path_buf(),
+                    agent_dir: agent_dir.clone(),
+                    model: Some(model.clone()),
+                    stream_fn: Some(provider.stream_fn()),
+                    session_manager: Some(manager),
+                    daemonless: true,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert!(!engine.session.auto_refine_allowed());
+            assert!(engine.session.harness_digest_inputs().await.is_none());
+            assert!(engine
+                .session
+                .pending_digest_prompt_row()
+                .await
+                .unwrap()
+                .is_none());
+            let live = engine.session.agent().state().await.messages;
+            assert_eq!(
+                super::super::messages::loop_convert_to_llm(live).len(),
+                usize::from(resumed)
+            );
+            // The history remains inspectable even though it is absent from model context.
+            if resumed {
+                assert!(engine.session.entries().await.iter().any(|entry| matches!(entry,
+                    pa_types::session::FileEntry::CustomMessage { payload, .. } if payload.custom_type == "harness_digest")));
+            }
+        }
     }
 
     #[test]

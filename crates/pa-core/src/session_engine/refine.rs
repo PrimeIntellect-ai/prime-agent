@@ -14,7 +14,8 @@ use crate::refinement::executor::{
 };
 use crate::refinement::{
     append_global_refinement, format_refinement_notice_body, load_global_refinement_history,
-    load_harness_state, merge_harness_states, update_harness_state, HarnessScope, RefinementResult,
+    load_harness_state, merge_harness_states, try_update_harness_state, HarnessScope,
+    RefinementResult,
 };
 use crate::session::manager::SessionManager;
 
@@ -401,20 +402,20 @@ pub async fn execute_refinement_with_rows(
         None => false,
     };
     let (mut result, state_path) = tokio::task::spawn_blocking(move || {
-        update_harness_state(&target_dir, target_scope, |state| {
+        try_update_harness_state(&target_dir, target_scope, |state| {
             anyhow::ensure!(
                 settings
                     .as_ref()
                     .is_none_or(|settings| settings.reopen().get_harness_refinements()),
                 "Harness refinements were disabled during planning; the result was discarded"
             );
-            apply_refinement_plan(
+            Ok(apply_refinement_plan(
                 state,
                 plan,
                 &core_options,
                 Some(baseline_state),
                 factory_enabled,
-            )
+            ))
         })
     })
     .await
