@@ -543,6 +543,43 @@ impl MockSupervisor {
                             push_event(&mut writer, events_seen, &event);
                         }
                         run_open = false;
+                    } else if matches!(
+                        command.get("message").and_then(Value::as_str),
+                        Some(
+                            "provider-failure"
+                                | "fallback-failure"
+                                | "fallback-abort"
+                                | "retry-failure"
+                                | "retry-cancel"
+                        )
+                    ) {
+                        let kind = command["message"].as_str().unwrap();
+                        let aborted = kind.ends_with("abort") || kind.ends_with("cancel");
+                        let message = json!({ "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Retry cancelled" });
+                        let events = if kind.starts_with("retry-") {
+                            // Identical text for failure and cancellation proves the
+                            // client consumes typed provenance, not error wording.
+                            vec![
+                                json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": aborted }),
+                            ]
+                        } else if kind == "provider-failure" {
+                            vec![
+                                json!({ "type": "message_end", "message": message }),
+                                json!({ "type": "turn_end", "message": message }),
+                                json!({ "type": "agent_end", "messages": [message] }),
+                            ]
+                        } else {
+                            vec![
+                                json!({ "type": "turn_end", "error": "No response produced.", "aborted": aborted }),
+                                json!({ "type": "agent_end", "aborted": aborted }),
+                            ]
+                        };
+                        for event in events {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = false;
+                        retry_pending = false;
                     } else if run_open {
                         if retry_pending {
                             for event in [

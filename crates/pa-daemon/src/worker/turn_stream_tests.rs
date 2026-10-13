@@ -478,6 +478,25 @@ async fn an_abort_between_steps_marks_the_runs_agent_end() {
     );
 }
 
+#[tokio::test]
+async fn fallback_cancellation_has_provenance_even_when_error_text_matches_failure() {
+    for (event, expected) in [
+        (
+            EngineEvent::DoneAborted,
+            json!({ "type": "turn_end", "error": "No response produced.", "aborted": true }),
+        ),
+        (
+            EngineEvent::Done(Err("No response produced.".to_string())),
+            json!({ "type": "turn_end", "error": "No response produced." }),
+        ),
+    ] {
+        let events = gate_sighting_events(vec![event], false, false).await;
+        let ends = positions_of(&events, "turn_end");
+        assert_eq!(ends.len(), 1);
+        assert_eq!(events[ends[0]], expected);
+    }
+}
+
 /// A run that settled on its own keeps the TS `agent_end` shape — the marker
 /// rides aborted runs only.
 #[tokio::test]

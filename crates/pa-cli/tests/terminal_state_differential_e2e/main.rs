@@ -307,7 +307,11 @@ fn program_status_lifecycle_failure_never_reports_done() {
     let mark = harness.mark();
     harness.write(b"lifecycle-failure\r");
     harness.wait_from(mark, b"lifecycle-failure-sentinel", "the failure rendered");
-    harness.wait_from(mark, STATUS_IDLE, "the failed run settled idle");
+    harness.wait_from(
+        mark,
+        b"\x1b]7501;state=error:app=prime-agent\x1b\\",
+        "the failed run settled error",
+    );
     assert!(
         !harness.output()[mark..]
             .windows(STATUS_DONE.len())
@@ -318,6 +322,59 @@ fn program_status_lifecycle_failure_never_reports_done() {
     harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
     assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
     harness.assert_terminal_state_restored("the lifecycle failure status route");
+}
+
+#[test]
+fn program_status_failure_and_cancellation_have_distinct_outcomes() {
+    let _lock = harness_lock();
+    for (command, expected) in [
+        (
+            "provider-failure",
+            b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
+        ),
+        (
+            "fallback-failure",
+            b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
+        ),
+        ("fallback-abort", STATUS_IDLE),
+        (
+            "retry-failure",
+            b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
+        ),
+        ("retry-cancel", STATUS_IDLE),
+    ] {
+        let mut harness = DifferentialHarness::start(&ChildSpec::new("chat"));
+        harness.answer_kitty_query();
+        harness.wait_from_start(b"row 0", "the attach snapshot rendered");
+        harness.wait_from_start(STATUS_IDLE, "the initial idle report");
+        let mark = harness.mark();
+        harness.write(if command.starts_with("retry-") {
+            b"retry\r"
+        } else {
+            b"hi\r"
+        });
+        harness.wait_from(mark, STATUS_WORKING, "the run is working");
+        if command.starts_with("retry-") {
+            harness.wait_from(
+                mark,
+                b"status-retry-sentinel",
+                "the retry countdown rendered",
+            );
+        }
+        let mark = harness.mark();
+        harness.write(format!("{command}\r").as_bytes());
+        harness.wait_from(mark, expected, command);
+        assert!(
+            !harness.output()[mark..]
+                .windows(STATUS_DONE.len())
+                .any(|w| w == STATUS_DONE),
+            "{command} must not report done"
+        );
+        harness.write(b"/exit\r");
+        harness.wait_from(mark, STATUS_CLEAR, "the exit clear");
+        assert_eq!(harness.wait_child_exit(Duration::from_secs(20)), Some(0));
+        harness.assert_terminal_state_restored(command);
+    }
 }
 
 /// A provider retry remains working even after the failed attempt's
