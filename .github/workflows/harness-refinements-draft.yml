@@ -9,7 +9,7 @@ on:
       - '.github/workflows/harness-refinements-draft.yml'
       - 'crates/pa-core/src/session_engine/refinement_gate.rs'
       - 'docs/harness-refinements-setting.md'
-      - 'scripts/review_harness_settings_parity.py'
+      - 'scripts/compare_harness_settings_binaries.py'
 permissions:
   contents: read
 concurrency:
@@ -120,7 +120,7 @@ jobs:
           export PI_PACKAGE_DIR="$RUNNER_TEMP/settings-ts/package"
           export PA_RUST_BINARY="$RUNNER_TEMP/pr-prime-agent"
           export PA_BASE_BINARY="$RUNNER_TEMP/base-prime-agent"
-          python3 scripts/review_harness_settings_parity.py --receipt "$RUNNER_TEMP/settings-parity/receipt.json"
+          python3 scripts/compare_harness_settings_binaries.py --receipt "$RUNNER_TEMP/settings-parity/receipt.json"
       - name: Upload frames, raw terminal output and comparison receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
