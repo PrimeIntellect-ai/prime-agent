@@ -139,14 +139,10 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
     } else {
         95.0
     };
-    let mut thresholds: Vec<String> = (1..=100).map(|value| value.to_string()).collect();
-    if !thresholds.contains(&percent.to_string()) {
-        thresholds.push(percent.to_string());
-        thresholds.sort_by(|a, b| {
-            a.parse::<f64>()
-                .unwrap()
-                .total_cmp(&b.parse::<f64>().unwrap())
-        });
+    let mut thresholds: Vec<f64> = (1..=100).map(f64::from).collect();
+    if !thresholds.contains(&percent) {
+        thresholds.push(percent);
+        thresholds.sort_by(f64::total_cmp);
     }
     vec![
         SettingsMenuRow {
@@ -154,7 +150,7 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             label: "Auto-compact threshold (%)",
             description: "Context percentage ceiling (1–100); output and reserve headroom can compact earlier",
             current: percent.to_string(),
-            values: Some(thresholds),
+            values: Some(thresholds.into_iter().map(|value| value.to_string()).collect()),
             submenu: None,
         },
         SettingsMenuRow {

@@ -33,7 +33,7 @@ def observe(binary, kind, root):
         terminal.send('\r')
         terminal.wait('settings menu', lambda: 'Auto-compact' in terminal.screen.text(), server)
         result['settings_frame'] = terminal.screen.text()
-        terminal.send('\x1b[C')
+        terminal.send('\r')
         terminal.wait('toggle delivered', lambda: any(c.get('type') == 'set_auto_compaction' for c in server.commands), server)
         terminal.wait('toggle rendered', lambda: any('Auto-compact' in row and 'true' in row for row in terminal.screen.text().splitlines()), server)
         result['toggle_frame'] = terminal.screen.text()
@@ -44,9 +44,9 @@ def observe(binary, kind, root):
         if kind == 'rust':
             # General's added row follows the five existing settings; preserve their key order.
             terminal.send('\x1b[B' * 5)
-            terminal.wait('percentage focused', lambda: 'Context percentage ceiling' in terminal.screen.text(), server)
+            terminal.wait('percentage focused', lambda: any(row.strip().startswith('› Auto-compact threshold (%)') for row in terminal.screen.text().splitlines()), server)
             result['percentage_frame'] = terminal.screen.text()
-            terminal.send('\x1b[C')
+            terminal.send('\r')
             path = root / 'agent/settings.json'
             terminal.wait('percentage persisted', lambda: json.loads(path.read_text()).get('compaction', {}).get('thresholdPercent') == 96, server)
             terminal.wait('percentage rendered', lambda: any('threshold (%)' in row and '96' in row for row in terminal.screen.text().splitlines()), server)

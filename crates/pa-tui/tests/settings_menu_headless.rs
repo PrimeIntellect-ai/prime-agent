@@ -747,12 +747,12 @@ fn threshold_percentage_cycles_through_the_persistence_seam() {
     }
     steps.push(HeadlessStep::Key(key(KeyCode::Right)));
     steps.push(HeadlessStep::WaitRender {
-        needle: "Context percentage ceiling".into(),
+        needle: "› Auto-compact threshold (%)".into(),
         timeout_ms: 5000,
     });
     let (frames, settings) = run_plan(steps);
     assert_eq!(settings.log(), vec!["threshold=96"]);
-    let rows = frame_with(&frames, "Context percentage ceiling");
+    let rows = frame_with(&frames, "› Auto-compact threshold (%)");
     assert!(rows
         .iter()
         .any(|row| row.contains("Auto-compact threshold (%)") && row.contains("96")));
