@@ -759,6 +759,44 @@ fn every_wrapped_auth_url_row_links_to_the_complete_target() {
     }
 }
 
+/// Bugbot (cursor) finding: the URL wrap must preserve every byte on screen. `scrub_controls`
+/// spaces control characters and word wrap drops spaces at the break - the visible rows would
+/// no longer match the copied or hyperlinked target. A URL is one token: char-level wrap.
+#[test]
+fn wrapped_auth_url_keeps_spaces_between_the_rows() {
+    let url = format!(
+        "https://example.test/oauth?state={}a{}b{}c",
+        ' ', '\u{1}', ' '
+    );
+    let expected = scrub_controls(&url).replace('\n', "");
+    let mut panel = AuthPanel::onboarding("Login");
+    panel.show_auth_url(url, None);
+    for width in [2, 3, 5, 8, 20, 40] {
+        crate::hyperlinks::set_hyperlinks_override(Some(false));
+        let lines = panel.render(&theme(), width, &kb());
+        crate::hyperlinks::set_hyperlinks_override(None);
+        let mut shown = String::new();
+        for row in &lines[1..] {
+            let raw = visible_auth_row(row);
+            // The URL block ends at the first truly empty row; a wrapped space renders
+            // as a whitespace-only URL row and must not end it.
+            if raw.is_empty() {
+                break;
+            }
+            let segment = if width > 1 {
+                raw.strip_prefix(' ').unwrap_or(&raw)
+            } else {
+                &raw[..]
+            };
+            shown.push_str(segment);
+        }
+        assert_eq!(shown, expected, "width {width}");
+        assert!(lines
+            .iter()
+            .all(|line| crate::width::line_width(line) <= width));
+    }
+}
+
 fn visible_auth_row(line: &Line) -> String {
     crate::ansi::strip_ansi(
         &line

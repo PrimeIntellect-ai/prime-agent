@@ -98,20 +98,35 @@ impl AuthPanel {
             let safe = scrub_controls(url).replace('\n', "");
             // Wrap the visible URL before adding OSC 8: every row must retain a complete
             // target and a closing sequence. Wrapping the escape-bearing string can split it.
+            // The wrap is character-level, not word-level: a URL is one token, and word wrap
+            // drops the spaces `scrub_controls` emits for control characters at the breaks -
+            // the visible rows would no longer match the copied or linked target.
             let budget = width.saturating_sub(2).max(1);
-            for row in crate::width::wrap_text(&safe, budget) {
-                let display: String = row.iter().map(|span| span.content.as_str()).collect();
+            let push_url_row = |lines: &mut Vec<Line>, display: &str| {
                 let linked = if crate::hyperlinks::hyperlinks_enabled() {
                     format!("{}{display}{OSC8_CLOSE}", osc8_open(&safe))
                 } else {
-                    display
+                    display.to_string()
                 };
                 // At one column there is no room for the usual indent as well as the URL.
                 lines.push(vec![
                     Span::raw(if width > 1 { " " } else { "" }),
                     theme.fg_span(ThemeColor::Text, linked),
                 ]);
+            };
+            let mut display = String::new();
+            let mut display_width = 0usize;
+            for c in safe.chars() {
+                let char_width = crate::width::char_width(c);
+                if display_width + char_width > budget && !display.is_empty() {
+                    push_url_row(&mut lines, &display);
+                    display.clear();
+                    display_width = 0;
+                }
+                display.push(c);
+                display_width += char_width;
             }
+            push_url_row(&mut lines, &display);
             // The browser-step text reads apart from the URL.
             lines.push(Vec::new());
             let instructions = self.auth_instructions.clone().map_or_else(
