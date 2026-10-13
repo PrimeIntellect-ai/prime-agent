@@ -22,6 +22,7 @@ from review_draft_disconnect_parity import Terminal, env_for, stop, LIMIT
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 
 PROMPT = 'NEW_GOAL_PARITY_INITIAL_PROMPT'
+SETTLED = 'Parity fixture settled'
 NAME = 'Parity named session'
 OBJECTIVE = 'Describe the attached parity image'
 IMAGE = {'type': 'image', 'mimeType': 'image/png', 'data':
@@ -64,7 +65,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                       'import goal\nawait goal.complete()'})}}]}
                 finish = 'tool_calls'
             else:
-                delta, finish = {'content': 'PARITY_FIXTURE_SETTLED'}, 'stop'
+                delta, finish = {'content': SETTLED}, 'stop'
             def chunk(value, reason=None):
                 return {'id': 'new-goal-parity', 'object': 'chat.completion.chunk', 'created': 1,
                         'model': 'parity-1', 'choices': [{'index': 0, 'delta': value,
@@ -156,8 +157,7 @@ def new_case(binary, label, root, observation):
         terminal.wait('command visibly typed', lambda: PROMPT in terminal.screen.text(), provider)
         observation['typed_screen'] = terminal.screen.text()
         terminal.send('\r')
-        terminal.wait('new prompt visibly settled', lambda: 'PARITY_FIXTURE_SETTLED'
-                      in terminal.screen.text(), provider)
+        terminal.wait('new prompt visibly settled', lambda: SETTLED in terminal.screen.text(), provider)
         rows = session_rows(root)
         observation.update(screen=terminal.screen.text(), raw_terminal=terminal.raw.decode(errors='replace'),
                            sessions=rows, requests=provider.requests)
@@ -171,7 +171,7 @@ def new_case(binary, label, root, observation):
         assert any(PROMPT in json.dumps(c) for c in content), 'initial prompt missing from provider'
         assert NAME in observation['screen'], 'named session not rendered'
         return {'session_count': len(rows), 'name': NAME, 'user_content': content,
-                'settled_text': 'PARITY_FIXTURE_SETTLED', 'request_count': len(provider.requests)}
+                'settled_text': SETTLED, 'request_count': len(provider.requests)}
     finally:
         if terminal:
             observation.setdefault('screen', terminal.screen.text())
@@ -240,10 +240,21 @@ def goal_case(binary, label, root, observation):
                   'images': [IMAGE]})
         response = rpc.until(lambda f: f.get('type') == 'response' and f.get('id') == 'goal-image')
         assert response.get('success'), response
-        # Goal-completion is observed in host output, never inferred from final text.
-        rpc.until(lambda f: f.get('type') == 'goal_update'
-                  and f.get('goal', {}).get('status') == 'complete')
+        # The changed surface is the goal-context carrier. RPC's existing Rust
+        # continuation path publishes an active update before the model turn,
+        # but not the tool's final complete update. Preserve that difference;
+        # query authoritative host state after agent_end rather than assuming
+        # the TS event-publication sequence or trusting fixture answer text.
         rpc.until(lambda f: f.get('type') == 'agent_end')
+        rpc.send({'type': 'get_state', 'id': 'settled-goal-state'})
+        settled = rpc.until(lambda f: f.get('type') == 'response'
+                            and f.get('id') == 'settled-goal-state')
+        assert settled.get('success'), settled
+        final_goal = settled.get('data', {}).get('goal', {})
+        observation['final_goal'] = final_goal
+        observation['goal_update_statuses'] = [f.get('goal', {}).get('status')
+            for f in rpc.frames if f.get('type') == 'goal_update']
+        assert final_goal.get('status') == 'complete', final_goal
         contexts = [f['message'] for f in rpc.frames if f.get('type') == 'message_end'
                     and f.get('message', {}).get('customType') == 'goal_context']
         observation.update(frames=rpc.frames, requests=provider.requests, sessions=session_rows(root))
@@ -278,7 +289,8 @@ def main():
     result = {'runs': {}, 'differences': {}, 'verified': False,
               'scope': {'new': 'Real PTY command, owned real daemon, persisted name and model initial prompt.',
                         'goal': 'Actual RPC image-bearing goal_context row and completed goal.',
-                        'provider_images': 'Recorded independently; existing model-routing limitation is not normalized into context-row evidence.'}}
+                        'provider_images': 'Recorded independently; existing model-routing limitation is not normalized into context-row evidence.',
+                        'goal_updates': 'Recorded independently: Rust RPC publishes before continuation, not on goal.complete; final completion is verified by get_state after agent_end.'}}
     try:
         assert sys.platform == 'linux', 'requires Linux hosted CI'
         archive_hash = sha256(os.environ['PA_TS_ARCHIVE'])
@@ -307,6 +319,9 @@ def main():
         if all('provider_image_urls' in run for run in images.values()):
             result['provider_image_routing_equal'] = (images['ts']['provider_image_urls']
                                                     == images['rust']['provider_image_urls'])
+        if all('goal_update_statuses' in run for run in images.values()):
+            result['goal_update_event_sequence_equal'] = (images['ts']['goal_update_statuses']
+                                                         == images['rust']['goal_update_statuses'])
         assert not failures, failures
         assert not result['differences'], 'changed-surface parity mismatch'
         result['verified'] = True
