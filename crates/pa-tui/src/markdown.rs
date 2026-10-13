@@ -67,14 +67,12 @@ impl MarkdownStyle {
             quote_border: theme.fg_style(C::MdQuoteBorder),
             hr: theme.fg_style(C::MdHr),
             list_bullet: theme.fg_style(C::MdListBullet),
-            // The TS source styles `**bold**`/`*ital*`/`~~strike~~` (and the heading taper)
-            // through chalk; in the deployed TS binary the chalk modifiers never reach the
-            // wire — only its raw-ANSI colors render (probe vs the installed 0.9.5 binary:
-            // headings render in mdHeading alone, inline strong/em/strike render plain, inline
-            // code stays colored). The markers survive parsing but carry no modifier.
-            bold: Modifier::empty(),
-            italic: Modifier::empty(),
-            strikethrough: Modifier::empty(),
+            // TS `theme.bold/italic/strikethrough` are chalk; chalk emits its SGR
+            // modifiers in any color terminal (its supports-color level is >= 1
+            // whenever stdout is a TTY), so emphasis carries real modifiers.
+            bold: Modifier::BOLD,
+            italic: Modifier::ITALIC,
+            strikethrough: Modifier::CROSSED_OUT,
             code_block_indent: "  ".to_string(),
             syntax: Some(crate::tool_card::highlight::SyntaxPalette::from_theme(
                 theme,
@@ -186,7 +184,9 @@ fn block_cache_key(
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BlockKind {
-    Heading,
+    Heading {
+        depth: usize,
+    },
     Paragraph,
     Code {
         lang: Option<String>,
@@ -251,9 +251,9 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             continue;
         }
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-        if hashes > 0 && trimmed.len() > hashes && trimmed.as_bytes()[hashes] == b' ' {
+        if heading_marker(trimmed) && hashes <= 6 {
             blocks.push(Block {
-                kind: BlockKind::Heading,
+                kind: BlockKind::Heading { depth: hashes },
                 sep_blank,
                 lines: vec![trimmed[hashes + 1..].to_string()],
             });
@@ -269,20 +269,25 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             i += 1;
             continue;
         }
-        if let Some(q) = trimmed.strip_prefix('>') {
-            let mut qlines = vec![q.trim_start().to_string()];
-            i += 1;
-            while i < src_lines.len()
-                && !src_lines[i].trim().is_empty()
-                && src_lines[i].trim().starts_with('>')
-            {
-                qlines.push(
-                    src_lines[i]
-                        .trim()
-                        .trim_start_matches('>')
-                        .trim_start()
-                        .to_string(),
-                );
+        if trimmed.starts_with('>') {
+            // One quote block: `>`-prefixed lines plus marked's lazy continuation —
+            // following non-blank lines that do not start another block stay inside
+            // the quote (the blockquote token consumes until a blank line).
+            let mut qlines = Vec::new();
+            while i < src_lines.len() {
+                let t = src_lines[i].trim();
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(q) = t.strip_prefix('>') {
+                    qlines.push(q.trim_start().to_string());
+                    i += 1;
+                    continue;
+                }
+                if interrupts_paragraph(t, src_lines.get(i + 1)) {
+                    break;
+                }
+                qlines.push(t.to_string());
                 i += 1;
             }
             blocks.push(Block {
@@ -347,14 +352,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         while i < src_lines.len() {
             let l = src_lines[i];
             let t = l.trim();
-            if t.is_empty()
-                || t.starts_with("```")
-                || t.starts_with('>')
-                || t.starts_with('#')
-                || list_marker(t).is_some()
-                || is_hr(t)
-                || crate::markdown_table::is_table_start(t, src_lines.get(i + 1))
-            {
+            if t.is_empty() || interrupts_paragraph(t, src_lines.get(i + 1)) {
                 break;
             }
             para_lines.push(t.to_string());
@@ -372,11 +370,30 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     blocks
 }
 
+/// A heading line start: `#`s followed by a space (the depth cap lives where the
+/// heading is parsed).
+pub(crate) fn heading_marker(t: &str) -> bool {
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    hashes > 0 && t.len() > hashes && t.as_bytes()[hashes] == b' '
+}
+
 pub(crate) fn is_hr(t: &str) -> bool {
     let chars: Vec<char> = t.chars().filter(|&c| c != ' ').collect();
     (chars.len() >= 3)
         && chars.iter().all(|&c| c == '-' || c == '*' || c == '_')
         && (chars[0] == '-' || chars[0] == '*' || chars[0] == '_')
+}
+
+/// A line that interrupts a paragraph (marked: a new block never continues one) —
+/// the shared stop predicate for paragraph parsing and a blockquote's lazy
+/// continuation.
+fn interrupts_paragraph(t: &str, next: Option<&&str>) -> bool {
+    t.starts_with("```")
+        || t.starts_with('>')
+        || t.starts_with('#')
+        || list_marker(t).is_some()
+        || is_hr(t)
+        || crate::markdown_table::is_table_start(t, next)
 }
 
 pub(crate) fn list_marker(t: &str) -> Option<(bool, usize)> {
@@ -475,18 +492,33 @@ fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Li
 /// collide) tapers to the heading color like any other span. Shared by
 /// the paint path and the row count, so a wrapped heading counts
 /// exactly what it paints.
-fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
-    let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+fn heading_spans(text: &str, depth: usize, style: &MarkdownStyle) -> Vec<Span> {
+    let (mut spans, url_slots, code_slots) = inline::render_inline_tracked(text, style);
+    // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic,
+    // all over the heading color. The heading modifiers close around an inline-code
+    // span and a link's URL bracket — both keep their own colors (tracked by origin);
+    // an underlined link label keeps the underline affordance.
+    let taper = style.heading.add_modifier(match depth {
+        1 => Modifier::BOLD | Modifier::UNDERLINED,
+        2 | 3 => Modifier::BOLD,
+        4 => Modifier::BOLD | Modifier::ITALIC,
+        _ => Modifier::ITALIC,
+    });
     // The slot indices arrive ascending, so one cursor walks them in
     // step with the span iteration — a link-heavy heading stays linear.
     let mut url_slot = 0;
+    let mut code_slot = 0;
     for (i, s) in spans.iter_mut().enumerate() {
         if url_slots.get(url_slot) == Some(&i) {
             url_slot += 1;
             continue;
         }
+        if code_slots.get(code_slot) == Some(&i) {
+            code_slot += 1;
+            continue;
+        }
         let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
-        s.style = style.heading;
+        s.style = taper;
         if underlined {
             s.style = s.style.add_modifier(Modifier::UNDERLINED);
         }
@@ -503,13 +535,9 @@ fn render_block(
 ) {
     let blank_after = |exclude_lists| geometry::blank_after(next, exclude_lists);
     match &block.kind {
-        BlockKind::Heading => {
-            // The TS source tapers headings by level (h1 bold+underline, h2/h3 bold, h4
-            // bold+italic, h5/h6 italic), all through chalk; in the deployed TS binary the
-            // chalk modifiers never reach the wire, so every level renders in the heading
-            // color alone (probe vs the installed 0.9.5 binary).
+        BlockKind::Heading { depth } => {
             let text = block.lines.first().cloned().unwrap_or_default();
-            let spans = heading_spans(&text, style);
+            let spans = heading_spans(&text, *depth, style);
             wrap_spans(&spans, width, style.heading, out);
             if blank_after(false) {
                 out.push(Vec::new());
@@ -557,18 +585,29 @@ fn render_block(
             }
         }
         BlockKind::Quote => {
+            // TS renders the whole quote content in the quote color and italic
+            // (its quoteStyle re-applies after every inline reset); inline-code
+            // spans and link URL brackets keep their own colors, and emphasis
+            // modifiers ride on top.
             for line in &block.lines {
-                let spans = render_inline(line, style);
+                let (spans, url_slots, code_slots) = inline::render_inline_tracked(line, style);
                 let mut quote_spans: Vec<Span> = Vec::new();
-                for mut s in spans {
-                    s.style = style.quote.patch(s.style);
+                for (i, mut s) in spans.into_iter().enumerate() {
+                    if s.content.is_empty() {
+                        continue;
+                    }
+                    s.style = s.style.add_modifier(Modifier::ITALIC);
+                    if !url_slots.contains(&i) && !code_slots.contains(&i) {
+                        s.style.fg = style.quote.fg;
+                    }
                     quote_spans.push(s);
                 }
                 wrap_quote(&quote_spans, width, style, out);
             }
         }
         BlockKind::Hr => {
-            let bar: String = "─".repeat(width.max(1));
+            // TS hr: `"─".repeat(Math.min(width, 80))`.
+            let bar: String = "─".repeat(width.min(80));
             out.push(vec![Span::styled(bar, style.hr)]);
         }
         BlockKind::Table { header, rows } => {
@@ -736,7 +775,7 @@ fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec
     let mut wrapped: Vec<Line> = Vec::new();
     wrap_spans(spans, quote_width, style.quote, &mut wrapped);
     for line in wrapped {
-        let mut l = vec![Span::styled("▐ ", style.quote_border)];
+        let mut l = vec![Span::styled("│ ", style.quote_border)];
         l.extend(line);
         out.push(l);
     }

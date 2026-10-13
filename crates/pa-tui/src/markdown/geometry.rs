@@ -99,9 +99,9 @@ pub(crate) fn markdown_row_count_tagged(
             continue;
         }
         let count = match &block.kind {
-            BlockKind::Heading => {
+            BlockKind::Heading { depth } => {
                 let text = block.lines.first().cloned().unwrap_or_default();
-                wrapped_span_count(&heading_spans(&text, style), width)
+                wrapped_span_count(&heading_spans(&text, *depth, style), width)
                     + usize::from(blank_after(next, false))
             }
             BlockKind::Hr => 1,

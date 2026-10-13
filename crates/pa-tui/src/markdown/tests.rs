@@ -249,7 +249,7 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
         .iter()
         .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
         .collect();
-    assert_eq!(visible, "docs [https://x.dev/a]");
+    assert_eq!(visible, "docs (https://x.dev/a)");
     // A narrow heading wraps like any row: the bracket — closing `]` included —
     // lands on its own row instead of clipping (count==paint at every width).
     let rows = render_markdown("# [docs](https://x.dev/a)", 20, &style);
@@ -264,7 +264,7 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
         .collect();
     assert_eq!(
         visible,
-        vec!["docs".to_string(), "[https://x.dev/a]".to_string()]
+        vec!["docs".to_string(), "(https://x.dev/a)".to_string()]
     );
     for width in 1..40 {
         assert_eq!(
@@ -284,21 +284,26 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
 }
 
 #[test]
-fn heading_tapers_code_and_body_that_merely_match_the_link_url_style() {
+fn heading_keeps_code_and_bracket_spans_by_origin() {
     // A theme can collide `mdCode`/`mdBody` onto the same color as `mdLinkUrl`; the
-    // taper reads the bracket slots by origin, not style equality.
+    // taper reads the code and bracket spans by origin, not style equality: the
+    // codespan keeps its own color while plain text and labels taper to the h1
+    // heading style (bold + underline), the label keeping its underline affordance.
     let mut style = MarkdownStyle::default();
     style.code = style.link_url;
     style.body = style.link_url;
     crate::hyperlinks::set_hyperlinks_override(Some(false));
     let lines = render_markdown("# `c` [d](https://x.dev/a)", 40, &style);
+    let taper = style
+        .heading
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     assert_eq!(
         lines,
         vec![vec![
-            Span::styled("c", style.heading),
-            Span::styled(" ", style.heading),
-            Span::styled("d", style.heading.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(" [https://x.dev/a]", style.link_url),
+            Span::styled("c", style.code),
+            Span::styled(" ", taper),
+            Span::styled("d", taper),
+            Span::styled(" (https://x.dev/a)", style.link_url),
         ]]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -544,7 +549,7 @@ fn inline_bold_code_link() {
     let style = MarkdownStyle::default();
     let spans = render_inline("a **b** `c` [d](http://e)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " [http://e]"]);
+    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -559,7 +564,7 @@ fn legacy_link_row_is_underlined_and_shows_the_url() {
         vec![
             "see ".to_string(),
             "docs".to_string(),
-            " [https://x.dev/a]".to_string()
+            " (https://x.dev/a)".to_string()
         ]
     );
     assert!(spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
@@ -585,7 +590,7 @@ fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
     assert_eq!(
         joined,
         format!(
-            "see {}docs{} [https://x.dev/a]",
+            "see {}docs{} (https://x.dev/a)",
             crate::hyperlinks::osc8_open("https://x.dev/a"),
             crate::hyperlinks::OSC8_CLOSE
         )
@@ -597,7 +602,7 @@ fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
     assert_eq!(spans[2].style.fg, style.link_url.fg);
     // The sequences are zero-width: the row measures like plain text plus the
     // bracketed URL.
-    assert_eq!(str_width(&joined), str_width("see docs [https://x.dev/a]"));
+    assert_eq!(str_width(&joined), str_width("see docs (https://x.dev/a)"));
     // Windows drive-letter targets classify as file paths; the label is
     // the URL, so no bracket follows it.
     let drive = render_inline("[c:\\src](c:\\src)", &style);
@@ -622,7 +627,7 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
         spans,
         vec![
             Span::styled("math", style.body.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(format!(" [{url}]"), style.link_url),
+            Span::styled(format!(" ({url})"), style.link_url),
         ]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -639,7 +644,7 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
                 ),
                 style.body.add_modifier(Modifier::UNDERLINED),
             ),
-            Span::styled(format!(" [{url}]"), style.link_url),
+            Span::styled(format!(" ({url})"), style.link_url),
         ]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -656,7 +661,7 @@ fn escaped_parens_never_open_or_close_the_link_destination() {
         spans,
         vec![
             Span::styled("a", style.body.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(" [b\\(c]", style.link_url),
+            Span::styled(" (b\\(c)", style.link_url),
         ]
     );
     let plain = render_inline("[a](b\\)", &style);
@@ -675,12 +680,12 @@ fn the_url_bracket_scrubs_terminal_control_bytes() {
     let url = "https://x.dev/\u{1b}]52;c;base64";
     let spans = render_inline(&format!("[a]({url})"), &style);
     let bracket = spans.last().expect("bracket span");
-    assert_eq!(bracket.content, " [https://x.dev/%1B]52;c;base64]");
+    assert_eq!(bracket.content, " (https://x.dev/%1B]52;c;base64)");
     // The bare-url autolink form hardens the same way (the regex tail only excludes
     // whitespace); the www form's href gains its scheme, so the bracket shows.
     let www = render_inline("www.x.dev/\u{1b}]52;c=base64", &style);
     let bracket = www.last().expect("bracket span");
-    assert_eq!(bracket.content, " [http://www.x.dev/%1B]52;c=base64]");
+    assert_eq!(bracket.content, " (http://www.x.dev/%1B]52;c=base64)");
     assert!(
         !bracket.content.contains('\u{1b}'),
         "no raw escape byte in the visible bracket"
@@ -715,7 +720,7 @@ fn link_url_bracket_wraps_and_counts_like_text() {
         visible,
         vec![
             "see docs".to_string(),
-            "[https://x.dev/a]".to_string(),
+            "(https://x.dev/a)".to_string(),
             "tail".to_string()
         ],
         "the bracket wraps like normal text"
@@ -749,7 +754,7 @@ fn long_link_url_wraps_without_breaking_the_clickable_region() {
         .collect();
     // The wrap drops the boundary gap (a wrapped row never carries its leading or
     // trailing space), so the visible text is `docs` then the bracketed URL.
-    assert_eq!(visible, format!("docs[{url}]"));
+    assert_eq!(visible, format!("docs({url})"));
     for width in 1..40 {
         assert_eq!(
             markdown_row_count(&format!("[docs]({url})"), width, &style),
@@ -853,7 +858,7 @@ fn www_autolink_gains_scheme_and_shows_the_url_in_both_forms() {
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["www.example.com/path", " [http://www.example.com/path]"]
+        vec!["www.example.com/path", " (http://www.example.com/path)"]
     );
     assert!(
         spans[0].style.add_modifier.contains(Modifier::UNDERLINED),
@@ -867,7 +872,7 @@ fn www_autolink_gains_scheme_and_shows_the_url_in_both_forms() {
     assert_eq!(
         joined,
         format!(
-            "{}www.example.com/path{} [http://www.example.com/path]",
+            "{}www.example.com/path{} (http://www.example.com/path)",
             crate::hyperlinks::osc8_open("http://www.example.com/path"),
             crate::hyperlinks::OSC8_CLOSE
         )
@@ -941,7 +946,7 @@ fn bare_url_is_not_autolinked_inside_a_link_label() {
     let style = MarkdownStyle::default();
     let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["see https://in.dev/x", " [https://out.dev/y]"]);
+    assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -1035,6 +1040,159 @@ fn wrapping() {
 fn quote_block() {
     let style = MarkdownStyle::default();
     let lines = render_markdown("> wisdom", 40, &style);
-    assert_eq!(lines[0][0].content, "▐ ");
+    assert_eq!(lines[0][0].content, "│ ");
     assert_eq!(lines[0][1].content, "wisdom");
+}
+
+#[test]
+fn emphasis_renders_chalk_modifiers() {
+    // TS `theme.bold/italic/strikethrough` are chalk; chalk emits its SGR modifiers in
+    // any color terminal (supports-color level >= 1 whenever stdout is a TTY), so
+    // `**bold**`, `*italic*`, and `~~strike~~` carry BOLD/ITALIC/CROSSED_OUT.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("**b** *i* ~~s~~", 40, &style);
+    assert_eq!(lines.len(), 1);
+    let spans = &lines[0];
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    assert_eq!(find("b").style.add_modifier, Modifier::BOLD);
+    assert_eq!(find("i").style.add_modifier, Modifier::ITALIC);
+    assert_eq!(find("s").style.add_modifier, Modifier::CROSSED_OUT);
+    assert_eq!(find("b").style.fg, style.body.fg);
+}
+
+#[test]
+fn headings_taper_by_level_like_the_theme_functions() {
+    // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic —
+    // all over the heading color.
+    let style = MarkdownStyle::default();
+    for (md, expected) in [
+        ("# one", Modifier::BOLD | Modifier::UNDERLINED),
+        ("## two", Modifier::BOLD),
+        ("### three", Modifier::BOLD),
+        ("#### four", Modifier::BOLD | Modifier::ITALIC),
+        ("##### five", Modifier::ITALIC),
+        ("###### six", Modifier::ITALIC),
+    ] {
+        let lines = render_markdown(md, 40, &style);
+        let span = &lines[0][0];
+        assert_eq!(span.style.fg, style.heading.fg, "{md}");
+        assert_eq!(span.style.add_modifier, expected, "{md}");
+    }
+    // Seven hashes is not a heading (marked: `#{1,6}`).
+    let lines = render_markdown("####### seven", 40, &style);
+    assert_eq!(lines[0][0].content, "####### seven");
+    assert_eq!(lines[0][0].style.fg, style.body.fg);
+}
+
+#[test]
+fn heading_keeps_inline_code_color() {
+    // TS `renderInlineTokens` codespan: `theme.code(text) + stylePrefix` — the heading
+    // modifiers close around the codespan, and it keeps the mdCode color.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("# a `c` b", 40, &style);
+    let spans = &lines[0];
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    let code = find("c");
+    assert_eq!(code.style.fg, style.code.fg);
+    assert_eq!(code.style.add_modifier, Modifier::empty());
+    let text = find("a ");
+    assert_eq!(text.style.fg, style.heading.fg);
+    assert_eq!(
+        text.style.add_modifier,
+        Modifier::BOLD | Modifier::UNDERLINED
+    );
+}
+
+#[test]
+fn quote_renders_the_ts_style_and_box_border() {
+    // TS blockquote: border `│ `; the whole quote content renders in the quote color
+    // and italic (`theme.quote(theme.italic(...))` re-applied after every inline reset),
+    // with emphasis modifiers riding on top; a codespan keeps its own color.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> q **b** `c`", 40, &style);
+    let spans = &lines[0];
+    assert_eq!(spans[0].content, "│ ");
+    assert_eq!(spans[0].style.fg, style.quote_border.fg);
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    let q = find("q ");
+    assert_eq!(q.style.fg, style.quote.fg);
+    assert_eq!(q.style.add_modifier, Modifier::ITALIC);
+    let b = find("b");
+    assert_eq!(b.style.fg, style.quote.fg);
+    assert_eq!(b.style.add_modifier, Modifier::BOLD | Modifier::ITALIC);
+    let c = find("c");
+    assert_eq!(c.style.fg, style.code.fg);
+    assert_eq!(c.style.add_modifier, Modifier::ITALIC);
+}
+
+#[test]
+fn link_fallback_prints_parens_and_parses_titles() {
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("[t](https://x.dev/a)", 40, &style);
+    let visible: String = lines[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(visible, "t (https://x.dev/a)");
+    // marked's link rule: a quoted title after the destination parses out of the URL.
+    let lines = render_markdown(r#"[t](https://x.dev/a "Title")"#, 40, &style);
+    let visible: String = lines[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(visible, "t (https://x.dev/a)");
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn hr_caps_at_eighty_columns() {
+    // TS hr: `"─".repeat(Math.min(width, 80))`.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("---", 120, &style);
+    assert_eq!(lines[0][0].content.chars().count(), 80);
+    let lines = render_markdown("---", 40, &style);
+    assert_eq!(lines[0][0].content.chars().count(), 40);
+}
+
+#[test]
+fn quote_lazy_continuation_stays_inside_the_quote() {
+    // marked's blockquote token lazily consumes following non-blank lines that do
+    // not start another block: the paragraph stays inside the quote border.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> quoted\ncontinued", 40, &style);
+    assert_eq!(lines.len(), 2, "rows: {lines:?}");
+    for row in &lines {
+        assert_eq!(row[0].content, "│ ", "border on every quote row");
+    }
+    let joined: String = lines[1]
+        .iter()
+        .skip(1)
+        .map(|s| s.content.as_str())
+        .collect();
+    assert_eq!(joined, "continued");
+    // A new block still escapes the quote (CommonMark lazy rules).
+    let lines = render_markdown("> quoted\n- list", 40, &style);
+    assert_eq!(lines[1][0].content, "- ");
+    let joined: String = lines[1].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "- list");
+}
+
+#[test]
+fn quote_blank_line_renders_a_bare_border_row() {
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> a\n>\n> b", 40, &style);
+    assert_eq!(lines.len(), 3, "rows: {lines:?}");
+    assert_eq!(lines[1], vec![Span::styled("│ ", style.quote_border)]);
+    let joined: String = lines[2].iter().skip(1).map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "b");
 }

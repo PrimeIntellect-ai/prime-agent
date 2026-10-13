@@ -4,27 +4,34 @@ use ratatui::style::Modifier;
 /// Inline rendering: bold, italic, strikethrough, code, links.
 #[must_use]
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
-    render_inline_with_url_slots(text, style).0
+    render_inline_tracked(text, style).0
 }
 
-/// The same inline render, plus the `link_url` slot indices: which spans of the
-/// returned line carry a link's `[url]` bracket, in ascending span order.
-/// Style-tapering callers preserve those spans by origin — a span that merely
-/// renders in the `link_url` style is not a slot.
+/// The same inline render, plus origin tracking: which spans of the returned line
+/// carry a link's `(url)` bracket (`url_slots`) and which are inline-code spans
+/// (`code_slots`), in ascending span order. Style-tapering callers (headings,
+/// quotes) preserve those spans by origin — a span that merely renders in the same
+/// style is not a slot.
 #[must_use]
-pub(crate) fn render_inline_with_url_slots(
+pub(crate) fn render_inline_tracked(
     text: &str,
     style: &MarkdownStyle,
-) -> (Line, Vec<usize>) {
+) -> (Line, Vec<usize>, Vec<usize>) {
     render_inline_ctx(text, style, false)
 }
 
 /// `in_link` mirrors marked's `lexer.state.inLink`: the gfm bare-url rule is
 /// skipped inside a link label's tokens (the angle `autolink` rule is not).
-/// Returns the `[url]` bracket indices, remapped across every recursive extend.
-fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line, Vec<usize>) {
+/// Returns the `(url)`-bracket and inline-code span indices, remapped across every
+/// recursive extend.
+fn render_inline_ctx(
+    text: &str,
+    style: &MarkdownStyle,
+    in_link: bool,
+) -> (Line, Vec<usize>, Vec<usize>) {
     let mut spans: Vec<Span> = Vec::new();
     let mut url_slots: Vec<usize> = Vec::new();
+    let mut code_slots: Vec<usize> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
     // Byte offset per char index: the autolink rules run on a slice of the original text, so a
     // candidate-heavy line stays linear in its attempts.
@@ -74,6 +81,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             }
             if j < bytes.len() {
                 flush!();
+                code_slots.push(spans.len());
                 spans.push(Span::styled(code, style.code));
                 i = j + 1;
                 continue;
@@ -88,32 +96,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 j += 1;
             }
             if j + 1 < bytes.len() && bytes[j] == ']' && bytes[j + 1] == '(' {
-                let mut k = j + 2;
-                let mut url = String::new();
-                // CommonMark link destination: parens ride as a balanced pair (the
-                // destination ends at its own `)`, not the first one inside); an
-                // escaped char rides verbatim and never counts toward the balance.
-                let mut paren_depth = 0usize;
-                while k < bytes.len() {
-                    if bytes[k] == ')' && paren_depth == 0 {
-                        break;
-                    }
-                    if bytes[k] == '\\' && k + 1 < bytes.len() {
-                        url.push(bytes[k]);
-                        k += 1;
-                        url.push(bytes[k]);
-                        k += 1;
-                        continue;
-                    }
-                    if bytes[k] == '(' {
-                        paren_depth += 1;
-                    } else if bytes[k] == ')' {
-                        paren_depth -= 1;
-                    }
-                    url.push(bytes[k]);
-                    k += 1;
-                }
-                if k < bytes.len() {
+                if let Some((url, k)) = link_destination(&bytes, j + 2) {
                     flush!();
                     let mut modifier = Modifier::empty();
                     if bold {
@@ -126,7 +109,8 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                     // terminal link affordance); `modifier` carries the
                     // emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
-                    let (mut label_spans, mut label_slots) = render_inline_ctx(&label, style, true);
+                    let (mut label_spans, mut label_slots, mut label_codes) =
+                        render_inline_ctx(&label, style, true);
                     for s in &mut label_spans {
                         s.style = s.style.add_modifier(modifier | Modifier::UNDERLINED);
                     }
@@ -144,7 +128,11 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                     for slot in &mut label_slots {
                         *slot += offset;
                     }
+                    for slot in &mut label_codes {
+                        *slot += offset;
+                    }
                     url_slots.append(&mut label_slots);
+                    code_slots.append(&mut label_codes);
                     spans.extend(label_spans);
                     // The URL rides after the wrap (the OSC 8 region covers the label
                     // only), in the dim `link_url` slot unless the label already is
@@ -156,7 +144,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                         // smuggled escape byte can never re-enter the terminal live.
                         let shown = crate::hyperlinks::sanitize_control_bytes(url.clone());
                         url_slots.push(spans.len());
-                        spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
+                        spans.push(Span::styled(format!(" ({shown})"), style.link_url));
                     }
                     i = k + 1;
                     continue;
@@ -194,13 +182,17 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 flush!();
                 if doubled {
                     bold = !bold;
-                    let (mut inner_spans, mut inner_slots) =
+                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
                         render_inline_ctx(&inner, style, in_link);
                     let offset = spans.len();
                     for slot in &mut inner_slots {
                         *slot += offset;
                     }
+                    for slot in &mut inner_codes {
+                        *slot += offset;
+                    }
                     url_slots.append(&mut inner_slots);
+                    code_slots.append(&mut inner_codes);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.bold);
                     }
@@ -208,13 +200,17 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                     bold = !bold;
                 } else {
                     italic = !italic;
-                    let (mut inner_spans, mut inner_slots) =
+                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
                         render_inline_ctx(&inner, style, in_link);
                     let offset = spans.len();
                     for slot in &mut inner_slots {
                         *slot += offset;
                     }
+                    for slot in &mut inner_codes {
+                        *slot += offset;
+                    }
                     url_slots.append(&mut inner_slots);
+                    code_slots.append(&mut inner_codes);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.italic);
                     }
@@ -230,13 +226,17 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
                 let inner: String = bytes[i + 2..close].iter().collect();
                 if !inner.trim().is_empty() {
                     flush!();
-                    let (mut inner_spans, mut inner_slots) =
+                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
                         render_inline_ctx(&inner, style, in_link);
                     let offset = spans.len();
                     for slot in &mut inner_slots {
                         *slot += offset;
                     }
+                    for slot in &mut inner_codes {
+                        *slot += offset;
+                    }
                     url_slots.append(&mut inner_slots);
+                    code_slots.append(&mut inner_codes);
                     for s in &mut inner_spans {
                         s.style = s.style.add_modifier(style.strikethrough);
                     }
@@ -289,7 +289,7 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
             if token.text != token.href && token.text != comparison {
                 let shown = crate::hyperlinks::sanitize_control_bytes(token.href.clone());
                 url_slots.push(spans.len());
-                spans.push(Span::styled(format!(" [{shown}]"), style.link_url));
+                spans.push(Span::styled(format!(" ({shown})"), style.link_url));
             }
             i += token.raw.chars().count();
             continue;
@@ -301,7 +301,62 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> (Line,
     if spans.is_empty() {
         spans.push(Span::raw(""));
     }
-    (spans, url_slots)
+    (spans, url_slots, code_slots)
+}
+
+/// The `CommonMark` inline-link destination after `[label](` (marked's link rule):
+/// parens ride as a balanced pair (the destination ends at its own `)`, not the
+/// first one inside), an escaped char rides verbatim, and the destination stops at
+/// whitespace — a quoted title may follow before the closing paren. Returns the
+/// destination and the index of the closing `)`.
+fn link_destination(bytes: &[char], from: usize) -> Option<(String, usize)> {
+    let mut k = from;
+    while k < bytes.len() && (bytes[k] == ' ' || bytes[k] == '\t') {
+        k += 1;
+    }
+    let mut url = String::new();
+    let mut paren_depth = 0usize;
+    while k < bytes.len() {
+        let b = bytes[k];
+        if b == ')' && paren_depth == 0 {
+            return Some((url, k));
+        }
+        if b == ' ' || b == '\t' {
+            break;
+        }
+        if b == '\\' && k + 1 < bytes.len() {
+            url.push(b);
+            k += 1;
+            url.push(bytes[k]);
+            k += 1;
+            continue;
+        }
+        if b == '(' {
+            paren_depth += 1;
+        } else if b == ')' {
+            paren_depth = paren_depth.saturating_sub(1);
+        }
+        url.push(b);
+        k += 1;
+    }
+    while k < bytes.len() && (bytes[k] == ' ' || bytes[k] == '\t') {
+        k += 1;
+    }
+    if k < bytes.len() && (bytes[k] == '"' || bytes[k] == '\'') {
+        let quote = bytes[k];
+        k += 1;
+        while k < bytes.len() && bytes[k] != quote {
+            k += 1;
+        }
+        if k == bytes.len() {
+            return None;
+        }
+        k += 1;
+        while k < bytes.len() && (bytes[k] == ' ' || bytes[k] == '\t') {
+            k += 1;
+        }
+    }
+    (k < bytes.len() && bytes[k] == ')').then_some((url, k))
 }
 
 /// Run the marked autolink rules on the text starting at `rest` (the caller's slice of the original
