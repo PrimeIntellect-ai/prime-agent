@@ -1443,6 +1443,21 @@ mod tests {
         assert!(big.ends_with(&kept), "the tail wins");
     }
 
+    /// Readiness wait for a racing thread's entered signal: the signal is
+    /// what the caller proceeds on — the deadline only bounds failure, it can
+    /// never make an assertion pass.
+    fn wait_for(signal: &AtomicBool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !signal.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the racing admission never started"
+            );
+            std::hint::spin_loop();
+            std::thread::yield_now();
+        }
+    }
+
     #[tokio::test]
     async fn the_shutdown_gate_cannot_close_between_a_streamed_claim_and_its_registration() {
         let cwd = tempfile::tempdir().expect("tempdir");
@@ -1462,11 +1477,19 @@ mod tests {
             core.shutdown_requested = false;
         }
         let mut gate = worker.core.lock().unwrap();
+        // Readiness is the racing admission's own signal, not a fixed sleep:
+        // once the thread is inside its call, the held gate pins it to enter
+        // the critical section only after the close.
+        let entered = Arc::new(AtomicBool::new(false));
         let racing = std::thread::spawn({
             let worker = Arc::clone(&worker);
-            move || worker.admit_streamed_bash().is_ok()
+            let entered = Arc::clone(&entered);
+            move || {
+                entered.store(true, Ordering::SeqCst);
+                worker.admit_streamed_bash().is_ok()
+            }
         });
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for(&entered);
         assert!(
             !worker.user_bash.is_running(),
             "the gated claim must not register"
@@ -1498,11 +1521,18 @@ mod tests {
             core.shutdown_requested = false;
         }
         let mut gate = worker.core.lock().unwrap();
+        // Readiness is the racing admission's own signal, not a fixed sleep
+        // (same as the streamed claim's gate test).
+        let entered = Arc::new(AtomicBool::new(false));
         let racing = std::thread::spawn({
             let worker = Arc::clone(&worker);
-            move || worker.admit_awaited_bash().is_ok()
+            let entered = Arc::clone(&entered);
+            move || {
+                entered.store(true, Ordering::SeqCst);
+                worker.admit_awaited_bash().is_ok()
+            }
         });
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        wait_for(&entered);
         assert!(
             !worker.user_bash.is_running(),
             "the gated admission must not register"
@@ -1524,15 +1554,15 @@ mod tests {
             let worker = Arc::clone(&worker);
             async move { worker.user_bash.abort_and_settle().await }
         });
-        // The close's abort cancels the admitted run's token.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !awaited.cancellation.is_cancelled() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the abort never reached the admitted token"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
+        // The close's abort cancels the admitted run's token: the token's
+        // own cancellation is the observable signal, and the bound only
+        // bounds failure.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            awaited.cancellation.cancelled(),
+        )
+        .await
+        .expect("the abort never reached the admitted token");
         // The settle still waits: the run counts until it settles.
         assert!(!settle.is_finished());
         drop(awaited);
