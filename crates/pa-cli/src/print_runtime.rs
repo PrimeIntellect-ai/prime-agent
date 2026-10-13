@@ -583,7 +583,12 @@ pub(crate) async fn build_headless_engine_with(
             }
         },
         HeadlessEmbedding::Root { .. } | HeadlessEmbedding::Rpc => {
-            select_model(&mut registry, config)?
+            // The opened session's active context joins the selection (TS
+            // `createAgentSession`); `--no-session` selects from no session.
+            let session = session_manager
+                .as_ref()
+                .map(pa_core::session::manager::SessionManager::active_context);
+            select_model(&mut registry, config, session.as_ref()).await?
         }
     };
     // Resolve request auth once: the stored team / `PRIME_TEAM_ID` reach the wire through these
@@ -1009,9 +1014,10 @@ async fn session_header_json(
     Some(serde_json::Value::Object(object).to_string())
 }
 
-fn select_model(
+async fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
     config: &crate::mode::RuntimeConfig,
+    _session: Option<&pa_core::session::SessionContext>,
 ) -> Result<Model, String> {
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
