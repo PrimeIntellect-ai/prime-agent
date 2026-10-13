@@ -84,9 +84,9 @@ fn tabs_partition_the_settings_rows() {
                 vec![
                     "skill-commands",
                     "builtin-skills",
-                    "harness-refinements",
                     "idle-eviction-minutes",
-                    "tree-filter-mode"
+                    "tree-filter-mode",
+                    "harness-refinements",
                 ]
             ),
         ]
@@ -641,5 +641,32 @@ fn space_activates_instead_of_typing_into_the_query() {
     assert_eq!(
         field_before, field_after,
         "the sanitized Space never types into the search field"
+    );
+}
+
+#[test]
+fn harness_refinement_row_cycles_both_values_in_the_agents_tab() {
+    let values = SettingsCurrentValues {
+        harness_refinements: true,
+        ..SettingsCurrentValues::default()
+    };
+    let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+    menu.handle_key("5", &kb());
+    for key in ["h", "a", "r", "n", "e", "s", "s"] {
+        menu.handle_key(key, &kb());
+    }
+    assert_eq!(
+        menu.handle_key("right", &kb()),
+        SettingsMenuAction::Change {
+            id: "harness-refinements",
+            value: "false".to_string()
+        }
+    );
+    assert_eq!(
+        menu.handle_key("left", &kb()),
+        SettingsMenuAction::Change {
+            id: "harness-refinements",
+            value: "true".to_string()
+        }
     );
 }
