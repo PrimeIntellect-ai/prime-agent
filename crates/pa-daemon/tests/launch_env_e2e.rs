@@ -249,13 +249,12 @@ fn worker_pid(socket: &Path, agent_dir: &Path, active_session_id: &str) -> u32 {
         if let Ok(bytes) = std::fs::read_to_string(&descriptor_path) {
             let descriptor: Value = serde_json::from_str(&bytes).expect("descriptor json");
             let pid = descriptor["pid"].as_u64().expect("descriptor pid");
-            assert!(pid > 0, "descriptor pid not written yet: {descriptor}");
+            assert!(pid > 0, "descriptor pid not written yet");
             return u32::try_from(pid).expect("pid fits");
         }
         assert!(
             Instant::now() < deadline,
-            "worker descriptor for {active_session_id} never appeared at {}",
-            descriptor_path.display()
+            "worker descriptor never appeared within 10s"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -359,13 +358,13 @@ fn the_client_launch_env_reaches_only_its_own_worker() {
             .expect("descriptor A");
     assert!(
         !descriptor_bytes.contains(&marker),
-        "the worker descriptor leaked the client env:\n{descriptor_bytes}"
+        "the worker descriptor leaked the client env"
     );
     let descriptor: Value = serde_json::from_str(&descriptor_bytes).expect("descriptor json");
     assert!(
         descriptor["createCommand"].get("launchEnv").is_none()
             && descriptor["createCommand"].get("launch_env").is_none(),
-        "the durable create command carries a launch env: {descriptor}"
+        "the durable create command carries a launch env"
     );
 }
 
@@ -541,7 +540,7 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
             }
         }
         if let Some((pid, bytes)) = found {
-            assert!(pid > 0, "child descriptor pid: {bytes}");
+            assert!(pid > 0, "child descriptor pid not written yet");
             break (u32::try_from(pid).expect("pid fits"), bytes);
         }
         assert!(
