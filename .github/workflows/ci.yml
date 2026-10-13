@@ -377,6 +377,9 @@ jobs:
               if [ "${scenario}" = "draft_disconnect" ]; then
                 python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
               fi
+              if [ "${scenario}" = "local_harness" ]; then
+                python3 scripts/test_review_local_harness_parity.py || comparison_status=1
+              fi
               python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
             fi
           done

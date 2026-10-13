@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 
-from review_restore_notice_parity import invoke, probe_from, Server, sha256, TS_ARCHIVE_SHA256
+from review_restore_notice_parity import invoke, texts, Server, sha256, TS_ARCHIVE_SHA256
 
 MARKER = 'LOCAL_HARNESS_PARITY='
 READ = """import os, json, dataclasses
@@ -84,6 +84,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
+def current_probe(requests, phase):
+    """Read only this phase's completed tool call, never historical results."""
+    assert requests, 'missing provider requests'
+    tool_id = 'call_' + phase
+    messages = requests[-1].get('messages', [])
+    calls = [call for message in messages if message.get('role') == 'assistant'
+             for call in message.get('tool_calls', []) if call.get('id') == tool_id]
+    assert len(calls) == 1, 'missing or duplicate current phase tool call ' + tool_id
+    results = [message for message in messages if message.get('role') == 'tool'
+               and message.get('tool_call_id') == tool_id]
+    assert len(results) == 1, 'missing or duplicate current phase tool result ' + tool_id
+    probes = [json.loads(line[len(MARKER):]) for text in texts(results[0].get('content'))
+              for line in text.splitlines() if line.startswith(MARKER)]
+    assert len(probes) == 1, 'missing or duplicate current phase probe ' + tool_id
+    return probes[0]
+
+
 def stored(path):
     state = json.loads(path.read_text())
     rows = state['entries']['memory']
@@ -134,7 +151,7 @@ def run_case(binary, label, root, observation):
             args = ['--resume', str(original)] if phase == 'resume' else []
             observation[phase] = invoke(command + args + ['Run the harness parity cell.'], cwd, env)
             observation[phase]['requests'] = server.requests[phase]
-            probe = probe_from(server.requests[phase], MARKER)
+            probe = current_probe(server.requests[phase], phase)
             assert len(server.requests[phase]) == 2, 'unexpected provider request sequence'
 
             files = [p for p in sessions.rglob('*.jsonl')
