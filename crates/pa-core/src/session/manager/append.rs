@@ -64,7 +64,7 @@ impl SessionManager {
 
     /// Register exact durable user rows that the worker already accepted while
     /// the lazy engine built. The current prompt replays them into the agent in
-    /// this order; their MessageEnd events must reuse these rows rather than
+    /// this order; their `MessageEnd` events must reuse these rows rather than
     /// append another copy. This is admission identity, never content deduplication.
     ///
     /// # Errors
