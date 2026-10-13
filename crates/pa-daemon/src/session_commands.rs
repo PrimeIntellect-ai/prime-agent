@@ -51,8 +51,6 @@ pub(crate) fn run_session_command(
                 compaction_skipped: None,
                 continuation_message: None,
                 error: Some(error),
-                refinement: None,
-                refinement_failed: None,
                 pending_refinement: None,
             };
             if !emit_compact_end(command, &execution, emit) {
@@ -93,20 +91,6 @@ pub(crate) fn run_session_command(
     // clear; the durable status row follows with the new state.
     if command.name == "autonomous" {
         engine.clear_autonomous_continuations();
-    }
-    if let Some(refinement) = &execution.refinement {
-        if let Ok(result) = serde_json::to_value(refinement) {
-            if !emit(EngineEvent::RefineComplete { result }) {
-                return None;
-            }
-        }
-    }
-    if let Some(error) = &execution.refinement_failed {
-        if !emit(EngineEvent::RefineFailed {
-            error: error.clone(),
-        }) {
-            return None;
-        }
     }
     // The executor's first row is the echo (already emitted); the rest of
     // the durable rows follow in order.

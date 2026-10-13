@@ -66,12 +66,6 @@ pub struct SessionCommandExecution {
     /// The command failed: the TS error message (the failure result row
     /// is already appended to `messages`).
     pub error: Option<String>,
-    /// A refinement run's structured outcome; the result row in
-    /// `messages` stays display-only.
-    pub refinement: Option<crate::refinement::RefinementResult>,
-    /// A refinement run failed: the raw run error (option-parse failures
-    /// leave this `None`; they are command failures, not refinement events).
-    pub refinement_failed: Option<String>,
     /// Background planning and the eventual idle-boundary commit. Hosts await this
     /// off their command runner and surface the durable result when it settles.
     pub pending_refinement:
