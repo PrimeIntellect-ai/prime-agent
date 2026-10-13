@@ -256,6 +256,13 @@ impl SessionEngine for AgentSessionEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
     }
 
+    fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
+        *self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock") = Some(leaf_id);
+    }
+
     /// Restore through the bounded readiness wait. An explicit create flag
     /// wins; a failed restore is never silent
     /// ([`Self::model_fallback_message`]).
@@ -918,6 +925,21 @@ impl SessionEngine for AgentSessionEngine {
 
     /// The worker's turn completed: release child prompt tasks waiting on the boundary.
     fn on_turn_done(&self) {
+        *self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock") = None;
+        self.runtime.block_on(async {
+            let core = self.session.lock().await.clone();
+            if let Some(core) = core {
+                core.session
+                    .shared_persistence()
+                    .lock()
+                    .await
+                    .replay_admitted_user_rows(Vec::new())
+                    .expect("clearing admitted rows cannot fail");
+            }
+        });
         if let Some(children) = &self.children {
             children.notify_turn_done();
         }

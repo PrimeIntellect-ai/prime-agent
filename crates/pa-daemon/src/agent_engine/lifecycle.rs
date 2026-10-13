@@ -162,6 +162,7 @@ impl AgentSessionEngine {
             )),
             session_build: tokio::sync::Mutex::new(()),
             pending_branch: std::sync::Mutex::new(None),
+            prompt_context_boundary: std::sync::Mutex::new(None),
             provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             image_route: std::sync::Mutex::new(None),
             reload_lock: std::sync::Mutex::new(()),
@@ -474,6 +475,60 @@ impl AgentSessionEngine {
                 shared_branch = branch;
             }
         }
+        // The worker persisted accepted rows while this lazy session built.
+        // Keep its whole durable window, but seed the loop only through the
+        // stable pre-admission leaf. Content/timestamps are never deduplicated.
+        let prompt_context_boundary = self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock")
+            .take();
+        let entries = pending_branch
+            .as_deref()
+            .or_else(|| shared_window.as_ref().map(|window| window.entries()))
+            .or(shared_branch.as_deref());
+        let mut admitted_user_ids = Vec::new();
+        let prompt_context = match prompt_context_boundary {
+            Some(boundary) => {
+                let mut after_boundary = boundary.is_none();
+                if let Some(entries) = entries {
+                    for entry in entries {
+                        if after_boundary {
+                            if let Some(id) = entry.id().filter(|_| {
+                                matches!(
+                                    entry,
+                                    pa_types::session::FileEntry::Message {
+                                        message: pa_types::session::AgentMessage::User(_),
+                                        ..
+                                    }
+                                )
+                            }) {
+                                admitted_user_ids.push(id.to_string());
+                            }
+                        } else if entry.id() == boundary.as_deref() {
+                            after_boundary = true;
+                        }
+                    }
+                }
+                match boundary {
+                    Some(leaf) => {
+                        anyhow::ensure!(
+                            after_boundary,
+                            "prompt context boundary {leaf} is absent from the retained transcript"
+                        );
+                        Some(
+                            pa_core::session::build_session_context(
+                                entries.expect("a found boundary has entries"),
+                                Some(&leaf),
+                            )
+                            .messages,
+                        )
+                    }
+                    None => Some(Vec::new()),
+                }
+            }
+            None => None,
+        };
         if let Some(state) = seed {
             // The restore-resurrection guard: an active seed whose
             // trailing turn settled as a terminal provider failure adopts
@@ -531,6 +586,19 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
+            built
+                .session
+                .shared_persistence()
+                .lock()
+                .await
+                .replay_admitted_user_rows(admitted_user_ids)?;
+            if let Some(messages) = prompt_context {
+                built
+                    .session
+                    .agent()
+                    .set_messages(messages.iter().filter_map(json_round_trip).collect())
+                    .await;
+            }
             // A moved branch restores its own park (the early return would leave the previous
             // branch's park armed).
             self.restore_quota_park(built).await;
@@ -553,6 +621,19 @@ impl AgentSessionEngine {
         } else if let Some(entries) = shared_branch.take().filter(|entries| !entries.is_empty()) {
             built.session.rebuild_branch_context(entries).await?;
             self.flush_pending_stale_goal_terminal().await;
+        }
+        built
+            .session
+            .shared_persistence()
+            .lock()
+            .await
+            .replay_admitted_user_rows(admitted_user_ids)?;
+        if let Some(messages) = prompt_context {
+            built
+                .session
+                .agent()
+                .set_messages(messages.iter().filter_map(json_round_trip).collect())
+                .await;
         }
         self.restore_quota_park(built).await;
         // The walk and replay allocated transient trees several times the
@@ -627,6 +708,10 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) {
         let _build = self.session_build.lock().await;
         let built = self.session.lock().await.take();
+        *self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock") = None;
         *self
             .quota_park
             .lock()

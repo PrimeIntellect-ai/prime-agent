@@ -201,6 +201,9 @@ pub struct AgentSessionEngine {
     /// A branch move that landed before the first turn: consumed at build so
     /// the session starts on the moved branch.
     pending_branch: std::sync::Mutex<Option<Vec<pa_types::session::FileEntry>>>,
+    /// The durable leaf sampled before the worker persists this prompt: an
+    /// outer None means no worker boundary, an inner None an empty transcript.
+    prompt_context_boundary: std::sync::Mutex<Option<Option<String>>>,
     /// The `goal_update` payload a branch rebuild's goal reload stashed,
     /// taken by the worker that announces it. `None` when it changed nothing.
     reloaded_goal_update: std::sync::Mutex<Option<Value>>,
