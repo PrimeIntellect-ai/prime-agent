@@ -50,6 +50,32 @@ async fn resolve_child_model_allowlisted(
     }
 }
 
+/// The `rlm.create_session` launch env (TS `createRlmRootSession`'s
+/// minimal map: `collectDaemonLaunchEnv({ PATH })` plus the provider's
+/// env API-key var plus `PRIME_TEAM_ID` for prime-inference).
+fn create_session_launch_env(model: &str) -> std::collections::BTreeMap<String, String> {
+    let mut env = std::collections::BTreeMap::new();
+    if let Ok(path) = std::env::var("PATH") {
+        env.insert("PATH".to_string(), path);
+    }
+    let provider = model
+        .split_once('/')
+        .map_or(model, |(provider, _)| provider);
+    if let Some(env_key) =
+        pa_ai::env_api_keys::find_env_keys(provider).and_then(|keys| keys.first().cloned())
+    {
+        if let Ok(value) = std::env::var(&env_key) {
+            env.insert(env_key, value);
+        }
+    }
+    if provider == "prime-inference" {
+        if let Ok(team) = std::env::var("PRIME_TEAM_ID") {
+            env.insert("PRIME_TEAM_ID".to_string(), team);
+        }
+    }
+    env
+}
+
 impl RlmSubagentHost for SupervisorChildSessions {
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
         let this = Arc::clone(&self.inner);
@@ -115,6 +141,18 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         request.spawned_by_request_id.as_deref(),
                         Some(runtime_metadata),
                         &identity,
+                        // TS runs an `rlm.spawn` child in-process inside
+                        // the parent worker, so the child implicitly
+                        // shares its environment — which includes the
+                        // client env the parent's own create carried.
+                        // The Rust child is a separate worker process:
+                        // forwarding the parent worker's whole env
+                        // (minus the internal identity, which the
+                        // supervisor re-stamps for the child) is the
+                        // parity restore.
+                        Some(pa_types::daemon::launch_env::collect_launch_env(
+                            std::env::vars(),
+                        )),
                     )
                     .await?;
                 let record = ChildRecord {
@@ -310,6 +348,15 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     &sessions_dir,
                     None,
                     &identity,
+                    // TS `createRlmRootSession` launches the new depth-0
+                    // root with a minimal env: `PATH`, the provider's
+                    // env API-key var when the parent's credential is
+                    // environment-sourced, and `PRIME_TEAM_ID` for
+                    // prime-inference (daemon-mode.ts). The worker has
+                    // no auth-source lookup at this seam; the provider's
+                    // env-key var is forwarded whenever it is set (the
+                    // deviation is stated in the PR).
+                    Some(create_session_launch_env(&model)),
                 )
                 .await?;
             // The TS create-path summary validation: a resident depth-0

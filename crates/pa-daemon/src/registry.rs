@@ -140,6 +140,14 @@ pub(crate) struct ResidentWorker {
     pub(crate) compaction: crate::compaction_supervision::CompactionSupervision,
     /// The pending owner-disconnect stop (TS `ownerCleanupTimer`).
     pub(crate) owner_cleanup: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    /// The client-forwarded launch env (TS `ResidentWorker.launchEnv`):
+    /// in memory ONLY — never the descriptor, never the durable create
+    /// command, never the update roster. The spawn merges it under the
+    /// internal identity overrides. A resident worker loses it once its
+    /// create completes (a crash relaunch runs on the daemon's env); an
+    /// owned worker keeps it for the owner-driven recovery relaunch
+    /// until ownership clears (promotion).
+    pub(crate) launch_env: std::sync::Mutex<Option<std::collections::BTreeMap<String, String>>>,
 }
 
 /// The last-good heartbeats rows, tagged with the catalog generation they
@@ -188,6 +196,7 @@ impl ResidentWorker {
             connection_epoch: AtomicU64::new(0),
             compaction: crate::compaction_supervision::CompactionSupervision::default(),
             owner_cleanup: std::sync::Mutex::new(None),
+            launch_env: std::sync::Mutex::new(None),
         })
     }
 

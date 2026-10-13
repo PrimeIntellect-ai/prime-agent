@@ -122,6 +122,13 @@ impl Supervisor {
                     if let Err(error) = persist_worker(&resident.descriptor_path, &descriptor) {
                         return Self::owned_failure(command_id, type_name, &error.to_string());
                     }
+                    // The owned worker became a resident: its owner's
+                    // launch env no longer serves a recovery relaunch
+                    // (TS clears it at promotion).
+                    *resident
+                        .launch_env
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     true
                 }
                 None => {

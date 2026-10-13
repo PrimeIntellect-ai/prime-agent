@@ -55,6 +55,12 @@ fn custom_message_text(message: &CustomMessage) -> Option<String> {
 impl SupervisorChildSessionsInner {
     /// Create one child session over the supervisor link (no prompt yet);
     /// `model` is the resolved `provider/id` selector.
+    ///
+    /// `launch_env` is the environment the child's worker process runs
+    /// in: the parent worker's own env (filtered) for an `rlm.spawn`
+    /// child — TS runs those in-process inside the parent worker, so
+    /// parity means the child inherits the parent's environment — or
+    /// the minimal TS set for a depth-0 `create_session` root.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_child(
         &self,
@@ -74,6 +80,7 @@ impl SupervisorChildSessionsInner {
         spawned_by_request_id: Option<&str>,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let mut config = json!({
             "cwd": cwd,
@@ -136,7 +143,7 @@ impl SupervisorChildSessionsInner {
             runtime_metadata,
             lifecycle: Some(DaemonSessionLifecycle::Resident),
             env: None,
-            launch_env: None,
+            launch_env,
             rest: Map::default(),
         };
         let summary = self
@@ -162,6 +169,7 @@ impl SupervisorChildSessionsInner {
         session_dir: &Path,
         runtime_metadata: Option<Value>,
         identity: &ParentIdentity,
+        launch_env: Option<std::collections::BTreeMap<String, String>>,
     ) -> Result<CreatedChild> {
         let created = self
             .create_child(
@@ -176,6 +184,7 @@ impl SupervisorChildSessionsInner {
                 /*spawned_by_request_id*/ None,
                 runtime_metadata,
                 identity,
+                launch_env,
             )
             .await?;
         // A failed prompt tears the just-created session down (TS kills the

@@ -747,6 +747,13 @@ impl Supervisor {
                     .insert("promotedOwnerClientId".to_string(), json!(owner));
                 crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
                     .map_err(|error| error.to_string())?;
+                // The owned worker became a resident: its owner's launch
+                // env no longer serves a recovery relaunch (the TS
+                // promotion clear).
+                *resident
+                    .launch_env
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                 Ok(())
             }
             // An already-promoted session stays promoted; a foreign owner
