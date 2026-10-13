@@ -293,7 +293,7 @@ mod windows_tests {
         let explicit = explicit.to_string_lossy().to_string();
         assert_eq!(
             resolve_kernel_bash_shell(Some(format!("  {explicit}  ").as_str())).unwrap(),
-            Some(explicit.clone())
+            Some(explicit)
         );
         assert_eq!(
             resolve_kernel_bash_shell(None).unwrap(),
