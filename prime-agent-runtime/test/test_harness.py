@@ -1664,11 +1664,11 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
             settings = Path(tmp) / "settings.json"
             settings.write_text('{"harnessRefinements":true}')
-            state = HarnessState(Path(tmp) / "harness_state.json", scope="global")
+            state = get_harness_state(tmp, global_=True)
             state.create_memory("Note", "Saved memory", id="note")
             before = state.file_path.read_bytes()
             settings.write_text('{"harnessRefinements":false}')
-            for action in (lambda: state.get("memory", "note"), lambda: state.create_memory("New", "New memory"), state.load, state.save):
+            for action in (lambda: get_harness_state(tmp, global_=True), lambda: state.get("memory", "note"), lambda: state.create_memory("New", "New memory"), state.load, state.save):
                 with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
                     action()
             self.assertEqual(state.file_path.read_bytes(), before)

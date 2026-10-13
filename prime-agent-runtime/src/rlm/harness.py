@@ -1352,6 +1352,7 @@ def get_harness_state(
     state_dir: str | Path | None = None, *, global_: bool = False, **kwargs: Any
 ) -> HarnessState:
     """Return the cached local harness state, or global when requested."""
+    _require_refinements_enabled()
     global_ = _resolve_global_flag(global_, kwargs)
     file_path = _state_file(state_dir, global_=global_)
     scope: HarnessScope = "global" if global_ else "local"
