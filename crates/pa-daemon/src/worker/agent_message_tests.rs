@@ -414,6 +414,10 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         script: Some(json!({ "responses": ["ack"] })),
     };
     let worker = Arc::new(Worker::new(config, None));
+    // Production opens the recovery sink in serve(); direct-dispatch fixtures
+    // must install it before admission so checkpoints persist synchronously.
+    *worker.recovery.lock().unwrap() =
+        Some(WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap());
     let created = worker
         .dispatch(
             "create",
@@ -446,6 +450,8 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
         // survive alongside the custom row for clear/pause/status handling.
         let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
         let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        assert_eq!(steering.len(), 1, "agent row checkpoint must be durable");
+        assert_eq!(follow_up.len(), 1, "prompt checkpoint must be durable");
         let mut core = worker.core.lock().unwrap();
         core.steering = steering;
         core.follow_up = follow_up;
