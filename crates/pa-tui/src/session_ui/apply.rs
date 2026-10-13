@@ -495,7 +495,11 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error, run_failed } => {
+            TurnUpdate::TurnEnded {
+                error,
+                run_failed,
+                aborted,
+            } => {
                 // One LLM turn ended; the run, and with it the busy state, lasts until
                 // `agent_end`.
                 self.streaming_index = None;
@@ -504,6 +508,11 @@ impl SessionUi {
                 // failed one ends the run without a done report.
                 if run_failed {
                     self.run_open = false;
+                    self.settled = if aborted {
+                        None
+                    } else {
+                        Some(crate::program_status::Status::Error)
+                    };
                 }
                 view.retry = None;
                 crate::snapshot::settle_pending_tool_cards(
@@ -544,12 +553,20 @@ impl SessionUi {
                 });
             }
             TurnUpdate::AutoRetryEnd {
-                success: _,
+                aborted,
+                success,
                 attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
+                if aborted {
+                    self.run_open = false;
+                    self.settled = None;
+                } else if !success {
+                    self.run_open = false;
+                    self.settled = Some(crate::program_status::Status::Error);
+                }
                 if final_error.is_some() {
                     self.turn_error_shown = true;
                     // The give-up's final attempt is superseded by the ONE terminal line.
@@ -635,6 +652,9 @@ impl SessionUi {
                 }
             }
             TurnUpdate::Idle { aborted } => {
+                if aborted {
+                    self.settled = None;
+                }
                 self.end_run(view);
                 // The run's normal end settles the report's done; an
                 // aborted one settles idle (a stream-time abort already
@@ -898,6 +918,11 @@ impl SessionUi {
             // Lifecycle failures can emit agent_end before any turn_end.
             // Their terminal message must not leave a successful run open.
             self.run_open = false;
+            self.settled = if abort_text.is_some() {
+                None
+            } else {
+                Some(crate::program_status::Status::Error)
+            };
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message
                     .get("errorMessage")

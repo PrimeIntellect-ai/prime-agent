@@ -49,6 +49,7 @@ pub enum TurnUpdate {
     TurnEnded {
         error: Option<String>,
         run_failed: bool,
+        aborted: bool,
     },
     /// A `custom`-role message the transcript renders (session-command
     /// echo/result rows, or the malformed-notice fallback).
@@ -66,6 +67,7 @@ pub enum TurnUpdate {
     /// retries were exhausted; `restored_model` after a successful
     /// failover.
     AutoRetryEnd {
+        aborted: bool,
         success: bool,
         attempt: u32,
         final_error: Option<String>,
@@ -230,7 +232,20 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                     .and_then(|message| message.get("stopReason"))
                     .and_then(Value::as_str)
                     .is_some_and(|reason| reason == "aborted" || reason == "error");
-            Some(TurnUpdate::TurnEnded { error, run_failed })
+            let aborted = event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || event
+                    .get("message")
+                    .and_then(|m| m.get("stopReason"))
+                    .and_then(Value::as_str)
+                    == Some("aborted");
+            Some(TurnUpdate::TurnEnded {
+                error,
+                run_failed,
+                aborted,
+            })
         }
         "agent_end" => Some(TurnUpdate::Idle {
             aborted: event
@@ -333,6 +348,10 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
             },
         }),
         "auto_retry_end" => Some(TurnUpdate::AutoRetryEnd {
+            aborted: event
+                .get("aborted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             success: event
                 .get("success")
                 .and_then(Value::as_bool)

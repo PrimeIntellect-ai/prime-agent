@@ -739,6 +739,7 @@ async fn retries_fold_into_one_run_that_succeeds() {
     recovered.usage.cost.total = 0.012;
     attempt(&fixture, recovered);
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        aborted: false,
         success: true,
         attempt: 2,
         final_error: None,
@@ -795,6 +796,7 @@ async fn exhausted_retries_are_one_failed_run() {
     retry_start(&telemetry, 2, 500, false);
     attempt(&fixture, failed);
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        aborted: false,
         success: false,
         attempt: 2,
         final_error: Some("network".to_string()),
@@ -834,6 +836,7 @@ async fn a_cancelled_retry_never_absorbs_the_next_turn() {
     attempt(&fixture, assistant_with_error("network connection reset"));
     retry_start(&telemetry, 1, 500, false);
     telemetry.note_auto_retry_event(&AutoRetryEvent::End {
+        aborted: true,
         success: false,
         attempt: 1,
         final_error: Some("Retry cancelled".to_string()),

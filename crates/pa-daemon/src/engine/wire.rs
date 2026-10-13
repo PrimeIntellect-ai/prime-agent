@@ -156,6 +156,7 @@ pub enum EngineEvent {
     /// `auto_retry_end`: the retry loop settled. `restored_model` is the
     /// `"provider/model-id"` primary restored after a failover switch.
     AutoRetryEnd {
+        aborted: bool,
         success: bool,
         attempt: u32,
         final_error: Option<String>,

@@ -1288,6 +1288,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         end,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: false,
             attempt: 2,
             final_error: Some("provider down".to_string()),
@@ -1304,6 +1305,7 @@ fn decodes_auto_retry_events() {
     assert_eq!(
         settled,
         TurnUpdate::AutoRetryEnd {
+            aborted: false,
             success: true,
             attempt: 2,
             final_error: None,
@@ -1419,6 +1421,7 @@ fn decodes_streamed_events() {
         TurnUpdate::TurnEnded {
             error: None,
             run_failed: false,
+            aborted: false,
         }
     );
     let failed = event_to_update(&json!({ "type": "turn_end", "error": "boom" })).unwrap();
@@ -1427,6 +1430,7 @@ fn decodes_streamed_events() {
         TurnUpdate::TurnEnded {
             error: Some("boom".to_string()),
             run_failed: true,
+            aborted: false,
         }
     );
     // The engine's own terminal message settles the run as failed too; a
@@ -1440,6 +1444,7 @@ fn decodes_streamed_events() {
             Some(TurnUpdate::TurnEnded {
                 error: None,
                 run_failed,
+                aborted: stop_reason == "aborted",
             })
         );
     }

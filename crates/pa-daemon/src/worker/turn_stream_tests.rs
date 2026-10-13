@@ -497,6 +497,31 @@ async fn fallback_cancellation_has_provenance_even_when_error_text_matches_failu
     }
 }
 
+#[tokio::test]
+async fn retry_cancellation_marker_comes_from_the_outcome_not_the_error_text() {
+    for aborted in [false, true] {
+        let events = gate_sighting_events(
+            vec![EngineEvent::AutoRetryEnd {
+                aborted,
+                success: false,
+                attempt: 1,
+                final_error: Some("Retry cancelled".to_string()),
+                restored_model: None,
+            }],
+            false,
+            false,
+        )
+        .await;
+        let ends = positions_of(&events, "auto_retry_end");
+        assert_eq!(ends.len(), 1);
+        let mut expected = json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled" });
+        if aborted {
+            expected["aborted"] = json!(true);
+        }
+        assert_eq!(events[ends[0]], expected);
+    }
+}
+
 /// A run that settled on its own keeps the TS `agent_end` shape — the marker
 /// rides aborted runs only.
 #[tokio::test]

@@ -890,6 +890,7 @@ impl TurnRunner {
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
+                        "aborted": true,
                     })],
                     EngineEvent::ModelChange(_)
                     | EngineEvent::Done(Ok(()) | Err(_))
@@ -921,6 +922,7 @@ impl TurnRunner {
                         vec![event]
                     }
                     EngineEvent::AutoRetryEnd {
+                        aborted,
                         success,
                         attempt,
                         final_error,
@@ -931,6 +933,9 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
+                        if aborted {
+                            event["aborted"] = json!(true);
+                        }
                         if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
