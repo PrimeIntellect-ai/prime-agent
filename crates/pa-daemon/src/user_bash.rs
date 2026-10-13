@@ -202,14 +202,13 @@ impl Worker {
             );
         };
         // Claim the slot synchronously (TS claims before the async dispatch
-        // could slip a second command through).
-        let Some(cancellation) = self.user_bash.claim() else {
-            return response_failure(
-                None,
-                "execute_bash",
-                "A bash command is already running",
-                None,
-            );
+        // could slip a second command through), through the admission gate:
+        // the gate re-check and the claim share the lock, so the close's
+        // abort cannot miss the new token (a claim its `abort_and_settle`
+        // missed would leave the child running past the exit).
+        let cancellation = match self.admit_streamed_bash() {
+            Ok(cancellation) => cancellation,
+            Err(response) => return response,
         };
         let exclude_from_context = payload
             .get("excludeFromContext")
@@ -292,6 +291,34 @@ impl Worker {
             work_notify.notify_one();
         });
         response_success(None, "execute_bash", None)
+    }
+
+    /// `require_created`'s shutdown gate re-checked with the streamed slot
+    /// claim under the same lock: the claim cannot interleave with the gate's
+    /// close, so the close's abort always sees — and cancels — the new token
+    /// (a claim its `abort_and_settle` missed would leave the child running
+    /// past the exit).
+    // DaemonResponse is the wire response struct and is deliberately wide; the
+    // error channel here carries the whole response, so allow the large-err lint.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn admit_streamed_bash(&self) -> Result<Arc<CancellationToken>, DaemonResponse> {
+        let core = self.core.lock().unwrap();
+        if core.shutdown_requested {
+            return Err(response_failure(
+                None,
+                "execute_bash",
+                "Session is shutting down",
+                None,
+            ));
+        }
+        self.user_bash.claim().ok_or_else(|| {
+            response_failure(
+                None,
+                "execute_bash",
+                "A bash command is already running",
+                None,
+            )
+        })
     }
 
     /// `require_created`'s shutdown gate re-checked and the awaited run
@@ -1414,6 +1441,41 @@ mod tests {
         assert!(truncated);
         assert!(kept.len() <= DEFAULT_MAX_BYTES);
         assert!(big.ends_with(&kept), "the tail wins");
+    }
+
+    #[tokio::test]
+    async fn the_shutdown_gate_cannot_close_between_a_streamed_claim_and_its_registration() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+
+        // Gate shut: the admission's own re-check rejects, nothing claims.
+        worker.core.lock().unwrap().shutdown_requested = true;
+        assert!(worker.admit_streamed_bash().is_err());
+        assert!(!worker.user_bash.is_running());
+
+        // A gate that closes while a claim waits on the admission lock: the
+        // gate check and the claim are one critical section, so the claim
+        // cannot slip past the close (a claim the close's abort missed would
+        // leave the child running past the exit).
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.shutdown_requested = false;
+        }
+        let mut gate = worker.core.lock().unwrap();
+        let racing = std::thread::spawn({
+            let worker = Arc::clone(&worker);
+            move || worker.admit_streamed_bash().is_ok()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !worker.user_bash.is_running(),
+            "the gated claim must not register"
+        );
+        gate.shutdown_requested = true;
+        drop(gate);
+        let claimed = racing.join().expect("claim thread");
+        assert!(!claimed, "the closed gate must reject it");
+        assert!(!worker.user_bash.is_running(), "nothing may register");
     }
 
     #[tokio::test]
