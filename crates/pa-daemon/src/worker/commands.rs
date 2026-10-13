@@ -847,10 +847,44 @@ impl Worker {
 /// truncated so the whole notice stays inside the delivery size limit the
 /// receiving `worker_deliver_message` enforces.
 fn cleared_agent_message_bounce_text(receiver: &str, message: &str) -> String {
-    let prefix =
-        format!("Your agent message was cleared from {receiver}'s queue before delivery: ");
-    let budget = pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS
-        .saturating_sub(prefix.chars().count());
+    let limit = pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
+    let opening = "Your agent message was cleared from ";
+    let ending = "'s queue before delivery: ";
+    // Session names are unbounded. Reserve the notice itself before fitting
+    // the receiver label, then spend the remaining characters on the body.
+    let receiver_budget = limit.saturating_sub(opening.chars().count() + ending.chars().count());
+    let receiver: String = receiver.chars().take(receiver_budget).collect();
+    let prefix = format!("{opening}{receiver}{ending}");
+    let budget = limit.saturating_sub(prefix.chars().count());
     let body: String = message.chars().take(budget).collect();
     format!("{prefix}{body}")
+}
+
+#[cfg(test)]
+mod bounce_text_tests {
+    use super::cleared_agent_message_bounce_text;
+    use pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS;
+
+    #[test]
+    fn bounce_text_limits_receiver_and_body_without_losing_the_notice() {
+        for (receiver, message) in [
+            (
+                "target".to_string(),
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS),
+            ),
+            (
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS + 1),
+                "body".to_string(),
+            ),
+            (
+                "界".repeat(DEFAULT_AGENT_MESSAGE_MAX_CHARS + 1),
+                String::new(),
+            ),
+        ] {
+            let text = cleared_agent_message_bounce_text(&receiver, &message);
+            assert_eq!(text.chars().count(), DEFAULT_AGENT_MESSAGE_MAX_CHARS);
+            assert!(text.starts_with("Your agent message was cleared from "));
+            assert!(text.contains("'s queue before delivery: "));
+        }
+    }
 }

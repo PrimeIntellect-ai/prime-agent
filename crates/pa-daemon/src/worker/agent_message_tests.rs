@@ -387,6 +387,17 @@ async fn attach_response_wire_bytes_keep_the_ts_key_order() {
 #[cfg(unix)]
 #[tokio::test]
 async fn clear_queue_bounces_dropped_agent_messages_to_their_senders() {
+    assert_clear_queue_bounces(/*restore_queue*/ false).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn clear_queue_bounces_recovered_agent_messages_to_their_senders() {
+    assert_clear_queue_bounces(/*restore_queue*/ true).await;
+}
+
+#[cfg(unix)]
+async fn assert_clear_queue_bounces(restore_queue: bool) {
     let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("supervisor.sock");
@@ -430,6 +441,19 @@ async fn clear_queue_bounces_dropped_agent_messages_to_their_senders() {
         .dispatch("follow_up", &json!({ "message": "plain queued prompt" }))
         .await;
     assert!(queued.success, "follow_up failed: {queued:?}");
+    if restore_queue {
+        // Reopen the persisted journal as a respawn would: the marker must
+        // survive alongside the custom row for clear/pause/status handling.
+        let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
+        let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
+        let mut core = worker.core.lock().unwrap();
+        core.steering = steering;
+        core.follow_up = follow_up;
+        assert_eq!(
+            core.steering[0].agent_message.as_deref(),
+            Some("please review the plan")
+        );
+    }
     let cleared = worker.dispatch("clear_queue", &json!({})).await;
     assert!(cleared.success, "clear_queue failed: {cleared:?}");
     let data = cleared.data.expect("the clear data");
