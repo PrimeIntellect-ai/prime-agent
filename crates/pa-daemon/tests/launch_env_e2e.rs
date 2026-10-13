@@ -240,17 +240,24 @@ fn write_plain_script(dir: &Path) -> PathBuf {
 }
 
 /// The pid of a live session worker, read from its on-disk descriptor
-/// (written by the create path before the create response returns).
+/// (written by the create path before the create response returns). A
+/// descriptor that is not yet parseable, or whose pid is not a positive
+/// number yet (a transitional rewrite), means "not yet": keep polling
+/// until the deadline — never panic mid-write.
+#[cfg(target_os = "linux")]
 fn worker_pid(socket: &Path, agent_dir: &Path, active_session_id: &str) -> u32 {
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(agent_dir, socket);
     let descriptor_path = descriptor_dir.join(format!("{active_session_id}.json"));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Ok(bytes) = std::fs::read_to_string(&descriptor_path) {
-            let descriptor: Value = serde_json::from_str(&bytes).expect("descriptor json");
-            let pid = descriptor["pid"].as_u64().expect("descriptor pid");
-            assert!(pid > 0, "descriptor pid not written yet");
-            return u32::try_from(pid).expect("pid fits");
+        let pid = std::fs::read_to_string(&descriptor_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_str::<Value>(&bytes).ok())
+            .and_then(|descriptor| descriptor["pid"].as_u64())
+            .filter(|pid| *pid > 0)
+            .and_then(|pid| u32::try_from(pid).ok());
+        if let Some(pid) = pid {
+            return pid;
         }
         assert!(
             Instant::now() < deadline,
@@ -260,9 +267,9 @@ fn worker_pid(socket: &Path, agent_dir: &Path, active_session_id: &str) -> u32 {
     }
 }
 
-/// The raw NUL-separated environ of a live process.
-fn proc_environ(pid: u32) -> String {
-    let bytes = std::fs::read(format!("/proc/{pid}/environ")).expect("worker environ readable");
+/// The raw NUL-separated environ bytes, one entry per line.
+#[cfg(target_os = "linux")]
+fn parse_environ(bytes: &[u8]) -> String {
     bytes
         .split(|byte| *byte == 0)
         .filter(|entry| !entry.is_empty())
@@ -271,7 +278,39 @@ fn proc_environ(pid: u32) -> String {
         .join("\n")
 }
 
+/// The raw environ of a live process.
+#[cfg(target_os = "linux")]
+fn proc_environ(pid: u32) -> String {
+    parse_environ(&std::fs::read(format!("/proc/{pid}/environ")).expect("worker environ readable"))
+}
+
+/// The child descriptor's pid: the one descriptor whose session file
+/// lives under the child's session dir. A descriptor that is not yet
+/// parseable, or whose pid is missing or zero, means "not yet" — the
+/// caller polls.
+#[cfg(target_os = "linux")]
+fn child_descriptor_pid(descriptor_dir: &Path, child_id: &str) -> Option<u32> {
+    for entry in std::fs::read_dir(descriptor_dir).ok()?.flatten() {
+        let Ok(bytes) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(descriptor) = serde_json::from_str::<Value>(&bytes) else {
+            continue;
+        };
+        if descriptor["sessionFile"]
+            .as_str()
+            .is_some_and(|file| file.contains(child_id))
+        {
+            if let Some(pid) = descriptor["pid"].as_u64().filter(|pid| *pid > 0) {
+                return u32::try_from(pid).ok();
+            }
+        }
+    }
+    None
+}
+
 /// The `rlmDepth` of a session file's header line.
+#[cfg(target_os = "linux")]
 fn session_header_depth(session_file: &Path) -> u64 {
     let file = std::fs::File::open(session_file).expect("session file open");
     let mut first_line = String::new();
@@ -286,6 +325,7 @@ fn session_header_depth(session_file: &Path) -> u64 {
 /// reaches both (the inherited base), `RLM_DEPTH` reaches NEITHER, the
 /// workers stamp depth-0 root headers, and the durable descriptor for
 /// A carries no trace of the client env.
+#[cfg(target_os = "linux")] // /proc/<pid>/environ
 #[test]
 fn the_client_launch_env_reaches_only_its_own_worker() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -450,6 +490,7 @@ fn the_kernel_runs_in_the_client_launch_env() {
 /// create forwards the parent worker's own env (filtered), so the child
 /// worker inherits it — while the parent's `RLM_DEPTH` never rides
 /// along.
+#[cfg(target_os = "linux")] // /proc/<pid>/environ
 #[tokio::test]
 async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
     use pa_core::session_engine::rlm_host::{RlmSpawnRequest, RlmSubagentHost};
@@ -506,51 +547,27 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
         })
         .await
         .expect("spawn");
-    // The registry sits outside a live worker turn here: release the
-    // detached task prompt at the boundary the worker would signal (the
-    // existing rlm-children e2e's contract).
-    children.notify_turn_done();
-    let _ = children
-        .collect(vec![handle.rlm_child_id.clone()], 5_000)
-        .await;
-
-    // The child's worker pid: the child descriptor is the one whose
-    // session file lives under the child's session dir.
+    // The child worker's env exists from its first exec: read it while
+    // the worker is guaranteed alive — BEFORE the settle pass, after
+    // which the child may passivate or exit (its pid can vanish from
+    // /proc, and a mid-flight descriptor rewrite can read as pid-less).
+    // A descriptor that is not yet parseable or pid-less, or a pid whose
+    // /proc read fails, means "not yet": keep polling until the deadline,
+    // never panic mid-transition.
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(&agent_dir, &socket);
     let deadline = Instant::now() + Duration::from_secs(15);
-    let (child_pid, _child_environ) = loop {
-        let mut found = None;
-        for entry in std::fs::read_dir(&descriptor_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-        {
-            let Ok(bytes) = std::fs::read_to_string(entry.path()) else {
-                continue;
-            };
-            let descriptor: Value = match serde_json::from_str(&bytes) {
-                Ok(descriptor) => descriptor,
-                Err(_) => continue,
-            };
-            if descriptor["sessionFile"]
-                .as_str()
-                .is_some_and(|file| file.contains(&handle.rlm_child_id))
-            {
-                found = Some((descriptor["pid"].as_u64().expect("pid"), bytes));
+    let environ = loop {
+        if let Some(pid) = child_descriptor_pid(&descriptor_dir, &handle.rlm_child_id) {
+            if let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) {
+                break parse_environ(&bytes);
             }
-        }
-        if let Some((pid, bytes)) = found {
-            assert!(pid > 0, "child descriptor pid not written yet");
-            break (u32::try_from(pid).expect("pid fits"), bytes);
         }
         assert!(
             Instant::now() < deadline,
-            "the child worker's descriptor never appeared in {}",
-            descriptor_dir.display()
+            "the child worker's env never became observable"
         );
         std::thread::sleep(Duration::from_millis(50));
     };
-    let environ = proc_environ(child_pid);
     assert!(
         environ.contains(&format!("PA_MARKER={marker}")),
         "the spawned child's worker never received the parent worker's env:\n{environ}"
@@ -561,6 +578,14 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
         !environ.contains("RLM_DEPTH="),
         "the spawned child inherited the supervisor's RLM_DEPTH:\n{environ}"
     );
+    // The registry sits outside a live worker turn here: release the
+    // detached task prompt at the boundary the worker would signal (the
+    // existing rlm-children e2e's contract), wait for the settle, and
+    // clean the child up.
+    children.notify_turn_done();
+    let _ = children
+        .collect(vec![handle.rlm_child_id.clone()], 5_000)
+        .await;
     let _ = children.delete_subagent(handle.rlm_child_id.clone()).await;
 }
 
