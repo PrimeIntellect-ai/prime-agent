@@ -3,6 +3,7 @@
 //! is NEWER than this window's binary, the recovered row says so.
 
 use crate::chat::StatusKind;
+use std::cmp::Ordering;
 
 /// The reconnect driver that owns the run: which daemon closing armed it
 /// decides the reattach banner and the expiry row.
@@ -55,6 +56,7 @@ pub(crate) fn reconnect_banner(
 /// The numeric version prefixes order segment by segment; a numeric-equal
 /// release outranks the client's own prerelease (semver: "1.2.3" >
 /// "1.2.3-beta.1"), so a prerelease window still gets the restart advice.
+/// Two prereleases of the same prefix order by `compare_prerelease_identifiers`.
 fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
     let daemon = parse_numeric_version_prefix(daemon_version);
     let client = parse_numeric_version_prefix(client_version);
@@ -65,7 +67,15 @@ fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
             return daemon_segment > client_segment;
         }
     }
-    !has_prerelease_suffix(daemon_version) && has_prerelease_suffix(client_version)
+    let daemon_ids = prerelease_identifiers(daemon_version);
+    let client_ids = prerelease_identifiers(client_version);
+    match (daemon_ids.is_empty(), client_ids.is_empty()) {
+        (_, true) => false,
+        (true, false) => true,
+        (false, false) => {
+            compare_prerelease_identifiers(&daemon_ids, &client_ids) == Ordering::Greater
+        }
+    }
 }
 
 /// The dot- and dash-separated segments of a version ("1.2.3-beta.1" ->
@@ -87,12 +97,30 @@ fn parse_numeric_version_prefix(value: &str) -> Vec<u64> {
     segments
 }
 
-/// Whether the version continues past its numeric prefix with a
-/// prerelease suffix.
-fn has_prerelease_suffix(value: &str) -> bool {
-    let segments = split_version_segments(value);
+/// The prerelease identifiers past a version's numeric prefix
+/// ("1.2.3-beta.20" -> `["beta", "20"]`).
+fn prerelease_identifiers(value: &str) -> Vec<&str> {
     let prefix_len = parse_numeric_version_prefix(value).len();
-    prefix_len > 0 && prefix_len < segments.len()
+    split_version_segments(value)[prefix_len..].to_vec()
+}
+
+/// Semver §11 ordering of two prerelease identifier lists: identifiers
+/// compare left to right — numeric ones numerically, alphanumeric ones
+/// lexically, numeric below alphanumeric — and the list with more
+/// identifiers wins when the shared ones are equal.
+fn compare_prerelease_identifiers(daemon: &[&str], client: &[&str]) -> Ordering {
+    for (daemon_id, client_id) in daemon.iter().zip(client) {
+        let ordering = match (daemon_id.parse::<u64>(), client_id.parse::<u64>()) {
+            (Ok(daemon_number), Ok(client_number)) => daemon_number.cmp(&client_number),
+            (Ok(_), Err(_)) => Ordering::Less,
+            (Err(_), Ok(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => daemon_id.cmp(client_id),
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    daemon.len().cmp(&client.len())
 }
 
 #[cfg(test)]
@@ -141,6 +169,7 @@ mod tests {
         assert!(!is_daemon_version_newer("1.2.3-beta.1", "1.2.3"));
         assert!(!is_daemon_version_newer("1.2.3-beta.2", "1.2.3-beta.10"));
         assert!(!is_daemon_version_newer("1.2.3-beta.1", "1.2.3-beta.2"));
+        assert!(is_daemon_version_newer("0.10.1-beta.20", "0.10.1-beta.8"));
         // An unparseable version has an empty prefix: it reads as all zeros, so a real release
         // orders above it but never below.
         assert!(!is_daemon_version_newer("dev", "0.1.0"));
