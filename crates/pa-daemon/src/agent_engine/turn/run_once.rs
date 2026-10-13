@@ -330,6 +330,17 @@ impl AgentSessionEngine {
                 // dogfood failure); the Arc clone keeps reads free.
                 let session = self.session.lock().await.clone();
                 let engine = session.expect("session built");
+                if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
+                    let state = engine.session.agent().state().await;
+                    pa_core::session_engine::compaction_trace::trace(
+                        "daemon.before_prompt_admission",
+                        &json!({
+                            "liveUserRows": state.messages.iter().filter(|message|
+                                matches!(message, pa_agent::types::AgentMessage::Standard(
+                                    pa_agent::types::Message::User(_)))).count(),
+                        }),
+                    );
+                }
                 match &prompt {
                     // A plain turn admits a user prompt; an injected turn admits the
                     // custom row itself — ONE representation.

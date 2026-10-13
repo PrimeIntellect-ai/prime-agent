@@ -87,6 +87,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def setup(root, label, provider):
     root.mkdir(parents=True)
     env = env_for(root, label)
+    if label == 'rust':
+        env['PA_COMPACTION_TRACE'] = 'stderr'
     for key in ('PYTHONPATH', 'PRIME_AGENT_KERNEL_PYTHON', 'PA_E2E_KERNEL_PYTHON'):
         if key in os.environ:
             env[key] = os.environ[key]
@@ -180,6 +182,8 @@ def new_case(binary, label, root, observation):
         if daemon:
             stop(daemon)
             observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')
+        observation['worker_stderr_logs'] = {str(path.relative_to(root)): path.read_text(errors='replace')
+            for path in (root / 'agent').rglob('worker-*.stderr.log')}
         observation.setdefault('requests', provider.requests)
         observation['provider_errors'] = provider.errors
         provider.close()

@@ -286,10 +286,32 @@ fn lazy_build_restores_only_the_pre_admission_prompt_context() {
         assert_eq!(result, Some(Ok(())));
         assert_eq!(
             model_user_content,
-            Some(vec![expected_content.clone(); prompt_index + 1]),
-            "each repeated prompt/image pair reaches the model once, including after restore"
+            Some(vec![expected_content.clone()]),
+            "each run emits exactly its own admitted prompt/image pair"
         );
         let core = engine.session.blocking_lock().clone().expect("core built");
+        let live_content = engine.runtime.block_on(async {
+            core.session
+                .agent()
+                .state()
+                .await
+                .messages
+                .into_iter()
+                .filter_map(|message| match message {
+                    pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::User(
+                        user,
+                    )) => Some(
+                        serde_json::to_value(user).expect("user serializes")["content"].clone(),
+                    ),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            live_content,
+            vec![expected_content.clone(); prompt_index + 1],
+            "live model history keeps each repeated prompt/image pair once"
+        );
         let persistence = core.session.shared_persistence();
         let inner = persistence.blocking_lock();
         let is_user = |entry: &&pa_types::session::FileEntry| {

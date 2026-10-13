@@ -492,6 +492,22 @@ impl AgentSessionEngine {
             })
             .or(shared_branch.as_deref());
         let mut admitted_user_ids = Vec::new();
+        if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
+            pa_core::session_engine::compaction_trace::trace(
+                "daemon.lazy_restore_boundary",
+                &serde_json::json!({
+                    "kind": match &prompt_context_boundary {
+                        Some(PromptContextBoundary::Empty) => "empty",
+                        Some(PromptContextBoundary::Leaf(_)) => "leaf",
+                        None => "unset",
+                    },
+                    "retainedUserRows": entries.map_or(0, |entries| entries.iter().filter(|entry|
+                        matches!(entry, pa_types::session::FileEntry::Message {
+                            message: pa_types::session::AgentMessage::User(_), ..
+                        })).count()),
+                }),
+            );
+        }
         let prompt_context = match prompt_context_boundary {
             Some(boundary) => {
                 let mut after_boundary = matches!(&boundary, PromptContextBoundary::Empty);
@@ -535,6 +551,16 @@ impl AgentSessionEngine {
             }
             None => None,
         };
+        if std::env::var_os("PA_COMPACTION_TRACE").is_some() {
+            pa_core::session_engine::compaction_trace::trace(
+                "daemon.lazy_restore_context",
+                &serde_json::json!({
+                    "priorUserRows": prompt_context.as_ref().map(|messages| messages.iter().filter(|message|
+                        matches!(message, pa_types::session::AgentMessage::User(_))).count()),
+                    "replayedUserRows": admitted_user_ids.len(),
+                }),
+            );
+        }
         if let Some(state) = seed {
             // The restore-resurrection guard: an active seed whose
             // trailing turn settled as a terminal provider failure adopts

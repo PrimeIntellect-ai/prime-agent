@@ -353,6 +353,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
+          comparison_status=0
+          if [ -f scripts/review_new_goal_parity.py ]; then
+            PA_COMPACTION_TRACE=stderr RUST_BACKTRACE=1 cargo test --locked -p pa-daemon --lib \
+              lazy_build_restores_only_the_pre_admission_prompt_context -- --nocapture \
+              2>&1 | tee "${RUNNER_TEMP}/lifecycle-parity-receipts/new-goal-regression.log" || comparison_status=1
+          fi
           reference="${RUNNER_TEMP}/lifecycle-ts-reference"
           mkdir -p "${reference}"
           gh release download v0.9.8 --repo "${GITHUB_REPOSITORY}" \
@@ -369,8 +376,6 @@ jobs:
           export PA_E2E_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON}"
           export PYTHONPATH="${reference}/package/skills/goal/src"
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
-          mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
-          comparison_status=0
           # Discover independently added verifiers so feature PRs do not
           # overwrite or conflict with each other's comparison selection.
           for verifier in scripts/review_*_parity.py; do
@@ -389,7 +394,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/lifecycle-parity-receipts/*.json
+          path: ${{ runner.temp }}/lifecycle-parity-receipts/
           if-no-files-found: error
       - name: Run this shard's test subset
         if: ${{ !cancelled() && (success() || steps.lifecycle_parity.outcome == 'failure') }}
