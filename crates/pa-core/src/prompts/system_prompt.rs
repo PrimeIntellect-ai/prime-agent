@@ -73,8 +73,6 @@ pub struct BuildSystemPromptOptions<'a> {
     pub vision_capable: Option<bool>,
     /// Active tools. Tool schemas carry tool descriptions outside the prompt.
     pub selected_tools: Option<Vec<&'a str>>,
-    /// Additional guideline bullets appended to the dynamic tail.
-    pub prompt_guidelines: Option<Vec<String>>,
     pub append_system_prompt: Option<String>,
     pub cwd: String,
     /// Conversation log path.
@@ -107,6 +105,7 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
 }
 
 /// Build the system prompt with its per-layer breakdown.
+#[must_use]
 pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemPromptBreakdown {
     let mut segments: Vec<PromptSegment> = Vec::new();
 
@@ -212,19 +211,6 @@ pub fn system_prompt_breakdown(options: &BuildSystemPromptOptions) -> SystemProm
             "session-role",
             "RLM recursion state",
             role,
-        ));
-    }
-
-    let guidelines = options
-        .prompt_guidelines
-        .as_deref()
-        .map(format_prompt_guidelines)
-        .unwrap_or_default();
-    if !guidelines.is_empty() {
-        segments.push(PromptSegment::dynamic_segment(
-            "additional-guidance",
-            "prompt guidelines",
-            format!("# Additional Guidance\n\n{guidelines}"),
         ));
     }
 
@@ -362,18 +348,6 @@ fn today() -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn format_prompt_guidelines(guidelines: &[String]) -> String {
-    let mut seen = std::collections::HashSet::new();
-    let mut list = Vec::new();
-    for guideline in guidelines {
-        let normalized = guideline.trim();
-        if !normalized.is_empty() && seen.insert(normalized.to_string()) {
-            list.push(format!("- {normalized}"));
-        }
-    }
-    list.join("\n")
 }
 
 fn format_generic_mcp_guidance(servers: &[String]) -> String {
@@ -523,10 +497,9 @@ mod tests {
     }
 
     #[test]
-    fn mcp_and_guidelines_are_tail_segments() {
+    fn mcp_servers_are_a_tail_segment() {
         let mut options = base_options();
         options.generic_mcp_servers = vec!["t".to_string(), "t".to_string()];
-        options.prompt_guidelines = Some(vec!["be careful".to_string(), "be careful".to_string()]);
         let breakdown = system_prompt_breakdown(&options);
         let names: Vec<&str> = breakdown
             .segments
@@ -534,14 +507,10 @@ mod tests {
             .map(|segment| segment.name)
             .collect();
         assert!(names.contains(&"mcp-servers"));
-        assert!(names.contains(&"additional-guidance"));
         assert!(breakdown.assembled.contains("# Generic MCP Connections"));
         assert!(breakdown
             .assembled
             .contains("Enabled generic MCP servers: `t`."));
-        assert!(breakdown
-            .assembled
-            .contains("# Additional Guidance\n\n- be careful"));
     }
 
     #[test]

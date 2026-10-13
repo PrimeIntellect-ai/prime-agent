@@ -53,7 +53,6 @@ const DYNAMIC_ONLY_MARKERS: &[&str] = &[
     "<available_skills>",
     "Enabled generic MCP servers:",
     "# Project Context",
-    "# Additional Guidance",
     "Pre-installed Python packages:",
     "You are a child agent spawned by",
 ];
@@ -94,7 +93,6 @@ fn cached_prefix_is_stable_across_sessions() {
     options.rlm_parent_agent = Some("orchestrator");
     options.generic_mcp_servers = vec!["slack".into(), "github".into()];
     options.context_files = vec![("AGENTS.md".into(), "Never commit main.".into())];
-    options.prompt_guidelines = Some(vec!["prefer tabs".into()]);
     options.append_system_prompt = Some("And one more thing.".into());
     let second = system_prompt_breakdown(&options);
 
@@ -125,7 +123,6 @@ fn cached_prefix_is_stable_across_sessions() {
     assert!(second_tail.contains("Recursive agent depth: 3 (not root)"));
     assert!(second_tail.contains("You are a child agent spawned by orchestrator."));
     assert!(second_tail.contains("# Project Context"));
-    assert!(second_tail.contains("# Additional Guidance"));
     assert!(second_tail.ends_with("And one more thing."));
 
     for segment in &first.segments {
