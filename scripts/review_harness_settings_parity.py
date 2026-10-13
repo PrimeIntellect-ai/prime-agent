@@ -21,11 +21,13 @@ from review_draft_disconnect_parity import (
 class SettingsSupervisor(Supervisor):
     """Add the existing reload response to the shared supervisor fixture."""
     def send(self, sock, data):
-        if data.get("type") == "response" and data.get("command") == "reload":
-            expected = "unexpected command: reload"
+        if data.get("type") == "response" and data.get("command") in ("reload", "get_messages"):
+            name = data["command"]
+            expected = f"unexpected command: {name}"
             if expected in self.errors:
                 self.errors.remove(expected)
-            data = dict(data, success=True, data={})
+            payload = {"messages": list(self.messages)} if name == "get_messages" else {}
+            data = dict(data, success=True, data=payload)
             data.pop("error", None)
         super().send(sock, data)
 
@@ -84,7 +86,11 @@ def capture(kind, binary, root, artifacts):
         if kind in ("base", "pr"):
             open_menu()
             terminal.send("5")
-            terminal.wait("Agents tab", lambda: "Skill commands" in terminal.screen.text(), server)
+            terminal.wait("Agents tab fully painted", lambda:
+                          row_has(terminal, "Idle worker eviction", "90") and
+                          row_has(terminal, "Tree filter mode", "user-only") and
+                          "Register skills as /skill:name commands" in terminal.screen.text() and
+                          (kind != "pr" or row_has(terminal, "Harness refinements", "true")), server)
             frame("agents-default")
             result["harness_row_present"] = "Harness refinements" in terminal.screen.text()
             if kind == "pr":
@@ -105,7 +111,6 @@ def capture(kind, binary, root, artifacts):
                 terminal.send("5")
                 terminal.wait("persisted harness enabled on reopen", lambda: row_has(terminal, "Harness refinements", "true"), server)
                 frame("harness-reopened")
-        result["saved_state_unchanged"] = saved.read_bytes() == saved_before
         result["settings"] = settings(root)
         result["commands"] = server.commands
         result["success"] = True
@@ -115,6 +120,7 @@ def capture(kind, binary, root, artifacts):
         if terminal is not None:
             result["failure_frame"] = terminal.screen.text()
     finally:
+        result["saved_state_unchanged"] = saved.read_bytes() == saved_before
         if terminal is not None:
             (artifacts / f"{kind}.ansi").write_bytes(terminal.raw)
             terminal.close()
