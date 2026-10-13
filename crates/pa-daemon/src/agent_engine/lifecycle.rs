@@ -767,6 +767,7 @@ impl AgentSessionEngine {
     pub(crate) fn execute_session_command(
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
+        images: &[pa_agent::types::ImageContent],
     ) -> anyhow::Result<SessionCommandExecution> {
         let model = self.session_model()?;
         self.ensure_core_session(&model)?;
@@ -787,7 +788,7 @@ impl AgentSessionEngine {
             .expect("session built by ensure_core_session");
         Ok(self
             .runtime
-            .block_on(async { execute_session_command(&core, &mut params, command).await }))
+            .block_on(async { execute_session_command(&core, &mut params, command, images).await }))
     }
 
     /// The current explicit selection (create-config flags over the

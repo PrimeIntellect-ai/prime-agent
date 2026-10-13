@@ -1294,9 +1294,12 @@ impl SessionEngine for AgentSessionEngine {
         if let Some(command) =
             crate::session_commands::parse_prompt_session_command(&request.message)
         {
-            let Some(execution) =
-                crate::session_commands::run_session_command(self, &command, &mut emit)
-            else {
+            let Some(execution) = crate::session_commands::run_session_command(
+                self,
+                &command,
+                &request.images,
+                &mut emit,
+            ) else {
                 return;
             };
             if let Some(error) = &execution.error {
