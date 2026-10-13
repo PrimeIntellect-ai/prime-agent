@@ -17,7 +17,7 @@ use crate::supervisor::Supervisor;
 
 /// Worker round-trip budget for the sender-summary read and the delivery
 /// route (TS `WORKER_REQUEST_TIMEOUT_MS`).
-const WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
+pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 impl Supervisor {
     /// `send_message`: route to the target worker as `worker_deliver_message`;

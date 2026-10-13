@@ -142,6 +142,10 @@ def comparison(results, artifacts):
         (artifacts / f"base-vs-pr-{frame}.diff").write_text(diff)
         if frame != "agents-default" and base != pr:
             errors.append(f"unexpected base-to-PR frame change: {frame}")
+        if frame == "agents-default":
+            without_new_row = "\n".join(line for line in pr.splitlines() if "Harness refinements" not in line)
+            if base.rstrip() != without_new_row.rstrip():
+                errors.append("Agents frame changed beyond the intended new row")
     for frame in ("default-settings", "quiet-before", "quiet-true", "quiet-false"):
         reference = results["ts"]["frames"].get(frame, "")
         base = results["base"]["frames"].get(frame, "")
