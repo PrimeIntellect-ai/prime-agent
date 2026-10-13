@@ -434,7 +434,10 @@ class HarnessState:
         # writes (e.g. the host `/refine` command) and avoid clobbering them.
         self._loaded_mtime: int | None = None
         self._held_lock: tuple[Path, str] | None = None
-        self.load()
+        # The proxy's empty fallback must remain constructible for kernel API
+        # introspection while disabled; every actual read/write still checks the gate.
+        if not in_memory:
+            self.load()
 
     def _ensure_local_writable(self) -> None:
         _require_refinements_enabled()

@@ -1632,6 +1632,18 @@ class HarnessSearchTest(unittest.TestCase):
 
 
 class HarnessRefinementsSettingTests(unittest.TestCase):
+    def test_disabled_harness_keeps_kernel_api_introspection_available(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            (Path(tmp) / "settings.json").write_text('{"harnessRefinements":false}')
+            # The real kernel bootstrap probes these methods before any cell runs.
+            for method in ("create_memory", "update_memory", "delete_memory", "create_skill", "record_refinement"):
+                self.assertTrue(callable(getattr(package_harness, method)))
+                self.assertTrue(callable(getattr(callable_rlm.harness, method)))
+            with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                package_harness.create_memory("No", "Do not create")
+            with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                package_harness.snapshot()
+
     def test_project_override_uses_the_session_cwd_and_ignores_wrong_types(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent_dir = Path(tmp) / "agent"
