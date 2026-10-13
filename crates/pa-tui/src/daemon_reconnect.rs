@@ -78,17 +78,20 @@ fn is_daemon_version_newer(daemon_version: &str, client_version: &str) -> bool {
     }
 }
 
-/// The dot- and dash-separated segments of a version ("1.2.3-beta.1" ->
-/// `["1", "2", "3", "beta", "1"]`).
-fn split_version_segments(value: &str) -> Vec<&str> {
-    value.split(['.', '-']).collect()
+/// Build metadata never contributes to Semver precedence.
+fn version_without_build(value: &str) -> &str {
+    value.split('+').next().unwrap_or(value)
 }
 
-/// The leading numeric segments; the first unparseable segment ends the
-/// prefix.
+/// The leading numeric segments of the release prefix; the first
+/// unparseable segment ends the prefix for nonstandard development versions.
 fn parse_numeric_version_prefix(value: &str) -> Vec<u64> {
+    let release = version_without_build(value)
+        .split('-')
+        .next()
+        .unwrap_or(value);
     let mut segments = Vec::new();
-    for segment in split_version_segments(value) {
+    for segment in release.split('.') {
         let Ok(parsed) = segment.parse::<u64>() else {
             break;
         };
@@ -97,11 +100,18 @@ fn parse_numeric_version_prefix(value: &str) -> Vec<u64> {
     segments
 }
 
-/// The prerelease identifiers past a version's numeric prefix
-/// ("1.2.3-beta.20" -> `["beta", "20"]`).
+/// Prerelease identifiers split on dots only: hyphens belong to an
+/// identifier, and even an entirely numeric prerelease remains a prerelease.
 fn prerelease_identifiers(value: &str) -> Vec<&str> {
-    let prefix_len = parse_numeric_version_prefix(value).len();
-    split_version_segments(value)[prefix_len..].to_vec()
+    let value = version_without_build(value);
+    if let Some((_, prerelease)) = value.split_once('-') {
+        return prerelease.split('.').collect();
+    }
+    // Preserve the existing treatment of nonstandard development strings.
+    value
+        .split('.')
+        .skip(parse_numeric_version_prefix(value).len())
+        .collect()
 }
 
 /// Semver §11 ordering of two prerelease identifier lists: identifiers
@@ -110,11 +120,21 @@ fn prerelease_identifiers(value: &str) -> Vec<&str> {
 /// identifiers wins when the shared ones are equal.
 fn compare_prerelease_identifiers(daemon: &[&str], client: &[&str]) -> Ordering {
     for (daemon_id, client_id) in daemon.iter().zip(client) {
-        let ordering = match (daemon_id.parse::<u64>(), client_id.parse::<u64>()) {
-            (Ok(daemon_number), Ok(client_number)) => daemon_number.cmp(&client_number),
-            (Ok(_), Err(_)) => Ordering::Less,
-            (Err(_), Ok(_)) => Ordering::Greater,
-            (Err(_), Err(_)) => daemon_id.cmp(client_id),
+        let daemon_numeric = daemon_id.bytes().all(|byte| byte.is_ascii_digit());
+        let client_numeric = client_id.bytes().all(|byte| byte.is_ascii_digit());
+        let ordering = match (daemon_numeric, client_numeric) {
+            (true, true) => {
+                // Decimal length then lexical order compares arbitrarily large numbers.
+                let daemon_number = daemon_id.trim_start_matches('0');
+                let client_number = client_id.trim_start_matches('0');
+                daemon_number
+                    .len()
+                    .cmp(&client_number.len())
+                    .then_with(|| daemon_number.cmp(client_number))
+            }
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => daemon_id.cmp(client_id),
         };
         if ordering != Ordering::Equal {
             return ordering;
@@ -157,6 +177,40 @@ mod tests {
             reconnect_banner(Some("1.2.3-beta.1"), "1.2.3"),
             (older_banner.to_string(), StatusKind::Info)
         );
+    }
+
+    #[test]
+    fn build_metadata_does_not_change_precedence() {
+        assert!(!is_daemon_version_newer("1.2.3+daemon", "1.2.3+client"));
+        assert!(!is_daemon_version_newer(
+            "1.2.3-beta.1+daemon",
+            "1.2.3-beta.1"
+        ));
+        assert!(is_daemon_version_newer(
+            "1.2.3+daemon",
+            "1.2.3-beta.1+client"
+        ));
+        assert!(is_daemon_version_newer("1.2.4+daemon", "1.2.3+client"));
+    }
+
+    #[test]
+    fn hyphens_belong_to_the_prerelease_identifier() {
+        assert!(is_daemon_version_newer("1.2.3-alpha-2", "1.2.3-alpha-10"));
+        assert!(is_daemon_version_newer("1.2.3-alpha-10", "1.2.3-alpha.10"));
+        assert!(!is_daemon_version_newer("1.2.3-20", "1.2.3"));
+        assert!(!is_daemon_version_newer("1.2.3-20", "1.2.3-alpha"));
+    }
+
+    #[test]
+    fn numeric_prerelease_identifiers_have_no_integer_size_limit() {
+        assert!(is_daemon_version_newer(
+            "1.2.3-beta.100000000000000000000",
+            "1.2.3-beta.99999999999999999999"
+        ));
+        assert!(!is_daemon_version_newer(
+            "1.2.3-beta.100000000000000000000",
+            "1.2.3-beta.alpha"
+        ));
     }
 
     /// TS `isDaemonVersionNewer`: numeric-prefix ordering with the semver prerelease rule.
