@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import socket
 import threading
+import tempfile
 import unittest
 
 from review_reconnect_version_parity import RestartSupervisor
@@ -38,6 +39,37 @@ def fixture():
 
 
 class RestartFixtureTests(unittest.TestCase):
+    def test_snapshot_reads_preserve_the_settled_fixture_turn(self):
+        with tempfile.TemporaryDirectory(prefix='reconnect-read-', dir='/tmp') as folder:
+            root = Path(folder)
+            server = RestartSupervisor(root / 'd.sock',
+                {'type': 'daemon_hello', 'protocol': {'name': 'prime-agent.daemon', 'version': 7}},
+                'restart', root)
+            try:
+                server.prompts.append({'message': 'persisted fixture prompt'})
+                server.settle(Connection(), 's1', ('fixture', 'turn'), 1, emit=False)
+                with socket.socket(socket.AF_UNIX) as connection:
+                    connection.settimeout(2)
+                    connection.connect(str(server.path))
+                    with connection.makefile('rb') as stream:
+                        self.assertEqual(json.loads(stream.readline())['type'], 'daemon_hello')
+                        for ident, command, expected in (
+                            ('1', 'get_messages', {'messages': server.messages}),
+                            ('2', 'get_session_context', {'context': {
+                                'messages': server.messages, 'thinkingLevel': 'off',
+                                'serviceTier': None, 'model': None}}),
+                        ):
+                            envelope = {'type': 'command', 'id': ident,
+                                'command': {'type': command, 'activeSessionId': 's1'}}
+                            connection.sendall((json.dumps(envelope) + '\n').encode())
+                            response = json.loads(stream.readline())
+                            self.assertTrue(response['success'], response)
+                            self.assertEqual(response['data'], expected)
+                self.assertEqual(len(server.messages), 2)
+                self.assertEqual(server.errors, [])
+            finally:
+                server.close()
+
     def test_attach_and_list_share_the_durable_session_identity(self):
         server, connection = fixture(), Connection()
         server.send(connection, {'type': 'response', 'command': 'attach',
