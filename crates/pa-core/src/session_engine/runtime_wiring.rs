@@ -227,7 +227,12 @@ pub fn kernel_provisioner(
     on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
-    let mut env = HashMap::with_capacity(1);
+    let mut env = HashMap::with_capacity(2);
+    // Pin settings resolution to the session cwd even if a Python cell changes directories.
+    env.insert(
+        "PRIME_AGENT_SETTINGS_CWD".to_string(),
+        cwd.to_string_lossy().to_string(),
+    );
     env.insert(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),

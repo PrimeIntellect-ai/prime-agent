@@ -1632,6 +1632,22 @@ class HarnessSearchTest(unittest.TestCase):
 
 
 class HarnessRefinementsSettingTests(unittest.TestCase):
+    def test_project_override_uses_the_session_cwd_and_ignores_wrong_types(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            agent_dir = Path(tmp) / "agent"
+            project_dir = Path(tmp) / "project" / ".prime" / "agent"
+            agent_dir.mkdir()
+            project_dir.mkdir(parents=True)
+            (agent_dir / "settings.json").write_text('{"harnessRefinements":false}')
+            project_settings = project_dir / "settings.json"
+            project_settings.write_text('{"harnessRefinements":true}')
+            with patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": str(agent_dir), "PRIME_AGENT_SETTINGS_CWD": str(Path(tmp) / "project")}):
+                state = HarnessState(Path(tmp) / "harness_state.json", scope="global")
+                state.create_memory("Note", "Project wins", id="note")
+                project_settings.write_text('{"harnessRefinements":"true"}')
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    state.get("memory", "note")
+
     def test_disable_blocks_cached_reads_and_writes_without_deleting_state(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
             settings = Path(tmp) / "settings.json"

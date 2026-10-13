@@ -314,7 +314,7 @@ pub async fn execute_refinement_with_rows(
     anyhow::ensure!(
         settings
             .as_ref()
-            .is_none_or(|settings| settings.get_harness_refinements()),
+            .is_none_or(crate::settings::SettingsManager::get_harness_refinements),
         "Harness refinements are disabled in /settings"
     );
     let RefinementTranscript {

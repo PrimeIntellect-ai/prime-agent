@@ -28,7 +28,12 @@ pub(crate) fn without_refinements(messages: Vec<AgentMessage>) -> Vec<AgentMessa
                 summary.harness_state_fingerprint = None;
                 Some(AgentMessage::CompactionSummary(summary))
             }
-            message => Some(message),
+            message @ (AgentMessage::User(_)
+            | AgentMessage::Assistant(_)
+            | AgentMessage::ToolResult(_)
+            | AgentMessage::BashExecution(_)
+            | AgentMessage::Custom(_)
+            | AgentMessage::BranchSummary(_)) => Some(message),
         })
         .collect()
 }
@@ -59,7 +64,7 @@ pub(crate) fn convert_to_llm(
                                 .next()
                                 .and_then(|row| super::session_message_to_loop(&row))
                         }
-                        message => Some(message),
+                        message @ pa_agent::types::AgentMessage::Standard(_) => Some(message),
                     })
                     .collect()
             };
@@ -78,14 +83,14 @@ mod tests {
         AgentMessage::User(UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
     #[tokio::test]
     async fn live_request_gate_filters_saved_rows_and_preserves_quoted_user_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut settings = SettingsManager::create(tmp.path(), &tmp.path().join("agent"));
+        let mut settings = SettingsManager::create(tmp.path(), tmp.path().join("agent"));
         let convert = convert_to_llm(settings.reopen());
         let digest =
             super::super::harness_digest::harness_digest_prompt_row("saved memory", 1, "fp");

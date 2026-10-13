@@ -136,7 +136,8 @@ def _agent_dir() -> Path:
 def _require_refinements_enabled() -> None:
     """Read the same global/project master switch as the host, without caching it."""
     enabled = True
-    for settings in (_agent_dir() / "settings.json", Path.cwd() / ".prime" / "agent" / "settings.json"):
+    cwd = Path(os.environ.get("PRIME_AGENT_SETTINGS_CWD") or os.getcwd())
+    for settings in (_agent_dir() / "settings.json", cwd / ".prime" / "agent" / "settings.json"):
         try:
             document = json.loads(settings.read_text(encoding="utf-8"))
         except (OSError, ValueError):
