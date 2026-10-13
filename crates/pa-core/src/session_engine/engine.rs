@@ -959,3 +959,6 @@ impl SessionEngine {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod append_system_tests;
