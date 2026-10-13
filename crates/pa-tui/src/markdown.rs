@@ -182,6 +182,22 @@ fn block_cache_key(
     })
 }
 
+/// One list level: its marker type and the items parsed at one indent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ListBlock {
+    ordered: bool,
+    start: usize,
+    items: Vec<ListItem>,
+}
+
+/// One list item: its own text lines (continuation lines included) and the
+/// nested lists rendered after them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ListItem {
+    lines: Vec<String>,
+    children: Vec<ListBlock>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BlockKind {
     Heading {
@@ -191,10 +207,7 @@ enum BlockKind {
     Code {
         lang: Option<String>,
     },
-    List {
-        ordered: bool,
-        start: usize,
-    },
+    List(ListBlock),
     Quote,
     Hr,
     Table {
@@ -297,34 +310,27 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        if let Some(marker) = list_marker(trimmed) {
-            let (ordered, start) = marker;
-            let mut items: Vec<String> = Vec::new();
-            let mut item = trimmed[marker_width(trimmed)..].to_string();
+        if let Some((ordered, start)) = list_marker(trimmed) {
+            let indent = line.len() - line.trim_start().len();
+            let first = ListItem {
+                lines: vec![trimmed[marker_width(trimmed)..].to_string()],
+                children: Vec::new(),
+            };
+            let content_col = indent + marker_width(trimmed);
             i += 1;
-            while i < src_lines.len() {
-                let l = src_lines[i];
-                let t = l.trim();
-                if t.is_empty() {
-                    break;
-                }
-                if list_marker(t).is_some() {
-                    items.push(std::mem::take(&mut item));
-                    item = t[marker_width(t)..].to_string();
-                    i += 1;
-                } else if l.starts_with("  ") || l.starts_with('\t') {
-                    item.push(' ');
-                    item.push_str(t);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            items.push(item);
+            let list = parse_list_level(
+                &src_lines,
+                &mut i,
+                first,
+                ordered,
+                start,
+                indent,
+                content_col,
+            );
             blocks.push(Block {
-                kind: BlockKind::List { ordered, start },
+                kind: BlockKind::List(list),
                 sep_blank,
-                lines: items,
+                lines: Vec::new(),
             });
             continue;
         }
@@ -422,6 +428,127 @@ fn marker_width(t: &str) -> usize {
         2
     } else {
         t.find(". ").map_or(t.len(), |p| p + 2)
+    }
+}
+
+/// The bullet for one item of a list level (TS `renderList`: the token's start
+/// number plus the item index, so sibling markers' own numbers are ignored).
+fn list_bullet(ordered: bool, start: usize, index: usize) -> String {
+    if ordered {
+        format!("{}. ", start + index)
+    } else {
+        "- ".to_string()
+    }
+}
+
+/// One list level's row geometry: the column its rows indent to (the level's own
+/// indent plus the accumulated `indent + "  "` frames of its ancestors, TS
+/// `renderList`), and the indent its children's rows inherit from that frame.
+fn list_level_geometry(depth: usize, outer: usize) -> (usize, usize) {
+    (outer + 2 * depth, outer + 2 * depth + 2)
+}
+
+/// One item line's wrap budget: the first line shares its row with the level
+/// indent and the bullet; later lines carry `indent + "  "`.
+fn list_line_budget(width: usize, indent_len: usize, bullet_width: usize, first_line: bool) -> usize {
+    let used = if first_line {
+        indent_len + bullet_width
+    } else {
+        indent_len + 2
+    };
+    width.saturating_sub(used).max(1)
+}
+
+/// Parse one list level (marked's list rule): marker lines of the level's own
+/// type start items (a marker line indented between the level indent and the
+/// current item's content column is absorbed as a sibling — marked renumbers
+/// by index), blank lines stay internal (marked's loose list), indented
+/// non-marker lines continue the current item as their own lines, and a marker
+/// line at or past the content column opens a nested level. Anything else ends
+/// the level; a trailing run of blanks is left for the gap before the next
+/// block.
+fn parse_list_level(
+    src_lines: &[&str],
+    i: &mut usize,
+    first: ListItem,
+    ordered: bool,
+    start: usize,
+    indent: usize,
+    first_content_col: usize,
+) -> ListBlock {
+    let mut items = vec![first];
+    // The column the current item's content starts at: a line indented to it is
+    // the item's continuation or a nested list; a marker line between the level
+    // indent and it is absorbed as a sibling (marked renumbers by index).
+    let mut content_col = first_content_col;
+    let mut pending_blank: Option<usize> = None;
+    while *i < src_lines.len() {
+        let line = src_lines[*i];
+        let t = line.trim();
+        let line_indent = line.len() - line.trim_start().len();
+        if t.is_empty() {
+            pending_blank.get_or_insert(*i);
+            *i += 1;
+            continue;
+        }
+        if let Some((child_ordered, child_start)) = list_marker(t) {
+            let marker_w = marker_width(t);
+            if line_indent >= content_col {
+                let child_first = ListItem {
+                    lines: vec![t[marker_w..].to_string()],
+                    children: Vec::new(),
+                };
+                *i += 1;
+                let child = parse_list_level(
+                    src_lines,
+                    i,
+                    child_first,
+                    child_ordered,
+                    child_start,
+                    line_indent,
+                    line_indent + marker_w,
+                );
+                items
+                    .last_mut()
+                    .expect("the level has its first item")
+                    .children
+                    .push(child);
+                pending_blank = None;
+                continue;
+            }
+            if child_ordered == ordered
+                && (line_indent == indent || (line_indent > indent && line_indent < content_col))
+            {
+                items.push(ListItem {
+                    lines: vec![t[marker_w..].to_string()],
+                    children: Vec::new(),
+                });
+                content_col = line_indent + marker_w;
+                pending_blank = None;
+                *i += 1;
+                continue;
+            }
+            break;
+        }
+        if line_indent >= content_col {
+            items
+                .last_mut()
+                .expect("the level has its first item")
+                .lines
+                .push(t.to_string());
+            pending_blank = None;
+            *i += 1;
+            continue;
+        }
+        break;
+    }
+    if let Some(blank) = pending_blank {
+        *i = blank;
+    }
+    ListBlock {
+        ordered,
+        start,
+        items,
     }
 }
 
@@ -570,16 +697,8 @@ fn render_block(
                 out.push(Vec::new());
             }
         }
-        BlockKind::List { ordered, start } => {
-            for (i, item) in block.lines.iter().enumerate() {
-                let bullet = if *ordered {
-                    format!("{}. ", start + i)
-                } else {
-                    "- ".to_string()
-                };
-                let spans = render_inline(item, style);
-                wrap_list_item(&bullet, &spans, width, style, out);
-            }
+        BlockKind::List(list) => {
+            render_list_level(list, 0, 0, width, style, out);
             if blank_after(true) {
                 out.push(Vec::new());
             }
@@ -746,26 +865,93 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
     out.finish_row(/*trim*/ false);
 }
 
-fn wrap_list_item(
-    bullet: &str,
-    spans: &[Span],
+/// The row count of one list level — the same geometry [`render_list_level`]
+/// paints (level indent, bullet widths, budgets), counted without collecting
+/// rows. An item with no lines still renders its bare bullet row.
+fn list_row_count(
+    list: &ListBlock,
+    depth: usize,
+    outer: usize,
+    width: usize,
+    style: &MarkdownStyle,
+) -> usize {
+    let (indent_len, child_outer) = list_level_geometry(depth, outer);
+    let mut count = 0;
+    for (index, item) in list.items.iter().enumerate() {
+        let bullet_width = str_width(&list_bullet(list.ordered, list.start, index));
+        let mut item_count = 0;
+        for (j, text) in item.lines.iter().enumerate() {
+            let budget = list_line_budget(width, indent_len, bullet_width, j == 0);
+            item_count += wrapped_span_count(&render_inline(text, style), budget);
+        }
+        for child in &item.children {
+            item_count += list_row_count(child, depth + 1, child_outer, width, style);
+        }
+        count += item_count.max(1);
+    }
+    count
+}
+
+/// Render one list level (TS `renderList`): every item line beyond the first
+/// prefixes with `indent + "  "` (each nesting level accumulates one frame), the
+/// item's first line carries the level's bullet, wrapped rows keep the
+/// bullet-width continuation indent, and empty items render the bare bullet.
+fn render_list_level(
+    list: &ListBlock,
+    depth: usize,
+    outer: usize,
     width: usize,
     style: &MarkdownStyle,
     out: &mut Vec<Line>,
 ) {
-    let bullet_width = str_width(bullet);
-    let content_width = width.saturating_sub(bullet_width).max(1);
-    let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, content_width, style.body, &mut wrapped);
-    for (i, line) in wrapped.into_iter().enumerate() {
-        if i == 0 {
-            let mut l = vec![Span::styled(bullet.to_string(), style.list_bullet)];
-            l.extend(line);
-            out.push(l);
+    let (indent_len, child_outer) = list_level_geometry(depth, outer);
+    let indent = " ".repeat(indent_len);
+    for (index, item) in list.items.iter().enumerate() {
+        let bullet = list_bullet(list.ordered, list.start, index);
+        let bullet_width = str_width(&bullet);
+        let mut item_rows: Vec<Line> = Vec::new();
+        for (j, text) in item.lines.iter().enumerate() {
+            let spans = render_inline(text, style);
+            let mut wrapped: Vec<Line> = Vec::new();
+            if j == 0 {
+                let budget = list_line_budget(width, indent_len, bullet_width, true);
+                wrap_spans(&spans, budget, style.body, &mut wrapped);
+                for (k, line) in wrapped.into_iter().enumerate() {
+                    let mut row: Line = Vec::new();
+                    if !indent.is_empty() {
+                        row.push(Span::raw(indent.clone()));
+                    }
+                    if k == 0 {
+                        row.push(Span::styled(bullet.clone(), style.list_bullet));
+                    } else {
+                        row.push(Span::raw(" ".repeat(bullet_width)));
+                    }
+                    row.extend(line);
+                    item_rows.push(row);
+                }
+            } else {
+                let sub_indent = format!("{indent}  ");
+                let budget = list_line_budget(width, indent_len, bullet_width, false);
+                wrap_spans(&spans, budget, style.body, &mut wrapped);
+                for line in wrapped {
+                    let mut row = vec![Span::raw(sub_indent.clone())];
+                    row.extend(line);
+                    item_rows.push(row);
+                }
+            }
+        }
+        for child in &item.children {
+            render_list_level(child, depth + 1, child_outer, width, style, &mut item_rows);
+        }
+        if item_rows.is_empty() {
+            let mut row: Line = Vec::new();
+            if !indent.is_empty() {
+                row.push(Span::raw(indent.clone()));
+            }
+            row.push(Span::styled(bullet, style.list_bullet));
+            out.push(row);
         } else {
-            let mut l = vec![Span::styled(" ".repeat(bullet_width), style.body)];
-            l.extend(line);
-            out.push(l);
+            out.extend(item_rows);
         }
     }
 }

@@ -60,7 +60,7 @@ impl<'a> WrapOutput<'a> {
 pub(super) fn blank_after(next: Option<&Block>, exclude_lists: bool) -> bool {
     match next {
         Some(next) => {
-            !(next.sep_blank || exclude_lists && matches!(next.kind, BlockKind::List { .. }))
+            !(next.sep_blank || exclude_lists && matches!(next.kind, BlockKind::List(..)))
         }
         None => false,
     }
@@ -120,20 +120,9 @@ pub(crate) fn markdown_row_count_tagged(
                     .sum::<usize>()
                     + usize::from(blank_after(next, true))
             }
-            BlockKind::List { ordered, start } => {
-                let mut count = 0;
-                for (index, text) in block.lines.iter().enumerate() {
-                    let bullet = if *ordered {
-                        format!("{}. ", start + index)
-                    } else {
-                        "- ".to_owned()
-                    };
-                    let content_width = width
-                        .saturating_sub(crate::width::str_width(&bullet))
-                        .max(1);
-                    count += wrapped_span_count(&render_inline(text, style), content_width);
-                }
-                count + usize::from(blank_after(next, true))
+            BlockKind::List(list) => {
+                crate::markdown::list_row_count(list, 0, 0, width, style)
+                    + usize::from(blank_after(next, true))
             }
             BlockKind::Quote => block
                 .lines

@@ -1193,6 +1193,129 @@ fn quote_blank_line_renders_a_bare_border_row() {
     let lines = render_markdown("> a\n>\n> b", 40, &style);
     assert_eq!(lines.len(), 3, "rows: {lines:?}");
     assert_eq!(lines[1], vec![Span::styled("│ ", style.quote_border)]);
-    let joined: String = lines[2].iter().skip(1).map(|s| s.content.as_str()).collect();
+    let joined: String = lines[2]
+        .iter()
+        .skip(1)
+        .map(|s| s.content.as_str())
+        .collect();
     assert_eq!(joined, "b");
+}
+
+#[test]
+fn nested_lists_render_indented_and_keep_parent_numbering() {
+    // marked nests indented markers; TS `renderList` frames each nesting level
+    // (`indent + "  "` per ancestor), giving nested rows their own indent and
+    // bullets. The parent's numbering never shifts.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- alpha\n  - beta\n    - gamma\n- delta", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- alpha".to_string(),
+            "    - beta".to_string(),
+            "          - gamma".to_string(),
+            "- delta".to_string(),
+        ]
+    );
+    let rows = render_markdown(
+        "1. first\n2. second\n   - nested under second\n3. third",
+        60,
+        &style,
+    );
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "1. first".to_string(),
+            "2. second".to_string(),
+            "    - nested under second".to_string(),
+            "3. third".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn an_ordered_list_after_an_unordered_list_is_its_own_block() {
+    // marked ends a list at a same-indent marker of a different type.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- bullet\n1. ordered", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["- bullet".to_string(), "1. ordered".to_string()]);
+    assert_eq!(rows[1][0].content, "1. ");
+    assert_eq!(rows[1][0].style.fg, style.list_bullet.fg);
+}
+
+#[test]
+fn loose_lists_keep_blank_lines_internal() {
+    // A blank line between items does not break the list (marked's loose list):
+    // no blank rows render between items.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- item one\n\n- item two\n\n- item three", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- item one".to_string(),
+            "- item two".to_string(),
+            "- item three".to_string(),
+        ]
+    );
+    // Blank lines before a following block belong to the gap, not the list.
+    let rows = render_markdown("- item one\n\nafter", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec!["- item one".to_string(), String::new(), "after".to_string()]
+    );
+}
+
+#[test]
+fn list_item_continuation_lines_render_as_their_own_rows() {
+    // TS `renderList` prefixes each item line beyond the first with `indent + "  "`.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- item\n  continued", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["- item".to_string(), "  continued".to_string()]);
+    // Long continuation lines wrap; the wrapped rows keep the item-line prefix.
+    let rows = render_markdown(
+        "- item\n  continued text that is long enough to wrap here",
+        22,
+        &style,
+    );
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat[1].trim(), "continued text that");
+    for row in &rows {
+        let w: usize = row.iter().map(|s| str_width(&s.content)).sum();
+        assert!(w <= 22, "row over the width: {w}");
+    }
+    // count==paint at every width.
+    for width in 1..60 {
+        assert_eq!(
+            markdown_row_count("- item\n  continued", width, &style),
+            render_markdown("- item\n  continued", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
 }
