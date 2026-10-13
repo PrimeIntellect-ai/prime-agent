@@ -294,6 +294,24 @@ impl Worker {
         response_success(None, "execute_bash", None)
     }
 
+    /// `require_created`'s shutdown gate re-checked and the awaited run
+    /// registered under the same lock: the registration cannot interleave
+    /// with the gate's close, so the close's abort always sees — and cancels —
+    /// the new token (a registration its `abort_and_settle` missed would let
+    /// a child outlive the exit).
+    pub(crate) fn admit_awaited_bash(&self) -> Result<AwaitedRun<'_>, DaemonResponse> {
+        let core = self.core.lock().unwrap();
+        if core.shutdown_requested {
+            return Err(response_failure(
+                None,
+                "execute_bash_and_wait",
+                "Session is shutting down",
+                None,
+            ));
+        }
+        Ok(self.user_bash.begin_awaited())
+    }
+
     /// `execute_bash_and_wait { command }` (TS `executeBash`): run to
     /// completion, record the row, answer the `BashResult` wire shape.
     pub(crate) async fn handle_execute_bash_and_wait(&self, payload: &Value) -> DaemonResponse {
@@ -319,11 +337,18 @@ impl Worker {
                 settings.shell_path.clone(),
             )
         };
-        let user_bash = Arc::clone(&self.user_bash);
         let command = command.to_string();
         // The awaited run counts toward `isBashRunning` without
-        // blocking a streamed user bash.
-        let awaited = user_bash.begin_awaited();
+        // blocking a streamed user bash. The admission re-checks the
+        // shutdown gate and registers under the same lock, so a close
+        // cannot slip between them: it either sees the gate shut (and
+        // the dispatch is rejected) or aborts a token that is already
+        // registered (a registration after its abort would leave a
+        // child the exit orphans).
+        let awaited = match self.admit_awaited_bash() {
+            Ok(awaited) => awaited,
+            Err(response) => return response,
+        };
         let end = run_bash(RunBash {
             command: &command,
             cwd: &cwd,
@@ -334,11 +359,13 @@ impl Worker {
             on_chunk: None,
         })
         .await;
-        drop(awaited);
-        // The awaited path emits no session events, so the port enqueues
-        // the roster flush TS's `execute_bash_and_wait` does in `finally`.
+        // The durable row lands while the run still counts: the orphan
+        // monitor treats `!is_running` as exit permission, so an awaited
+        // result released before its row (the streamed path persists,
+        // then releases) could be lost to a racing orphan exit.
         self.roster_pushes.push();
         if let Some(error) = &end.error_message {
+            drop(awaited);
             return response_failure(None, "execute_bash_and_wait", error, None);
         }
         let result = BashResult {
@@ -349,6 +376,7 @@ impl Worker {
             full_output_path: end.full_output_path,
         };
         record_bash_result(&self.core, &command, &result, false);
+        drop(awaited);
         response_success(
             None,
             "execute_bash_and_wait",
@@ -1383,5 +1411,90 @@ mod tests {
         assert!(truncated);
         assert!(kept.len() <= DEFAULT_MAX_BYTES);
         assert!(big.ends_with(&kept), "the tail wins");
+    }
+
+    #[tokio::test]
+    async fn the_shutdown_gate_cannot_close_between_an_awaited_admission_and_its_registration() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+
+        // Gate shut: the admission's own re-check rejects, nothing registers.
+        worker.core.lock().unwrap().shutdown_requested = true;
+        assert!(worker.admit_awaited_bash().is_err());
+        assert!(!worker.user_bash.is_running());
+
+        // A gate that closes while an admission waits on the admission
+        // lock: the gate check and the registration are one critical
+        // section, so the admission cannot slip past the close (a
+        // registration the close's abort missed would leave the child
+        // running past the exit).
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.shutdown_requested = false;
+        }
+        let mut gate = worker.core.lock().unwrap();
+        let racing = std::thread::spawn({
+            let worker = Arc::clone(&worker);
+            move || worker.admit_awaited_bash().is_ok()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !worker.user_bash.is_running(),
+            "the gated admission must not register"
+        );
+        gate.shutdown_requested = true;
+        drop(gate);
+        let admitted = racing.join().expect("admission thread");
+        assert!(!admitted, "the closed gate must reject it");
+        assert!(!worker.user_bash.is_running(), "nothing may register");
+    }
+
+    #[tokio::test]
+    async fn the_close_abort_cancels_an_admitted_awaited_run_and_settles_after_it() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let awaited = worker.admit_awaited_bash().expect("gate open");
+        assert!(worker.user_bash.is_running());
+        let settle = tokio::spawn({
+            let worker = Arc::clone(&worker);
+            async move { worker.user_bash.abort_and_settle().await }
+        });
+        // The close's abort cancels the admitted run's token.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !awaited.cancellation.is_cancelled() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the abort never reached the admitted token"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // The settle still waits: the run counts until it settles.
+        assert!(!settle.is_finished());
+        drop(awaited);
+        tokio::time::timeout(std::time::Duration::from_secs(2), settle)
+            .await
+            .expect("the settle completes once the run settles")
+            .expect("the settle task joins");
+    }
+
+    #[tokio::test]
+    async fn an_awaited_dispatch_against_a_closing_gate_records_no_row() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        worker.core.lock().unwrap().shutdown_requested = true;
+        let response = worker
+            .dispatch(
+                "execute_bash_and_wait",
+                &json!({ "activeSessionId": "bash-session", "command": "echo no" }),
+            )
+            .await;
+        assert!(!response.success);
+        assert_eq!(response.error.as_deref(), Some("Session is shutting down"));
+        assert_eq!(
+            bash_rows(&worker).len(),
+            0,
+            "a rejected run records nothing"
+        );
+        assert!(!worker.user_bash.is_running());
     }
 }
