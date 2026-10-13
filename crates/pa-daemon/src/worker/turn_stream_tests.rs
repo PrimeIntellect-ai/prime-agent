@@ -124,9 +124,14 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 // race is deterministic.
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
+    boundaries: Mutex<Vec<Option<String>>>,
 }
 
 impl SessionEngine for GateProbeEngine {
+    fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
+        self.boundaries.lock().unwrap().push(leaf_id);
+    }
+
     fn run_prompt(
         &self,
         _prompt_index: usize,
@@ -189,7 +194,10 @@ async fn gate_sighting_events(
     abort_requested: bool,
     suppress_aborted_row: bool,
 ) -> Vec<Value> {
-    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine { frames });
+    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+        frames,
+        boundaries: Mutex::new(Vec::new()),
+    });
     let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
@@ -282,4 +290,73 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
         positions_of(&events, "agent_end").is_empty(),
         "the suppressed-row sighting arms the silence: {events:?}"
     );
+}
+
+/// noSession keeps its prefix IDs in the worker's in-memory store; they
+/// cannot fence the engine's durable restore. File-backed prompts capture the
+/// leaf after next-turn prefix rows have persisted.
+#[tokio::test]
+async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    for file_backed in [false, true] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![EngineEvent::Done(Ok(()))],
+            boundaries: Mutex::new(Vec::new()),
+        });
+        let dynamic: Arc<dyn SessionEngine> = engine.clone();
+        let runner = burst_runner(Arc::clone(&dynamic));
+        let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+        store.append_session_info("prefix");
+        assert!(store.leaf_id().is_some(), "in-memory prefixes have IDs too");
+        if file_backed {
+            store.set_path(dir.path().join("backed.jsonl"));
+            store.rewrite().unwrap();
+        }
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.store = Some(store);
+            core.pending_next_turn.push(json!({
+                "role":"custom", "customType":"prior_context", "content":"keep this prefix",
+                "display":false,
+            }));
+        }
+        runner
+            .run_turn(
+                dynamic,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "go".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let expected = if file_backed {
+            let path = dir.path().join("backed.jsonl");
+            let persisted = crate::session_store::SessionFile::open(&path).unwrap();
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("prior_context"),
+                "the captured boundary follows the prefix on disk"
+            );
+            vec![persisted.leaf_id().map(str::to_string)]
+        } else {
+            assert!(!dir.path().join("backed.jsonl").exists());
+            Vec::new()
+        };
+        assert_eq!(
+            *engine.boundaries.lock().unwrap(),
+            expected,
+            "boundary capture must match durable ownership (file_backed={file_backed})"
+        );
+    }
 }

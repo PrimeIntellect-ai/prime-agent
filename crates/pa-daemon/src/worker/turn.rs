@@ -1008,13 +1008,21 @@ impl TurnRunner {
             emitting_prefix_rows.set(false);
             // Sample the worker-owned leaf in memory before accepted rows
             // persist. The engine stays lazy and the accepted event stays first.
-            let prompt_context_leaf = {
+            let (file_backed, prompt_context_leaf) = {
                 let core = core.lock().unwrap();
-                core.store
-                    .as_ref()
-                    .and_then(|store| store.leaf_id().map(str::to_string))
+                core.store.as_ref().map_or((false, None), |store| {
+                    (
+                        !store.path.as_os_str().is_empty(),
+                        store.leaf_id().map(str::to_string),
+                    )
+                })
             };
-            engine.set_prompt_context_boundary(prompt_context_leaf);
+            // noSession's in-memory prefix IDs do not identify any durable
+            // context the engine can restore. Only file-backed stores supply
+            // this boundary; their missing-ID validation remains strict.
+            if file_backed {
+                engine.set_prompt_context_boundary(prompt_context_leaf);
+            }
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
