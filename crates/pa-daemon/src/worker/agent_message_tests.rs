@@ -448,10 +448,16 @@ async fn assert_clear_queue_bounces(restore_queue: bool) {
     if restore_queue {
         // Reopen the persisted journal as a respawn would: the marker must
         // survive alongside the custom row for clear/pause/status handling.
+        // A respawn acquires ownership after the old worker releases it.
+        // Dropping the sink releases the journal lock; the durable admissions
+        // above have already completed their synchronous checkpoint writes.
+        drop(worker.recovery.lock().unwrap().take());
         let journal = WorkerRecoveryJournal::open(&worker.config.recovery_journal_path).unwrap();
         let (steering, follow_up) = restore_queue_snapshot(&journal, "target-session");
         assert_eq!(steering.len(), 1, "agent row checkpoint must be durable");
         assert_eq!(follow_up.len(), 1, "prompt checkpoint must be durable");
+        // The replacement worker owns the reopened sink for clear's checkpoint.
+        *worker.recovery.lock().unwrap() = Some(journal);
         let mut core = worker.core.lock().unwrap();
         core.steering = steering;
         core.follow_up = follow_up;
