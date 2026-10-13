@@ -39,6 +39,7 @@ type EventSink = std::sync::Arc<dyn Fn(&serde_json::Value) + Send + Sync>;
 /// compact-trigger auto-refine bookkeeping, and the json/text output mode.
 pub(crate) struct TurnBoundary {
     recovery: OverflowRecovery,
+    refinement_reports: Vec<tokio::task::JoinHandle<()>>,
     /// A successful compaction schedules the compact-trigger auto-refine
     /// review for the next serialized checkpoint (or the disposal drain).
     compact_auto_refine_pending: bool,
@@ -61,6 +62,7 @@ impl TurnBoundary {
     pub(crate) fn new(json_mode: bool) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
+            refinement_reports: Vec::new(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -76,6 +78,7 @@ impl TurnBoundary {
     pub(crate) fn with_sink(json_mode: bool, sink: EventSink) -> Self {
         Self {
             recovery: OverflowRecovery::Idle,
+            refinement_reports: Vec::new(),
             compact_auto_refine_pending: false,
             last_auto_refine_review_at: None,
             assistant_turns_since_review: 0,
@@ -167,13 +170,14 @@ impl TurnBoundary {
         }
         // The requested refinement runs whenever the turn did not
         // re-issue (a retried turn consumes it at its own boundary).
-        let entries_before = engine.session.entries().await.len();
-        if let Some(outcome) = engine
-            .consume_pending_refinement(model, api_key, global_harness_dir)
+        if let Some(pending) = engine
+            .start_pending_refinement(model, api_key, global_harness_dir)
             .await
         {
-            self.stream_refinement_outcome(engine, &outcome, entries_before, true, "requested")
-                .await;
+            self.report_background_refinement(
+                pending,
+                pa_core::session_engine::refine::RefinementSource::SelfRefine,
+            );
         }
         Ok(())
     }

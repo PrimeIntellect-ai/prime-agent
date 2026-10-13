@@ -6,6 +6,13 @@ use super::{
 };
 
 impl AgentSession {
+    pub(crate) fn refinement_signal(&self) -> pa_agent::abort::AbortSignal {
+        self.refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .signal()
+    }
+
     pub async fn latest_compaction_timestamp(&self) -> Option<u64> {
         let state = self.agent.state().await;
         state
@@ -433,6 +440,45 @@ impl AgentSession {
         .await
     }
 
+    /// Start ephemeral background refinement; awaiting the returned task is
+    /// optional for hosts that deliver completion through their event stream.
+    /// Planning never reserves a user turn. Committed rows append at full-run idle.
+    pub fn start_refinement(
+        &self,
+        options: refine::RefineOptions,
+        source: refine::RefinementSource,
+        model: pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+    ) -> tokio::task::JoinHandle<anyhow::Result<crate::refinement::RefinementResult>> {
+        let session = self.session.clone();
+        let agent = self.agent.clone();
+        let flight = self.compaction_flight.clone();
+        let cancel = self.refinement_signal();
+        let agent_dir = self.agent_dir.clone();
+        let auxiliary = self.auxiliary_model.clone();
+        let usage_store = self.usage_store.clone();
+        tokio::spawn(async move {
+            let session_id = session.lock().await.get_session_id().to_string();
+            let refiner = refine::session_refiner_call(auxiliary, &model, api_key, session_id).await?;
+            let refiner =
+                refine::recorded_refiner_call(refiner, "refine", session.clone(), usage_store);
+            refine::run_refinement(
+                session,
+                agent,
+                flight,
+                cancel,
+                agent_dir,
+                options,
+                source,
+                model,
+                refiner,
+                global_harness_dir,
+            )
+            .await
+        })
+    }
+
     /// [`Self::refine`] with an injected refiner call: the seam the parity
     /// tests use to drive the refinement without a provider.
     pub(crate) async fn refine_with_refiner(
@@ -443,52 +489,24 @@ impl AgentSession {
         refine_call: crate::refinement::executor::RefinerFn,
         global_harness_dir: std::path::PathBuf,
     ) -> anyhow::Result<crate::refinement::RefinementResult> {
-        // The flight serializes every live-context replacer against a
-        // compaction's rebuild: this round's outcome rows persist and then
-        // push onto the context the compaction replaces, so the push must
-        // not interleave with a replace (duplicating in the rebuilt view
-        // or vanishing under it).
-        let _flight = self.compaction_flight.lock().await;
-        // The transcript's consumed artifacts are extracted under this first
-        // lock straight from the retained rows: no second clone of the rows.
-        let parts = self.session.lock().await.refine_transcript_parts();
-        let crate::session::manager::RefineTranscriptParts {
-            messages,
-            refinement_history,
-        } = parts.await?;
-        let (refine_call, billed) = refine::billed_refiner_call(refine_call, "refine");
-        let (result, context_row_ids) = refine::execute_refinement_with_rows(
-            &self.session,
-            &self.agent,
-            refine::RefinementTranscript {
-                messages: &messages,
-                refinement_history: &refinement_history,
-            },
-            &global_harness_dir,
-            model,
-            options,
+        refine::run_refinement(
+            self.session.clone(),
+            self.agent.clone(),
+            self.compaction_flight.clone(),
+            self.refinement_signal(),
+            self.agent_dir.clone(),
+            options.clone(),
             source,
-            refine_call,
-            self.agent_dir.as_deref(),
+            model.clone(),
+            refine::recorded_refiner_call(
+                refine_call,
+                "refine",
+                self.session.clone(),
+                self.usage_store.clone(),
+            ),
+            global_harness_dir,
         )
-        .await?;
-        // The planning call bills whether or not its plan applied.
-        let billed = billed.lock().expect("billed refiner call lock").take();
-        self.record_model_usage(billed).await;
-        // The outcome rows (and the notice row when any edit applied) push
-        // onto the live context after the durable append, never a full rebuild
-        // — a rebuild would resurrect a retried turn's dropped trailing
-        // assistant. The pushed rows are THIS run's, under ONE agent-state lock.
-        let rows = {
-            let session = self.session.lock().await;
-            refine::context_rows_by_ids(session.retained_entries(), &context_row_ids)
-        };
-        let loop_rows: Vec<AgentMessage> =
-            rows.iter().filter_map(session_message_to_loop).collect();
-        if !loop_rows.is_empty() {
-            self.agent.append_messages(loop_rows).await;
-        }
-        Ok(result)
+        .await
     }
 }
 

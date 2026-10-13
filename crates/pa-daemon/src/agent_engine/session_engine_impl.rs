@@ -1251,15 +1251,17 @@ impl SessionEngine for AgentSessionEngine {
             .clone()
             .expect("session built by ensure_core_session");
         let result = self.runtime.block_on(async {
-            core.session
-                .refine(
-                    &options,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                    &model,
-                    api_key,
-                    global_harness_dir,
-                )
+            let pending = core.session.start_refinement(
+                options,
+                pa_core::session_engine::refine::RefinementSource::User,
+                model,
+                api_key,
+                global_harness_dir,
+            );
+            drop(core);
+            pending
                 .await
+                .map_err(|error| anyhow::anyhow!("refinement task failed: {error}"))?
         })?;
         serde_json::to_value(&result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))

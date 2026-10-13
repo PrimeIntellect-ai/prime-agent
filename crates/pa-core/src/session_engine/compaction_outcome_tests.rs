@@ -334,6 +334,7 @@ async fn refine_test_session_with(
             tools: Some(tools),
             ..Default::default()
         },
+        convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
         stream_fn: Some(provider.stream_fn()),
         ..Default::default()
     };
@@ -739,6 +740,8 @@ async fn refinement_and_auto_review_send_the_session_request_identity() {
             );
             2
         ]
+    );
+}
 
 /// A tool that signals its start, then waits for one release: the turn that
 /// calls it stays mid-tool across the refinement's commit window.
@@ -940,8 +943,8 @@ enum RacingTurnEnd {
 
 /// Park the actual refinement at its final persistence lock while idle,
 /// then admit a run before releasing that lock. No timing window or test
-/// hook is needed: the global audit is written synchronously just before
-/// the pending lock acquisition, and the refiner owns the competing guard.
+/// hook is needed: the refiner hands back the competing persistence guard
+/// before the prepared plan tries to reserve its commit boundary.
 async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingTurnEnd) {
     let (tool_started, mut tool_started_rx) = tokio::sync::mpsc::unbounded_channel();
     let (tool_release, tool_release_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -965,7 +968,7 @@ async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingT
         })
     });
     let global_dir = tmp.path().join("harness");
-    let global_history = crate::refinement::get_refinement_history_path(&global_dir);
+
     let options = refine::RefineOptions {
         global: true,
         ..Default::default()
@@ -979,20 +982,16 @@ async fn refinement_rechecks_a_run_admitted_during_commit_lock_wait(end: RacingT
         global_dir,
     ));
     let window = std::time::Duration::from_secs(3);
-    tokio::time::timeout(
+    let guard = tokio::time::timeout(
         window,
         std::future::poll_fn(|cx| {
             assert!(refinement.as_mut().poll(cx).is_pending());
-            if global_history.exists() {
-                std::task::Poll::Ready(())
-            } else {
-                std::task::Poll::Pending
-            }
+            guard_rx.poll_recv(cx)
         }),
     )
     .await
-    .expect("refinement reached its commit lock after observing idle");
-    let guard = guard_rx.recv().await.unwrap();
+    .expect("refinement prepared its plan while the persistence lock is held")
+    .unwrap();
     assert!(engine.agent().signal().is_none());
     engine
         .agent()
@@ -1071,4 +1070,331 @@ async fn refine_rechecks_a_turn_admitted_while_waiting_for_the_commit_lock() {
 #[tokio::test]
 async fn refine_commits_once_after_a_racing_turn_is_aborted() {
     refinement_rechecks_a_run_admitted_during_commit_lock_wait(RacingTurnEnd::Abort).await;
+}
+
+#[tokio::test]
+async fn refinement_preserves_provider_prefix_and_completed_state_across_resume() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("before refinement");
+    provider.push_text_turn("after refinement");
+    let (session, tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    session.agent().prompt("first request").await.unwrap();
+    let before = provider.calls().pop().unwrap();
+    let global_dir = tmp.path().join("harness");
+    session
+        .refine_with_refiner(
+            &refine::RefineOptions {
+                global: true,
+                ..Default::default()
+            },
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+            global_dir.clone(),
+        )
+        .await
+        .unwrap();
+    session.agent().prompt("second request").await.unwrap();
+    let mut after = provider.calls().pop().unwrap();
+    assert!(after.messages.len() > before.messages.len());
+    assert!(serde_json::to_string(&after.messages)
+        .unwrap()
+        .contains("Use tactic A"));
+    after.messages.truncate(before.messages.len());
+    assert_eq!(
+        serde_json::to_value(after).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    let committed =
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
+    assert_eq!(committed.refinements.len(), 1);
+    let harness = super::harness_digest::HarnessDigestContext {
+        global_dir: global_dir.clone(),
+        local_dir: None,
+        include_ipython: false,
+        include_shell_examples: false,
+        include_refine: false,
+    };
+    let resumed =
+        super::tests::resumed_digest_session(session.entries().await, harness.clone()).await;
+    let once = resumed.entries().await;
+    let resumed_again = super::tests::resumed_digest_session(once.clone(), harness).await;
+    assert_eq!(
+        serde_json::to_value(resumed_again.entries().await).unwrap(),
+        serde_json::to_value(once).unwrap()
+    );
+    assert_eq!(
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global),
+        committed
+    );
+}
+
+#[tokio::test]
+async fn closing_session_cancels_background_planning_without_committing() {
+    let (session, tmp) = refine_test_session().await;
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let refiner: crate::refinement::executor::RefinerFn = Box::new(move |_, _, _| {
+        Box::pin(async move {
+            started.send(()).unwrap();
+            std::future::pending().await
+        })
+    });
+    let global_dir = tmp.path().join("harness");
+    let job = tokio::spawn(refine::run_refinement(
+        session.session.clone(),
+        session.agent.clone(),
+        session.compaction_flight.clone(),
+        session.refinement_signal(),
+        None,
+        refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        },
+        refine::RefinementSource::User,
+        session_ai_model(),
+        refiner,
+        global_dir.clone(),
+    ));
+    started_rx.recv().await.unwrap();
+    assert!(
+        session.compaction_flight.try_lock().is_ok(),
+        "planning cannot reserve compaction"
+    );
+    drop(session);
+    let error = tokio::time::timeout(std::time::Duration::from_secs(3), job)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+}
+
+#[tokio::test]
+async fn prepared_refinement_cannot_change_harness_during_an_active_run() {
+    let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (release, release_rx) = tokio::sync::mpsc::unbounded_channel();
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_tool_call_turn(None, vec![("boundary-call", "held", serde_json::json!({}))]);
+    provider.push_text_turn("finished");
+    let (session, tmp) = refine_test_session_with(
+        provider,
+        vec![Arc::new(HeldTool {
+            started,
+            release: Arc::new(tokio::sync::Mutex::new(release_rx)),
+        })],
+    )
+    .await;
+    session
+        .agent()
+        .prompt_until_accepted("hold the run")
+        .await
+        .unwrap();
+    started_rx.recv().await.unwrap();
+    let global_dir = tmp.path().join("harness");
+    let state_path = crate::refinement::get_harness_state_path(&global_dir);
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let model = session_ai_model();
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &global_dir,
+        &model,
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let cancel = pa_agent::abort::AbortSignal::never();
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &cancel,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(commit.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(
+        !state_path.exists(),
+        "no harness mutation is allowed mid-run"
+    );
+    assert!(session.agent().prompt("competing prompt").await.is_err());
+    assert!(session.agent().continue_run().await.is_err());
+    release.send(()).unwrap();
+    session.agent().wait_for_idle().await;
+    commit.await.unwrap();
+    assert!(state_path.exists());
+}
+
+#[tokio::test]
+async fn contended_harness_lock_does_not_reserve_the_next_provider_run() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("new user work");
+    let (session, tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    let global_dir = tmp.path().join("harness");
+    std::fs::create_dir_all(&global_dir).unwrap();
+    let state_path = crate::refinement::get_harness_state_path(&global_dir);
+    let lock = crate::platform::lock_dir::LockDir::acquire_owned_retrying(
+        &state_path,
+        std::time::Duration::from_secs(10),
+        1,
+        std::time::Duration::ZERO,
+    )
+    .unwrap();
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &global_dir,
+        &session_ai_model(),
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let cancel = pa_agent::abort::AbortSignal::never();
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &cancel,
+    ));
+    let mut prompt = Box::pin(session.agent().prompt("arriving input"));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        std::future::poll_fn(|cx| {
+            assert!(
+                commit.as_mut().poll(cx).is_pending(),
+                "contended commit must defer"
+            );
+            prompt.as_mut().poll(cx)
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(provider.calls().len(), 1);
+    assert!(!state_path.exists());
+    drop(lock);
+    commit.await.unwrap();
+    assert!(state_path.exists());
+}
+
+#[tokio::test]
+async fn idle_reservation_excludes_both_direct_prompt_and_continue_admission() {
+    let provider = Arc::new(ScriptedProvider::new(test_model()));
+    provider.push_text_turn("admitted after commit");
+    let (session, _tmp) = refine_test_session_with(provider.clone(), Vec::new()).await;
+    let reservation = session.agent().reserve_idle().await;
+    let mut prompt = Box::pin(session.agent().prompt("new run"));
+    std::future::poll_fn(|cx| {
+        assert!(prompt.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert!(provider.calls().is_empty());
+    drop(reservation);
+    prompt.await.unwrap();
+    session
+        .agent()
+        .append_messages(vec![AgentMessage::Standard(
+            pa_agent::types::Message::User(pa_agent::types::UserMessage {
+                content: pa_agent::types::UserContent::Text("continue".into()),
+                timestamp: 1,
+            }),
+        )])
+        .await;
+    provider.push_text_turn("continued after commit");
+    let reservation = session.agent().reserve_idle().await;
+    let mut continuation = Box::pin(session.agent().continue_run());
+    std::future::poll_fn(|cx| {
+        assert!(continuation.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(provider.calls().len(), 1);
+    drop(reservation);
+    continuation.await.unwrap();
+    assert_eq!(provider.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn branch_change_discards_prepared_plan_but_allows_new_refinements() {
+    let (session, tmp) = refine_test_session().await;
+    let global_dir = tmp.path().join("harness");
+    let options = refine::RefineOptions {
+        global: true,
+        ..Default::default()
+    };
+    let ready = refine::prepare_refinement(
+        &session.session,
+        None,
+        refine::RefinementTranscript {
+            messages: &[],
+            refinement_history: &[],
+        },
+        &global_dir,
+        &session_ai_model(),
+        &options,
+        refine_plan_call(APPLIED_PLAN),
+    )
+    .await
+    .unwrap();
+    let signal = session.refinement_signal();
+    let guard = session.session.lock().await;
+    let mut commit = Box::pin(refine::commit_refinement(
+        &session.session,
+        session.agent(),
+        ready,
+        refine::RefinementSource::User,
+        None,
+        Some(&session.compaction_flight),
+        &signal,
+    ));
+    std::future::poll_fn(|cx| {
+        assert!(commit.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    session.discard_compact_auto_refine();
+    let error = commit.await.unwrap_err();
+    assert!(pa_agent::abort::is_abort_error(&error));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+    drop(guard);
+    session
+        .refine_with_refiner(
+            &options,
+            refine::RefinementSource::User,
+            &session_ai_model(),
+            refine_plan_call(APPLIED_PLAN),
+            global_dir.clone(),
+        )
+        .await
+        .unwrap();
+    let state =
+        crate::refinement::load_harness_state(&global_dir, crate::refinement::HarnessScope::Global);
+    assert_eq!(state.refinements.len(), 1);
 }

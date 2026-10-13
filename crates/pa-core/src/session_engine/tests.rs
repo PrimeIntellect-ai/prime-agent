@@ -177,7 +177,7 @@ async fn digest_session_with_harness(
 
 /// A resumed session over the entries of a prior session (converted
 /// loop context, adopted manager).
-async fn resumed_digest_session(
+pub(super) async fn resumed_digest_session(
     entries: Vec<FileEntry>,
     harness: crate::session_engine::harness_digest::HarnessDigestContext,
 ) -> AgentSession {

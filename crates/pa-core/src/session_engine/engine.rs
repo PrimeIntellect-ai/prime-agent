@@ -1056,6 +1056,11 @@ impl SessionEngine {
     /// dispose), so a worker that replaces its session does not hold the old socket until the
     /// idle expiry.
     pub async fn dispose_kernel(&self) {
+        self.session
+            .refinement_cancel
+            .lock()
+            .expect("refinement cancellation lock")
+            .abort();
         if let Some(session_id) = self.session.agent().session_id() {
             pa_ai::codex_debug::close_websocket_sessions(Some(session_id));
         }

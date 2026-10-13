@@ -61,7 +61,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let command_result = run_session_command(
-        state.as_ref(),
+        state,
         engine.clone(),
         &command,
         model,
@@ -104,7 +104,7 @@ async fn write_command_row(state: &RpcState, message: &CustomMessage) {
 /// Execute one session command the prompt admitted: the executor
 /// persists the echo/result rows; the goal publishes on change.
 async fn run_session_command(
-    state: &RpcState,
+    state: &Arc<RpcState>,
     engine: Arc<pa_core::session_engine::engine::SessionEngine>,
     command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     model: pa_types::ai::Model,
@@ -141,7 +141,7 @@ async fn run_session_command(
         // so this `compaction_start` publishes AFTER the prompt's response
         // (the direct `compact` handler flushes early).
     }
-    let execution = {
+    let mut execution = {
         // The executor rebuilds session context on its compact branch:
         // serialize against the other context rebuilders.
         let _ops = state.session_ops.lock().await;
@@ -156,6 +156,51 @@ async fn run_session_command(
         // `execution.error` and the session events.
         execute_session_command(&engine, &mut params, command, images).await
     };
+    if let Some(pending) = execution.pending_refinement.take() {
+        let state = Arc::clone(state);
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move {
+            let result = pending
+                .await
+                .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
+            // Hold a read lease only while emitting the completed result; a
+            // replaced session must not receive the old job's rows or events.
+            let current = state.session.handle().await;
+            if !Arc::ptr_eq(&current.engine, &engine) {
+                return;
+            }
+            match result {
+                Ok(result) => {
+                    write_command_row(
+                        &state,
+                        &pa_core::session_engine::refine::create_refinement_outcome_message(
+                            &result,
+                        ),
+                    )
+                    .await;
+                    if result.applied_edits.iter().any(|edit| edit.applied) {
+                        write_command_row(
+                            &state,
+                            &pa_core::session_engine::refine::create_refinement_notice_message(
+                                &result,
+                                pa_core::session_engine::refine::RefinementSource::User,
+                            ),
+                        )
+                        .await;
+                    }
+                    state
+                        .session
+                        .write_connection_output(
+                            serde_json::json!({ "type": "refine_complete", "result": result }),
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    state.session.write_connection_output(serde_json::json!({ "type": "refine_failed", "error": format!("{error:#}") })).await;
+                }
+            }
+        });
+    }
     if is_compact {
         // The post-compaction kernel notice rides between the start and
         // the settled end (the ACP seam's order).

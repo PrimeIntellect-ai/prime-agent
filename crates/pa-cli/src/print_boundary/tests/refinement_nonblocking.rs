@@ -1,0 +1,219 @@
+use super::*;
+use std::sync::Arc;
+
+struct HeldPlanner {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    reply: &'static str,
+}
+
+impl pa_ai::registry::Provider for HeldPlanner {
+    fn api(&self) -> &str {
+        "test-held-refinement-host"
+    }
+
+    fn stream(
+        &self,
+        model: &Model,
+        _context: &pa_ai::types::Context,
+        _options: Option<&pa_ai::types::StreamOptions>,
+    ) -> pa_ai::event_stream::AssistantMessageEventStream {
+        let (writer, stream) = pa_ai::event_stream::AssistantMessageEventStream::new();
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let mut message =
+            pa_ai::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        message.content =
+            serde_json::from_value(json!([{ "type": "text", "text": self.reply }])).unwrap();
+        tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            writer.push(pa_types::ai::AssistantMessageEvent::Done {
+                reason: pa_types::ai::DoneStopReason::Stop,
+                message: message.clone(),
+            });
+            writer.end(Some(message));
+        });
+        stream
+    }
+
+    fn stream_simple(
+        &self,
+        model: &Model,
+        context: &pa_ai::types::Context,
+        _options: Option<&pa_ai::types::SimpleStreamOptions>,
+    ) -> pa_ai::event_stream::AssistantMessageEventStream {
+        self.stream(model, context, None)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    Slash,
+    Requested,
+    Auto,
+}
+
+impl Origin {
+    async fn schedule(
+        self,
+        engine: &SessionEngine,
+        planner_model: &Model,
+        boundary: &mut TurnBoundary,
+        global_dir: std::path::PathBuf,
+    ) -> Option<tokio::task::JoinHandle<anyhow::Result<pa_core::refinement::RefinementResult>>>
+    {
+        let mut pending = None;
+        match self {
+            Origin::Slash => {
+                let mut autonomous =
+                    pa_core::autonomous::create_autonomous_runtime_state(None, None);
+                let mut params = pa_core::session_engine::session_commands::SessionCommandParams {
+                    model: planner_model,
+                    api_key: None,
+                    global_harness_dir: global_dir,
+                    autonomous: &mut autonomous,
+                };
+                let command = pa_core::session_engine::slash_commands::SessionSlashCommand {
+                    name: "refine",
+                    args: String::new(),
+                    text: "/refine".to_string(),
+                };
+                let execution = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    pa_core::session_engine::session_commands::execute_session_command(
+                        engine,
+                        &mut params,
+                        &command,
+                    ),
+                )
+                .await
+                .expect("slash command must return while planner is held");
+                assert!(execution.error.is_none());
+                pending = execution.pending_refinement;
+                assert!(pending.is_some());
+            }
+            Origin::Requested => {
+                engine
+                    .turn_boundary
+                    .schedule_refine(pa_core::session_engine::turn_boundary::PendingRefine {
+                        instructions: None,
+                        global: false,
+                    })
+                    .await;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    boundary.run_at_settled_turn(engine, planner_model, None, global_dir),
+                )
+                .await
+                .expect("requested planning must leave the boundary")
+                .unwrap();
+            }
+            Origin::Auto => {
+                boundary.compact_auto_refine_pending = true;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    boundary.consume_compact_auto_refine(
+                        engine,
+                        planner_model,
+                        None,
+                        global_dir,
+                        RefineSurface::Checkpoint,
+                    ),
+                )
+                .await
+                .expect("auto review must leave the boundary")
+                .unwrap();
+            }
+        }
+        pending
+    }
+}
+
+/// Real host scheduling calls use a held provider. Readiness comes from provider
+/// entry, and the next user turn must complete before the planner is released.
+#[tokio::test]
+async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_prefix() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    for origin in [Origin::Slash, Origin::Requested, Origin::Auto] {
+        let (engine, dir, model) = faux_engine_with_settings(
+            json!({ "responses": [{"text": "seed"}, {"text": "next user reply"}] }),
+            json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+            None,
+        ).await;
+        engine
+            .session
+            .prompt("seed", Default::default())
+            .await
+            .unwrap();
+        engine.session.agent().wait_for_idle().await;
+        // A failed assistant retained on disk but dropped from the live retry
+        // context must not reappear when the user runs /refine.
+        let mut failed =
+            pa_ai::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        failed.stop_reason = pa_types::ai::StopReason::Error;
+        failed.error_message = Some("discarded retry attempt".to_string());
+        engine
+            .session
+            .session_handle()
+            .lock()
+            .await
+            .append_message(SessionAgentMessage::Assistant(failed))
+            .unwrap();
+        let before = pa_core::session_engine::messages::loop_convert_to_llm(
+            engine.session.agent().state().await.messages,
+        );
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let reply = match origin {
+            Origin::Auto => r#"{"shouldRefine":false,"rationale":"decline"}"#,
+            Origin::Slash | Origin::Requested => r#"{"summary":"background note","edits":[]}"#,
+        };
+        pa_ai::registry::register_api_provider(
+            Arc::new(HeldPlanner {
+                started: started.clone(),
+                release: release.clone(),
+                reply,
+            }),
+            Some("test-held-refinement-host"),
+        );
+        let mut planner_model = model.clone();
+        planner_model.api = "test-held-refinement-host".to_string();
+        let mut boundary = TurnBoundary::new(false);
+        let global_dir = dir.path().join("global-refinement");
+        let pending = origin
+            .schedule(&engine, &planner_model, &mut boundary, global_dir)
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+            .await
+            .expect("planner entered");
+        assert_eq!(
+            pa_core::session_engine::messages::loop_convert_to_llm(
+                engine.session.agent().state().await.messages
+            ),
+            before,
+            "{origin:?} changed the live provider prefix before commit"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            engine
+                .session
+                .prompt("next user input", Default::default())
+                .await
+                .unwrap();
+            engine.session.agent().wait_for_idle().await;
+        })
+        .await
+        .expect("held planning must not delay the user's next run");
+        assert_eq!(
+            serde_json::to_value(last_assistant(&engine).await.unwrap()).unwrap()["content"][0]
+                ["text"],
+            "next user reply"
+        );
+        release.notify_one();
+        if let Some(pending) = pending {
+            pending.await.unwrap().unwrap();
+        }
+        boundary.wait_for_refinement_reports().await;
+        pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+    }
+}

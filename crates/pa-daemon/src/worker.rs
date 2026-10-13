@@ -13,6 +13,7 @@ pub(crate) use config::WorkerConfig;
 use env::KillCloseReason;
 mod input;
 mod lifecycle;
+mod refinement;
 mod summary;
 
 mod connection;
@@ -616,6 +617,12 @@ impl Worker {
                         );
                     });
                 concrete.set_compaction_summary_sink(summary_sink);
+                // The worker's refinement completion sink: the background
+                // run's durable rows and completion events surface here,
+                // generation-fenced, once the run settles.
+                *concrete.refinement_completion_sink.lock().unwrap() = Some(
+                    refinement::completion_sink(Arc::clone(&core), Arc::clone(&events)),
+                );
                 // The kernel-notice wake seam (TS `_promptInjectedMessage`
                 // for `bash.completed` and `factory.progress`): the handlers
                 // validate, the sinks admit/withdraw through the queue lanes.
@@ -896,7 +903,26 @@ fn emit_refinement_event_for_session(
     review_session_id: &str,
     event: Value,
 ) -> bool {
+    emit_refinement_event_for_generation(
+        core,
+        events,
+        review_session_id,
+        /*expected_generation*/ None,
+        event,
+    )
+}
+
+pub(crate) fn emit_refinement_event_for_generation(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    expected_generation: Option<&str>,
+    event: Value,
+) -> bool {
     let mut core = core.lock().unwrap();
+    if expected_generation.is_some_and(|generation| core.generation != generation) {
+        return false;
+    }
     if core.store.as_ref().map(SessionFile::session_id) != Some(review_session_id) {
         return false;
     }
@@ -929,7 +955,26 @@ fn emit_refinement_row(
     review_session_id: &str,
     message: &Value,
 ) -> bool {
+    emit_refinement_row_for_generation(
+        core,
+        events,
+        review_session_id,
+        /*expected_generation*/ None,
+        message,
+    )
+}
+
+pub(crate) fn emit_refinement_row_for_generation(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    expected_generation: Option<&str>,
+    message: &Value,
+) -> bool {
     let mut core = core.lock().unwrap();
+    if expected_generation.is_some_and(|generation| core.generation != generation) {
+        return false;
+    }
     {
         let Some(store) = core.store.as_mut() else {
             return false;
@@ -951,6 +996,14 @@ fn emit_refinement_row(
             }),
         );
     }
+    #[cfg(test)]
+    tests::BEFORE_REFINEMENT_ROW_BROADCAST.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
+    // Persistence and both frames belong to the same session generation. A
+    // navigation cannot replace the store between the check and either send.
     broadcast_custom_row_locked(&mut core, events, message);
     true
 }
