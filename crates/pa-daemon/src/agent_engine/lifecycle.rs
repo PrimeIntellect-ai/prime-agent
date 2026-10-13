@@ -8,9 +8,9 @@ use super::{
     register_agent_message_host_handlers, register_agent_observe_host_handlers,
     switchable_stream_fn, AgentEngineConfig, AgentSessionEngine, Arc, CoreSessionEngine,
     EngineModelSelection, HostRequestHandlers, LinkAgentMessageController,
-    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, ProviderTarget,
-    QuotaParkState, SessionCommandExecution, SessionCommandParams, SessionEngineConfig,
-    SupervisorChildSessions, Value,
+    LinkAgentObserveController, Model, OverflowRecovery, ProducerUsageSink, PromptContextBoundary,
+    ProviderTarget, QuotaParkState, SessionCommandExecution, SessionCommandParams,
+    SessionEngineConfig, SupervisorChildSessions, Value,
 };
 
 /// The instruction the floor appends to a bare skill invocation: ask what
@@ -485,12 +485,16 @@ impl AgentSessionEngine {
             .take();
         let entries = pending_branch
             .as_deref()
-            .or_else(|| shared_window.as_ref().map(|window| window.entries()))
+            .or_else(|| {
+                shared_window
+                    .as_ref()
+                    .map(pa_core::session::window::WindowedSessionStore::entries)
+            })
             .or(shared_branch.as_deref());
         let mut admitted_user_ids = Vec::new();
         let prompt_context = match prompt_context_boundary {
             Some(boundary) => {
-                let mut after_boundary = boundary.is_none();
+                let mut after_boundary = matches!(&boundary, PromptContextBoundary::Empty);
                 if let Some(entries) = entries {
                     for entry in entries {
                         if after_boundary {
@@ -505,13 +509,15 @@ impl AgentSessionEngine {
                             }) {
                                 admitted_user_ids.push(id.to_string());
                             }
-                        } else if entry.id() == boundary.as_deref() {
+                        } else if matches!(&boundary, PromptContextBoundary::Leaf(leaf)
+                            if entry.id() == Some(leaf.as_str()))
+                        {
                             after_boundary = true;
                         }
                     }
                 }
                 match boundary {
-                    Some(leaf) => {
+                    PromptContextBoundary::Leaf(leaf) => {
                         anyhow::ensure!(
                             after_boundary,
                             "prompt context boundary {leaf} is absent from the retained transcript"
@@ -524,7 +530,7 @@ impl AgentSessionEngine {
                             .messages,
                         )
                     }
-                    None => Some(Vec::new()),
+                    PromptContextBoundary::Empty => Some(Vec::new()),
                 }
             }
             None => None,

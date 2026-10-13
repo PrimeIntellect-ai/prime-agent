@@ -6,8 +6,8 @@ use super::{
     artifact_reference, json, map_thinking_level, now_millis, AgentSessionEngine, Arc,
     BranchSummaryOutcome, BranchSummaryRequest, BranchSummaryRun, CompactionOutcome,
     CompactionRequest, CompactionRun, EngineEvent, EngineModelSelection, ParentIdentity,
-    PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome, SideQuestionRequest,
-    StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
+    PromptContextBoundary, PromptRequest, ProviderTarget, SessionEngine, SideQuestionOutcome,
+    SideQuestionRequest, StartupScope, TurnPrompt, Value, DEFAULT_RLM_MAX_DEPTH,
 };
 
 impl SessionEngine for AgentSessionEngine {
@@ -257,10 +257,14 @@ impl SessionEngine for AgentSessionEngine {
     }
 
     fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
+        let boundary = match leaf_id {
+            Some(leaf) => PromptContextBoundary::Leaf(leaf),
+            None => PromptContextBoundary::Empty,
+        };
         *self
             .prompt_context_boundary
             .lock()
-            .expect("prompt context boundary lock") = Some(leaf_id);
+            .expect("prompt context boundary lock") = Some(boundary);
     }
 
     /// Restore through the bounded readiness wait. An explicit create flag
