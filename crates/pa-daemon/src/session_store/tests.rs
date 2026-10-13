@@ -1286,3 +1286,55 @@ fn hydrating_full_history_preserves_the_trace_controller() {
         &controller
     ));
 }
+
+#[test]
+fn listing_and_frozen_usage_agree_on_duplicate_attribution_ids() {
+    let dir = temp_dir();
+    let mut session = SessionFile::create("/tmp", None, 0);
+    let path = dir.join(session_file_name(session.session_id()));
+    session.set_path(path.clone());
+    let usage = |input, output, cost| {
+        json!({
+            "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": input + output,
+            "cost": {"input": 0.0, "output": cost, "cacheRead": 0.0, "cacheWrite": 0.0, "total": cost}
+        })
+    };
+    let target = session.append_message(&json!({
+        "role": "assistant", "content": [], "timestamp": 1_790_110_000_000_u64,
+        "usage": usage(100u64, 10u64, 8.0)
+    }));
+    session.rewrite().unwrap();
+    let attributed = json!({
+        "type": "child_usage_attributed", "id": "report-1", "targetId": target,
+        "timestamp": "2026-10-11T00:00:00.000Z",
+        "childUsage": usage(20, 2, 2.0), "aggregateUsage": usage(120, 12, 10.0)
+    });
+    serde_json::from_str::<super::info::SessionInfoEntry<'_>>(&attributed.to_string()).unwrap();
+    let append = || {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{attributed}").unwrap();
+    };
+    append();
+    let expected = Some(crate::session_usage::SessionUsageSummary {
+        input_tokens: 100,
+        output_tokens: 10,
+        cost: 8.0,
+    });
+    assert_eq!(read_session_info(&path).unwrap().usage, expected);
+    let prefix_len = fs::metadata(&path).unwrap().len();
+    // The appended duplicate must not subtract again in either scanner.
+    append();
+    let grown_len = fs::metadata(&path).unwrap().len();
+    assert!(grown_len > prefix_len);
+    assert_eq!(read_session_info(&path).unwrap().usage, expected);
+    assert_eq!(
+        crate::session_usage::read_session_usage(&path),
+        Some(crate::session_usage::SessionUsageTotals {
+            own: serde_json::from_value(usage(100, 10, 8.0)).unwrap(),
+            total: serde_json::from_value(usage(120, 12, 10.0)).unwrap(),
+        })
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
