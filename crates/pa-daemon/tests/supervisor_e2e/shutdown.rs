@@ -3,7 +3,6 @@
 
 use super::*;
 
-/// Pids whose parent is `ppid` (the supervisor's live worker children).
 fn child_pids_of(ppid: u32) -> Vec<u32> {
     let mut pids = Vec::new();
     let entries = std::fs::read_dir("/proc").expect("read /proc");
@@ -45,7 +44,6 @@ fn process_alive(pid: u32) -> bool {
     !state.starts_with('Z') && !state.starts_with('X')
 }
 
-/// Wait for the child to exit by itself within `timeout` (no kill).
 fn wait_child_exit(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -59,11 +57,8 @@ fn wait_child_exit(child: &mut Child, timeout: Duration) -> Option<std::process:
     }
 }
 
-/// The shutdown command must stop every worker and exit the supervisor
-/// process itself, cleaning up its socket (the CLI's stale-replacement and
-/// shutdown paths wait for the daemon to be gone; a supervisor that stays
-/// parked on its listening socket would block replacement forever and leak
-/// both processes).
+/// The shutdown must stop every worker and exit the supervisor, cleaning
+/// up its socket: a supervisor parked on its socket blocks replacement.
 #[test]
 fn shutdown_command_exits_the_supervisor_process() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -74,7 +69,6 @@ fn shutdown_command_exits_the_supervisor_process() {
     let supervisor_pid = daemon.child.id();
     let (mut client, _hello) = Client::connect(&socket);
 
-    // A live session so a worker process exists when shutdown arrives.
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
@@ -110,13 +104,11 @@ fn shutdown_command_exits_the_supervisor_process() {
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
 
-    // The supervisor exits on its own, cleanly, and takes the socket file.
     let exit = wait_child_exit(&mut daemon.child, Duration::from_secs(10))
         .expect("the supervisor process exited after shutdown");
     assert!(exit.success(), "supervisor exit: {exit:?}");
     assert!(!socket.exists(), "the socket file is removed on exit");
 
-    // No worker process outlives the shutdown.
     let deadline = Instant::now() + Duration::from_secs(10);
     for pid in worker_pids {
         while process_alive(pid) {
@@ -129,11 +121,9 @@ fn shutdown_command_exits_the_supervisor_process() {
     }
 }
 
-/// The OS-signal drain, end to end: a SIGTERM to the live supervisor is
-/// the graceful drain, not the default signal death - the process exits 0
-/// (a signal kill reports no exit code) and cleans its socket file up
-/// behind it. A connected client rides the drain; the in-crate
-/// supervisor tests hold the closing/settle semantics.
+/// SIGTERM to the live supervisor is the graceful drain, not the default
+/// signal death: the process exits 0 and cleans its socket file up. A
+/// connected client rides the drain.
 #[test]
 fn a_sigterm_exits_the_supervisor_through_the_graceful_drain() {
     let dir = tempfile::TempDir::new().expect("temp dir");

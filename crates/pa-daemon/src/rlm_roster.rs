@@ -1,13 +1,7 @@
-//! Passive (non-resident) RLM children for the roster surfaces: the ledger
-//! walk that keeps historical children visible in `list --all` and the
-//! saved-session catalog after their parent (or the whole daemon) has
-//! passivated. Port of the TS passive-RLM roster walk
-//! (`walkPassiveRlmSubagents` + `withPassiveRlmDescendantInfos`): roots are
-//! the saved session files plus every resident session file, live ledger
-//! edges group children by parent, resident children walk as roots (their
-//! rows come from the live registry), and every other live child's file is
-//! read for display data. Topology always comes from the ledger edge; the
-//! session file is display-grade.
+//! Passive (non-resident) RLM children for the roster surfaces: the
+//! ledger walk that keeps historical children visible in `list --all`
+//! after their parent (or the daemon) passivates. Topology always comes
+//! from the ledger edge; the session file is display-grade.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,9 +24,8 @@ pub struct RlmChildMetadata {
     pub parent_session_id: Option<String>,
 }
 
-/// One walk root: a saved or resident session file. Resident roots carry
-/// their active session id (a passive child of a resident parent reports it
-/// as `parentActiveSessionId`).
+/// One walk root: a saved or resident session file. Resident roots carry their active session id (a
+/// passive child of a resident parent reports it as `parentActiveSessionId`).
 #[derive(Debug, Clone)]
 pub struct RosterWalkRoot {
     pub session_file: PathBuf,
@@ -46,8 +39,7 @@ pub struct PassiveRlmChild {
     pub edge: RlmLedgerEdge,
     pub info: SessionInfo,
     pub metadata: RlmChildMetadata,
-    /// Set when the child's direct parent is a resident root (TS: a
-    /// chain of length one rooted at a resident parent).
+    /// Set when the child's direct parent is a resident root (a chain of length one).
     pub parent_active_session_id: Option<String>,
 }
 
@@ -121,9 +113,8 @@ pub fn walk_passive_rlm_children(
     Ok(walked)
 }
 
-/// Lifecycle for an off-daemon session (TS `inactiveLifecycleForSession`):
-/// explicit archived/crash markers stay archived, everything else is live
-/// once a message exists, draft otherwise.
+/// Lifecycle for an off-daemon session (TS `inactiveLifecycleForSession`): explicit archived/crash
+/// markers stay archived, everything else is live once a message exists, draft otherwise.
 fn inactive_lifecycle(info: &SessionInfo) -> &'static str {
     match info.state.as_deref() {
         Some("archived" | "crash") => "archived",
@@ -132,10 +123,8 @@ fn inactive_lifecycle(info: &SessionInfo) -> &'static str {
     }
 }
 
-/// Hydration metadata for one live ledger edge: the child's display file
-/// first, then the parent's legacy registry for pre-ledger children (one
-/// registry read per parent, cached for the walk). The edge itself is
-/// always the topology authority. Mirrors TS `passiveRlmSubagentEntryForEdge`.
+/// Hydration metadata for one live ledger edge: the child's display file first, then the parent's
+/// legacy registry for pre-ledger children (one registry read per parent, cached).
 pub(crate) fn rlm_child_metadata(
     edge: &RlmLedgerEdge,
     registry_cache: &mut HashMap<PathBuf, Vec<LegacyRlmSubagentEntry>>,
@@ -169,9 +158,8 @@ pub(crate) fn rlm_child_metadata(
     }
 }
 
-/// One passive child as a daemon list summary row (TS
-/// `buildSessionListWithPassiveRlmSubagents`: the inactive-session summary
-/// with the subagent identity fields merged in).
+/// One passive child as a daemon list summary row (the inactive-session
+/// summary with the subagent identity fields merged in).
 pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
     let PassiveRlmChild {
         edge,
@@ -217,15 +205,14 @@ pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
     if let Some(spawn_code) = &metadata.spawn_code {
         object.insert("spawnCode".to_string(), json!(spawn_code));
     }
-    // The persisted thinking level rides the passive-child row like the
-    // saved-session row: the agents-view Model column keeps rendering
-    // "model:level" for passivated subagents.
+    // The persisted thinking level rides the passive-child row: the
+    // agents-view Model column keeps rendering "model:level" for
+    // passivated subagents.
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }
-    // The saved session's own-usage summary rides the passive-child row
-    // too: the roster record publishes the passivated child's spend so
-    // `list --all` rows and parent rollups never read it as zero.
+    // The saved session's own-usage summary rides the row too, so
+    // passivated children never read as zero.
     if let Some(usage) = &info.usage {
         object.insert("usage".to_string(), json!(usage));
     }
@@ -233,8 +220,7 @@ pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
 }
 
 /// The passive child as a saved-session catalog row: the ordinary session
-/// info with the ledger edge as the topology authority (TS
-/// `withPassiveRlmDescendantInfos`).
+/// info with the ledger edge as the topology authority.
 pub fn passive_child_info(child: &PassiveRlmChild) -> SessionInfo {
     let mut info = child.info.clone();
     info.parent_session_path = Some(child.edge.parent.clone());
@@ -262,9 +248,6 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
-    /// The passive-child summary row carries the persisted thinking level:
-    /// a passivated subagent keeps rendering "model:level" in the agents
-    /// view, like its live counterpart.
     #[test]
     fn passive_child_summary_carries_the_persisted_thinking_level() {
         let dir = temp_dir("thinking");
@@ -289,7 +272,6 @@ mod tests {
         let summary = passive_child_summary(&child_row);
         assert_eq!(summary["thinkingLevel"], json!("high"));
 
-        // A child file without a persisted level stays bare.
         let plain = dir.join("sub-plain.jsonl");
         write_session(&plain, "sub-plain", 0);
         let plain_info = read_session_info(&plain).expect("plain info");
@@ -313,9 +295,6 @@ mod tests {
             .is_none());
     }
 
-    /// The passive-child row carries the saved session's own-usage
-    /// summary: a passivated subagent's spend keeps rendering in the
-    /// `list --all` roster and parent rollups.
     #[test]
     fn passive_child_summary_carries_the_saved_usage_summary() {
         let dir = temp_dir("usage");
@@ -445,7 +424,6 @@ mod tests {
         assert_eq!(walked[0].edge.child_id, "sub-2");
         assert_eq!(walked[0].parent_active_session_id.as_deref(), Some("act-1"));
 
-        // Saved children of the walk are not re-listed as passive rows.
         let roots = vec![
             RosterWalkRoot {
                 session_file: parent,

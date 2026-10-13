@@ -1,12 +1,7 @@
-//! Orphan-process journal: how the host tracks `bash()` children a kernel left
-//! behind, so a killed/crashed kernel cannot leak process groups.
-//!
-//! The Python runtime journals every `bash()` process group under the kernel
-//! pid (`kernelPid`) into the file named by `PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL`;
-//! the host reaps those groups when the kernel dies without running its
-//! shutdown hook.
-//!
-//! Ported from `core/orphan-process-journal.ts`.
+//! Orphan-process journal: the runtime journals every `bash()` process group
+//! under the kernel pid into the file named by
+//! `PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL`; the host reaps those
+//! groups when a killed/crashed kernel cannot run its own shutdown hook.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -21,10 +16,8 @@ pub const ORPHAN_PROCESS_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_ORPHAN_PROCES
 pub struct ActiveOrphanProcess {
     pub pid: i32,
     pub kernel_pid: Option<i32>,
-    /// Missing on identity-free records: old journals or host writes whose
-    /// start-id query failed. Identity-free records cannot prove the pid still
-    /// names the journaled process; on POSIX the group-scoped kill stays
-    /// best-effort safe, so they may still be reaped.
+    /// Missing on identity-free records: old journalsthe POSIX group-scoped kill stays best-effort
+    /// safe.
     pub process_start_id: Option<String>,
 }
 
@@ -117,20 +110,20 @@ fn civil_from_unix(secs: i64) -> (i64, u32, u32, u32, u32, u32) {
     (year, m, d, hh, mm, ss)
 }
 
-/// Read the still-active orphan processes recorded by this host process.
+/// Read the still-active orphan processes a journal recorded for one owner
+/// pid — the host reads its own pid; the supervisor reads a dead worker's.
 ///
 /// # Errors
 ///
-/// Returns an error when the journal file cannot be read (a missing file is
-/// an empty record; malformed or partial lines are skipped).
+/// Returns an error when the journal file cannot be read (a missing file is an empty record).
 ///
 /// # Panics
 ///
-/// The `pid` field of a record is unwrapped, but only after the validity
-/// filter guarantees it is a positive integer, so the unwraps are
-/// unreachable.
-pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
-    let owner_pid = i64::from(std::process::id());
+/// The `pid` unwrap is unreachable behind the validity filter.
+pub fn read_active_orphan_processes(
+    path: &Path,
+    owner_pid: i64,
+) -> anyhow::Result<Vec<ActiveOrphanProcess>> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -201,7 +194,7 @@ pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
     if kernel_pid <= 0 {
         return;
     }
-    let Ok(orphans) = read_active_orphan_processes(&path) else {
+    let Ok(orphans) = read_active_orphan_processes(&path, i64::from(std::process::id())) else {
         return;
     };
     for orphan in orphans {
@@ -217,14 +210,44 @@ pub fn reap_kernel_orphan_processes(kernel_pid: i32) {
     }
 }
 
+/// Kill the still-active `bash()` process groups a dead worker's kernels
+/// journaled, then clear the journal (TS `recoverUncertainWorkerOperations`'
+/// orphan sweep, owner-scoped to the worker's own pid). The journal is
+/// kept only when a kill failed and every record carried an identity, so
+/// the next recovery pass can safely retry.
+pub fn reap_worker_orphan_processes(path: &Path, worker_pid: i32) {
+    if worker_pid <= 0 {
+        return;
+    }
+    let Ok(orphans) = read_active_orphan_processes(path, i64::from(worker_pid)) else {
+        return;
+    };
+    let mut reap_failed = false;
+    let mut retry_is_safe = true;
+    for orphan in orphans {
+        if orphan.process_start_id.is_none() {
+            retry_is_safe = false;
+        }
+        if !should_reap(&orphan) {
+            continue;
+        }
+        if !kill_orphan_process(orphan.pid) {
+            reap_failed = true;
+        }
+    }
+    if !reap_failed || !retry_is_safe {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn process_start_id_reads_the_platform_ladder() {
-        // Linux answers from /proc (`proc:`); macOS/BSD from `ps lstart=`
-        // (`ps:`) - the same ladder TS `getProcessStartId` walks.
+        // Linux answers from /proc (`proc:`); macOS/BSD answer
+        // `ps:<lstart>` - the same ladder TS `getProcessStartId` walks.
         let id = get_process_start_id(std::process::id() as i32);
         let id = id.expect("own pid must be readable");
         assert!(id.starts_with("proc:") || id.starts_with("ps:"));
@@ -234,5 +257,53 @@ mod tests {
     fn civil_conversion_known_dates() {
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
         assert_eq!(civil_from_unix(1_700_000_000), (2023, 11, 14, 22, 13, 20));
+    }
+
+    /// The worker reap's journal-clearing rule for the records a live-reap
+    /// e2e cannot stage: a dead pid journaled identity-free (the kill is
+    /// attempted; whether it fails or hits a reused pid, a blind retry is
+    /// unsafe, so the journal is spent) and the same pid journaled with a
+    /// stale identity (the start-id check never reaps a reused pid).
+    #[test]
+    fn worker_reap_spends_stale_and_identity_free_records() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("w.orphans.jsonl");
+        let owner = i64::from(std::process::id());
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("spawn short-lived child");
+        let dead_pid = child.id() as i32;
+        let _ = child.wait();
+        let identity_free = json!({
+            "version": 1,
+            "pid": dead_pid,
+            "ownerPid": owner,
+            "active": true,
+            "recordedAt": iso8601_now(),
+        });
+        let stale_identity = json!({
+            "version": 1,
+            "pid": dead_pid,
+            "ownerPid": owner,
+            "active": true,
+            "processStartId": "proc:1",
+            "recordedAt": iso8601_now(),
+        });
+        for record in [identity_free, stale_identity] {
+            // Separate sweeps: the reader retains only the latest row per pid.
+            std::fs::write(&path, format!("{record}\n")).expect("write journal");
+            let active = read_active_orphan_processes(&path, owner).expect("read journal");
+            assert_eq!(active.len(), 1);
+            assert_eq!(
+                active[0].process_start_id.as_deref(),
+                record["processStartId"].as_str()
+            );
+            reap_worker_orphan_processes(&path, owner as i32);
+            assert!(
+                !path.exists(),
+                "the journal is spent, not kept for a blind retry"
+            );
+        }
     }
 }

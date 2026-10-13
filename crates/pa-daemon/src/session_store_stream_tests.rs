@@ -1,7 +1,6 @@
-//! Equivalence tests for the streamed session reader: the line-by-line
-//! `SessionFile::open` must behave exactly like the whole-body
-//! `read_to_string` reader it replaced (the reference below is that old
-//! code, verbatim) — invariant-by-test, not by reasoning.
+//! Equivalence tests for the streamed session reader: the line-by-line `SessionFile::open`
+//! must behave exactly like the whole-body `read_to_string` reader it replaced (the
+//! reference below is that old code, verbatim) — invariant-by-test, not by reasoning.
 
 use super::{fold_child_usage_attributions, SessionEntry, SessionFile};
 use serde_json::Value;
@@ -66,9 +65,8 @@ fn assert_streamed_equals_reference(name: &str, bytes: &[u8]) {
 
 #[test]
 fn streamed_open_matches_the_whole_file_reader_on_crlf_blank_and_unterminated_files() {
-    // CRLF endings, a CR-only blank line, a malformed row skipped
-    // mid-file, and no trailing newline: both readers must produce the
-    // identical entry sequence.
+    // CRLF endings, a CR-only blank line, a malformed row skipped mid-file, and no
+    // trailing newline: both readers must produce the identical entry sequence.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(
         b"{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":3}\r\n",
@@ -106,9 +104,9 @@ fn streamed_open_matches_the_whole_file_reader_on_unix_files_with_a_trailing_new
 
 #[test]
 fn streamed_open_fails_on_invalid_utf8_like_the_whole_file_read() {
-    // The whole-body `read_to_string` failed on invalid UTF-8 anywhere in
-    // the file; the streamed read surfaces the same failure as an open
-    // error instead of silently skipping the row.
+    // The whole-body `read_to_string` failed on invalid UTF-8 anywhere in the file; the
+    // streamed read surfaces the same failure as an open error instead of silently
+    // skipping the row.
     let mut bytes = Vec::new();
     bytes.extend_from_slice(
         b"{\"type\":\"session\",\"id\":\"s\",\"timestamp\":\"2026-01-01T00:00:00Z\",\"cwd\":\"/tmp\",\"version\":3}\n",

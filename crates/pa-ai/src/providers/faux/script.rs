@@ -18,29 +18,24 @@ pub struct FauxScript {
     pub model: FauxModelDefinition,
     pub tokens_per_second: Option<f64>,
     pub responses: Vec<FauxResponseStep>,
-    /// The `repeatLastResponse` script key: once the queued responses run
-    /// out, the provider re-serves the last one on every further call
-    /// instead of erroring. Opt-in for harnesses whose flow keeps calling
-    /// the model past the script's depth (an active goal's continuation
-    /// churn); the default stays the finite response budget.
+    /// The `repeatLastResponse` script key: once the queued responses run out, the provider
+    /// re-serves the last one on every further call instead of erroring (the default stays the
+    /// finite response budget).
     pub repeat_last_response: bool,
 }
 
-/// Parse a `{"responses": [...], "modelId": ..., "tokensPerSecond": ...,
-/// "repeatLastResponse": ...}` script.
+/// Parse a `{"responses": [...], "modelId": ..., "tokensPerSecond": ..., "repeatLastResponse":
+/// ...}` script.
 ///
-/// Entry forms: a plain string, `{"text": "..."}`, or
-/// `{"content": [{"type": "thinking"|"text"|"toolCall", ...}], "stopReason"?}`.
-/// The stop reason defaults to `toolUse` when the entry carries a tool call.
+/// Entry forms: a plain string, `{"text": "..."}`, or `{"content": [{"type":
+/// "thinking"|"text"|"toolCall", ...}], "stopReason"?}`. The stop reason defaults to `toolUse` when
+/// the entry carries a tool call.
 ///
 /// # Errors
 ///
-/// Returns `Err` when the script is not a JSON object, when `responses` is
-/// not an array, when a response entry is neither a string nor an object,
-/// when a `content` block is malformed, or when `stopReason` is unknown.
-/// Entry objects whose `content` is not an array and whose `text` is not a
-/// string (for example `{"content": 1}` or `{"text": 1}`) are accepted as
-/// empty text responses rather than errors.
+/// Returns `Err` when the script is not a JSON object, `responses` is not an array, a response
+/// entry is neither a string nor an object, a `content` block is malformed, or `stopReason` is
+/// unknown; entry objects without a usable `content`/`text` are accepted as empty responses.
 pub fn parse_faux_script(script: &Value) -> Result<FauxScript, String> {
     let Some(object) = script.as_object() else {
         return Err("the faux script must be a JSON object".to_string());
@@ -75,9 +70,8 @@ pub fn parse_faux_script(script: &Value) -> Result<FauxScript, String> {
                 .and_then(Value::as_u64)
                 .unwrap_or(128_000),
         ),
-        // The default request budget mirrors the registry faux model;
-        // scripts override it (the combined input+output ceiling fixtures
-        // need a small window and a small output budget).
+        // The default request budget mirrors the registry faux model; scripts override it (the
+        // combined input+output ceiling fixtures need a small window and a small output budget).
         max_tokens: Some(
             object
                 .get("maxTokens")
@@ -136,9 +130,8 @@ fn parse_script_step(entry: &Value) -> Result<FauxResponseStep, String> {
         Some(other) => return Err(format!("unknown faux script stopReason {other}")),
         None => None,
     };
-    // Optional scripted error text (verification harness only): rides the
-    // message with `stopReason: "error"`, so overflow-recovery harnesses can
-    // script provider overflow responses.
+    // Optional scripted error text (verification harness only): rides the message with `stopReason:
+    // "error"`, so overflow-recovery harnesses can script provider overflow responses.
     let error_message = entry
         .get("errorMessage")
         .and_then(Value::as_str)
@@ -153,8 +146,8 @@ fn parse_script_step(entry: &Value) -> Result<FauxResponseStep, String> {
             StopReason::Stop
         }
     });
-    // Optional harness pacing: `delayMs` holds the stream closed before
-    // the first delta (verification harness only).
+    // Optional harness pacing: `delayMs` holds the stream closed before the first delta
+    // (verification harness only).
     let delay_ms = entry
         .get("delayMs")
         .and_then(Value::as_u64)

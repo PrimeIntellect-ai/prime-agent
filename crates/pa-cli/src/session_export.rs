@@ -1,12 +1,10 @@
 //! `prime-agent session export <file> [output]`: the HTML export of a saved
-//! session file (TS main.ts' `--export` branch, reached through the
-//! `session export` rewrite; the export itself is pa-core's `export_from_file`).
+//! session file (the export itself is pa-core's `export_from_file`).
 
 use crate::args::Args;
 
 /// Run the export and print the TS output: the written path on success
-/// (`Exported to: ...`), the error message on failure (the main entry's
-/// `Error: ...` prefix + exit 1).
+/// (`Exported to: ...`), the error message on failure.
 pub fn run(parsed: &Args, agent_dir: &std::path::Path) -> Result<i32, String> {
     let Some(input) = parsed.export.as_deref() else {
         return Err("--export requires a value".to_string());
@@ -38,8 +36,7 @@ mod tests {
         })
     }
 
-    /// A fixture session exports to the requested output and the run prints
-    /// the TS success line.
+    /// A fixture session exports to the requested output and the run prints the TS success line.
     #[test]
     fn exports_a_session_file() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -63,8 +60,7 @@ mod tests {
         assert!(out.exists());
     }
 
-    /// A missing input file surfaces the TS error (through the main
-    /// entry's `Error: ...` prefix).
+    /// A missing input file surfaces the TS error (through the main entry's `Error: ...` prefix).
     #[test]
     fn missing_file_errors() {
         let dir = tempfile::TempDir::new().expect("temp dir");

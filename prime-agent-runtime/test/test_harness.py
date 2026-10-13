@@ -2,21 +2,70 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from rlm import harness as package_harness
 from rlm import rlm as callable_rlm
 from rlm.harness import HarnessState, get_harness_state
+
+# The agent-dir override setUpModule installs: an isolated dir whose
+# settings.json carries the factory opt-in setting.
+_factory_gate_dir: tempfile.TemporaryDirectory | None = None
+_previous_agent_dir: str | None = None
+
+
+def setUpModule() -> None:
+    # The factory opt-in gate refuses every factory write while the
+    # `factory.enabled` setting is off (the default); the harness CRUD tests
+    # exercise the write paths with the setting on, written in the real
+    # settings.json shape the daemon writes. The gate's own refusal pins
+    # live in test_factory.py.
+    global _factory_gate_dir, _previous_agent_dir
+    _factory_gate_dir = tempfile.TemporaryDirectory(prefix="harness_test_agent_dir_")
+    settings = Path(_factory_gate_dir.name) / "settings.json"
+    settings.write_text('{"factory": {"enabled": true}}', encoding="utf-8")
+    _previous_agent_dir = os.environ.get("PRIME_AGENT_CODING_AGENT_DIR")
+    os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = _factory_gate_dir.name
+
+
+def tearDownModule() -> None:
+    global _factory_gate_dir
+    if _previous_agent_dir is None:
+        os.environ.pop("PRIME_AGENT_CODING_AGENT_DIR", None)
+    else:
+        os.environ["PRIME_AGENT_CODING_AGENT_DIR"] = _previous_agent_dir
+    if _factory_gate_dir is not None:
+        _factory_gate_dir.cleanup()
+        _factory_gate_dir = None
 
 PYTHON_REFERENCE = {
     "type": "python",
     "import": "agent_skills.example",
     "callable": "run",
     "call_pattern": "await run(...)",
+}
+
+FACTORY_DAG = {
+    "run": {"failure_policy": "continue", "max_parallel": 2},
+    "nodes": [
+        {
+            "id": "collect",
+            "subagent": "researcher",
+            "outputs": [{"name": "findings", "type": "text"}],
+        },
+        {
+            "id": "review",
+            "subagent": {"prompt": "Review the findings."},
+            "depends_on": ["collect"],
+            "inputs": [{"name": "draft", "type": "text", "from": "collect.findings"}],
+        },
+    ],
 }
 
 
@@ -56,6 +105,14 @@ class HarnessStateTest(unittest.TestCase):
                     path="subagent/path",
                     metadata={"kind": "subagent"},
                 ),
+                "factory": state.create_factory(
+                    "Factory",
+                    "Factory content",
+                    id="factory_entry",
+                    path="factory/path",
+                    dag=FACTORY_DAG,
+                    metadata={"kind": "factory"},
+                ),
             }
 
             for kind, entry in created.items():
@@ -73,8 +130,9 @@ class HarnessStateTest(unittest.TestCase):
                 arguments={"target": {"type": "string", "required": True}, "mode": {"type": "string"}},
             )
             state.update_subagent("subagent_entry", "Subagent", "Subagent content updated")
+            state.update_factory("factory_entry", "Factory", "Factory content updated", dag=FACTORY_DAG)
 
-            for kind in ("prompt", "memory", "skill", "subagent"):
+            for kind in ("prompt", "memory", "skill", "subagent", "factory"):
                 entry_id = f"{kind}_entry"
                 self.assertEqual(state.get(kind, entry_id).version, 2)
                 self.assertIn("updated", state.get(kind, entry_id).content)
@@ -114,14 +172,28 @@ class HarnessStateTest(unittest.TestCase):
                 outcome="next validation passed",
             )
 
+            factory = state.create_factory(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                dag=FACTORY_DAG,
+            )
+
             reloaded = HarnessState(state.file_path)
 
             self.assertEqual(reloaded.get("memory", memory.id).content, memory.content)
             self.assertEqual(reloaded.get("skill", skill.id).version, 1)
             self.assertEqual(reloaded.get("skill", skill.id).arguments["failure_log"]["type"], "string")
             self.assertEqual(reloaded.get("subagent", subagent.id).metadata["max_turns"], 3)
+            self.assertEqual(reloaded.get("factory", factory.id).arguments["dag"], FACTORY_DAG)
             self.assertEqual(reloaded.refinements[0].id, event.id)
             self.assertIn("Prefer focused patches", reloaded.overview())
+            self.assertIn("factory", reloaded.overview())
+            self.assertIn("await rlm.factory.run", reloaded.overview())
+            self.assertIn("await rlm.factory.status(run_id)", reloaded.overview())
+            self.assertIn("await rlm.factory.stop(run_id)", reloaded.overview())
+            self.assertIn("await rlm.factory.resume(run_id)", reloaded.overview())
+            self.assertIn("create_factory/update_factory/delete_factory", reloaded.overview())
             self.assertIn(
                 "Call contract: installed Python skills use await <skill_import>(...)",
                 reloaded.overview(),
@@ -133,6 +205,228 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("await rlm.list_subagents()", overview)
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
+
+    def test_create_factory_with_invalid_dag_raises_and_does_not_store(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            invalid_dags = [
+                None,
+                "not a dag",
+                {"nodes": []},
+                {"nodes": [{"id": "a", "subagent": "w"}, {"id": "a", "subagent": "w"}]},
+                {"nodes": [{"id": "a", "subagent": "w", "depends_on": ["a"]}]},
+                {
+                    "nodes": [
+                        {"id": "a", "subagent": "w", "outputs": [{"name": "o", "type": "text"}]},
+                        {"id": "b", "subagent": "w", "inputs": [{"name": "i", "type": "json", "from": "a.o"}]},
+                    ]
+                },
+            ]
+            for index, dag in enumerate(invalid_dags):
+                with self.assertRaises(ValueError, msg=f"dag #{index}") as ctx:
+                    state.create_factory("Broken sweep", "Should never store.", id=f"broken_{index}", dag=dag)
+                self.assertTrue(str(ctx.exception).strip())
+
+            self.assertEqual(state.list("factory"), [])
+            for index in range(len(invalid_dags)):
+                self.assertIsNone(state.get("factory", f"broken_{index}"))
+
+            # An invalid dag leaves nothing on disk either.
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.list("factory"), [])
+
+    def test_create_factory_with_valid_dag_stores_arguments_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            entry = state.create_factory(
+                "PR review sweep",
+                "Sweep review across changed files.",
+                id="pr_sweep",
+                path="review",
+                dag=FACTORY_DAG,
+                metadata={"owner": "kernel"},
+            )
+
+            self.assertEqual(entry.kind, "factory")
+            self.assertEqual(entry.arguments["dag"], FACTORY_DAG)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+            self.assertIn(entry, state.list("factory"))
+
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+
+    def test_create_factory_with_machine_stores_arguments_machine(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            machine = {
+                "states": [
+                    {"id": "collect", "entry": True, "subagent": "researcher", "outputs": [{"name": "findings", "type": "text"}]},
+                    {
+                        "id": "fix",
+                        "subagent": {"prompt": "Fix the findings."},
+                        "max_entries": 3,
+                        "inputs": [{"name": "draft", "type": "text", "from": "collect.findings"}],
+                    },
+                ],
+                "transitions": [
+                    {"from": "collect", "to": "fix", "when": {"output": "findings", "op": "exists"}},
+                ],
+            }
+
+            entry = state.create_factory("Loop", "Fix-and-review loop.", id="loop", machine=machine)
+
+            self.assertEqual(entry.arguments, {"machine": machine})
+            self.assertEqual(state.get("factory", "loop").arguments["machine"], machine)
+
+            # An invalid machine is rejected exactly like an invalid dag.
+            with self.assertRaises(ValueError):
+                state.create_factory("Broken", "Never stores.", id="broken", machine={"states": [{}]})
+            self.assertIsNone(state.get("factory", "broken"))
+
+            # Supplying both forms at once is a usage error, not a validation one.
+            with self.assertRaisesRegex(ValueError, "not both"):
+                state.create_factory("Both", "Never stores.", id="both", dag=FACTORY_DAG, machine=machine)
+            self.assertIsNone(state.get("factory", "both"))
+
+    def test_update_factory_with_machine_replaces_the_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_factory("PR review sweep", "Sweep.", id="pr_sweep", dag=FACTORY_DAG)
+
+            machine = {"states": [{"id": "solo", "entry": True, "subagent": "worker"}], "transitions": []}
+            updated = state.update_factory("pr_sweep", "PR review sweep", "Sweep v2.", machine=machine)
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments, {"machine": machine})
+
+            # Omitting both forms still preserves the stored spec.
+            state.update_factory("pr_sweep", "PR review sweep", "Sweep v3.")
+            self.assertEqual(state.get("factory", "pr_sweep").arguments, {"machine": machine})
+
+            with self.assertRaises(ValueError):
+                state.update_factory("pr_sweep", "PR review sweep", "Bad machine.", machine={"states": "nope"})
+            self.assertEqual(state.get("factory", "pr_sweep").content, "Sweep v3.")
+
+    def test_update_factory_without_dag_preserves_stored_dag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            entry = state.create_factory("PR review sweep", "Sweep review.", id="pr_sweep", dag=FACTORY_DAG)
+            stored_at_create = dict(entry.arguments["dag"])
+
+            updated = state.update_factory("pr_sweep", "PR review sweep", "Sweep review across PRs.")
+
+            self.assertEqual(updated.version, 2)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], FACTORY_DAG)
+
+            replacement = {
+                "nodes": [
+                    {"id": "solo", "subagent": "worker", "outputs": [{"name": "report", "type": "text"}]}
+                ]
+            }
+            state.update_factory("pr_sweep", "PR review sweep", "Sweep review across PRs.", dag=replacement)
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], replacement)
+
+            with self.assertRaises(ValueError):
+                state.update_factory("pr_sweep", "PR review sweep", "Bad dag.", dag={"nodes": []})
+            self.assertEqual(state.get("factory", "pr_sweep").arguments["dag"], replacement)
+            # The pre-update snapshot was taken before any replacement landed.
+            self.assertEqual(stored_at_create, FACTORY_DAG)
+
+    def test_delete_factory_removes_the_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_factory("PR review sweep", "Sweep review.", id="pr_sweep", dag=FACTORY_DAG)
+
+            self.assertTrue(state.delete_factory("pr_sweep"))
+            self.assertIsNone(state.get("factory", "pr_sweep"))
+            self.assertFalse(state.delete_factory("pr_sweep"))
+
+    def test_generic_create_and_update_validate_factory_arguments(self) -> None:
+        # The shared write path must enforce the write-time dry run for every
+        # factory writer, not only create_factory: a generic create/update (a
+        # refinement edit) carrying an invalid spec must raise and never
+        # persist an unusable factory entry.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            with self.assertRaisesRegex(ValueError, "rejected"):
+                state.create("factory", "Broken", "content", id="broken", arguments={"dag": {"nodes": []}})
+            self.assertEqual(state.list("factory"), [])
+
+            # Neither form at all is rejected with the structural wording.
+            with self.assertRaisesRegex(ValueError, "require a dag or machine object in arguments"):
+                state.create("factory", "Empty", "content", id="empty", arguments={})
+            self.assertEqual(state.list("factory"), [])
+
+            # Both forms at once is rejected with the usage wording.
+            with self.assertRaisesRegex(ValueError, "not both"):
+                state.create(
+                    "factory",
+                    "Both",
+                    "content",
+                    id="both",
+                    arguments={"dag": FACTORY_DAG, "machine": {"states": [{"id": "s", "entry": True, "subagent": "w"}]}},
+                )
+            self.assertEqual(state.list("factory"), [])
+
+            # A valid spec stores through the generic path, and a generic
+            # update that writes arguments validates the replacement.
+            state.create("factory", "Sweep", "content", id="sweep", arguments={"dag": FACTORY_DAG})
+            with self.assertRaisesRegex(ValueError, "rejected"):
+                state.update("factory", "sweep", "Sweep", "content", arguments={"dag": {"nodes": []}})
+            self.assertEqual(state.get("factory", "sweep").arguments["dag"], FACTORY_DAG)
+
+            # An update that omits arguments preserves the stored spec.
+            state.update("factory", "sweep", "Sweep", "content updated")
+            self.assertEqual(state.get("factory", "sweep").arguments["dag"], FACTORY_DAG)
+
+            # An invalid spec leaves nothing on disk either.
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(len(reloaded.list("factory")), 1)
+            self.assertIsNone(reloaded.get("factory", "broken"))
+
+    def test_generic_create_factory_without_arguments_is_rejected(self) -> None:
+        # Regression (bot review): a generic create with NO arguments stored
+        # an unusable factory (no dag, no machine) that run() later rejects;
+        # a NEW factory requires its spec (updates may omit it and preserve).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+
+            with self.assertRaisesRegex(ValueError, "require a dag or machine object in arguments"):
+                state.create("factory", "No spec", "content", id="no_spec")
+            self.assertEqual(state.list("factory"), [])
+            self.assertIsNone(state.get("factory", "no_spec"))
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(reloaded.list("factory"), [])
+
+    def test_create_factory_deep_copies_the_caller_spec(self) -> None:
+        # Regression (bot review): storing the caller-owned spec by reference
+        # let a later mutation change the live entry without validation (and
+        # an update that omits both forms would then preserve the mutated,
+        # unvalidated spec).
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            dag = {"nodes": [{"id": "collect", "subagent": "worker"}]}
+            state.create_factory("Sweep", "Sweep review.", id="sweep", dag=dag)
+
+            dag["nodes"] = []  # corrupt the caller-owned dict after creation
+            self.assertEqual(
+                state.get("factory", "sweep").arguments["dag"],
+                {"nodes": [{"id": "collect", "subagent": "worker"}]},
+            )
+            # An update that omits both forms preserves the VALID stored spec,
+            # not the corrupted caller dict.
+            state.update_factory("sweep", "Sweep", "Sweep review across PRs.")
+            self.assertEqual(
+                state.get("factory", "sweep").arguments["dag"],
+                {"nodes": [{"id": "collect", "subagent": "worker"}]},
+            )
+            reloaded = HarnessState(state.file_path)
+            self.assertEqual(
+                reloaded.get("factory", "sweep").arguments["dag"],
+                {"nodes": [{"id": "collect", "subagent": "worker"}]},
+            )
 
     def test_save_failure_preserves_previous_state_on_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -230,6 +524,133 @@ class HarnessStateTest(unittest.TestCase):
             self.assertTrue(alias.is_symlink())
             titles = [entry.title for entry in HarnessState(real_path).entries["memory"].values()]
             self.assertEqual(titles, ["Seed", "Through alias"])
+
+    def test_concurrent_subprocess_creates_all_land(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness" / "harness_state.json"
+            start = Path(temp_dir) / "start"
+            env = dict(os.environ)
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+            workers = []
+            for worker in range(8):
+                code = (
+                    "import time\n"
+                    "from pathlib import Path\n"
+                    "from rlm.harness import HarnessState\n"
+                    f"while not Path({str(start)!r}).exists():\n"
+                    "    time.sleep(0.005)\n"
+                    f"state = HarnessState({str(state_path)!r})\n"
+                    "for i in range(10):\n"
+                    f"    state.create('memory', f'note {worker} {{i}}', f'note {worker} {{i}}', id=f'm-{worker}-{{i}}')\n"
+                )
+                workers.append(
+                    subprocess.Popen([sys.executable, "-c", code], env=env)
+                )
+            start.write_text("", encoding="utf-8")
+            for worker in workers:
+                self.assertEqual(worker.wait(), 0)
+            entries = HarnessState(state_path).list("memory")
+            self.assertEqual(len(entries), 80)
+
+    def test_held_lock_dir_defers_writes_and_pins_the_shared_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness" / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create("memory", "Seed", "Creates the file.", id="seed")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            lock_dir.mkdir()
+            try:
+                with self.assertRaises(RuntimeError) as raised:
+                    state.create("memory", "Second", "Blocked by the lock.", id="second")
+            finally:
+                lock_dir.rmdir()
+            self.assertIn(str(lock_dir), str(raised.exception))
+            entries = HarnessState(state_path).list("memory")
+            self.assertEqual([entry.id for entry in entries], ["seed"])
+
+    def test_save_syncs_parent_after_replace(self) -> None:
+        if os.name != "posix":
+            self.skipTest("directory fsync is POSIX-only")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(path)
+            events: list[str] = []
+            replace, fsync = os.replace, os.fsync
+
+            def observed_replace(source: Path, destination: Path) -> None:
+                replace(source, destination)
+                events.append("replace")
+
+            def observed_fsync(fd: int) -> None:
+                fsync(fd)
+                events.append("directory sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file sync")
+
+            with patch.object(os, "replace", side_effect=observed_replace), patch.object(
+                os, "fsync", side_effect=observed_fsync
+            ):
+                state.create_memory("Durable", "Saved")
+            self.assertEqual(events[-2:], ["replace", "directory sync"])
+
+    def test_live_stale_lock_is_not_stolen(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            owner = state._acquire_lock_dir(lock_dir)
+            os.utime(lock_dir, (1, 1))
+            try:
+                with self.assertRaises(RuntimeError):
+                    state.create_memory("Second", "Blocked")
+                self.assertTrue(state._owner_matches(lock_dir, owner))
+            finally:
+                (lock_dir / "owner").unlink()
+                lock_dir.rmdir()
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 1)
+
+    def test_dead_lock_is_reclaimed_without_old_owner_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            owner = state._acquire_lock_dir(lock_dir)
+            worker = subprocess.Popen([sys.executable, "-c", "pass"])
+            worker.wait()
+            (lock_dir / "owner").write_text(f"{worker.pid} dead-token\n", encoding="utf-8")
+            os.utime(lock_dir, (1, 1))
+            state.create_memory("Second", "Saved")
+            self.assertFalse(state._owner_matches(lock_dir, owner))
+            self.assertFalse(lock_dir.exists())
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 2)
+
+    def test_unparseable_stale_owner_is_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            lock_dir = Path(f"{os.path.realpath(state_path)}.lock")
+            lock_dir.mkdir()
+            (lock_dir / "owner").write_bytes(b"\xff")
+            os.utime(lock_dir, (1, 1))
+            state.create_memory("Second", "Saved")
+            self.assertFalse(lock_dir.exists())
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 2)
+
+    def test_save_refuses_lost_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state = HarnessState(state_path)
+            state.create_memory("Seed", "Present")
+            with self.assertRaisesRegex(RuntimeError, "lock lost"):
+                with state._locked():
+                    lock_dir, _ = state._held_lock
+                    (lock_dir / "owner").write_text("999999 other-token\n", encoding="utf-8")
+                    state.save()
+            self.assertTrue(lock_dir.exists())
+            (lock_dir / "owner").unlink()
+            lock_dir.rmdir()
+            self.assertEqual(len(HarnessState(state_path).list("memory")), 1)
 
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

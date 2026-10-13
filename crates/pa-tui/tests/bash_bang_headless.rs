@@ -1,48 +1,22 @@
 //! Headless e2e for the `!`/`!!` bash-from-chat shortcut (TS
 //! interactive-mode `onSubmit`): a mock supervisor serves one attached
 //! session and answers the `execute_bash` request with the streamed
-//! `bash_start`/`bash_output`/`bash_end` events the daemon's user-bash
-//! slot emits.
-//!
-//! Verifies the TS parity contract of the shortcut:
-//!
-//! - `!command` runs directly (no model turn): the bash transcript card
-//!   mounts with the `$ command` row, the streamed output renders, and
-//!   the settled run shows `done`; the request carries
-//!   `excludeFromContext: false`, so the output enters the session
-//!   context (the durable `bashExecution` row joins follow-up prompts);
-//! - `!!command` dispatches with `excludeFromContext: true` — excluded
-//!   from the context, rendered the same way;
-//! - a bare `!` is inert (never dispatched, never sent as a prompt);
-//! - a second `!` while a run is still active shows the
-//!   already-running guard instead of dispatching;
-//! - inside a side conversation the run is transient: the request carries
-//!   `transient` + `runId` + `excludeFromContext: true`, the row mounts
-//!   in the pane, and (for `!`) the run seeds the follow-up side
-//!   question's `previousTurns`.
+//! `bash_start`/`bash_output`/`bash_end` events.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -56,19 +30,15 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The headless plan height: tall enough that the whole 20-row bash
-/// preview plus its status rows stay inside the rendered window.
+/// Tall enough that the whole 20-row bash preview plus its status rows fit the window.
 const TALL_PLAN_HEIGHT: u16 = 64;
 
-/// How long the mock holds a bash run open before settling it (the
-/// already-running guard's window).
+/// How long the mock holds a bash run open (the already-running guard's window).
 const LONG_RUN_END_DELAY_MS: u64 = 600;
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// Every recorded `execute_bash` request payload.
     bash_requests: Arc<Mutex<Vec<Value>>>,
-    /// Every recorded `start_side_question` request payload.
     side_question_requests: Arc<Mutex<Vec<Value>>>,
     /// Hold each bash run's `bash_end` for this long (0 settles at once).
     end_delay_ms: u64,
@@ -76,33 +46,21 @@ struct MockSupervisor {
     bash_chunks: Vec<String>,
     /// The `bash_end` payload (None: the clean exit-0 default).
     bash_end: Option<Value>,
-    /// Stream a model turn around a `prompt` request and hold it open
-    /// for `turn_end_delay_ms` (the pending-bash mount's window).
+    /// Hold the streamed model turn open for this long (the pending-bash mount's window).
     turn_end_delay_ms: u64,
-    /// After the bang run's chunks stream, close the link with a
-    /// `daemon_closing` update frame instead of `bash_end` (§10): the
-    /// client must reattach and the resync settles the never-ended run.
+    /// After the chunks stream, close the link with a `daemon_closing` update frame instead of
+    /// `bash_end` (§10): the resync settles the never-ended run.
     update_restart_after_bash: bool,
-    /// After a side run settles, replay another client's main-thread `!`
-    /// run (broadcast `bash_start`/`bash_output`/`bash_end`, no runId):
-    /// the pane keeps its settled row while the transcript mounts the
-    /// foreign card.
+    /// After a side run settles, replay another client's main-thread `!` run (broadcast, no runId):
+    /// the pane keeps its row while the transcript mounts the foreign card.
     foreign_main_run_after_side_run: bool,
-    /// §10.1: set when the update restart closes the link. The old
-    /// daemon stops emitting with the socket close, so a turn still in
-    /// flight there (the delayed `turn_end` thread) never lands its
-    /// end on the wire.
+    /// §10.1: set when the update restart closes the link — a turn in flight never lands its end on
+    /// the wire.
     link_closed: Arc<std::sync::atomic::AtomicBool>,
-    /// Hold the streaming turn's end until the SECOND dispatched bash
-    /// run (the ack) arrives instead of a wall-clock delay: the client's
-    /// render barriers gate the ack behind the captured pending regime,
-    /// so the flush is written strictly after the hold was observed —
-    /// no CI-load reordering of the stream and the end can coalesce
-    /// them. Pairs with `end_delay_ms: 0` (the ack's own `bash_end`
-    /// lands on the wire before the signal below fires).
+    /// Hold the streaming turn's end until the SECOND dispatched bash run (the ack) arrives, so
+    /// no CI-load reordering can coalesce the stream and the end.
     turn_end_after_bash_ack: bool,
-    /// Signals the delayed turn-end thread that the ack bash run
-    /// arrived (a `Mutex<bool>` + `Condvar` pair).
+    /// Signals the delayed turn-end thread that the ack bash run arrived.
     bang_ack: Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
 
@@ -124,25 +82,18 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve connections until the client stops coming back (bounded, so
-    /// the join at the end of a plan always finishes): attach a session,
-    /// answer requests, and emit the user-bash events the daemon's
-    /// user-bash slot streams. The second connection carries the §10.3
-    /// `updateResume` hello a successor supervisor reports.
+    /// Serve connections until the client stops coming back (bounded, so the plan's join always
+    /// finishes); the second connection carries the §10.3 `updateResume` hello.
     fn serve(self) {
         self.listener
             .set_nonblocking(true)
             .expect("nonblocking mock listener");
-        // A reconnecting client dials again about a second after the
-        // closing frame (the §10.2 backoff stretches on a loaded box), so
-        // the wait right after that connection closes runs long; once its
-        // plan ends the client stops coming back and the short idle
-        // window ends the serve, so the harness join always returns.
+        // A reconnecting client dials again about a second after the closing frame (the §10.2
+        // backoff stretches on a loaded box); the short idle window ends the serve.
         let reconnect_window = std::time::Duration::from_secs(20);
         let idle_window = std::time::Duration::from_millis(1500);
         for connection in 0..5 {
-            // connection 1 is the reconnect dial (the one the §10 closing
-            // frame promises); every other gap is a plan teardown.
+            // connection 1 is the reconnect dial; every other gap is a plan teardown.
             let window = if connection == 1 && self.update_restart_after_bash {
                 reconnect_window
             } else {
@@ -240,9 +191,7 @@ impl MockSupervisor {
                             }),
                         );
                         if self.turn_end_delay_ms > 0 || self.turn_end_after_bash_ack {
-                            // One open model turn the client streams while its
-                            // bash run mounts: the assistant message stays
-                            // open until the delayed end settles it.
+                            // The assistant message stays open until the delayed end settles it.
                             let question = command
                                 .get("message")
                                 .and_then(Value::as_str)
@@ -290,13 +239,9 @@ impl MockSupervisor {
                             let bang_ack = self.bang_ack.clone();
                             std::thread::spawn(move || {
                                 if waits_for_ack {
-                                    // The ack-gated end: hold the turn open
-                                    // until the ack bash run arrives (the
-                                    // client's barriers prove the pending
-                                    // regime was captured before it was even
-                                    // typed), with a generous backstop so a
-                                    // broken chain still settles the turn
-                                    // and the asserts run instead of a hang.
+                                    // Hold the turn open until the ack bash run arrives; the
+                                    // backstop settles a broken chain so asserts run instead of a
+                                    // hang.
                                     let (lock, cvar) = &*bang_ack;
                                     let _ = cvar
                                         .wait_timeout_while(
@@ -408,12 +353,9 @@ impl MockSupervisor {
                             );
                         }
                         if self.update_restart_after_bash {
-                            // The update restart kills the link before the
-                            // run settles (§10.1): no bash_end arrives on
-                            // this link; the successor supervisor reattaches
-                            // the client instead. The socket close stops
-                            // every other in-flight write on this link too
-                            // (the still-open turn's delayed end below).
+                            // §10.1: the update restart kills the link before the run settles; the
+                            // socket close also stops every in-flight write (the held turn's
+                            // delayed end).
                             self.link_closed
                                 .store(true, std::sync::atomic::Ordering::SeqCst);
                             write_json(
@@ -449,9 +391,7 @@ impl MockSupervisor {
                             None => end,
                         };
                         if self.foreign_main_run_after_side_run && run_id.is_some() {
-                            // The pane's run settled; another client's
-                            // main-thread `!` run now claims the slot and
-                            // the wire broadcasts it here.
+                            // The pane's run settled; the foreign main run rides the broadcast.
                             let mut delayed = writer.try_clone().expect("clone delayed writer");
                             std::thread::spawn(move || {
                                 std::thread::sleep(std::time::Duration::from_millis(250));
@@ -489,12 +429,8 @@ impl MockSupervisor {
                                 write_session_event(&mut delayed, &end);
                             });
                         }
-                        // The ack of an ack-gated turn: signal the held
-                        // end thread now that this run's events (including
-                        // its `bash_end`) are on the wire, so the turn's
-                        // end always lands behind them (the one FIFO
-                        // session-event channel keeps the flush ordered
-                        // after every held card's run).
+                        // Signal the held end thread once this run's events (including its
+                        // `bash_end`) are on the wire, so the turn's end always lands behind them.
                         if self.turn_end_after_bash_ack && request_ordinal == 2 {
                             let (lock, cvar) = &*self.bang_ack;
                             let mut arrived = lock.lock().expect("ack lock");
@@ -623,8 +559,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The run outcome the bash assertions need: the captured frames plus the
-/// recorded request payloads.
+/// The captured frames plus the recorded request payloads.
 #[derive(Debug)]
 struct RunOutcome {
     frames: Vec<String>,
@@ -632,22 +567,20 @@ struct RunOutcome {
     side_question_requests: Vec<Value>,
 }
 
-/// Run the headless plan against a fresh mock supervisor. `end_delay_ms`
-/// holds each bash run open before its `bash_end` (the guard's window).
+/// `end_delay_ms` holds each bash run open before its `bash_end` (the guard's window).
 fn run_plan(steps: Vec<HeadlessStep>, end_delay_ms: u64) -> RunOutcome {
     run_plan_with(steps, |supervisor| {
         supervisor.end_delay_ms = end_delay_ms;
     })
 }
 
-/// Run the headless plan against a configured mock supervisor (the
-/// chunked-output, cancelled, and streaming-turn scenarios).
+/// Run the headless plan against a configured mock supervisor.
 fn run_plan_with(
     steps: Vec<HeadlessStep>,
     configure: impl FnOnce(&mut MockSupervisor),
 ) -> RunOutcome {
-    // The ambient TMUX variable adds a startup notice to the transcript;
-    // scrub it so the run is the same inside tmux and out.
+    // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
+    // and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -683,8 +616,6 @@ fn run_plan_with(
     }
 }
 
-/// `!command` runs directly and mounts the bash transcript card; `!!command`
-/// dispatches excluded from the context.
 #[test]
 fn bang_runs_the_command_and_mounts_the_bash_card() {
     let steps = vec![
@@ -700,8 +631,7 @@ fn bang_runs_the_command_and_mounts_the_bash_card() {
         "the ! card's command row rendered:\n{all}"
     );
     assert!(all.contains("hi"), "the streamed output rendered:\n{all}");
-    // The BashExecutionComponent renders no status row for a clean
-    // exit-0 run (only cancelled/error runs mark themselves).
+    // No status row for a clean exit-0 run (only cancelled/error runs mark themselves).
     assert!(
         !all.contains("bash \u{b7} done") && !all.contains("bash · done"),
         "the settled card renders no generic tool-card done row:\n{all}"
@@ -737,8 +667,6 @@ fn bang_runs_the_command_and_mounts_the_bash_card() {
     );
 }
 
-/// A second `!` while a run is active shows the already-running guard and
-/// never dispatches; a bare `!` is inert.
 #[test]
 fn the_running_guard_blocks_and_a_bare_bang_is_inert() {
     let steps = vec![
@@ -766,8 +694,6 @@ fn the_running_guard_blocks_and_a_bare_bang_is_inert() {
     );
 }
 
-/// Inside a side conversation the `!` run is transient (pane-rendered,
-/// context-excluded) and seeds the follow-up side question's turns.
 #[test]
 fn a_side_conversation_bash_run_mounts_in_the_pane_and_seeds_follow_ups() {
     let steps = vec![
@@ -800,7 +726,6 @@ fn a_side_conversation_bash_run_mounts_in_the_pane_and_seeds_follow_ups() {
         request.get("runId").and_then(Value::as_str).is_some(),
         "the pane run carries its run identity"
     );
-    // The follow-up side question seeded the bash run's output.
     assert_eq!(
         run.side_question_requests.len(),
         2,
@@ -823,12 +748,8 @@ fn a_side_conversation_bash_run_mounts_in_the_pane_and_seeds_follow_ups() {
         "the bash run seeded the follow-up's previousTurns:\n{turns:?}"
     );
 }
-/// The pane keeps its settled bash row after its side run ends, but the
-/// row never receives a LATER run's output: `bash_output` carries no run
-/// identity on the wire, so routing follows the active run (TS appends to
-/// `activeBashComponent`, and a settled side component is never active).
-/// A main-thread `!` run that starts while the pane holds a stale row
-/// streams into its own transcript card.
+/// `bash_output` carries no run identity on the wire, so routing follows the active run (TS
+/// `activeBashComponent`): a settled pane row never receives a later run's output.
 #[test]
 fn a_main_run_after_a_settled_pane_run_owns_its_output() {
     let steps = vec![
@@ -854,9 +775,8 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
         all.contains("main-out"),
         "the foreign run's output rendered:\n{all}"
     );
-    // The streamed output belongs to the transcript card: its rows sit
-    // inside the card (the `$ echo main` header row and its output rows
-    // are adjacent), never appended to the pane's settled row.
+    // The output rows sit inside the card (adjacent to the `$ echo main` header), never appended to
+    // the pane's settled row.
     let with_output = run
         .frames
         .iter()
@@ -880,57 +800,34 @@ fn a_main_run_after_a_settled_pane_run_owns_its_output() {
     );
 }
 
-/// A `!` run during a streaming turn mounts above the execution
-/// indicator (TS `pendingMessagesContainer`) and flushes into the
-/// transcript when the turn ends (TS `flushPendingBashComponents`): the
-/// card sits ABOVE the assistant's open message while pending and BELOW
-/// it once flushed.
+/// TS `pendingMessagesContainer`: the run mounts above the execution indicator and flushes
+/// into the transcript when the turn ends (TS `flushPendingBashComponents`).
 #[test]
 fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     let steps = vec![
         HeadlessStep::Submit("run a turn".to_string()),
-        // The bang must land while the client has APPLIED the turn's
-        // admission. The streamed assistant text is the stable witness:
-        // it renders only after `turn_start` (the same FIFO session-event
-        // channel carries both, so the text's frame proves the turn is
-        // active on the client), and nothing un-renders it. The loader's
-        // "Writing" label is NOT a stable witness — the backgrounded
-        // submit's outcome note re-arms the loader to "Waiting" whenever
-        // it lands (two channels, so load can order it after the stream
-        // event), and the old fixed turn-end delay could coalesce the
-        // whole turn before any "Writing" frame rendered, starving the
-        // barrier outright. With the mock holding the turn open for the
-        // ack bang (below), the barrier's frame is provably pre-end:
-        // the flush cannot exist on the wire yet.
+        // The bang must land while the client has APPLIED the turn's admission. The streamed
+        // text is the stable witness: it renders only after `turn_start` on the same FIFO
+        // channel and nothing un-renders it; the "Writing" label is NOT a witness.
         HeadlessStep::WaitRender {
             needle: "Let me run the long check.".to_string(),
             timeout_ms: 30_000,
         },
         HeadlessStep::Submit("!echo mid".to_string()),
-        // The pending regime's capture: the first frame carrying the
-        // card. The turn end is still unwritten (the mock ends the turn
-        // only after the ack bang below, which this plan dispatches only
-        // past this barrier), so this frame is necessarily the pending
-        // regime — the flush can neither land first nor coalesce with
-        // it, whatever the load does to the delivery order.
+        // The pending regime's capture: the turn end is still unwritten (the mock ends the turn
+        // only after the ack bang below).
         HeadlessStep::WaitRender {
             needle: "$ echo mid".to_string(),
             timeout_ms: 30_000,
         },
-        // The settle proof for the first run before the ack: the running
-        // marker paints in every frame while the run is open and clears
-        // when its `bash_end` applies, so the pop means the ack cannot
-        // hit the already-running guard (a coalesced start+end pair
-        // never paints the marker and pops at arming with the run
-        // already settled).
+        // The settle proof before the ack: the running marker clears when its `bash_end` applies,
+        // so the pop means the ack cannot hit the guard.
         HeadlessStep::WaitGone {
             needle: "Running... (".to_string(),
             timeout_ms: 30_000,
         },
-        // The ack: the mock's own causal trigger for the turn end —
-        // dispatched only after the pending frame was captured above,
-        // so the flush lands strictly after the hold regime was
-        // observed (its own card rides the same flush).
+        // The ack: the mock's causal trigger for the turn end — dispatched only after the pending
+        // frame was captured above.
         HeadlessStep::Submit("!echo ack".to_string()),
         HeadlessStep::WaitMs(400),
         HeadlessStep::WaitMs(1000),
@@ -956,14 +853,8 @@ fn a_bang_during_a_streaming_turn_holds_then_flushes() {
             .position(|line| line.contains(needle))
             .expect("the needle's row")
     };
-    // The loader row by its activity label, not its spinner glyph: the
-    // label is delivery-order-dependent (a late submit outcome re-arms
-    // the armed loader back to "Waiting" after the stream event set
-    // "Writing", and this mock emits exactly one text-bearing event, so
-    // nothing restores it) — but the pair is a closed set for this
-    // scenario, and the row it names is the execution indicator the
-    // assertion protects. The card's own running row shares the glyph
-    // and must not match.
+    // The loader row by its activity label, not its spinner glyph: the label can flip between
+    // "Waiting"/"Writing" (delivery-order-dependent), and the card's row shares the glyph.
     let loader_row_of = |frame: &str| -> usize {
         frame
             .lines()
@@ -991,9 +882,6 @@ fn a_bang_during_a_streaming_turn_holds_then_flushes() {
     );
 }
 
-/// A long run renders the 20-line tail preview (TS
-/// `truncateToVisualLines` + the hidden logical count) and the truncation
-/// notice names the spill file.
 #[test]
 fn a_long_truncated_run_previews_the_tail_and_names_the_spill_file() {
     let steps = vec![
@@ -1010,9 +898,8 @@ fn a_long_truncated_run_previews_the_tail_and_names_the_spill_file() {
             "fullOutputPath": "/tmp/bang-spill.log",
         }));
     });
-    // The settled frame (the last one that shows the run) carries the
-    // preview: the tail visible, the older half hidden — streaming
-    // frames legitimately show the partial output as it arrives.
+    // The settled frame carries the preview; streaming frames legitimately show partial output as
+    // it arrives.
     let settled = run
         .frames
         .iter()
@@ -1036,8 +923,7 @@ fn a_long_truncated_run_previews_the_tail_and_names_the_spill_file() {
     );
 }
 
-/// A cancelled run marks itself `(cancelled)` (TS `setComplete`'s
-/// cancelled status outranks the exit code).
+/// TS `setComplete`: cancelled outranks the exit code.
 #[test]
 fn a_cancelled_run_marks_the_card_cancelled() {
     let steps = vec![
@@ -1062,11 +948,8 @@ fn a_cancelled_run_marks_the_card_cancelled() {
     );
 }
 
-/// A bang run cut short by an update restart (§10): the link dies before
-/// `bash_end`, the client reattaches, and the resync's `bashFinished`
-/// edge settles the held card with an unknown exit and flushes it into
-/// the rebuilt transcript (TS `renderResyncedSession` — no fake
-/// `(cancelled)` marker, the hold released when no turn is streaming).
+/// §10: the link dies before `bash_end`; the resync's `bashFinished` edge settles the held card
+/// with an unknown exit (TS `renderResyncedSession` — no fake `(cancelled)` marker).
 #[test]
 fn an_update_restart_settles_the_held_bang_card_on_reattach() {
     let steps = vec![

@@ -1,12 +1,6 @@
-//! Prime Inference login orchestration (TS `prime-inference-auth.ts`'s
-//! `loginPrimeInference`): the production prime-cli credential reuse, the
-//! browser challenge over the arm-agnostic core the traces login owns
-//! (`prime_traces.rs`'s `run_prime_browser_login` — no scope on the URL),
-//! and the inference access check on the resulting key. The interactive
-//! surface (the URL raced against the paste prompt, the fallback, the
-//! cancellation) is the composition root's (`pa-cli`'s
-//! `prime_inference_login.rs`); the API-key surface (the whoami check, the
-//! team list, the cli config) is `prime_inference.rs`'s.
+//! Prime Inference login orchestration: the production prime-cli credential reuse, the browser
+//! challenge over `prime_traces.rs`'s `run_prime_browser_login`, and the inference access check.
+//! The interactive surface is the composition root's.
 
 use std::path::Path;
 
@@ -17,34 +11,27 @@ use super::prime_inference::{
 use super::prime_traces::{run_prime_browser_login, PrimeAuthInfo, DEFAULT_POLL_INTERVAL_MS};
 use super::types::PrimeTeamAssignment;
 
-/// TS `PrimeInferenceLoginResult`'s `source` (`"prime-cli" | "browser"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrimeInferenceLoginSource {
     PrimeCli,
     Browser,
 }
 
-/// TS `PrimeInferenceLoginResult`: the key, where it came from, and the
-/// team the credential write carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PrimeInferenceLoginResult {
     pub api_key: String,
     pub source: PrimeInferenceLoginSource,
-    /// TS the result's `primeTeam`: the cli candidate's team, `null` for
-    /// its personal account, and absent for the browser arm — the
-    /// [`PrimeTeamAssignment`] encoding of that tri-state.
+    /// The TS `primeTeam` tri-state: the cli candidate's team, `null`
+    /// for its personal account, absent for the browser arm.
     pub prime_team: PrimeTeamAssignment,
 }
 
-/// The login's callbacks (TS `PrimeInferenceLoginCallbacks`): the auth
-/// surface (the browser URL with its code line) and the progress line.
 pub struct PrimeInferenceLoginCallbacks<'a> {
     pub on_auth: &'a (dyn Fn(&PrimeAuthInfo) + Send + Sync),
     pub on_progress: Option<&'a (dyn Fn(&str) + Send + Sync)>,
 }
 
 impl PrimeInferenceLoginCallbacks<'_> {
-    /// TS the optional `onProgress` arm.
     fn progress(&self, message: &str) {
         if let Some(on_progress) = self.on_progress {
             on_progress(message);
@@ -52,8 +39,6 @@ impl PrimeInferenceLoginCallbacks<'_> {
     }
 }
 
-/// TS `PrimeInferenceLoginOptions`: the prime-cli reuse and the poll and
-/// request timing.
 pub struct PrimeInferenceLoginOptions<'a> {
     pub prime_cli_config_path: Option<&'a Path>,
     pub use_prime_cli_config: bool,
@@ -62,8 +47,6 @@ pub struct PrimeInferenceLoginOptions<'a> {
 }
 
 impl<'a> PrimeInferenceLoginOptions<'a> {
-    /// TS the default options object (`{}`): the prime-cli reuse is on,
-    /// the path and the timing come from the caller's inputs.
     #[must_use]
     pub fn new(prime_cli_config_path: Option<&'a Path>) -> Self {
         PrimeInferenceLoginOptions {
@@ -75,19 +58,14 @@ impl<'a> PrimeInferenceLoginOptions<'a> {
     }
 }
 
-/// TS `loginPrimeInference`: the whole login — the production prime-cli
-/// credential reuse first, then the browser challenge (its URL carries
-/// only the code), then the inference access check on the resulting key.
-/// The config arrives resolved (TS resolves it inside; the composition
-/// root resolves once so the whole interactive flow shares it). TS's
-/// `signal` cancellation is the caller's drop here: the composition root
-/// drops this future to stop the status poll mid-flight.
+/// The whole login: the production prime-cli credential reuse first, then the
+/// browser challenge (its URL carries only the code), then the inference access
+/// check. TS's `signal` cancellation is the caller dropping this future.
 ///
 /// # Errors
 ///
-/// Returns a human-readable error string when the reused prime-cli key's
-/// access check fails to run, when the browser challenge or its polling
-/// fails, or when the resulting key does not have Prime Inference access.
+/// Returns a human-readable error string when access check fails to run or the resulting key lacks
+/// Prime Inference access.
 pub async fn login_prime_inference(
     http: &dyn PrimeHttp,
     config: &PrimeInferenceAuthConfig,
@@ -98,8 +76,6 @@ pub async fn login_prime_inference(
         .request_timeout_ms
         .unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
     let poll_interval_ms = options.poll_interval_ms.unwrap_or(DEFAULT_POLL_INTERVAL_MS);
-    // TS `loginPrimeInference`'s candidate rule: the prime CLI's
-    // credential is reused only when both URLs stay production.
     let candidate = if options.use_prime_cli_config && config.is_production() {
         options
             .prime_cli_config_path
@@ -117,8 +93,6 @@ pub async fn login_prime_inference(
         {
             Ok(()) => {
                 let api_key = api_key.to_string();
-                // TS `importedPrimeTeam`: the candidate's team rides the
-                // key; no team is the personal account.
                 let prime_team = match candidate.and_then(|candidate| candidate.team) {
                     Some(team) => PrimeTeamAssignment::Team(team),
                     None => PrimeTeamAssignment::PersonalAccount,
@@ -140,8 +114,7 @@ pub async fn login_prime_inference(
         callbacks
             .progress("No eligible production Prime CLI API key found. Starting browser login...");
     }
-    // TS `runPrimeBrowserLogin` without a scope: the inference
-    // challenge's URL carries only the code.
+    // No scope on the URL: the inference challenge carries only the code.
     let api_key = run_prime_browser_login(
         http,
         &config.base_url,
@@ -157,8 +130,8 @@ pub async fn login_prime_inference(
         Ok(()) => Ok(PrimeInferenceLoginResult {
             api_key,
             source: PrimeInferenceLoginSource::Browser,
-            // TS the browser result carries no `primeTeam`: the stored
-            // selection of the same key survives the credential write.
+            // The browser result carries no `primeTeam`: the stored
+            // selection survives the write.
             prime_team: PrimeTeamAssignment::PreserveWhenKeyMatches,
         }),
         Err(PrimeAccessError::Denied(failure)) => Err(format!(
@@ -184,11 +157,8 @@ mod tests {
 
     type PrimeHttpResponse = super::super::prime_inference::PrimeHttpResponse;
 
-    /// A scripted transport: exact URL -> response, in call order; the
-    /// served requests land in the log. With `dynamic_generate` (the
-    /// default) the generate POST answers with a fixed challenge and the
-    /// status poll answers pending once, then the encrypted fixture key
-    /// (so the flow's poll interval genuinely yields mid-flow).
+    /// A scripted transport: exact URL -> response, in call order. With `dynamic_generate` the
+    /// generate POST answers a fixed challenge and the status poll answers pending once.
     struct ScriptedHttp {
         queue: Mutex<VecDeque<(String, u16, String)>>,
         dynamic_generate: bool,
@@ -240,17 +210,16 @@ mod tests {
             _api_key: &str,
             _timeout_ms: u64,
         ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>> {
-            // The trait's boxed answer is 'static, so the whole read
-            // resolves before the future arms.
+            // The boxed answer is 'static, so the read resolves before
+            // the future arms.
             let url = url.to_string();
             self.served.lock().unwrap().push(url.clone());
-            // The cipher stays until the pending answer has been served:
-            // only the result response consumes it.
+            // The cipher stays until the result response consumes it.
             let dynamic = self.dynamic_status.lock().unwrap().clone();
             let answer = if url.contains("/api/v1/auth_challenge/status") && dynamic.is_some() {
                 if self.status_pending_once.swap(false, Ordering::SeqCst) {
                     // The first poll answers pending (the flow sleeps its
-                    // poll interval and yields).
+                    // interval).
                     Ok(PrimeHttpResponse {
                         status: 200,
                         body: r#"{"pending":true}"#.to_string(),
@@ -283,8 +252,6 @@ mod tests {
             self.served.lock().unwrap().push(url.clone());
             Box::pin(async move {
                 if self.dynamic_generate && url.ends_with("/api/v1/auth_challenge/generate") {
-                    // Capture the flow's public key so the status poll
-                    // can encrypt the fixture key with it.
                     let parsed: serde_json::Value =
                         serde_json::from_str(&body).expect("generate body");
                     let public_pem = parsed
@@ -317,8 +284,7 @@ mod tests {
         }
     }
 
-    /// The production challenge config (the scripted transport keeps the
-    /// requests hermetic).
+    /// The production challenge config.
     fn production_config() -> PrimeInferenceAuthConfig {
         PrimeInferenceAuthConfig {
             base_url: DEFAULT_PRIME_API_BASE_URL.to_string(),
@@ -339,8 +305,7 @@ mod tests {
         )
     }
 
-    /// The fast options: the pending status poll's interval stays real but
-    /// short, so the tests yield without the product's 5s window.
+    /// Fast options: the poll interval stays real but short.
     fn fast_options(
         prime_cli_config_path: Option<&std::path::Path>,
     ) -> PrimeInferenceLoginOptions<'_> {
@@ -392,7 +357,6 @@ mod tests {
             progress.lock().unwrap()[..],
             ["Checking existing Prime CLI credentials...".to_string()]
         );
-        // Only the cli key's whoami ran.
         assert_eq!(
             http.requests(),
             vec!["https://api.primeintellect.ai/api/v1/user/whoami".to_string()]
@@ -471,8 +435,6 @@ mod tests {
                 "Checking Prime Inference access...".to_string(),
             ]
         );
-        // The protocol sequence: the cli whoami, then the challenge round
-        // trip, then the browser key's whoami.
         assert_eq!(
             http.requests(),
             vec![
@@ -507,8 +469,8 @@ mod tests {
                 .await
                 .expect("login");
         assert_eq!(result.source, PrimeInferenceLoginSource::Browser);
-        // TS sends no scope for the inference arm: the URL keeps only the
-        // code, with the code line next to it.
+        // TS sends no scope for the inference arm: the URL keeps only
+        // the code.
         assert_eq!(
             auth.lock().unwrap().join("\n"),
             "https://app.primeintellect.ai/dashboard/tokens/challenge?code=ch-1\nCode: ch-1"
@@ -526,8 +488,8 @@ mod tests {
     #[tokio::test]
     async fn a_non_production_config_never_reads_the_prime_cli() {
         let dir = tempfile::tempdir().expect("temp dir");
-        // A cli config carries a working key, but the challenge config's
-        // base URL is overridden: the reuse is production-only.
+        // The cli config carries a working key, but the base URL is
+        // overridden: the reuse is production-only.
         let config_path = dir.path().join("config.json");
         std::fs::write(&config_path, r#"{"api_key":"cli-key"}"#).expect("config");
         let config = PrimeInferenceAuthConfig {
@@ -555,7 +517,6 @@ mod tests {
         .await
         .expect("login");
         assert_eq!(result.source, PrimeInferenceLoginSource::Browser);
-        // No cli whoami ran: the challenge and its check hit the override.
         assert_eq!(
             progress.lock().unwrap()[..],
             [
@@ -591,8 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_expired_challenge_reports_the_ts_error() {
-        // A queued challenge round whose status poll expired: the dynamic
-        // generate stays off so the queue owns every answer.
+        // The dynamic generate stays off so the queue owns every answer.
         let http = ScriptedHttp::without_dynamic(vec![
             (
                 "https://api.primeintellect.ai/api/v1/auth_challenge/generate",

@@ -1,6 +1,5 @@
-//! Log-source tests over a fixture agent dir (the TS `runIncident over a
-//! fixture agent dir` suite, asserted on the composed report text the
-//! command prints).
+//! Log-source tests over a fixture agent dir, asserted on the composed
+//! report text the command prints.
 
 use super::*;
 
@@ -11,8 +10,7 @@ fn supervisor_line(ts: &str, msg: &str) -> String {
     )
 }
 
-/// The composed report text for a window over the redirected agent dir
-/// (what `run_incident` prints).
+/// The composed report text for a window over the redirected agent dir.
 fn report_text(since: &str, until: &str) -> String {
     let options = IncidentCommandOptions {
         since: Some(since.to_string()),
@@ -65,11 +63,8 @@ fn tolerates_malformed_lines_and_reports_them_as_skipped() {
     });
 }
 
-/// A torn multi-byte write at the live log's tail must not cost the whole
-/// scan (Cursor Bugbot: the CLI's `read_to_string` dropped the file on
-/// invalid UTF-8; TS readFile + toString keeps the tear as replacement
-/// characters — the agents-view reader's own lossy rule). The complete
-/// lines around the tear still classify; the torn line itself fails the
+/// A torn multi-byte write at the live log's tail must not cost the whole scan (Cursor
+/// Bugbot: `read_to_string` dropped the file on invalid UTF-8); the torn line fails the
 /// parse like any non-line.
 #[test]
 fn keeps_structured_lines_around_a_torn_multibyte_tail() {
@@ -106,8 +101,8 @@ fn keeps_structured_lines_around_a_torn_multibyte_tail() {
     });
 }
 
-/// Unix-only: the decoy is a directory carrying a future mtime via
-/// `File::set_times` on a directory handle, which Windows cannot open.
+/// Unix-only: the decoy is a directory with a future mtime via `File::set_times`,
+/// which Windows cannot open.
 #[cfg(unix)]
 #[test]
 fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
@@ -127,11 +122,11 @@ fn falls_back_to_the_newest_per_daemon_log_when_agent_jsonl_is_absent() {
             .join("\n"),
         )
         .expect("write newest log");
-        // A future-dated DIRECTORY matching the log pattern: it must not be
-        // picked as the fallback (TS `statSync().isFile` filter), or it
-        // would hide both valid daemon logs behind a failed read. The
-        // newest log's mtime is pinned ahead of the older one (and behind
-        // the decoy) so the pick never rides write-order timing.
+        // A future-dated DIRECTORY matching the log pattern must not be
+        // picked as the fallback, or it would hide both valid daemon logs
+        // behind a failed read. The newest log's mtime is pinned ahead of
+        // the older one (and behind the decoy) so the pick never rides
+        // write-order timing.
         let decoy_dir = agent_dir.join("logs/daemon.sock.deadbeef.log");
         std::fs::create_dir(&decoy_dir).expect("decoy dir");
         let decoy = std::fs::File::open(&decoy_dir).expect("open decoy");
@@ -202,8 +197,7 @@ fn falls_back_when_agent_jsonl_is_empty_or_unreadable() {
             "{text}"
         );
         assert!(text.contains("worker 5b1d3aeb91ee recovered; 2 uncertain operations not replayed"));
-        // Empty agent.jsonl: zero parsed entries also triggers the
-        // fallback.
+        // Empty agent.jsonl also triggers the fallback.
         std::fs::write(agent_dir.join("logs/agent.jsonl"), "").expect("truncate log");
         let text = report_text("2026-09-10T20:00", "2026-09-10T20:30");
         assert!(text.contains("daemon.sock.98ed5cb2.log"), "{text}");
@@ -242,15 +236,13 @@ fn does_not_fall_back_when_agent_jsonl_parses_but_has_no_in_window_events() {
 fn reports_missing_logs_clearly() {
     with_agent_dir(|_agent_dir| {
         // No logs at all: the command prints the missing-logs message
-        // instead of an empty timeline (TS runIncident's early return).
+        // instead of an empty timeline.
         let options = IncidentCommandOptions {
             since: Some("2026-09-10T20:00".to_string()),
             until: Some("2026-09-10T20:30".to_string()),
             session: None,
         };
         let now_ms = crate::util_time::now_ms() as i64;
-        // No logs at all: the composed text is None, which is what gates
-        // the "No daemon logs found under <dir>." message.
         assert!(incident_report_text(&options, None, now_ms)
             .expect("the window resolves")
             .is_none());

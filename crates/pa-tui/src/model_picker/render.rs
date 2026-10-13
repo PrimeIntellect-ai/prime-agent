@@ -1,8 +1,7 @@
 //! The inline panel frame of the `/model` picker: bordered search field,
 //! effort rows, scroll indicator, selection detail, key hint, one blank
 //! line below the hint (the operator's 2026-09-24 spacing directive).
-//! Geometry is the TS `ModelSelectorComponent` inline path (menu-panel.ts
-//! primitives).
+//! Geometry is the TS `ModelSelectorComponent` inline path.
 
 use pa_types::ai::{Model, ModelThinkingLevel};
 use std::fmt::Write;
@@ -14,17 +13,13 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::str_width;
 use crate::{Line, Span};
 
-/// The search field's placeholder (TS `MenuSearchInput("Search models")`).
 const SEARCH_PLACEHOLDER: &str = "Search models";
 
-/// The price detail block's unit label (TS `PRICE_UNIT_TEXT`).
 const PRICE_UNIT_TEXT: &str = "$ / 1M tokens";
 
-/// Wide detail columns must still fit the longest label, "Cached input".
 const PRICE_COLUMN_MIN_WIDTH: usize = 13;
 
-/// Render the picker's frame: the inline menu panel plus the model/effort
-/// hint row (TS `ConfigurationMenuComponent.render` composition).
+/// Render the picker's frame: the inline menu panel plus the model/effort hint row.
 pub(super) fn render(
     picker: &mut ModelPicker,
     theme: &Theme,
@@ -34,11 +29,9 @@ pub(super) fn render(
     picker.set_render_width(width);
     picker.set_visible_items(picker.list_layout());
 
-    // TS model-selector v0.9.7: the headerHelpContainer (the scope row,
-    // :794-807) mounts before the search input, so the scope row renders
-    // ABOVE the search field — one leading space on the row, the active
-    // side accented, then the dim toggle key and muted description,
-    // truncated with "...".
+    // The scope row renders ABOVE the search field (TS v0.9.7's headerHelpContainer mounts before
+    // the search input): one leading space, the active side accented, then the dim toggle key and
+    // muted description, truncated with "...".
     let mut lines = Vec::new();
     if picker.has_scoped_models() {
         let muted = |text: &str| theme.fg_span(ThemeColor::Muted, text.to_string());
@@ -93,7 +86,6 @@ pub(super) fn render(
     }
 
     let filtered_len = picker.filtered_len();
-    // The scroll indicator shows the selection's position in the full list.
     if start > 0 || end < filtered_len {
         lines.push(scroll_row(
             theme,
@@ -112,16 +104,13 @@ pub(super) fn render(
     }
 
     lines.push(hint_line(theme, width, kb));
-    // One blank line of spacing below the shortcuts (the operator's
-    // 2026-09-24 directive on the `/model` view: the hint is the
-    // frame's last content row, a single blank rides under it — never
-    // a rule).
+
     lines.push(Vec::new());
     lines
 }
 
 /// The primary cell of one row: the model name, or the name with the inline
-/// effort cluster (arrows, squares, level label) when the window fits it.
+/// effort cluster when the window fits it.
 fn row_primary(
     picker: &ModelPicker,
     theme: &Theme,
@@ -146,7 +135,6 @@ fn row_primary(
         "\u{2026}",
     ))];
     primary.push(Span::raw(" ".repeat(layout.gap)));
-    // Arrow slots: only the selected row shows the effort-adjustment arrows.
     if selected {
         primary.push(theme.fg_span(ThemeColor::Dim, "\u{2190}"));
     } else {
@@ -176,8 +164,8 @@ fn row_primary(
     primary
 }
 
-/// The effort squares (TS `renderEffortSquares`): one slot per on-level,
-/// filled up to the current effort, padded to the row's slot count.
+/// The effort squares: one slot per on-level, filled up to the current effort,
+/// padded to the row's slot count.
 fn effort_square_spans(
     theme: &Theme,
     levels: &[ModelThinkingLevel],
@@ -204,8 +192,7 @@ fn effort_square_spans(
     let mut spans: Line = Vec::with_capacity(on_levels.len() + 1);
     for (index, _) in on_levels.iter().enumerate() {
         if index < filled {
-            // Filled squares: the effort pastel on the selected row, muted
-            // elsewhere.
+            // Filled squares: the effort pastel on the selected row, muted elsewhere.
             if selected {
                 let style = theme.effort_square_style();
                 spans.push(Span::styled("\u{25a0}".to_string(), style));
@@ -249,7 +236,6 @@ fn detail_lines(theme: &Theme, width: usize, model: &Model) -> Vec<Line> {
     let unit = theme.fg_span(ThemeColor::Muted, PRICE_UNIT_TEXT);
     let mut lines: Vec<Line> = Vec::new();
     if width >= 58 {
-        // Shrink the columns so the unit can trail the Output column.
         let column_width = PRICE_COLUMN_MIN_WIDTH
             .max((width.saturating_sub(2 + str_width(PRICE_UNIT_TEXT) + 1)) / 3);
         let row = |index: usize| -> String {
@@ -299,9 +285,8 @@ fn detail_lines(theme: &Theme, width: usize, model: &Model) -> Vec<Line> {
         .collect()
 }
 
-/// The trailing key hint (TS `ConfigurationMenuComponent.render`): the
-/// model/effort navigation hint on wide panes, the select/close core below
-/// 70 columns.
+/// The trailing key hint: the model/effort navigation hint on wide panes, the
+/// select/close core below 70 columns.
 fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
     let select_key = kb
         .first_key("tui.select.confirm")
@@ -331,8 +316,7 @@ fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
     hint_row(theme, width, &hint)
 }
 
-/// Truncate to a width and pad to it (TS `truncateToWidth` with
-/// `pad: true`).
+/// Truncate to a width and pad to it.
 fn truncate_pad(text: &str, width: usize, ellipsis: &str) -> String {
     if width == 0 {
         return String::new();

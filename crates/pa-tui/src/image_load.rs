@@ -1,11 +1,8 @@
 //! Image loading from disk with MIME-type detection for the supported
 //! attachment formats (PNG, JPEG, GIF, WebP - the attach-image skill's
-//! formats).
-//!
-//! The contract is the TS `utils/mime.ts` + `cli/file-processor.ts` image
-//! path: sniff a bounded prefix of the file's bytes (never trust the
-//! extension), keep only the supported image types, and read the payload
-//! as base64.
+//! formats). The contract is the TS image path: sniff a bounded prefix
+//! of the file's bytes (never trust the extension), keep only the
+//! supported image types, and read the payload as base64.
 
 use std::path::Path;
 
@@ -15,8 +12,6 @@ use base64::Engine;
 pub const SUPPORTED_IMAGE_MIME_TYPES: [&str; 4] =
     ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
-/// How many leading bytes are sniffed for format detection (TS
-/// `FILE_TYPE_SNIFF_BYTES`).
 const SNIFF_BYTES: usize = 4100;
 
 /// A loaded image attachment: base64 payload plus its detected mime type.
@@ -45,15 +40,12 @@ pub fn detect_supported_image_mime_from_bytes(bytes: &[u8]) -> Option<&'static s
     None
 }
 
-/// Detect the supported image mime type of a file, reading only the sniff
-/// prefix. `Ok(None)` for a non-image or empty file (TS
-/// `detectSupportedImageMimeTypeFromFile`).
+/// Detect the supported image mime type of a file, reading only the
+/// sniff prefix. `Ok(None)` for a non-image or empty file.
 ///
 /// # Errors
 ///
-/// Returns `Err` when the file cannot be opened or its sniff prefix
-/// cannot be read (an i/o error, e.g. a missing file or missing
-/// permission).
+/// Returns `Err` when the file cannot be opened or its sniff prefix read.
 pub fn detect_supported_image_mime_from_path(path: &Path) -> std::io::Result<Option<&'static str>> {
     use std::io::Read;
     let mut file = std::fs::File::open(path)?;
@@ -67,13 +59,12 @@ pub fn detect_supported_image_mime_from_path(path: &Path) -> std::io::Result<Opt
 }
 
 /// Load an image file as an attachment payload. `Ok(None)` when the file
-/// is empty or not a supported image (TS `processFileArguments`' image
-/// branch treats those as plain text instead; the caller decides).
+/// is empty or not a supported image (the caller treats those as plain
+/// text instead).
 ///
 /// # Errors
 ///
-/// Returns `Err` when the file cannot be opened, its prefix read, or its
-/// full bytes re-read (an i/o error).
+/// Returns `Err` when the file cannot be opened, its prefix read, or its full bytes re-read.
 pub fn load_image_from_path(path: &Path) -> std::io::Result<Option<LoadedImage>> {
     let Some(mime_type) = detect_supported_image_mime_from_path(path)? else {
         return Ok(None);

@@ -1,12 +1,8 @@
-//! Image-marker handling for the input editor.
-//!
-//! Pasted images are represented in the editor as `[image #N]` markers
-//! while the bytes are held in a registry keyed by N. The markers present
-//! in the submitted text decide which images are attached to the prompt,
-//! so deleting a marker drops its image and restoring it (undo, history)
-//! brings it back as long as the bytes are still in the registry.
-//!
-//! The contract is the TS interactive mode's `image-markers.ts`.
+//! Image-marker handling for the input editor: pasted images appear as
+//! `[image #N]` markers while the bytes are held in a registry keyed by
+//! N. The markers present in the submitted text decide which images are
+//! attached — deleting a marker drops its image; restoring it (undo,
+//! history) brings it back while the bytes stay in the registry.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -92,7 +88,6 @@ mod tests {
             vec![1, 2, 1]
         );
         assert!(image_marker_ids("no markers").is_empty());
-        // Non-numeric and unsafe-integer ids are not markers.
         assert!(image_marker_ids("[image #x] [image #1.5]").is_empty());
     }
 
@@ -117,7 +112,6 @@ mod tests {
         let mut keep = BTreeSet::new();
         keep.insert(3);
         evict_images_to_budget(&mut images, |v| *v, 250, &keep);
-        // 300 > 250: oldest (1) evicts; 2 and 3 stay (3 is kept, 200 <= 250).
         assert_eq!(images.keys().copied().collect::<Vec<_>>(), vec![2, 3]);
     }
 

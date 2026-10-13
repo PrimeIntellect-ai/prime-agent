@@ -1,19 +1,7 @@
-//! The Anthropic (Claude Pro/Max) OAuth flow — the port of
-//! `packages/ai/src/utils/oauth/anthropic.ts` (+ `pkce.ts`): the PKCE
-//! authorization request against the client registration, the
-//! localhost callback server raced against the manual paste, the
-//! JSON token exchange, and the token refresh. The credentials the
-//! flow returns carry the TS shape (`access`, `refresh`, `expires`)
-//! and persist under the provider id `anthropic`.
-//!
-//! The TS flow doubles its PKCE verifier as the OAuth `state` (the
-//! redirect echoes the verifier and the exchange posts it back) —
-//! kept verbatim for wire parity.
-//!
-//! Cancellation follows the fleet's cooperative pattern (#2770): the
-//! driving surface marks a shared flag when it exits; the flow
-//! checks it between the race's poll steps and before its network
-//! steps, so an exited surface never receives a completed login.
+//! The Anthropic (Claude Pro/Max) OAuth flow: the PKCE request, the
+//! localhost callback server raced against the manual paste, the JSON
+//! token exchange, and the refresh. The TS flow doubles its PKCE
+//! verifier as the OAuth `state` — kept for wire parity.
 
 use std::time::Duration;
 
@@ -25,87 +13,74 @@ use super::pkce::generate_pkce;
 use super::provider_http::{ProviderHttp, ProviderHttpMethod, ProviderHttpRequest};
 use super::types::{OAuthLoginUi, OAuthPrompt};
 
-/// The client registration the TS flow ships (TS stores the id
-/// base64-encoded; the decoded value is the wire value).
+/// TS stores the id base64-encoded; the decoded value is the wire
+/// value.
 pub const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-/// TS `AUTHORIZE_URL`.
 const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
-/// TS `TOKEN_URL`.
 const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-/// TS `SCOPES`.
 const SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
-/// One token request's bound (TS `AbortSignal.timeout(30_000)`).
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
-/// The credential's expiry skew (TS `5 * 60 * 1000`).
 const EXPIRY_SKEW_MS: i64 = 5 * 60 * 1000;
-/// The refresh grant's request bound: the refresh runs under the auth
-/// store's file lock, which a peer declares stale after 10 seconds — the
-/// request must fit inside that window so a slow endpoint fails the
-/// refresh (kept for a retry) instead of holding the lock past its
-/// staleness.
+/// The refresh runs under the auth store's file lock, which a peer declares stale after 10 seconds;
+/// the request must fit inside that window.
 pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
-/// TS the `onAuth` instructions line.
 const AUTH_INSTRUCTIONS: &str =
     "Complete login in your browser. If the browser is on another machine, paste the final redirect URL here.";
-/// TS the `onPrompt` fallback line.
 const PROMPT_MESSAGE: &str = "Paste the authorization code or full redirect URL:";
-/// The cancel error the driving surface maps to the silent cancelled
-/// outcome (TS the dialog throws the same text; `auth-flows.ts`
-/// matches it).
+/// The cancel error the driving surface maps to the silent cancelled outcome.
 pub const LOGIN_CANCELLED: &str = "Login cancelled";
-/// The race's poll step: how often the loop re-checks the cooperative
-/// cancel flag (#2770 — the flag is checked between poll steps).
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The credentials the flow returns and persists (TS
-/// `OAuthCredentials` for the Anthropic provider).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnthropicCredentials {
     pub access: String,
     pub refresh: String,
-    /// Wall-clock epoch milliseconds (TS `Date.now() + expires_in *
-    /// 1000 - 5 * 60 * 1000`).
+    /// Wall-clock epoch milliseconds.
     pub expires: i64,
 }
 
-/// Run the login (TS `loginAnthropic`): build the PKCE request, start
-/// the callback server, present the URL, race the browser callback
-/// against the manual paste, exchange the code, and return the
-/// credentials to persist. The exchange always posts the registered
-/// redirect (TS `redirectUriForExchange` is `REDIRECT_URI` on every
-/// path).
+/// Race the browser callback against the manual paste, exchange the
+/// code, and return the credentials to persist.
 ///
 /// # Errors
 ///
-/// Returns an error when the callback port cannot be bound (TS
-/// rejects the server promise), the surface cancelled the login
-/// ([`LOGIN_CANCELLED`]), a pasted redirect's state mismatches, no
-/// authorization code ever arrives, or the token exchange fails.
+/// Returns an error when the port cannot be bound, the login is cancelled
+/// ([`LOGIN_CANCELLED`]), the paste mismatches, or the exchange fails.
 pub async fn login_anthropic(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<AnthropicCredentials, String> {
-    // An exited surface never starts: no callback port bind, no browser
-    // launch (the #2770 flag is the seam).
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
     let (verifier, challenge) = generate_pkce();
     let server = AnthropicCallbackServer::start(&verifier)?;
+    login_with_server(http, ui, &server, &verifier, &challenge).await
+}
+
+/// The flow after the bind: present the URL, race the callback against
+/// the paste, exchange the code. `server` listens with `verifier` as
+/// its state.
+async fn login_with_server(
+    http: &dyn ProviderHttp,
+    ui: &dyn OAuthLoginUi,
+    server: &AnthropicCallbackServer,
+    verifier: &str,
+    challenge: &str,
+) -> Result<AnthropicCredentials, String> {
     ui.on_auth(
-        &authorization_url(&challenge, &verifier),
+        &authorization_url(challenge, verifier),
         Some(AUTH_INSTRUCTIONS),
     );
-
-    let code = wait_for_code(&server, ui, &verifier).await?;
+    let code = wait_for_code(server, ui, verifier).await?;
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
     ui.on_progress("Exchanging authorization code for tokens...");
-    exchange_authorization_code(http, &code, &verifier).await
+    exchange_authorization_code(http, &code, verifier).await
 }
 
-/// Refresh an expired credential (TS `refreshAnthropicToken`).
+/// Refresh an expired credential.
 ///
 /// # Errors
 ///
@@ -120,8 +95,6 @@ pub async fn refresh_anthropic_token(
         "refresh_token": refresh_token,
     })
     .to_string();
-    // The refresh runs under the auth store's lock: the request fits
-    // inside the lock's staleness window (REFRESH_TIMEOUT_MS).
     let token = json_token_request(
         http,
         TOKEN_URL,
@@ -134,9 +107,6 @@ pub async fn refresh_anthropic_token(
     Ok(credentials_from(token))
 }
 
-/// The authorization URL (TS the `authParams` block in TS order: the
-/// code flag, the registration, the challenge, and the state — which
-/// is the PKCE verifier).
 fn authorization_url(challenge: &str, verifier: &str) -> String {
     let mut url = Url::parse(AUTHORIZE_URL).expect("the authorize url parses");
     for (name, value) in [
@@ -154,10 +124,6 @@ fn authorization_url(challenge: &str, verifier: &str) -> String {
     url.to_string()
 }
 
-/// The race + the fallbacks (TS `loginAnthropic`'s middle): the
-/// browser callback against the manual paste, then the prompt
-/// fallback. The tick re-checks the cooperative cancel between poll
-/// steps.
 async fn wait_for_code(
     server: &AnthropicCallbackServer,
     ui: &dyn OAuthLoginUi,
@@ -173,8 +139,7 @@ async fn wait_for_code(
     };
     tokio::pin!(manual_answer);
     // The browser redirect wins over a late manual paste: the manual
-    // answer only cancels the server's wait (TS `server.cancelWait`),
-    // the settled callback settles first.
+    // answer only cancels the server's wait (TS `server.cancelWait`).
     let wait = server.wait_for_code();
     tokio::pin!(wait);
     let mut tick = tokio::time::interval(CANCEL_POLL_INTERVAL);
@@ -189,11 +154,7 @@ async fn wait_for_code(
         }
     };
     let code: Option<CallbackCode> = match raced {
-        // A settled callback (the server validated the state).
         RaceOutcome::Callback(Some(code)) => Some(code),
-        // A settled-empty wait: with a paste surface TS awaits the
-        // manual promise before the prompt fallback; without one the
-        // prompt is the only path.
         RaceOutcome::Callback(None) => {
             if manual_available {
                 match manual_answer.await {
@@ -210,8 +171,6 @@ async fn wait_for_code(
     if let Some(code) = code {
         return Ok(code);
     }
-    // The fallback prompt (TS `onPrompt`): neither the callback nor
-    // the paste produced a code.
     let answer = ui
         .on_prompt(&OAuthPrompt {
             message: PROMPT_MESSAGE.to_string(),
@@ -223,21 +182,13 @@ async fn wait_for_code(
     parse_paste(&input, verifier)?.ok_or_else(|| "Missing authorization code".to_string())
 }
 
-/// What the race settled on.
 enum RaceOutcome {
-    /// The callback wait settled: the code, or `None` when it
-    /// settled empty (a cancelled wait).
+    /// The code, or `None` on a settled-empty wait.
     Callback(Option<CallbackCode>),
-    /// The manual paste answered: the input, or `None` when
-    /// cancelled.
+    /// The paste input, or `None` when cancelled.
     Manual(Option<String>),
 }
 
-/// Parse one pasted input and check its echoed state (TS
-/// `parseAuthorizationInput` + the state guard; the expected state is
-/// the PKCE verifier). Returns the code and state (the verifier when
-/// the input carries none — TS's falsy state skips the check and
-/// substitutes it).
 fn parse_paste(input: &str, verifier: &str) -> Result<Option<CallbackCode>, String> {
     let (code, echoed) = parse_authorization_input(input);
     if let Some(echoed) = &echoed {
@@ -251,11 +202,6 @@ fn parse_paste(input: &str, verifier: &str) -> Result<Option<CallbackCode>, Stri
     }))
 }
 
-/// Parse a pasted authorization input (TS `parseAuthorizationInput`,
-/// duplicated per module the same way): a full redirect URL, a
-/// `code#state` pair, `code=`-shaped parameters, or a bare code.
-/// Returns the code and the echoed state (`None` when the input
-/// carries none).
 fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
     let value = input.trim();
     if value.is_empty() {
@@ -294,18 +240,14 @@ fn parse_authorization_input(input: &str) -> (Option<String>, Option<String>) {
     (non_empty(Some(value.to_string())), None)
 }
 
-/// One token response (TS the `tokenData` shape of the exchange and
-/// the refresh).
 struct TokenResponse {
     access: String,
     refresh: String,
     expires_in: i64,
 }
 
-/// The credential the response builds (TS the expires arithmetic).
 fn credentials_from(token: TokenResponse) -> AnthropicCredentials {
-    // Saturating: a hostile `expires_in` must not overflow the sum (the
-    // NaN/inf gate already answered the missing-fields error).
+    // Saturating: a hostile `expires_in` must not overflow the sum.
     AnthropicCredentials {
         access: token.access,
         refresh: token.refresh,
@@ -315,8 +257,7 @@ fn credentials_from(token: TokenResponse) -> AnthropicCredentials {
     }
 }
 
-/// Wall-clock milliseconds since the epoch (the `expires` convention).
-// Epoch millis fit i64 for ~292 million years; the u128 duration's millis are the i64 convention here.
+// Epoch millis fit i64 for ~292 million years.
 #[allow(clippy::cast_possible_truncation)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -324,10 +265,6 @@ fn now_ms() -> i64 {
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64)
 }
 
-/// TS `exchangeAuthorizationCode`: the authorization-code grant with
-/// the PKCE verifier, the echoed state, and the registered redirect —
-/// a JSON body (the Anthropic endpoint's shape, unlike the form
-/// bodies the other providers use).
 async fn exchange_authorization_code(
     http: &dyn ProviderHttp,
     code: &CallbackCode,
@@ -354,13 +291,8 @@ async fn exchange_authorization_code(
     Ok(credentials_from(token))
 }
 
-/// One JSON token POST through the TS error wrappers: the transport
-/// failure and the failed status wrap the request error (`TS
-/// formatErrorDetails`' `Error: <message>` head), the failed JSON
-/// parse wraps the invalid-JSON error, and a missing field is this
-/// port's explicit error where TS would persist an unusable
-/// credential. The two TS call sites differ only in the wrapper
-/// prefix (`Anthropic token refresh …` vs `Token exchange …`).
+/// One JSON token POST through the TS error wrappers (`Error: <message>` heads). A missing field is
+/// this port's explicit error where TS would persist an unusable credential.
 async fn json_token_request(
     http: &dyn ProviderHttp,
     url: &str,
@@ -375,8 +307,6 @@ async fn json_token_request(
             format!("{label} request failed. url={url};{wire_context} details={message}")
         })?;
     if !response.ok() {
-        // TS `postJson` throws and the caller wraps the thrown error
-        // (`formatErrorDetails` prints the Error head + message).
         return Err(format!(
             "{label} request failed. url={url};{wire_context} details=Error: HTTP request failed. status={}; url={url}; body={}",
             response.status, response.body
@@ -415,7 +345,6 @@ async fn json_token_request(
     })
 }
 
-/// TS `postJson`: the JSON-body POST with the request timeout bound.
 async fn post_json(
     http: &dyn ProviderHttp,
     url: &str,
@@ -441,15 +370,12 @@ async fn post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::anthropic_callback::CALLBACK_PORT;
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
-
-    use super::super::anthropic_callback::{registered_port_stages, CALLBACK_PORT_LOCK};
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -513,8 +439,6 @@ mod tests {
         }
     }
 
-    /// One scripted UI answer: an immediate value (`Some`), an
-    /// immediate cancel (`None`), or a never-resolving surface.
     enum ScriptedAnswer {
         Once(Option<String>),
         Pending,
@@ -540,9 +464,6 @@ mod tests {
         }
     }
 
-    /// The scripted login surface: the captured authorization URL,
-    /// the paste racing the callback, the fallback prompt, and the
-    /// progress lines.
     struct ScriptedUi {
         auth_url: Mutex<Option<String>>,
         progress: Mutex<Vec<String>>,
@@ -564,8 +485,6 @@ mod tests {
             }
         }
 
-        /// The captured authorization URL (waits for the flow's
-        /// `onAuth`).
         async fn captured_url(&self) -> String {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
@@ -620,13 +539,24 @@ mod tests {
         }
     }
 
-    /// The token endpoint answering one happy credential (3600s).
     fn token_http() -> ScriptedHttp {
         ScriptedHttp::new(vec![(
             TOKEN_URL,
             200,
             r#"{"access_token":"the-access","refresh_token":"the-refresh","expires_in":3600}"#,
         )])
+    }
+
+    /// The flow on a free loopback port (the registered port is `start`'s
+    /// production bind; `a_bound_port_fails_the_start_clearly` pins it).
+    async fn login_on_a_free_port(
+        http: &ScriptedHttp,
+        ui: &ScriptedUi,
+    ) -> Result<AnthropicCredentials, String> {
+        let (verifier, challenge) = generate_pkce();
+        let server = AnthropicCallbackServer::bind("127.0.0.1", 0, &verifier)
+            .expect("a free loopback port binds");
+        login_with_server(http, ui, &server, &verifier, &challenge).await
     }
 
     #[tokio::test]
@@ -655,13 +585,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_exchange_body_matches_the_ts_grant() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let credentials = login_anthropic(&http, &ui).await.unwrap();
+        let credentials = login_on_a_free_port(&http, &ui).await.unwrap();
         assert_eq!(credentials.access, "the-access");
         assert_eq!(credentials.refresh, "the-refresh");
         // TS: expires = now + expires_in * 1000 - 5 minutes.
@@ -673,7 +599,6 @@ mod tests {
             .as_millis() as i64;
         let skew = (credentials.expires - now - (3600 * 1000 - EXPIRY_SKEW_MS)).abs();
         assert!(skew < 10_000, "the expiry arithmetic: {skew}");
-        // The exchange's JSON body carries the TS grant.
         let body = http.first_body(TOKEN_URL);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["grant_type"], "authorization_code");
@@ -693,13 +618,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_exchange_surfaces_the_ts_message() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 400, "no grant")]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(
             error,
             format!(
@@ -710,13 +631,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_exchange_names_the_response() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = ScriptedHttp::new(vec![(TOKEN_URL, 200, r#"{"access_token":"a"}"#)]);
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert!(
             error.starts_with("Token exchange response missing fields"),
             "{error}"
@@ -748,10 +665,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_state_mismatch_fails_the_paste() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value(
@@ -759,23 +672,19 @@ mod tests {
             )),
             None,
         );
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, "OAuth state mismatch");
         assert!(http.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_paste_without_a_code_falls_back_to_the_prompt() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
             Some(ScriptedAnswer::value("the-prompted-code")),
         );
-        login_anthropic(&http, &ui).await.unwrap();
+        login_on_a_free_port(&http, &ui).await.unwrap();
         let body = http.first_body(TOKEN_URL);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["code"], "the-prompted-code");
@@ -783,64 +692,56 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_paste_ends_the_login() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(Some(ScriptedAnswer::ready()), None);
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
     async fn a_cancelled_prompt_ends_the_login() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = token_http();
         let ui = ScriptedUi::new(
             Some(ScriptedAnswer::value("   ")),
             Some(ScriptedAnswer::ready()),
         );
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_login_between_polls() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         // The flag flips when the url lands: the race loop's first
         // poll-step check ends the flow before any code arrives.
         let http = token_http();
         let mut ui = ScriptedUi::new(Some(ScriptedAnswer::Pending), None);
         ui.cancel_on_auth = true;
-        let error = login_anthropic(&http, &ui).await.unwrap_err();
+        let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
-        // No token request ever posted.
         assert!(http.requests.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn the_browser_callback_wins_the_race() {
-        let _port = CALLBACK_PORT_LOCK.lock().await;
-        // The real registered port: the flow binds its callback server
-        // and the browser redirect settles the code. Skip when another
-        // process holds the port — the bind-failure path is its own
-        // invariant.
-        if !registered_port_stages() {
-            return; // the registered port is busy: this run cannot stage it.
-        }
         let http = Arc::new(token_http());
         let ui = Arc::new(ScriptedUi::new(Some(ScriptedAnswer::Pending), None));
+        let (verifier, challenge) = generate_pkce();
+        let server = AnthropicCallbackServer::bind("127.0.0.1", 0, &verifier)
+            .expect("a free loopback port binds");
+        let port = server.port();
         let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http = Arc::clone(&http);
-            tokio::spawn(async move { login_anthropic(flow_http.as_ref(), flow_ui.as_ref()).await })
+            tokio::spawn(async move {
+                login_with_server(
+                    flow_http.as_ref(),
+                    flow_ui.as_ref(),
+                    &server,
+                    &verifier,
+                    &challenge,
+                )
+                .await
+            })
         };
         let url = ui.captured_url().await;
         let state = url::Url::parse(&url)
@@ -849,7 +750,7 @@ mod tests {
             .find(|(key, _)| key == "state")
             .map(|(_, value)| value.to_string())
             .expect("the authorization url carries the state");
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", CALLBACK_PORT))
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .expect("the flow's callback server accepts the redirect");
         stream

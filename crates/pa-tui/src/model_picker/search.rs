@@ -1,6 +1,5 @@
 use pa_types::ai::Model;
-/// Match quality for the scored search (TS `ModelSearchMatchQuality`;
-/// lower sorts first).
+/// Match quality for the scored search (lower sorts first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum MatchQuality {
     ExactShortId,
@@ -15,7 +14,7 @@ pub(super) struct SearchMatch {
     pub(super) score: f64,
 }
 
-/// TS `normalizeModelSearchText`: lowercase, drop separator runs.
+/// Lowercase, drop separator runs.
 fn normalize_search_text(value: &str) -> String {
     value
         .to_lowercase()
@@ -24,7 +23,6 @@ fn normalize_search_text(value: &str) -> String {
         .collect()
 }
 
-/// The search fields of one item (TS `getModelSearchFields`).
 fn search_fields(model: &Model) -> (String, Vec<String>, Vec<String>) {
     let short_id = model.id.rsplit('/').next().unwrap_or(&model.id).to_string();
     let full_ids = vec![model.id.clone(), format!("{}/{}", model.provider, model.id)];
@@ -35,12 +33,10 @@ fn search_fields(model: &Model) -> (String, Vec<String>, Vec<String>) {
     (short_id, full_ids, all)
 }
 
-/// TS `getBestFuzzyScore`: every token must fuzzy-match some field; the
-/// score is the sum of each token's best field.
+/// Every token must fuzzy-match some field; the score is the sum of each token's best field.
 fn best_fuzzy_score(query_tokens: &[String], fields: &[String]) -> Option<f64> {
     let mut total = 0.0;
     for token in query_tokens {
-        // Every token must match some field; the score is each token's best.
         let mut best: Option<f64> = None;
         for field in fields {
             if let Some(score) = crate::fuzzy::fuzzy_match(token, field) {
@@ -56,7 +52,6 @@ fn best_fuzzy_score(query_tokens: &[String], fields: &[String]) -> Option<f64> {
     Some(total)
 }
 
-/// TS `scoreModelSearch`.
 pub(super) fn score_model_search(model: &Model, query: &str) -> Option<SearchMatch> {
     let query_tokens: Vec<String> = query.split_whitespace().map(str::to_string).collect();
     let normalized_query = normalize_search_text(query);

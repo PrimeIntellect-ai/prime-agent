@@ -1,5 +1,5 @@
-//! Report tests (the TS `incident.test.ts` report/window/session-filter
-//! suites, asserted on plain text like the TS `stripAnsi` comparisons).
+//! Report tests, asserted on plain text like the TS `stripAnsi`
+//! comparisons.
 
 use super::*;
 use pa_types::incident::parse_incident_log_line;
@@ -90,8 +90,8 @@ fn incident_fixture_lines() -> Vec<String> {
     };
     let crashed_worker = "/tmp/prime-agent-501/worker-98ed5cb228d2-5b1d3aeb91ee.sock";
     let mut lines = Vec::new();
-    // Worker starts before the window; provider failures are attributed to
-    // it by pid.
+    // Worker starts before the window; its provider failures attribute
+    // by pid.
     lines.push(worker_start_line(
         "2026-09-10T19:42:09.064Z",
         crashed_worker,
@@ -237,7 +237,6 @@ fn a_clean_run_shows_no_anomalies() {
 #[test]
 fn reconstructs_the_incident_narrative_in_one_report() {
     let text = report_for(&incident_fixture_lines());
-    // Timeouts aggregated with count and span.
     assert!(
         text.contains(
             "command attach failed: timed out waiting for worker response (x4, until 09-10 20:21:53)"
@@ -251,13 +250,11 @@ fn reconstructs_the_incident_narrative_in_one_report() {
         "{text}"
     );
     assert!(text.contains("command list_agent_peers failed: worker authentication failed"));
-    // The crash appears once, critical, with the EPIPE cause.
     assert_eq!(text.matches("crashed").count(), 1);
     assert!(
         text.contains("09-10 20:23:24  critical  worker 5b1d3aeb91ee crashed: uncaught exception: Error: write EPIPE"),
         "{text}"
     );
-    // Recovery with the held backlog and its operation breakdown.
     assert!(
         text.contains(
             "worker 5b1d3aeb91ee recovered; 533 uncertain operations not replayed (tool_execution_start x408, auto_retry_end x62, agent_end x47, message_start x16)"
@@ -267,8 +264,6 @@ fn reconstructs_the_incident_narrative_in_one_report() {
     assert!(text.contains(
         "could not adopt worker 5b1d3aeb91ee: Session worker process is no longer running"
     ));
-    // Anomalies: a timeout stall, an auth failure, and provider failures
-    // attributed to the crashed worker.
     assert!(text.contains("/tmp/prime-agent-501/daemon.sock: 5 command timeouts over 19m18s"));
     assert!(text.contains("session 2339fb7da605: 3 command timeouts over 10m7s"));
     assert!(text.contains("provider stream failure (rate_limit 429) for worker 5b1d3aeb91ee (x24"));
@@ -416,8 +411,7 @@ fn keeps_a_same_component_worker_restart_within_two_seconds() {
 
 #[test]
 fn the_report_layout_matches_the_ts_shape() {
-    // One supervisor-start event in a 30-minute window: the exact TS
-    // frame, from the header through the trimmed tail.
+    // The exact TS frame, from the header through the trimmed tail.
     let options = default_options();
     let lines = vec![supervisor_line(
         "2026-09-10T20:00:05.000Z",

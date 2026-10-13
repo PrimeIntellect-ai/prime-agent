@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,24 +8,9 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier integration tests for the restore-path guards (TS #2471 + #2478):
-//!
-//! - a restored `__main__` function runs against the LIVE namespace: a
-//!   global redefined after the restore wins, and a name the saved function
-//!   references but the snapshot never saved resolves once defined (the
-//!   live-globals revival; pre-fix the function kept its frozen snapshot
-//!   globals and the late name raised `NameError`);
-//! - the debounced auto-snapshot that follows a restore skips while the
-//!   namespace is unchanged (identical rewrite, no churn) and captures again
-//!   after a real cell changes it;
-//! - a failed restore keeps the on-disk payload the fresher copy: the
-//!   debounced post-bootstrap snapshot skips AND the dispose flush (a
-//!   `snapshot: true` shutdown) cannot clobber it with a skills-only
-//!   namespace.
-//!
-//! The kernel Python is ambient product state like `kernel_lifecycle.rs`:
-//! skipped with a note when absent; `PA_CORE_KERNEL_PYTHON` points at an
-//! explicit interpreter.
+//! Verifier integration tests for the restore-path guards: a restored function runs against the
+//! LIVE namespace; the post-restore debounced auto-snapshot skips while unchanged; a failed restore
+//! keeps the on-disk payload the fresher copy.
 #![cfg(unix)]
 
 use std::collections::HashMap;
@@ -263,8 +246,8 @@ async fn failed_restore_keeps_the_on_disk_payload_through_the_debounced_snapshot
     let dir = tempfile::TempDir::new().expect("temp dir");
     let snapshot_path = snapshot_path_in(dir.path());
     let manifest_path = manifest_path_in(dir.path());
-    // An unloadable payload takes the same failed-restore branch as a timeout
-    // (TS #2478's test): nothing the kernel can do makes it load.
+    // An unloadable payload takes the same failed-restore branch as a
+    // timeout: nothing the kernel can do makes it load.
     std::fs::write(&snapshot_path, b"not-a-snapshot").expect("write bad payload");
 
     let Some(reader_options) = test_options(Some(dir.path()), Some(50)) else {
@@ -280,11 +263,9 @@ async fn failed_restore_keeps_the_on_disk_payload_through_the_debounced_snapshot
         "the unloadable payload must fail the restore"
     );
 
-    // Production order: a cell (here a plain pass instead of the full
-    // bootstrap), then the arm. The first execute also reprovisions (the
-    // failed restore left pending_restore set): the re-attempt fails again,
-    // falls back to an empty namespace, and hands the flush duty back —
-    // which is exactly why the debounced snapshot needs its own guard.
+    // Production order: a cell, then the arm. The first execute reprovisions (the failed restore
+    // left pending_restore set): the re-attempt fails again and hands the flush duty back — exactly
+    // why the debounced snapshot needs its own guard.
     let pass = execute(&reader, "pass").await;
     assert_eq!(pass.status, ExecuteStatus::Ok);
     reader.mark_restored_namespace_fresh();
@@ -302,10 +283,9 @@ async fn failed_restore_keeps_the_on_disk_payload_through_the_debounced_snapshot
         "no manifest may be written for a skipped snapshot"
     );
 
-    // The dispose flush (snapshot: true) after the reprovision consumed
-    // pending_restore: the failed-restore guard is sticky until a restore
-    // fully succeeds, so the skills-only namespace still cannot replace the
-    // on-disk payload.
+    // The dispose flush (snapshot: true) after the reprovision consumed pending_restore: the
+    // failed-restore guard is sticky until a restore fully succeeds, so the skills-only namespace
+    // still cannot replace the on-disk payload.
     let _ = reader
         .shutdown(KernelShutdownOptions {
             snapshot: true,
@@ -431,10 +411,9 @@ async fn zero_debounce_after_a_failed_restore_still_cannot_clobber_the_payload()
     let manifest_path = manifest_path_in(dir.path());
     std::fs::write(&snapshot_path, b"not-a-snapshot").expect("write bad payload");
 
-    // A zero debounce schedules the auto-snapshot for the first scheduler
-    // tick after the bootstrap settles — before the skip arm's production
-    // order (bootstrap, then mark) can install it. The boot hold suppresses
-    // that early shot.
+    // A zero debounce schedules the auto-snapshot for the first scheduler tick after the bootstrap
+    // settles — before the skip arm's production order (bootstrap, then mark) can install it. The
+    // boot hold suppresses that early shot.
     let Some(options) = test_options(Some(dir.path()), Some(0)) else {
         return;
     };

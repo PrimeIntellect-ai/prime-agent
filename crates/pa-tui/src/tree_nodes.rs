@@ -1,6 +1,6 @@
 //! Session-tree node model: the flat `get_session_tree` wire nodes parsed
-//! into typed entries, and the parent/child tree the `/tree` view navigates
-//! (TS `buildSessionTreeFromFlatNodes` + `SessionTreeFlatNode`).
+//! into typed entries, and the parent/child tree the `/tree` view
+//! navigates.
 
 use std::collections::HashMap;
 
@@ -42,13 +42,9 @@ pub fn parse_flat_nodes(data: &Value) -> Vec<TreeNodeData> {
 }
 
 /// A tree node: its data plus its children (siblings sorted by timestamp,
-/// oldest first, like the TS `getTree` ordering).
-///
-/// The type deliberately carries no `Clone`/`Debug` derives: a session
-/// tree nests one level per entry (a linear session runs tens of
-/// thousands deep), and the generated per-level recursion of either
-/// would overflow the runtime stack the same way a recursive build
-/// does.
+/// oldest first). Deliberately carries no `Clone`/`Debug`: their generated
+/// per-level recursion overflows the stack on a linear session tens of
+/// thousands deep.
 pub struct TreeNode {
     pub data: TreeNodeData,
     pub children: Vec<TreeNode>,
@@ -90,16 +86,10 @@ enum BuildStep {
     Leave(usize),
 }
 
-/// Build the nested tree from flat nodes (TS
-/// `buildSessionTreeFromFlatNodes`): parentless entries (or entries whose
-/// parent is missing) become roots; sibling order is by timestamp, oldest
-/// first (the TS `getTree` ordering).
-///
-/// The construction walks an explicit worklist, never the call stack
-/// (TS builds "without recursively walking deep chains"): a session tree
-/// nests one level per entry, and a call frame per level would overflow
-/// the runtime stack on a linear session tens of thousands of entries
-/// deep.
+/// Build the nested tree from flat nodes: parentless entries (or
+/// entries whose parent is missing) become roots; sibling order is by
+/// timestamp, oldest first. The construction walks an explicit
+/// worklist, never the call stack.
 pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
     let by_id: HashMap<String, usize> = flat
         .iter()
@@ -115,9 +105,8 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
             })
         })
         .collect();
-    // One child-index list per node, resolved before any node is taken out
-    // of its slot (a child attaches to the LAST parent occurrence, matching
-    // the TS map-insertion order).
+    // One child-index list per node, resolved before any node leaves its
+    // slot (a child attaches to the LAST parent occurrence, TS order).
     let child_indices: Vec<Vec<usize>> = {
         let mut lists = vec![Vec::new(); slots.len()];
         for (index, slot) in slots.iter().enumerate() {
@@ -144,10 +133,8 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
                 == index
         })
         .collect();
-    // A node enters the worklist once (from its one parent slot or the
-    // root list), so the walk terminates on any input, parent cycles
-    // included (cycle members are never roots and never enter the
-    // worklist).
+    // A node enters the worklist once, so the walk terminates on any
+    // input, parent cycles included (cycle members are never roots).
     let mut built: Vec<Option<TreeNode>> = (0..slots.len()).map(|_| None).collect();
     let mut work: Vec<BuildStep> = roots.iter().rev().copied().map(BuildStep::Enter).collect();
     while let Some(step) = work.pop() {
@@ -217,7 +204,6 @@ mod tests {
         ];
         let tree = build_tree(flat);
         let root_ids: Vec<&str> = tree.iter().map(|n| n.id().unwrap()).collect();
-        // The parentless entry and the orphan both become roots.
         assert_eq!(root_ids, vec!["root", "orphan"]);
         let children: Vec<&str> = tree[0].children.iter().map(|n| n.id().unwrap()).collect();
         assert_eq!(children, vec!["a", "b"], "oldest sibling first");
@@ -225,10 +211,9 @@ mod tests {
 
     #[test]
     fn deep_chain_builds_and_tears_down_iteratively() {
-        // A linear session nests one level per entry; the operator's tree
-        // ran tens of thousands deep, and a per-level build (or teardown)
-        // overflows the runtime stack. A size far past any thread stack
-        // makes the regression deterministic on every thread.
+        // The operator's tree ran tens of thousands deep; a per-level
+        // build (or teardown) overflows the stack, so a size far past
+        // any thread stack makes the regression deterministic.
         let depth = 50_000;
         let mut flat: Vec<TreeNodeData> = Vec::with_capacity(depth);
         let mut parent: Option<String> = None;
@@ -239,8 +224,8 @@ mod tests {
         }
         let tree = build_tree(flat);
         assert_eq!(tree.len(), 1);
-        // The count itself walks a worklist: the test must never recurse
-        // per level either.
+        // The count walks a worklist: the test must not recurse per
+        // level either.
         let mut seen = 0usize;
         let mut rest: Vec<&TreeNode> = tree.iter().collect();
         while let Some(current) = rest.pop() {
@@ -248,15 +233,11 @@ mod tests {
             rest.extend(current.children.iter());
         }
         assert_eq!(seen, depth);
-        // Teardown drains through the worklist, never the call stack.
         drop(tree);
     }
 
     #[test]
     fn parent_cycle_never_reaches_the_tree() {
-        // `a` and `b` point at each other, so neither is a root and both
-        // stay out of the tree (TS keeps cycle members out of the roots
-        // the same way); a clean sibling root survives.
         let flat = vec![
             node("a", Some("b"), "2024-01-01T00:00:00.000Z"),
             node("b", Some("a"), "2024-01-01T00:00:01.000Z"),
@@ -269,8 +250,7 @@ mod tests {
 
     #[test]
     fn self_parent_entry_is_a_root() {
-        // TS treats `parentId === entry.id` as no parent: the entry is a
-        // root, never its own child.
+        // TS treats `parentId === entry.id` as no parent.
         let flat = vec![
             node("s", Some("s"), "2024-01-01T00:00:00.000Z"),
             node("c", Some("s"), "2024-01-01T00:00:01.000Z"),

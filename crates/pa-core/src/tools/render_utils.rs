@@ -1,9 +1,4 @@
 //! Result-rendering helpers shared by tool renderers.
-//!
-//! Port of `packages/coding-agent/src/core/tools/render-utils.ts`, including
-//! `sanitizeBinaryOutput` from `utils/shell.ts`, the `strip-ansi` package's
-//! pattern, and the `imageFallback` / `getImageDimensions` helpers from
-//! `packages/tui/src/terminal-image.ts`.
 
 use base64::Engine;
 
@@ -36,8 +31,7 @@ pub struct ImageDimensions {
 
 /// Decode base64 image bytes and read their pixel dimensions.
 ///
-/// Mirrors the TS `getImageDimensions(data, mimeType)`: returns `None`
-/// for unknown mime types or undecodable payloads.
+/// Returns `None` for unknown mime types or undecodable payloads.
 pub fn get_image_dimensions(data: &str, mime_type: &str) -> Option<ImageDimensions> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(data.trim())
@@ -51,18 +45,13 @@ pub fn get_image_dimensions(data: &str, mime_type: &str) -> Option<ImageDimensio
     }
 }
 
-/// The bounded-prefix decode budget for [`get_image_dimensions_prefix`]
-/// (the image-heavy session-open fix): every supported format's dimension
-/// header lives in the first bytes, and a payload whose header spills past
-/// the budget reports `None` (the caller renders the payload size instead).
+/// The bounded-prefix decode budget for [`get_image_dimensions_prefix`]:
+/// every supported format's dimension header lives in the first bytes.
 pub const IMAGE_DIMENSIONS_PREFIX_BYTES: usize = 1024;
 
-/// Read an image's pixel dimensions from a BOUNDED PREFIX of its base64
-/// payload: the image-heavy session-open fix's render-path guard — a
-/// tool result can carry megabytes of base64, and its metadata row must
-/// never decode the whole string. `None` for unsupported mime types,
-/// payloads whose quantum-aligned prefix does not decode, or headers that
-/// spill past [`IMAGE_DIMENSIONS_PREFIX_BYTES`].
+/// Read an image's pixel dimensions from a BOUNDED PREFIX of its base64 payload — a tool result can
+/// carry megabytes of base64, and its metadata row must never decode the whole string. `None` for
+/// unsupported mime types or an undecodable prefix.
 #[must_use]
 pub fn get_image_dimensions_prefix(
     data: &str,
@@ -70,10 +59,9 @@ pub fn get_image_dimensions_prefix(
     max_decoded_bytes: usize,
 ) -> Option<ImageDimensions> {
     let trimmed = data.trim();
-    // Keep the prefix at a multiple of 4 base64 characters so the slice
-    // decodes as a complete unpadded sequence; `get` returns `None` when
-    // the cut lands inside a multi-byte character (a non-ASCII payload is
-    // not decodable base64 anyway).
+    // Keep the prefix at a multiple of 4 base64 characters so the slice decodes
+    // as a complete unpadded sequence; `get` returns `None` when the cut lands
+    // inside a multi-byte character (a non-ASCII payload is not decodable anyway).
     let take = (max_decoded_bytes.div_ceil(3) * 4).min(trimmed.len());
     let prefix = trimmed.get(..take)?;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -233,15 +221,12 @@ pub fn image_block(data: impl Into<String>, mime_type: impl Into<String>) -> Con
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TextOutputOptions {
-    /// Whether image fallbacks should parse image dimensions from base64 data.
     pub include_image_dimensions: bool,
 }
 
-/// Join a tool result's content into the plain-text output shown for it.
-///
-/// Port of `getTextOutput`: text blocks are ANSI-stripped, sanitized, and
-/// joined with newlines; images that are not shown inline become
-/// `[Image: ...]` fallback lines.
+/// Join a tool result's content into the plain-text output shown for it:
+/// text blocks are ANSI-stripped, sanitized, and joined with newlines;
+/// non-inline images become `[Image: ...]` fallback lines.
 pub fn get_text_output(
     content: &[ContentBlock],
     show_images: bool,
@@ -315,9 +300,8 @@ mod tests {
         assert_eq!(strip_ansi("plain"), "plain");
     }
 
-    // The home read goes through the platform wall exactly like the
-    // product's shortening (USERPROFILE on win32), so the test runs
-    // everywhere the home resolves.
+    // The home read goes through the platform wall exactly like the product's
+    // shortening (USERPROFILE on win32), so the test runs everywhere the home resolves.
     #[test]
     fn shorten_path_replaces_home() {
         let Some(home) = pa_types::platform::home_dir() else {

@@ -1,23 +1,14 @@
-//! Connection-status computation for MCP services: ONE shared state machine
-//! over the credential binding and the connection record (port of the status
-//! half of `packages/coding-agent/src/core/mcp/service-catalog.ts`:
-//! `httpConnectionStatus`, `accountStateFor`, `accountStatesFor`).
-//!
-//! Token presence alone never yields "connected": without a verified
-//! connection record the state stays "pending" until the probe succeeds.
-//! Expiry, retargeting, and missing grants surface as reconnect-required
-//! regardless of what the record last said — one truth, no stale
-//! `record.status` reads.
+//! Connection-status computation for MCP services: ONE shared state machine over the credential
+//! binding and the connection record. Token presence alone never yields "connected"; expiry,
+//! retargeting, and missing grants surface as reconnect-required.
 
 use std::collections::HashMap;
 
 use super::connection_store::{McpConnectionRecord, McpConnectionStatus as RecordStatus};
 use crate::auth::types::AuthCredential;
 
-/// Connection status vocabulary shared with the kernel host-request
-/// contract. "connected" requires a verified handshake (connection record),
-/// never bare token presence; "pending" means credentials exist but
-/// verification has not succeeded yet.
+/// Connection status vocabulary shared with the kernel host-request contract. "connected" requires
+/// a verified handshake (connection record).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpConnectionStatus {
@@ -86,8 +77,8 @@ pub(crate) struct HttpStatusOptions<'a> {
     pub declared_no_auth: bool,
 }
 
-/// Status for an HTTP connection with an optional OAuth credential or static
-/// bearer token (TS `httpConnectionStatus`).
+/// Status for an HTTP connection with an optional OAuth credential or
+/// static bearer token.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn http_connection_status(
     options: &HttpStatusOptions<'_>,
@@ -239,10 +230,8 @@ pub(crate) fn http_connection_status(
         return record_driven(record);
     }
     if options.static_token {
-        // A pasted static token: the ONE shared usability rule (type,
-        // endpoint binding, non-empty bearer), then the SAME record-driven
-        // states as the env-var path. No expiry: usable until removed or
-        // replaced, and setup field ids are never read as env vars.
+        // A pasted static token: the ONE shared usability rule, then the SAME record-driven states
+        // as the env-var path. No expiry: usable until removed or replaced.
         match super::catalog_views::mcp_static_token_usable(
             credentials.get(&credential_key),
             options.endpoint,
@@ -328,7 +317,7 @@ fn record_driven(record: Option<McpConnectionRecord>) -> HttpStatusResult {
     }
 }
 
-/// One account's honestly-computed state (TS `McpAccountState`).
+/// One account's honestly-computed state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpAccountState {
     pub connection_id: String,
@@ -371,8 +360,7 @@ fn account_state_for(
     }
 }
 
-/// Every account of a service (primary first), each with its computed state
-/// (TS `accountStatesFor`).
+/// Every account of a service (primary first), each with its computed state.
 pub(crate) fn account_states_for(
     service: &super::service_catalog::McpServiceDescriptor,
     credentials: &SnapshotCredentials,

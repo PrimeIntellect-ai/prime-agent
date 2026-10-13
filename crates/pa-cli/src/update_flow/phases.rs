@@ -1,8 +1,6 @@
-//! The coordinator's daemon-facing phase bodies: the prepare poll, the
-//! commit, the marker freshness gate, and the restore report (the
-//! successor's `update_restore_status` RPC). Split from the driver so the
-//! FSM stays readable; the driver owns the state writes, these own the
-//! wire and filesystem facts.
+//! The coordinator's daemon-facing phase bodies: the prepare poll, the commit,
+//! the marker freshness gate, and the restore report (the driver owns the
+//! state writes).
 
 use std::path::Path;
 use std::time::Duration;
@@ -18,11 +16,9 @@ use serde_json::Value;
 const PHASE_POLL: Duration = Duration::from_millis(500);
 
 /// Poll `prepare_update_restart` (idempotent on `update_id`) until the old
-/// supervisor reports `prepared` (spec §4 `Preparing`), bounded by the
-/// prepare budget. A typed refusal is the spec's `Join` case: another
-/// update owns the daemon's transaction - the update aborts for a later
-/// retry (this process holds the coordinator lock, so there is nothing to
-/// join).
+/// supervisor reports `prepared` (spec §4), bounded by the prepare budget. A
+/// typed refusal is the spec's `Join` case: another update owns the
+/// transaction - the update aborts for a later retry.
 pub(super) async fn prepare_to_prepared(
     client: &pa_tui::daemon_client::DaemonClient,
     update_id: &UpdateId,
@@ -66,10 +62,8 @@ pub(super) async fn prepare_to_prepared(
     }
 }
 
-/// Consume the prepared artifact: `commit_update_restart` (spec §5
-/// `Prepared -> Stopping`, the slice-3 dispatch). The RPC budget spans the
-/// graceful stops (a stop that exceeds its budget refuses and the
-/// supervisor abandons - either way this call returns).
+/// Consume the prepared artifact: `commit_update_restart` (spec §5). The RPC
+/// budget spans the graceful stops (a stop that exceeds its budget refuses).
 pub(super) async fn commit_update(
     client: &pa_tui::daemon_client::DaemonClient,
     update_id: &UpdateId,
@@ -96,8 +90,7 @@ pub(super) async fn commit_update(
     Ok(())
 }
 
-/// An expired marker is a refusal, never a restore of stale snapshots (spec
-/// §7).
+/// An expired marker is a refusal, never a restore of stale snapshots (spec §7).
 pub(super) fn check_marker_fresh(prepared_dir: &Path) -> Result<()> {
     let marker_path = update_marker_path(prepared_dir);
     let content = std::fs::read_to_string(&marker_path)
@@ -117,12 +110,8 @@ pub(super) fn check_marker_fresh(prepared_dir: &Path) -> Result<()> {
     }
 }
 
-/// The restore report (slice 5): poll the successor's
-/// `update_restore_status` RPC (spec §6/§9) until the boot restore pass
-/// completes or the overall restore budget expires. The supervisor's
-/// restore pass owns the real per-session counts and failure records —
-/// the coordinator reports them, it does not infer adoption from the
-/// session list.
+/// The restore report: poll the successor's `update_restore_status` RPC (spec
+/// §6/§9) until the boot restore pass completes or the budget expires.
 pub(super) async fn restore_report(
     socket_path: &Path,
     budget: &UpdateTimeoutBudget,
@@ -151,17 +140,14 @@ pub(super) async fn restore_report(
                 if complete {
                     return (counts, failures);
                 }
-                // In flight: keep polling; the snapshot so far is not the
-                // settle report.
+                // In flight: keep polling; the snapshot so far is not the settle report.
             } else {
                 client.close();
             }
         }
         if tokio::time::Instant::now() >= deadline {
-            // The budget expired mid-restore: report the snapshot's last
-            // poll as the honest state rather than blocking forever (spec
-            // §9: restore never fails the boot; a late pass still settles
-            // on the supervisor).
+            // The budget expired mid-restore: report the snapshot's last poll rather than
+            // blocking forever (spec §9: a late pass still settles on the supervisor).
             return (UpdateStatusCounts::default(), Vec::new());
         }
         tokio::time::sleep(PHASE_POLL).await;

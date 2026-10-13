@@ -1,12 +1,7 @@
-//! The saved-session roster scan (`list_sessions`): the listing loop gated
-//! by a bounded first-line header read (the `isValidSessionFile`
-//! precedent). A file whose complete first line is a parseable record that
-//! is not the `session` header is skipped without its fold (the TS
-//! `acc.invalid` arm); an unparseable or blank first line leaves the fold
-//! to decide (TS never invalidates on a parse failure). The rows stay the
-//! fold's own values: a perf-only reshape, the row contract is the fold's
-//! (now the #2713 resumable scan: the gate runs first, then
-//! `read_session_info`).
+//! The saved-session roster scan (`list_sessions`), gated by a bounded
+//! first-line header read: a parseable non-`session` first record skips the
+//! file, while an unparseable or blank first line leaves the fold to decide
+//! (TS never invalidates on a parse failure).
 
 use std::fs;
 use std::path::Path;
@@ -22,15 +17,11 @@ enum HeaderGate {
     /// The complete first line is a valid `session` header: the fold fills
     /// the row.
     Header,
-    /// The complete first line is a parseable record that is not the
-    /// `session` header. Harness-written session files lead with their
-    /// header (`session_header_line` writes it first), and TS marks the
-    /// same file invalid (`acc.invalid`), so the file is not a session:
-    /// skip it without the fold.
+    /// A parseable first record that is not the `session` header: TS marks
+    /// the file invalid (`acc.invalid`) — skip it without the fold.
     NotAHeader,
     /// The first line does not end within the bound (an over-long header, an
-    /// unreadable file): the bounded read cannot judge the file, the fold
-    /// decides.
+    /// unreadable file): the fold decides.
     Unjudged,
 }
 
@@ -39,27 +30,21 @@ fn bounded_header_gate(file: &mut fs::File) -> HeaderGate {
         return HeaderGate::Unjudged;
     };
     let Ok(text) = std::str::from_utf8(&line) else {
-        // A full read of the file would fail on the same bytes
-        // (`read_to_string`).
+        // A full read of the file would fail on the same bytes (`read_to_string`).
         return HeaderGate::NotAHeader;
     };
     if text.trim().is_empty() {
         // A blank first line judges nothing: the fold skips blank lines and
-        // may find the header on a later one (TS skips blank lines the same
-        // way), so the fold decides.
+        // may find the header on a later one.
         return HeaderGate::Unjudged;
     }
-    // TS `foldSessionScanLine` never invalidates a file on a parse failure
-    // (the catch returns before the header check, session-manager.ts:1563-1569):
-    // an unparseable first record leaves a later `session` header free to
-    // produce the row, so the fold decides.
+    // Parse failures never invalidate the file (TS `foldSessionScanLine`):
+    // a later `session` header may still produce the row, so the fold decides.
     if serde_json::from_str::<serde_json::Value>(text).is_err() {
         return HeaderGate::Unjudged;
     }
     // A parseable first record that is not the `session` header marks the
-    // file invalid (the TS `acc.invalid` arm, session-manager.ts:1602-1608):
-    // TS breaks the scan and lists no row for such a file, so the gate skips
-    // it without the fold.
+    // file invalid (TS `acc.invalid`): the gate skips it without the fold.
     if parse_session_header_line(text).is_some() {
         HeaderGate::Header
     } else {
@@ -67,17 +52,9 @@ fn bounded_header_gate(file: &mut fs::File) -> HeaderGate {
     }
 }
 
-/// One file's roster row: `None` when the file produces none.
-///
-/// One open serves both the bounded header judgment and the fold: the gate
-/// reads the first line from the fresh handle, the fold rewinds the same
-/// handle and folds from byte 0. The double-open judged and folded two
-/// handles opened moments apart, so a rename/replace racing between them
-/// could judge one file and fold another (and paid an open+close per file
-/// for the chance); the shared handle pins the judgment and the fold to
-/// the same inode — the fold's cursor, generation, and certification
-/// re-stat read the file the gate judged, never a replacement that landed
-/// in between.
+/// One file's roster row: `None` when the file produces none. One open serves
+/// the gate and the fold, pinning both to the same inode (a rename racing two
+/// handles could judge one file and fold another).
 fn roster_session_info(path: &Path) -> Option<SessionInfo> {
     let mut file = fs::File::open(path).ok()?;
     match bounded_header_gate(&mut file) {
@@ -86,27 +63,18 @@ fn roster_session_info(path: &Path) -> Option<SessionInfo> {
     }
 }
 
-/// List every valid session file in a directory, most recently modified first
-/// (port of `SessionManager.listAll`): the directory read supplies the rows'
-/// identity keys (entry order, mtime), the bounded header gate skips foreign
-/// files without their fold, and the rich-field fold runs sequentially -
-/// a measured parallel fold loses to cross-core cacheline/futex costs on a
-/// loaded multi-core box (425ms vs 137ms over 1412 files), so the fold stays
-/// the loop the scan replaced.
+/// List every valid session file in a directory, most recently modified first.
+/// The rich-field fold runs sequentially: a measured parallel fold loses to
+/// cross-core cacheline/futex costs on a loaded box (425ms vs 137ms over 1412 files).
 #[must_use]
 pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
     list_sessions_with(session_dir, |_, _, _| true)
 }
 
-/// [`list_sessions`] with the saved-catalog stream's per-file callback (TS
-/// `listSessionsFromDir`'s `onSession`): `on_row` receives every row as its
-/// own file's fold completes - the file's scan index and the scan's file
-/// total ride along (TS `onProgress`'s counts) - so a slow directory's rows
-/// reach the client DURING the scan instead of after it. The metadata pass
-/// runs first, so the scan order (newest first) is known before any fold:
-/// the stream's first row is the newest session (the agents view's entry
-/// anchor), where TS streams readdir order and only sorts at the end.
-/// `false` stops the scan (the stream consumer is gone).
+/// [`list_sessions`] with the saved-catalog stream's per-file callback:
+/// `on_row` receives rows as each fold completes, so rows reach the client
+/// DURING the scan; the metadata pass runs first, so the first row is the
+/// newest session. `false` stops the scan.
 pub fn list_sessions_with(
     session_dir: &Path,
     mut on_row: impl FnMut(usize, usize, &SessionInfo) -> bool,
@@ -128,9 +96,8 @@ pub fn list_sessions_with(
     let mut infos = Vec::new();
     for (index, (path, _)) in files.into_iter().enumerate() {
         if let Some(info) = roster_session_info(&path) {
-            // `false` stops the scan: the stream consumer is gone (the
-            // connection loop dropped its channel), so the remaining
-            // folds serve nobody - the scan returns the rows it has.
+            // `false` stops the scan: the consumer is gone, so the remaining
+            // folds serve nobody — the scan returns the rows it has.
             if !on_row(index, total, &info) {
                 break;
             }
@@ -175,8 +142,8 @@ mod tests {
         path
     }
 
-    /// The scan this module replaced: sequential folds collected in
-    /// directory order, stable-sorted by mtime. The scan's oracle.
+    /// The scan this module replaced: sequential folds in directory order, stable-sorted by
+    /// mtime. The scan's oracle.
     fn sequential_list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
         let Ok(read) = fs::read_dir(session_dir) else {
             return Vec::new();
@@ -220,10 +187,8 @@ mod tests {
     #[test]
     fn skips_a_file_whose_first_parseable_line_is_not_the_session_header() {
         let dir = temp_dir();
-        // A session header preceded by a parseable non-session record: TS
-        // marks the file invalid (`acc.invalid`, session-manager.ts:1602-1608)
-        // and lists no row, so the gate skips it without the fold - even
-        // though a header follows.
+        // A session header preceded by a parseable non-session record: TS marks
+        // the file invalid (`acc.invalid`) — skipped even though a header follows.
         let mistyped = dir.join("mistyped.jsonl");
         let mut session = SessionFile::create("/repo/mistyped", None, 0);
         session.set_path(mistyped.clone());
@@ -234,8 +199,8 @@ mod tests {
             format!("{{\"type\":\"message\",\"id\":\"x1\"}}\n{header_line}"),
         )
         .unwrap();
-        // An unparseable first line with no header anywhere is no skip
-        // either: the fold decides and finds no row.
+        // An unparseable first line with no header anywhere is no skip either: the fold decides
+        // and finds no row.
         let foreign = dir.join("foreign.jsonl");
         fs::write(&foreign, "not a session file at all\n").unwrap();
         assert!(list_sessions(&dir).is_empty());
@@ -244,10 +209,8 @@ mod tests {
     #[test]
     fn still_lists_a_file_with_an_unparseable_first_line_and_a_later_header() {
         let dir = temp_dir();
-        // TS `foldSessionScanLine` never invalidates on a parse failure (the
-        // catch returns before the header check, session-manager.ts:1563-1569):
-        // a truncated or foreign first line must not hide a recoverable
-        // session, so the fold decides the file.
+        // TS never invalidates on a parse failure: a truncated or foreign
+        // first line must not hide a recoverable session.
         let path = write_session(&dir, "/repo/junk-first", None, 1);
         let content = fs::read_to_string(&path).unwrap();
         fs::write(&path, format!("not a session file at all\n{content}")).unwrap();
@@ -287,9 +250,8 @@ mod tests {
     }
 
     #[test]
-    // A wall-clock probe, not a correctness test: it only prints timings of a
-    // real sessions dir (PA_ROSTER_BENCH_DIR), so it runs on demand with
-    // `cargo test -p pa-daemon --release -- --ignored roster_scan_wall_clock --nocapture`.
+    // Runs on demand: `cargo test -p pa-daemon --release -- --ignored roster_scan_wall_clock
+    // --nocapture`.
     #[ignore = "wall-clock probe, not a correctness test: prints timings of a real sessions dir (PA_ROSTER_BENCH_DIR)"]
     fn roster_scan_wall_clock() {
         let dir = match std::env::var_os("PA_ROSTER_BENCH_DIR") {
@@ -310,10 +272,6 @@ mod tests {
         }
     }
 
-    /// The streaming callback variant emits every row as its own file's
-    /// fold completes, newest first (the metadata pass precedes the
-    /// folds), with the scan's sorted-file index and total riding along
-    /// (TS `listSessionsFromDir`'s per-file `onSession`/`onProgress`).
     #[test]
     fn list_sessions_with_emits_rows_newest_first_with_scan_counts() {
         let dir = temp_dir();
@@ -355,8 +313,6 @@ mod tests {
         );
     }
 
-    /// The callback's `false` stops the scan (the stream consumer is
-    /// gone): the rows folded so far return, the rest never fold.
     #[test]
     fn list_sessions_with_stops_when_the_consumer_stops() {
         let dir = temp_dir();

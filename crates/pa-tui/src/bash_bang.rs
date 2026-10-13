@@ -1,19 +1,16 @@
-//! The `!`/`!!` bash-from-chat shortcut (TS interactive-mode `onSubmit`):
-//! `!command` runs bash directly — no model turn — and the output enters
-//! the session context (the daemon records the durable `bashExecution`
-//! row, so follow-up prompts see it); `!!command` runs the same way but
-//! stays excluded from the context; a bare `!`/`!!` is bash mode with
-//! nothing to run and is never sent as a prompt.
+//! The `!`/`!!` bash-from-chat shortcut: `!command` runs bash directly — no model turn —
+//! and the output enters the session context (the daemon records the durable
+//! `bashExecution` row); `!!command` runs the same way but stays excluded from the
+//! context; a bare `!`/`!!` is never sent as a prompt.
 
 use std::fmt::Write;
-/// The tail-truncation budget shared with the bash tool (TS
-/// `truncateTail` defaults): the last 2000 lines within 50KB win, so a
-/// pane-mounted run cannot seed a follow-up with unbounded output.
+/// The tail-truncation budget shared with the bash tool: the last 2000 lines within 50KB
+/// win, so a pane-mounted run cannot seed a follow-up with unbounded output.
 const TAIL_MAX_LINES: usize = 2000;
 pub(crate) const TAIL_MAX_BYTES: usize = 50 * 1024;
 
 /// One `!`/`!!` submission: the command and whether the run is excluded
-/// from the session context.
+/// from the context.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BashShortcut {
     pub command: String,
@@ -24,17 +21,15 @@ pub struct BashShortcut {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BashBang {
     /// A bare `!`/`!!` with nothing after it: bash mode with nothing to
-    /// run (TS returns without sending a prompt).
+    /// run.
     Bare,
     /// A command to run through the user-bash slot.
     Run(BashShortcut),
 }
 
-/// TS `getBashPromptInfo` (custom-editor.ts): the prompt prefix the
-/// editor renders in place of a leading `!`/`!!`, and how many
-/// characters of the typed line stay hidden behind it (the leading
-/// whitespace plus the prefix, one wider when the user typed its
-/// trailing space).
+/// The prompt prefix the editor renders in place of a leading `!`/`!!`, and how many
+/// characters of the typed line stay hidden behind it (the leading whitespace plus the
+/// prefix, one wider when the user typed its trailing space).
 #[must_use]
 pub fn bash_prompt_info(line: &str) -> Option<(&'static str, usize)> {
     let trimmed = line.trim_start();
@@ -50,8 +45,8 @@ pub fn bash_prompt_info(line: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-/// Parse a submitted text through the bash shortcut (TS `text.startsWith("!")`
-/// ladder). `None` for submissions that do not start with `!`.
+/// Parse a submitted text through the bash shortcut. `None` for
+/// submissions that do not start with `!`.
 #[must_use]
 pub fn parse_bash_bang(text: &str) -> Option<BashBang> {
     let rest = match text.strip_prefix("!!") {
@@ -70,10 +65,8 @@ pub fn parse_bash_bang(text: &str) -> Option<BashBang> {
     }))
 }
 
-/// Format bash output for the follow-up seed text (TS `bashOutputToText`):
-/// the fenced output (the fence outgrows any backtick run in it so
-/// command output cannot terminate it early), then the cancellation or
-/// exit-code suffix and the truncation notice.
+/// Format bash output for the follow-up seed text: the fenced output (the fence outgrows
+/// any backtick run in it), then the cancellation or exit-code suffix and the truncation notice.
 #[must_use]
 pub fn bash_output_to_text(
     output: &str,
@@ -114,11 +107,9 @@ pub fn bash_output_to_text(
     text
 }
 
-/// The tail truncation the side pane applies to a run's raw output before
-/// seeding a follow-up (TS `truncateTail`): the last `TAIL_MAX_LINES`
-/// lines within `TAIL_MAX_BYTES` win. The result (window and truncation
-/// flag) depends only on the input's last `TAIL_MAX_BYTES + 1` bytes, and
-/// the bash card trims its stream to that.
+/// The tail truncation applied to a run's raw output before seeding a follow-up: the
+/// last `TAIL_MAX_LINES` lines within `TAIL_MAX_BYTES` win. The result depends only on
+/// the input's last `TAIL_MAX_BYTES + 1` bytes (the bash card trims its stream to that).
 #[must_use]
 pub fn truncate_tail(content: &str) -> (String, bool) {
     let total_bytes = content.len();
@@ -147,9 +138,7 @@ pub fn truncate_tail(content: &str) -> (String, bool) {
 mod tests {
     use super::*;
 
-    /// `!command` runs and joins the context; `!!command` runs excluded;
-    /// a bare `!`/`!!` (whitespace only counts as bare) is inert; other
-    /// submissions do not route through the shortcut at all.
+    /// Whitespace-only counts as bare; other submissions do not route here.
     #[test]
     fn parses_the_variants() {
         assert_eq!(
@@ -173,8 +162,7 @@ mod tests {
         assert_eq!(parse_bash_bang("/help"), None);
     }
 
-    /// A `!!`-prefixed command still parses its own body for a second `!`
-    /// (the variant is the leading prefix, not the whole text).
+    /// The variant is the leading prefix, not the whole text.
     #[test]
     fn double_bang_keeps_the_command_body() {
         assert_eq!(
@@ -186,10 +174,7 @@ mod tests {
         );
     }
 
-    /// The seed text fences the output, names the fence longer than any
-    /// backtick run inside the output, and carries the exit-code and
-    /// truncation suffixes. The fence floor is 3 and it grows past a
-    /// run only by one (TS `Math.max(3, longest + 1)`).
+    /// The fence floor is 3 and grows past a backtick run only by one.
     #[test]
     fn seed_text_matches_the_ts_shape() {
         assert_eq!(
@@ -207,9 +192,7 @@ mod tests {
         assert_eq!(bash_output_to_text("", None, false, None), "(no output)");
     }
 
-    /// `bash_prompt_info` (TS `getBashPromptInfo`): `!!` outranks `!`,
-    /// leading whitespace counts toward the hidden prefix, and a typed
-    /// trailing space makes the prefix one wider.
+    /// `!!` outranks `!`; whitespace counts toward the hidden prefix.
     #[test]
     fn bash_prompt_info_matches_the_ts_ladder() {
         assert_eq!(bash_prompt_info("!echo hi"), Some(("! ", 1)));
@@ -222,7 +205,6 @@ mod tests {
         assert_eq!(bash_prompt_info(""), None);
     }
 
-    /// Tail truncation keeps the last lines within the byte budget.
     #[test]
     fn tail_truncation_keeps_the_tail() {
         let long = vec!["line"; 3000].join("\n");

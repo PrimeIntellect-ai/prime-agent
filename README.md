@@ -40,13 +40,19 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 ## Install
 
-Install the latest build with the one-command installer (every push to the `rust` branch publishes a fresh rolling beta; the stable channel ships on release):
+Install the latest stable version with the one-command installer:
 
 ```bash
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
-The served installer and everything it downloads — the version pointers, the platform tarballs, the checksums — come from the same domain: no GitHub URL is on the user path.
+On Windows, install from PowerShell:
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
+The Windows installer downloads the latest stable Windows x64 build and verifies its checksum before installation.
 
 ## Why Prime Agent
 
@@ -60,6 +66,22 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
+## Clipboard over SSH and tmux
+
+Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.
+
+Nested tmux servers and terminals may still block delivery. An outer tmux with `set-clipboard external` can reject the inner server's OSC 52. In that case, run `tmux set -s set-clipboard on` on the outer server, or use native terminal selection (Shift-drag in most terminals; Option-drag in iTerm2) followed by Cmd-C. macOS Terminal.app does not support OSC 52; iTerm2 requires its “Applications in terminal may access clipboard” setting.
+
+## Custom certificate authorities
+
+HTTPS requests trust your operating system's trust store together with the bundled Mozilla roots. For servers behind a custom CA, point `NODE_EXTRA_CA_CERTS` at a PEM bundle of your CA certificates — the same variable the Node/TypeScript build honors:
+
+```bash
+export NODE_EXTRA_CA_CERTS=/path/to/your-ca.pem
+```
+
+Each transport reads the variable once when its first client is initialized. The background daemon keeps the environment it started with, so run `prime-agent shutdown` after changing it.
+
 ## Getting Started
 
 Start Prime Agent from the repository or directory you want it to work in:
@@ -72,7 +94,7 @@ prime-agent
 On first launch, run `/login` to choose a subscription or API-key provider. Prime Agent works in the current directory and can run commands and modify files there. Use a disposable clone, clean worktree, or another checkpoint you can inspect and restore.
 
 > [!WARNING]
-> Prime Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, skills, and extensions only. Run untrusted code or instructions in an external sandbox or restricted environment.
+> Prime Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, and skills only. Run untrusted code or instructions in an external sandbox or restricted environment.
 
 Useful commands:
 

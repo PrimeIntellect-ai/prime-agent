@@ -1,2 +1,0 @@
-===== ts normalized loader rows
-===== rust normalized loader rows

@@ -1,0 +1,1 @@
+- A session file whose header id is not a plain file name (for example `../x` or an absolute path) is now treated as an invalid session, so its artifacts can no longer be written outside the session-artifacts folder.

@@ -1,0 +1,1 @@
+- A prompt stashed with ctrl+s now returns to the empty prompt box after you send another prompt, as it did in the TypeScript version.

@@ -1,8 +1,7 @@
 //! The update flow's graceful-stop driver (spec §5 `Stopping`, §9 budgets,
-//! invariant I3): workers stop by an acked graceful-stop request and then
-//! exiting, each within its budget; a worker that never acks or never exits
-//! ABANDONS the update - the supervisor returns to `Serving` and relaunches
-//! the already-stopped workers - and no session is ever killed mid-run.
+//! invariant I3): workers stop by an acked request and then exiting,
+//! each within its budget; a miss ABANDONS the update — the supervisor
+//! returns to `Serving` — and no session is ever killed mid-run.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,8 +13,7 @@ use pa_types::daemon::UpdateTimeoutBudget;
 use crate::registry::ResidentWorker;
 
 /// TS `UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS` parity: the per-worker cap
-/// for update RPCs, always bounded by the remaining prepare deadline at the
-/// call site.
+/// for update RPCs, always bounded by the remaining prepare deadline at the call site.
 pub(crate) const WORKER_REQUEST_TIMEOUT_MS: u64 = 90_000;
 
 /// One worker's stop verdict.
@@ -28,29 +26,21 @@ pub(crate) enum WorkerStopVerdict {
     Refused,
 }
 
-/// The supervisor's transport to its workers, abstracted so the stop budget
-/// logic is unit-testable against a fake worker that never acks (the spec's
-/// slice-3 verifier: "worker that never acks -> update abandoned, sessions
-/// intact").
+/// The supervisor's transport to its workers, abstracted so the stop
+/// budget logic is unit-testable against a fake worker that never acks.
 ///
-/// Contract of the two operations, matching the budget table (spec §9
-/// `Stopping`): [`WorkerStopTransport::request_shutdown`] is the acked
-/// graceful-stop request bounded by `worker_stop_ms` (its success means the
-/// worker flushed its recovery journal and telemetry before replying - the
-/// worker's shutdown handler is the flush barrier); a success then gets
-/// `worker_stop_extension_ms` of exit wait. `wait_exit` returns `true` only
-/// when the worker's process identity is gone by the deadline.
+/// Contract (spec §9 `Stopping`): `request_shutdown` is the acked request bounded by
+/// `worker_stop_ms`; a success means a flush before replying and gets `worker_stop_extension_ms`
+/// of exit wait; `wait_exit` true when gone by the deadline.
 pub(crate) trait WorkerStopTransport {
-    /// Send the acked graceful-stop request; `Err` on timeout, disconnect,
-    /// or refusal.
+    /// Send the acked graceful-stop request; `Err` on timeout, disconnect, or refusal.
     fn request_shutdown(
         &self,
         resident: &Arc<ResidentWorker>,
         timeout: Duration,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
 
-    /// Wait until the worker's process is gone or the timeout passes
-    /// (`true` = exited).
+    /// Wait until the worker's process is gone or the timeout passes (`true` = exited).
     fn wait_exit(
         &self,
         resident: &Arc<ResidentWorker>,
@@ -58,10 +48,8 @@ pub(crate) trait WorkerStopTransport {
     ) -> impl std::future::Future<Output = bool> + Send;
 }
 
-/// Stop every resident worker gracefully, concurrently, each within its own
-/// budget (spec §9: 30 s request budget, +30 s exit window). A worker that
-/// misses either budget refuses - the update driver abandons the update for
-/// that verdict (never a kill).
+/// Stop every resident worker gracefully, concurrently, each within its own budget (spec §9: 30 s
+/// request budget, +30 s exit window); a miss abandons the update for that verdict (never a kill).
 pub(crate) async fn stop_workers_gracefully<T: WorkerStopTransport + Sync>(
     transport: &T,
     residents: &[Arc<ResidentWorker>],
@@ -153,9 +141,8 @@ mod tests {
     }
 
     fn resident(name: &str) -> Arc<ResidentWorker> {
-        // The stop driver only reads `worker_id`; a minimal descriptor-free
-        // resident cannot be built (ResidentWorker::new needs a descriptor),
-        // so build a real one from a minimal descriptor.
+        // The stop driver only reads `worker_id`; a real descriptor is
+        // needed because `ResidentWorker::new` takes one.
         let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
             version: 2,
             worker_id: name.to_string(),
@@ -242,9 +229,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_ack_means_no_kill_and_the_verdict_names_the_worker() {
-        // The spec's slice-3 verifier, at the driver seam: a worker that
-        // never acks is Refused (the driver abandons, the session keeps
-        // running - nothing here or in the driver signals or kills).
+        // The spec's slice-3 verifier: a worker that never acks is Refused
+        // (the session keeps running — nothing signals or kills).
         let fake = Arc::new(FakeWorkers {
             acks: Mutex::new(vec![false]),
             exits: Mutex::new(vec![false]),

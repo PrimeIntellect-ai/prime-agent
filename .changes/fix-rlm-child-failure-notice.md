@@ -1,0 +1,1 @@
+- A subagent that fails because its task cannot be delivered, or whose worker becomes unreachable, now sends a failure notice with the error to its parent, and a goal waiting on it resumes.

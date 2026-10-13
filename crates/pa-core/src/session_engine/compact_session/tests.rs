@@ -1,4 +1,4 @@
-//! Compact-session tests (moved with their concerns).
+//! Compact-session tests.
 use super::*;
 use pa_types::ai::{AssistantMessage, UserContent};
 
@@ -71,13 +71,6 @@ fn faux_registration() -> pa_ai::faux::FauxProviderRegistration {
     registration
 }
 
-// The family children: the test mass splits by test family (the same
-// tests, the same assertions, zero behavior changes). Each child holds
-// its family's moved blocks byte-identically (in the original file's
-// first-appearance order), `use super::*` re-anchors the two shared
-// fixtures above, and the session_engine module bindings in the facade
-// keep the children's `super::super::` path literals resolving
-// unchanged.
 mod auxiliary_model;
 mod cut_math;
 mod execute_compaction;
@@ -85,3 +78,25 @@ mod prepare_compaction;
 mod second_compaction;
 mod skip_guards;
 mod split_turn;
+
+async fn execute_compaction(
+    session: &mut SessionManager,
+    options: CompactOptions<'_>,
+) -> anyhow::Result<CompactOutcome> {
+    let started_at = std::time::Instant::now();
+    let mut attempt = match prepare_attempt(session, &options) {
+        Ok(attempt) => attempt,
+        Err(skip) => return Ok(CompactOutcome::Skipped(skip.user_message())),
+    };
+    let prepared = summarize_attempt(&attempt, &options).await?;
+    assert!(
+        commit_attempt(session, &mut attempt, &prepared, options.abort)?,
+        "no concurrent writer in a unit test"
+    );
+    Ok(CompactOutcome::Ran(Box::new(CompactRun {
+        result: prepared.result,
+        entry: prepared.entry,
+        duration_ms: started_at.elapsed().as_millis() as u64,
+        ipython_state: None,
+    })))
+}

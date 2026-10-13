@@ -1,8 +1,6 @@
-//! Single tool-call pipeline (TS `prepareToolCall` / `executePreparedToolCall`
-//! / `finalizeExecutedToolCall`): argument preparation and schema validation,
+//! Single tool-call pipeline: argument preparation and schema validation,
 //! the `beforeToolCall`/`afterToolCall` hooks, abort racing, streamed
 //! `tool_execution_update` emission, and the resulting tool outcome.
-//! Section of the port of `packages/agent/src/agent-loop.ts`.
 
 use std::sync::Arc;
 
@@ -14,12 +12,12 @@ use crate::types::{
 
 use super::abort::race_with_abort;
 use super::run::clone_context;
-use super::tools::{FinalizedToolCallOutcome, Preparation, PreparedToolCall};
+use super::tools::{find_tool, FinalizedToolCallOutcome, Preparation, PreparedToolCall};
 use super::{AgentEventSink, AgentLoopConfig};
 
-/// Port of `prepareToolCall`: tool lookup, `prepareArguments`, schema
-/// validation, and the `beforeToolCall` hook. Never fails; errors become
-/// immediate error tool results exactly like the TS catch-all.
+/// Tool lookup, `prepareArguments`, schema validation, and the
+/// `beforeToolCall` hook. Never fails; errors become immediate error tool
+/// results exactly like the TS catch-all.
 pub(crate) async fn prepare_tool_call(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -27,11 +25,7 @@ pub(crate) async fn prepare_tool_call(
     config: &AgentLoopConfig,
     signal: Option<&AbortSignal>,
 ) -> Preparation {
-    let Some(tool) = current_context
-        .tools
-        .iter()
-        .find(|t| t.name() == tool_call.name)
-    else {
+    let Some(tool) = find_tool(&current_context.tools, &tool_call.name) else {
         return Preparation::Immediate {
             result: AgentToolResult::error(format!("Tool {} not found", tool_call.name)),
             is_error: true,
@@ -115,10 +109,9 @@ pub(crate) struct ExecutedToolCallOutcome {
     is_error: bool,
 }
 
-/// Port of `executePreparedToolCall`: race the tool against abort, stream
-/// `tool_execution_update` events through a background emitter task, and
-/// return an error tool result when the tool fails (or aborts, with the TS
-/// message "Tool execution aborted").
+/// Race the tool against abort, stream `tool_execution_update` events
+/// through a background emitter task, and return an error tool result when
+/// the tool fails (or aborts, with the TS message "Tool execution aborted").
 pub(crate) async fn execute_prepared_tool_call(
     prepared: &PreparedToolCall,
     signal: Option<&AbortSignal>,
@@ -238,7 +231,7 @@ fn error_tool_result(signal: Option<&AbortSignal>, error: &anyhow::Error) -> Age
     }
 }
 
-/// Port of `finalizeExecutedToolCall`: apply the `afterToolCall` overrides.
+/// Apply the `afterToolCall` overrides.
 pub(crate) async fn finalize_executed_tool_call(
     current_context: &AgentContext,
     assistant_message: &AssistantMessage,
@@ -312,7 +305,6 @@ pub(crate) async fn emit_tool_execution_end(
     .await
 }
 
-/// Port of `createToolResultMessage`.
 pub(crate) fn create_tool_result_message(
     finalized: &FinalizedToolCallOutcome,
 ) -> ToolResultMessage {

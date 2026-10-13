@@ -39,9 +39,8 @@ pub fn iso_from_unix_ms(ms: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
-/// Epoch milliseconds from an RFC 3339 UTC timestamp
-/// (`YYYY-MM-DDTHH:MM:SS[.fff]Z`, the shape `now_iso` writes and the TS
-/// product's `new Date().toISOString()`). `None` for anything else.
+/// Epoch milliseconds from an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SS[.fff]Z`, the shape
+/// `now_iso` writes and the TS product's `new Date().toISOString()`). `None` for anything else.
 pub fn iso_to_unix_ms(iso: &str) -> Option<u64> {
     let bytes = iso.as_bytes();
     if bytes.len() < 19

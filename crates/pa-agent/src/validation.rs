@@ -1,28 +1,17 @@
-//! Tool-argument validation, the TS `validateToolArguments` contract
-//! (`packages/ai/src/utils/validation.ts`).
-//!
-//! The TS reference validates against `TypeBox` schemas with `Value.Convert`
-//! (primitive coercion) plus a compiled validator. This port implements the
-//! JSON Schema subset that the product's tool schemas use: `type` (including
-//! type arrays), `properties`, `required`, `items`, `enum`, `const`,
-//! `additionalProperties: false`, and numeric bounds, with the same primitive
-//! coercion behavior (`"42"` -> `42` for `type: "number"`, etc.). The error
-//! message format matches the TS reference exactly so surfaced text is
-//! identical.
+//! Tool-argument validation, the TS `validateToolArguments` contract: the
+//! JSON Schema subset the product's tool schemas use, with the same
+//! primitive coercion behavior. The error message format matches the TS
+//! reference exactly so surfaced text is identical.
 
 use serde_json::Value;
 
 /// Validates tool call arguments against the tool's JSON Schema, returning
 /// the validated (and potentially coerced) arguments.
 ///
-/// Mirrors TS `validateToolArguments(tool, toolCall)`: on failure it returns
-/// the preformatted error message (TS throws `Error(message)`); the caller
-/// wraps it into an error tool result.
-///
 /// # Errors
 ///
-/// Returns the preformatted validation error message when the arguments fail
-/// the tool's schema checks (after coercion).
+/// Returns the preformatted validation error message (TS throws
+/// `Error(message)`; the caller wraps it into an error tool result).
 pub fn validate_tool_arguments(
     tool_name: &str,
     schema: &Value,
@@ -60,9 +49,9 @@ fn schema_type(schema: &Value) -> Vec<&str> {
     }
 }
 
-/// Primitive coercion mirroring `TypeBox` `Value.Convert`: string values are
-/// parsed into number/boolean when the schema requests it, and number/boolean
-/// values are stringified when the schema requests a string.
+/// Primitive coercion mirroring `TypeBox` `Value.Convert`: strings parse
+/// into number/boolean when the schema requests it, and numbers/booleans
+/// stringify when the schema requests a string.
 fn coerce(schema: &Value, value: &mut Value) {
     let types = schema_type(schema);
     if types.is_empty() {
@@ -160,9 +149,8 @@ fn number_value(n: f64) -> Value {
     }
 }
 
-/// Instance path formatting mirroring TS `formatValidationPath`:
-/// JSON pointer paths (`/a/b`) become dotted paths (`a.b`), and the empty
-/// path reads as `root`.
+/// Instance path formatting mirroring TS `formatValidationPath`: the
+/// empty path reads as `root`.
 fn format_path(path: &str) -> String {
     if path.is_empty() {
         "root".to_string()

@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,17 +11,10 @@
 )]
 
 //! Latency regression guard for the operators' agents-view round trip
-//! ("when I go to subagents view and hit esc to come back to this chat
-//! view, it takes close to 5-10 seconds", 2026-09-24): the Esc handoff
-//! back into the chat is a fresh interactive surface attaching to the
-//! live session — a daemon `attach` (the full snapshot round trip) plus
-//! the client-side rebuild. This test times exactly that second surface
-//! (`run_interactive` on the same live session, the handoff's own code
-//! path — the agents view's own surface has its separate guard in
-//! `agents_view_saved_catalog_failure` / the flash-fix lane) under a
-//! seeded store: real transcript entries plus a seeded session-artifact
-//! tree, and asserts the round trip stays under the sub-second ceiling,
-//! an order of magnitude under the operator's 5-10s report.
+//! (operator ruling 2026-09-24: the Esc handoff took close to 5-10
+//! seconds): the handoff is a fresh surface attaching to the live session
+//! — a daemon `attach` plus the client-side rebuild. This test times that
+//! second surface under a seeded store and asserts a sub-second round trip.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -37,24 +23,16 @@ use std::time::{Duration, Instant};
 
 use pa_types::daemon::DaemonCommand;
 
-/// The generous-but-bounded view-switch ceiling: a healthy attach round
-/// trip over a local daemon is tens of milliseconds; one full second is
-/// the regression ceiling.
+/// A healthy attach is tens of milliseconds; one full second is the regression ceiling.
 const VIEW_SWITCH_CEILING: Duration = Duration::from_millis(1_000);
 
-/// The seeded artifact tree size: enough rows that the context-tree cache
-/// warm at attach does real work in the background, without doubling the
-/// fixture cost of the daemon-side guard (`context_latency_e2e`).
-/// Box-shaped per the operator's real store (the governance session that
-/// reported the 5-10s handoff carries 66 live+persisted children): the
-/// seeded artifact tree matches that per-session child scale.
+/// Enough rows that the context-tree cache warm does real work, without
+/// doubling the daemon-side guard's fixture cost (box-shaped per the
+/// operator's real store: 66 children).
 const SEEDED_CHILDREN: usize = 60;
 const SEEDED_MESSAGES_PER_CHILD: usize = 50;
 /// The transcript the round trip re-attaches to: a multi-hundred-message
-/// session file (the reporting governance session carries 1279 messages
-/// in 9.4MB — the attach snapshot ships the whole history), written
-/// directly instead of run turn-by-turn (the fixture writer, not live
-/// model turns).
+/// session file (the snapshot ships the whole history).
 const SEEDED_TRANSCRIPT_MESSAGES: usize = 400;
 
 struct Supervisor {
@@ -145,11 +123,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// Create a live session through the daemon protocol (the same `create`
-/// config the TUI sends), writing the scripted engine config first.
 /// Create a live session FROM a pre-written session file (the
-/// operator-scale attach snapshot): the worker opens the file's history
-/// and the scripted engine appends any live turns.
+/// operator-scale attach snapshot): the worker opens the file's history.
 async fn create_session_from_file_via_daemon(
     socket: &Path,
     script_path: &Path,
@@ -191,9 +166,7 @@ async fn create_session_from_file_via_daemon(
         .to_string()
 }
 
-/// Seed one persisted child session file (a version-3 header plus a
-/// parent-chained message run), the artifact tree the context-tree cache
-/// warms against at attach.
+/// Seed one persisted child session file (a version-3 header plus a parent-chained message run).
 fn seed_child_session(dir: &Path, child_id: &str) {
     std::fs::create_dir_all(dir).expect("child dir");
     let file = dir.join(format!("{child_id}.jsonl"));
@@ -288,8 +261,7 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     let supervisor = spawn_supervisor(dir.path());
 
     // The multi-hundred-message transcript, written directly (the
-    // operator-scale attach snapshot ships the whole history): a parent-
-    // chained user/assistant run.
+    // operator-scale attach snapshot ships the whole history).
     let durable = format!("01a0vs-{:012x}", u64::from(std::process::id()));
     let transcript_path = session_dir.join(format!("{durable}.jsonl"));
     {
@@ -346,16 +318,14 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     )
     .await;
 
-    // A seeded artifact tree: the attach warm does real background work
-    // (the context-tree cache) while the round trip is measured.
+    // A seeded artifact tree: the attach warm does real background work.
     let artifacts_root = agent_dir.join("session-artifacts").join(&durable);
     for index in 0..SEEDED_CHILDREN {
         let child_id = format!("viewswitch-child-{index:03}");
         seed_child_session(&artifacts_root.join(format!("sub-{child_id}")), &child_id);
     }
 
-    // The first chat surface: attach, one scripted turn, idle (the
-    // transcript the round trip re-attaches to).
+    // The first chat surface: attach, one scripted turn, idle.
     let first_plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
@@ -376,9 +346,7 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
         .expect("first interactive run");
 
     // The Esc handoff's own path: a fresh surface attaching to the same
-    // live session (detach ran at the first surface's exit, exactly like
-    // the agents-view round trip). The wall time is the view-switch
-    // round trip the operator reported at 5-10s.
+    // live session; the wall time is the reported 5-10s round trip.
     let second_plan = pa_tui::interactive::HeadlessPlan {
         steps: Vec::new(),
         width: 100,

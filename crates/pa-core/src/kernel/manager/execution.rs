@@ -155,14 +155,8 @@ impl Inner {
                 if !execution.opts.internal {
                     g.user_executions += 1;
                 }
-                // The freshness memo describes the namespace as of its
-                // commit. A settled request that runs user-namespace code
-                // (an execute — the bootstrap class included, internal or
-                // not) or replaces the namespace wholesale (a restore) ends
-                // that description: the next capture must re-dump. The
-                // state reads (the listing) and the captures themselves do
-                // not clear it — the captures re-arm the memo at their own
-                // commits.
+                // The freshness memo describes the namespace as of its commit. A settled request
+                // that runs user-namespace code or replaces the namespace ends that description.
                 if execution.namespace_code || execution.restores_namespace {
                     g.capture_freshness = None;
                     g.freshness_epoch += 1;
@@ -193,12 +187,9 @@ impl Inner {
                 );
             }
             if let Some(text) = &result {
-                if text.len() > execution.max_chars {
-                    let mut clipped = text[..execution.max_chars.clamp(0, text.len())].to_string();
-                    // Trim at a char boundary when max_chars split a multi-byte char.
-                    while !clipped.is_char_boundary(clipped.len()) {
-                        clipped.pop();
-                    }
+                if let Some((end, _)) = text.char_indices().nth(execution.max_chars) {
+                    // Match the Unicode-scalar limit used for stdout and stderr.
+                    let mut clipped = text[..end].to_string();
                     let _ = write!(
                         clipped,
                         "\n[... output truncated at {} chars ...]",
@@ -233,6 +224,7 @@ impl Inner {
                     .then(|| std::mem::take(&mut buffers.attachments)),
                 sent_agent_messages: (!buffers.sent_agent_messages.is_empty())
                     .then(|| std::mem::take(&mut buffers.sent_agent_messages)),
+                bash_commands: buffers.bash_commands.take(),
                 background_output: (!background_output.is_empty()).then_some(background_output),
                 status,
                 error: buffers.error.take(),

@@ -1,8 +1,4 @@
 //! Offline mode (`PI_OFFLINE`): no network at all, serve cache/bundled/compiled.
-//!
-//! Ported from `isCatalogOffline` in `model-catalog-cache.ts`: the value
-//! matches `^(1|true|yes)$` case-insensitively; unset or anything else
-//! keeps the network enabled.
 
 /// Whether the catalog subsystem must avoid every network request.
 #[must_use]

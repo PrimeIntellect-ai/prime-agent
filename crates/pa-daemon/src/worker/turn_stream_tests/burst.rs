@@ -1,14 +1,10 @@
-//! The provider-burst coalescing family (moved with its concern): the
-//! per-tick update coalescing and the settle-frame flush, with the
-//! `BurstStreamEngine` + `texts_at` fixtures.
+//! The provider-burst coalescing family: the per-tick update
+//! coalescing and the settle-frame flush.
 use super::*;
 
-/// One scripted turn that streams `deltas` partial-message updates
-/// (one full-snapshot `message_update` frame per provider delta, the
-/// wire shape a fast provider produces on a big turn) and settles
-/// with one final assistant message. `spacing_ms` paces the deltas so
-/// the flusher tick can interleave (the realistic case: a provider
-/// that outruns 20 updates/second).
+/// One scripted turn that streams `deltas` partial-message updates and
+/// settles with one final assistant message. `spacing_ms` paces the
+/// deltas so the flusher tick can interleave.
 struct BurstStreamEngine {
     deltas: usize,
     spacing_ms: u64,
@@ -119,9 +115,7 @@ fn texts_at(events: &[Value], positions: &[usize]) -> Vec<String> {
 }
 
 /// A provider that outruns the flush tick still broadcasts at most one
-/// parked update per tick — never one wire frame per delta (the
-/// pre-fix path flooded the wire with every delta and the client
-/// starved at the tick rate; a 12k-token turn took minutes to render).
+/// parked update per tick — never one wire frame per delta.
 #[tokio::test]
 async fn a_provider_burst_broadcasts_one_coalesced_update_per_tick_not_per_delta() {
     const DELTAS: usize = 120;
@@ -164,11 +158,9 @@ async fn a_provider_burst_broadcasts_one_coalesced_update_per_tick_not_per_delta
     );
 }
 
-/// The streamed-turn pipeline end to end — pa-ai faux provider ->
-/// pa-core adapter -> pa-agent loop and listeners -> daemon engine
-/// forwarding -> worker emit -> coalescer -> broadcast — timed on the
-/// turn wall clock. The faux splitter randomizes chunk sizes, so runs
-/// vary; compare medians, not single runs.
+/// The streamed-turn pipeline end to end, timed on the turn wall clock.
+/// The faux splitter randomizes chunk sizes, so runs vary; compare
+/// medians, not single runs.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 #[ignore = "run with cargo test -p pa-daemon --release streamed_turn_pipeline_benchmark -- --ignored --nocapture"]
@@ -262,10 +254,7 @@ async fn the_last_parked_update_carries_the_final_content() {
     assert_eq!(events[end]["message"]["content"][0]["text"], json!(text));
 }
 
-/// An instant burst (the provider outruns the tick entirely) parks one
-/// snapshot at a time; the settle frame flushes the final snapshot
-/// before `message_end`, so the client sees the full message without a
-/// tick waiting period and nothing lands out of order.
+/// The client sees the full message without a tick wait and nothing lands out of order.
 #[tokio::test]
 async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {
     const DELTAS: usize = 200;

@@ -1,62 +1,8 @@
-//! The queued-message strip above the prompt dock (TS
-//! `updatePendingMessagesDisplay`): the picked-up prompt whose turn is
-//! still preparing renders as the "Starting" row (TS #2063), then every
-//! human-typed steering/follow-up
-//! message parked behind the running turn renders as a preview row - dim,
-//! with the TS prompt-highlight styling on top (a leading slash command
-//! in accent, `@path`/`--flag` argument tokens in their own colors) - with
-//! one hint row below them. The queued internal prompts (heartbeat fires,
-//! agent messages, goal contexts, background-command notices) condense
-//! into the single counted row instead of preview rows, so the strip
-//! stays about what the user typed (the condensed row renders after the
-//! human previews). The strip is empty (renders nothing) when
-//! the queue is empty, so delivered messages make it disappear.
-//!
-//! The condensation is a SANCTIONED DIVERGENCE from TS (operator request,
-//! Kevin 2026-09-24, queue-condensed-display; per-origin counts refined
-//! 2026-09-25): TS renders every internal prompt as its own preview row
-//! too; Rust renders one counted row naming each origin with its own
-//! plural-correct count - "1 agent message, 1 heartbeat, and 1 other
-//! internal prompt queued" - so the visual queue prioritizes
-//! human-inserted prompts. The classifier
-//! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
-//! no provenance), so a human-typed prompt that begins with one of the
-//! internal labels condenses too - it still delivers, and the browse
-//! affordance walks and shows it. The parked RLM child status notices
-//! (`[child-exited: ...]` / `[child-failed ...]` lifecycle rows) are the
-//! one origin that NEVER string-classifies: they condense by WIRE-TYPED
-//! provenance (operator directive 2026-09-25 — the queue-fold bug: many
-//! child exits parked behind one busy turn rendered as that many
-//! user-like rows), the daemon marking its own injected rows by index on
-//! the queue projection, so a user-typed prompt that merely looks like a
-//! notice stays the human row it is.
-//!
-//! The engine-minted continuations (goal continuations and budget-limit
-//! steers, threshold-compaction continuations) park preview-less and
-//! queue-invisible - TS's `visibleSessionActionProjection` filters them
-//! out of the projection entirely, Rust's projection kept serving their
-//! raw text, so they rendered as user-like rows. They now carry their own
-//! WIRE-TYPED provenance too (the `injectedPrompts` rider, the
-//! `rlmChildStatus` precedent; operator directive 2026-09-28: "please
-//! group the child exits in the summary of agent messages, internal
-//! messages, etc. they should not be individual rows"): they count into
-//! the condensed row's "other internal prompt" bucket and never render
-//! their own rows, while a user-typed prompt with a continuation's exact
-//! text stays the human row it is.
-//!
-//! The browse affordances TS gives the strip (TS `QueueSelection`,
-//! alt+up/alt+down to pick a parked message, ctrl+alt+arrows to reorder,
-//! Enter to steer the edit, the follow-up key to park it) still walk
-//! every queued item, internal prompts included (the full queue stays
-//! inspectable; the selection state is owned by the session UI and
-//! projected to the view as the dimmed browse header), but the EDIT
-//! affordances apply to the user-origin items only (operator directive
-//! 2026-09-28: "humans should only be editing the human sent and queued
-//! messages" - a human edit of a harness prompt can mis-steer the
-//! agent, the system owns them): internal items render the header's
-//! read-only phrasing and the edit/reorder/delete gates refuse them.
-//! That gate is another SANCTIONED DIVERGENCE from TS (TS's queue edit
-//! surface edits any projected item).
+//! The queued-message strip above the prompt dock (see [`render_queue`]). Sanctioned divergence
+//! (operator request Kevin 2026-09-24; directives 2026-09-25, 2026-09-28): internal prompts
+//! condense into one counted row by origin instead of preview rows; child status notices and
+//! engine-minted continuations classify by wire-typed provenance only (user-typed look-alikes stay
+//! human rows); browse walks every item; edits are human-origin only.
 
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, truncate_line};
@@ -65,36 +11,21 @@ use crate::Line;
 #[cfg(test)]
 mod tests;
 
-/// The dim preview label for messages parked on the steering lane.
 pub const STEERING_LABEL: &str = "Steering";
-/// The dim preview label for messages parked on the follow-up lane.
 pub const FOLLOW_UP_LABEL: &str = "Follow-up";
-/// The dim preview label for the picked-up prompt whose turn is preparing
-/// (TS #2063 `Starting`): the queued strip keeps showing the prompt the
-/// pump selected while it is still on its way into the conversation.
+/// The dim preview label for the picked-up prompt still preparing.
 pub const STARTING_LABEL: &str = "Starting";
 
-/// The origin of a queued internal prompt: what the condensed row counts
-/// the prompt as. The four TS labels classify by preview string (the wire
-/// carries no provenance for them - the label is the classifier); the RLM
-/// child status notices classify only by wire-typed provenance.
 #[derive(Debug, Clone, Copy)]
 enum InternalPromptOrigin {
-    /// An `Agent message received: ` preview.
     AgentMessage,
-    /// A `Heartbeat prompt: ` preview.
     Heartbeat,
-    /// A parked RLM child status notice (an injected
-    /// `rlm_child_terminal_notice` / `rlm_child_failure` row), classified
-    /// by wire-typed provenance only (see [`QueueLaneIndices`]).
+    /// A parked RLM child status notice, classified by wire-typed provenance only.
     ChildStatus,
-    /// Every other internal prompt: `Goal context: ` and
-    /// `Background command finished: ` previews.
     Other,
 }
 
-/// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
-/// with their own visible label render as-is (no lane label prepended),
+/// Internal prompts that queue with their own visible label render as-is (no lane label prepended),
 /// each paired with the origin the condensed row counts it as.
 const LABELED_PREVIEW_PREFIXES: [(&str, InternalPromptOrigin); 4] = [
     ("Heartbeat prompt: ", InternalPromptOrigin::Heartbeat),
@@ -115,8 +46,7 @@ fn internal_prompt_origin(message: &str) -> Option<InternalPromptOrigin> {
         .map(|(_, origin)| *origin)
 }
 
-/// The queued internal prompts' counts by origin across both lanes, or
-/// `None` when every queued message is human-typed.
+/// The queued internal prompts' counts by origin across both lanes.
 #[derive(Debug, Default)]
 struct CondensedCounts {
     agent_messages: usize,
@@ -131,11 +61,8 @@ impl CondensedCounts {
         self.agent_messages + self.heartbeats + self.child_status + self.other
     }
 
-    /// The counted row's text: each origin with queued prompts and its
-    /// count, plural-correct (only a count of one reads singular - a
-    /// listed `0` would read plural too), in the fixed agent-message,
-    /// heartbeat, child-status, other order, joined into one concise
-    /// line. A zero-count origin never lists.
+    /// The counted row's text: each origin with queued prompts and its count, plural-correct, in
+    /// the fixed order; a zero-count origin never lists.
     fn row_text(&self) -> String {
         let mut parts = [
             (self.agent_messages, InternalPromptOrigin::AgentMessage),
@@ -167,8 +94,8 @@ impl CondensedCounts {
     }
 }
 
-/// Count every queued internal prompt by origin across both lanes, or
-/// `None` when every queued message is human-typed.
+/// Count every queued internal prompt by origin, or `None` when every queued message is
+/// human-typed.
 fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
     let mut counts = CondensedCounts::default();
     for (lane, index, message) in queued_items(queue) {
@@ -184,8 +111,7 @@ fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
     (counts.total() > 0).then_some(counts)
 }
 
-/// Walk the parked queue items lane-by-lane, oldest-first, with each
-/// item's lane and index (its provenance address).
+/// Walk the parked queue items lane-by-lane, oldest-first, with each item's lane and index.
 fn queued_items(queue: &QueuedMessages) -> impl Iterator<Item = (QueueLane, usize, &str)> {
     queue
         .steering
@@ -201,12 +127,8 @@ fn queued_items(queue: &QueuedMessages) -> impl Iterator<Item = (QueueLane, usiz
         )
 }
 
-/// One queued item's origin for the strip: the wire-typed provenance
-/// decides FIRST (the daemon marks its own injected rows — the child
-/// status notices and the engine-minted continuations; the preview text
-/// never classifies them), then the TS internal labels classify by
-/// preview string exactly like `isLabeledQueuedPreview`. `None` is a
-/// human-typed row.
+/// One queued item's origin for the strip: the wire-typed provenance decides
+/// FIRST, then the TS internal labels classify by preview string; `None` is a human-typed row.
 fn queued_item_origin(
     message: &str,
     queue: &QueuedMessages,
@@ -219,9 +141,8 @@ fn queued_item_origin(
     if let Some(origin) = internal_prompt_origin(message) {
         return Some(origin);
     }
-    // The engine-minted continuations carry no preview label, so the
-    // rider is the only thing that can classify them (a user-typed
-    // prompt with the continuation's exact text never rides it).
+    // The rider is the only thing that can classify the continuation (a
+    // user-typed prompt with its exact text never rides it).
     if queue.injected_prompts.is_marked(lane, index) {
         return Some(InternalPromptOrigin::Other);
     }
@@ -239,32 +160,20 @@ pub fn format_queued_message_preview(message: &str, label: &str) -> String {
     }
 }
 
-/// The queued input lanes as the session reports them
-/// (`sessionActions.steering` / `.followUps`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueuedMessages {
     /// Messages delivered at the next turn boundary (Enter while busy).
     pub steering: Vec<String>,
     /// Messages delivered when the run goes idle (the follow-up key).
     pub follow_ups: Vec<String>,
-    /// The picked-up prompt whose turn is still preparing (TS #2063
-    /// `sessionActions.active` with `kind: "turn"` and
-    /// `phase: "preparing"`): the strip keeps it visible as its
-    /// "Starting" row until the turn's rows land — the prompt left its
-    /// lane at pickup, so without the row it would be visible nowhere
-    /// until the turn renders it. Not browsable: the browse affordances
-    /// walk the parked lanes only (the prompt is already delivered).
+    /// The picked-up prompt whose turn is still preparing: the strip keeps it visible as its
+    /// "Starting" row until the turn's rows land; not browsable.
     pub starting: Option<String>,
-    /// Which parked items are RLM child status notices, by lane index
-    /// (the wire-typed provenance; see [`QueueLaneIndices`]). The
-    /// strip folds exactly these rows into the condensed count — they
-    /// stay browseable with their full notice text.
+    /// Which parked items are RLM child status notices, by lane index (wire-typed
+    /// provenance): folded into the condensed count, still browseable.
     pub rlm_child_status: QueueLaneIndices,
-    /// Which parked items are engine-minted internal prompts (the
-    /// injected, queue-invisible continuations), by lane index (the
-    /// second wire-typed provenance rider; see [`QueueLaneIndices`]).
-    /// The strip folds exactly these rows into the condensed count too
-    /// — they stay browseable with their full text, read-only.
+    /// Which parked items are engine-minted internal prompts, by lane index (the second wire-typed
+    /// provenance rider); folded into the condensed count, read-only.
     pub injected_prompts: QueueLaneIndices,
 }
 
@@ -275,15 +184,8 @@ impl QueuedMessages {
     }
 }
 
-/// The lane-indices rider shape the queue projection's typed-provenance
-/// marks share (`sessionActions.rlmChildStatus` for the parked RLM child
-/// status notices — the daemon derives the indices from the parked rows'
-/// injected custom rows, the `rlm_child_terminal_notice` /
-/// `rlm_child_failure` kinds — and `sessionActions.injectedPrompts` for
-/// the engine-minted continuations). The strip never classifies by
-/// preview text through either: a user-typed message that merely looks
-/// like a notice or a continuation (or starts with any internal-looking
-/// prefix) stays a human row.
+/// The lane-indices rider shape the typed-provenance marks share (`sessionActions.rlmChildStatus` /
+/// `sessionActions.injectedPrompts`); the strip never classifies by preview text.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueLaneIndices {
     pub steering: Vec<usize>,
@@ -301,7 +203,7 @@ impl QueueLaneIndices {
     }
 }
 
-/// TS `QueueLane`: one of the two queue lanes, by its wire name.
+/// One of the two queue lanes, by its wire name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueLane {
     Steering,
@@ -318,7 +220,7 @@ impl QueueLane {
         }
     }
 
-    /// The browse-header display name (TS `getQueueSelectionHeader`).
+    /// The browse-header display name.
     #[must_use]
     pub fn display_name(&self) -> &'static str {
         match self {
@@ -328,12 +230,8 @@ impl QueueLane {
     }
 }
 
-/// One addressable queue item (TS `QueueSelectionItem`). `internal`
-/// is the item's origin: `true` marks an internal prompt (a TS-labeled
-/// preview, an RLM child status notice, or an engine-minted
-/// continuation — every non-user-origin item), which the browse walks
-/// READ-ONLY (the edit gates refuse internal items; the system owns
-/// them), `false` the human-typed row the edit affordances apply to.
+/// One addressable queue item (TS `QueueSelectionItem`). `internal` marks an internal prompt, which
+/// the browse walks READ-ONLY; `false` is the human row the edit affordances apply to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueSelectionItem {
     pub lane: QueueLane,
@@ -342,15 +240,9 @@ pub struct QueueSelectionItem {
     pub internal: bool,
 }
 
-/// The strip rows (TS `queuedMessagesContainer`): one blank spacer, the
-/// "Starting" row of a preparing turn (TS #2063) above a truncated dim
-/// preview per human-typed queued message, the one condensed
-/// internal-prompt row, and the queue hint. Empty input renders no rows
-/// at all — a preparing turn alone still renders its row (the strip is
-/// the only place the picked-up prompt is visible until its turn runs),
-/// but never the hint (there is nothing parked to browse).
-/// `browse_key` is the effective binding display for
-/// `app.message.navigateOlder` (user overrides show).
+/// The strip rows: the "Starting" row of a preparing turn above a truncated dim preview per
+/// human-typed queued message, the condensed internal-prompt row, and the queue hint. Empty input
+/// renders no rows; a preparing turn alone renders its row but never the hint.
 #[must_use]
 pub fn render_queue(
     theme: &Theme,
@@ -362,18 +254,11 @@ pub fn render_queue(
         return Vec::new();
     }
     let mut rows = vec![Vec::new()];
-    // The preparing turn's prompt renders first (TS #2063: a queued
-    // prompt leaves its lane at pickup, and its own pre-turn work can
-    // hold it out of the conversation for a while — the "Starting" row
-    // keeps it visible there until the turn begins).
     if let Some(starting) = queue.starting.as_deref() {
         rows.push(preview_row(theme, STARTING_LABEL, starting, width));
     }
-    // The human-typed previews (the non-labeled messages) render
-    // individually, so what the user parked stays explicit and
-    // prioritized above the condensed row. The child status notices
-    // classify by typed provenance here (never by their text), so a
-    // user-typed row that merely looks like a notice renders too.
+    // The human-typed previews render individually, so what the user parked stays explicit above
+    // the condensed row; child status notices classify by typed provenance here.
     for (lane, index, message) in queued_items(queue) {
         if queued_item_origin(message, queue, lane, index).is_none() {
             let label = match lane {
@@ -402,12 +287,8 @@ pub fn render_queue(
     rows
 }
 
-/// The browse header text (TS `getQueueSelectionHeader`, the editor header
-/// line while a queued message is selected): the lane, its 1-based index,
-/// and the effective keys for the affordances. An internal prompt renders
-/// the read-only phrasing instead (the edit affordances never apply to
-/// it - the system owns the harness prompts, so the header offers
-/// browsing only, never the reorder/steer/queue/delete keys).
+/// The browse header text: the lane, its 1-based index, and the effective keys for the affordances;
+/// an internal prompt renders the read-only phrasing instead.
 #[must_use]
 pub fn browse_header_text(selected: &QueueSelectionItem, key_display: &QueueBrowseKeys) -> String {
     if selected.internal {
@@ -441,12 +322,8 @@ pub struct QueueBrowseKeys {
     pub follow_up: String,
 }
 
-/// One styled preview row (TS
-/// `TruncatedText(styleQueuedMessagePreview(...), 1, 0)`): the labeled
-/// message's first line with the TS prompt-highlight styling (dim base,
-/// accent on a leading recognized command's `/name` segment, colored
-/// argument tokens), truncated with `...` to the padded content width, with
-/// a plain 1-col left pad and the row padded to the full width.
+/// One styled preview row: the labeled message's first line with the TS prompt-highlight styling,
+/// truncated with `...` to the padded content width, with a plain 1-col left pad.
 fn preview_row(theme: &Theme, label: &str, message: &str, width: usize) -> Line {
     let text = match message.split_once('\n') {
         Some((first_line, _)) => first_line,
@@ -457,17 +334,13 @@ fn preview_row(theme: &Theme, label: &str, message: &str, width: usize) -> Line 
     line.extend(crate::prompt_highlight::style_queued_message_preview(
         theme, text, label,
     ));
-    // The right pad keeps the row at the full width like TS
-    // (`lineWithPadding + paddingNeeded`), so 1 left pad + content cut to
-    // `width - 1` leaves the trailing space.
+    // The right pad keeps the row at the full width like TS, so 1 left pad +
+    // content cut to `width - 1` leaves the trailing space.
     pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
 }
 
-/// The condensed internal-prompt row (the sanctioned divergence, see the
-/// module docs): one dim line carrying the queued internal prompts'
-/// counts by origin instead of one preview row each, so the strip's
-/// per-message rows stay about the human prompts. Truncated and padded
-/// like a preview row.
+/// The condensed internal-prompt row (the sanctioned divergence, see the module docs): one dim line
+/// carrying the counts by origin.
 fn condensed_row(theme: &Theme, counts: &CondensedCounts, width: usize) -> Line {
     let line: crate::Line = vec![
         crate::Span::raw(" ".repeat(width.min(1))),
@@ -476,19 +349,14 @@ fn condensed_row(theme: &Theme, counts: &CondensedCounts, width: usize) -> Line 
     pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
 }
 
-/// Browse direction: `Older` moves toward the oldest steering message,
-/// `Newer` toward the draft (TS `move(queue, draft, -1 | 1)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueueBrowseDirection {
     Older,
     Newer,
 }
 
-/// Port of TS `QueueSelection`: which parked message the user is browsing
-/// with alt+up/alt+down. Items are addressed by (lane, index, text) - the
-/// text is the authoritative check when a mutation is applied, so no ids
-/// or revisions are needed. Browsing order is newest-first: draft -> last
-/// follow-up -> ... -> first steering.
+/// Which parked message the user is browsing with alt+up/alt+down: items are addressed by (lane,
+/// index, text) — the text is the authoritative check; browsing order is newest-first.
 #[derive(Debug, Default)]
 pub struct QueueSelection {
     items: Vec<QueueSelectionItem>,
@@ -519,8 +387,7 @@ impl QueueSelection {
         self.has_stashed_draft = true;
     }
 
-    /// Move the cursor. Returns the text to show, or `None` for a boundary
-    /// noop; reaching the draft end the browse (the stashed draft returns).
+    /// Move the cursor; returns the text to show, or `None` for a boundary noop.
     pub fn browse(
         &mut self,
         queue: &QueuedMessages,
@@ -528,7 +395,6 @@ impl QueueSelection {
         direction: QueueBrowseDirection,
     ) -> Option<String> {
         match (self.cursor, direction) {
-            // Browsing newer than the draft is a noop.
             (None, QueueBrowseDirection::Newer) => None,
             // Leaving the draft stashes the current editor text first.
             (None, QueueBrowseDirection::Older) => {
@@ -550,7 +416,6 @@ impl QueueSelection {
                     QueueBrowseDirection::Newer => Some(cursor + 1),
                 };
                 match next {
-                    // Older than the oldest steering message is a noop.
                     None => None,
                     // Newer than the newest follow-up lands back on the
                     // draft: restore it and end the browse.
@@ -564,9 +429,8 @@ impl QueueSelection {
         }
     }
 
-    /// Re-point the selection after a mutation or queue update. The
-    /// selection survives only when the addressed item is unchanged; a stale
-    /// selection resets and returns the stashed draft (TS `refreshAt`).
+    /// Re-point the selection after a mutation or queue update: the selection
+    /// survives only when the addressed item is unchanged (TS `refreshAt`).
     pub fn refresh_at(
         &mut self,
         queue: &QueuedMessages,
@@ -598,11 +462,8 @@ impl QueueSelection {
     }
 }
 
-/// Mirror one applied lane move locally (TS
-/// `moveQueueSelection`'s local mirror): swap the item with its neighbor so
-/// the strip and the selection update without waiting for the
-/// `session_action_update` event. Out-of-range targets are a no-op (the
-/// daemon already rejected them).
+/// Mirror one applied lane move locally: swap the item with its neighbor so the strip and the
+/// selection update without waiting for the `session_action_update` event.
 pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usize, target: i64) {
     if target < 0 {
         return;
@@ -614,11 +475,8 @@ pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usiz
     };
     if index < lane_items.len() && target < lane_items.len() && index != target {
         lane_items.swap(index, target);
-        // The typed provenance mirrors the same swap (a marked index
-        // rides its item through the move), so the strip classification
-        // stays correct in the window before the daemon's action update
-        // lands with the fresh indices. Both riders mirror: a user
-        // row's reorder can swap it across an internal one.
+        // The typed provenance mirrors the same swap (a marked index rides its item through the
+        // move), so the classification stays correct until the daemon's action update lands.
         let (lane_child, lane_injected) = match lane {
             QueueLane::Steering => (
                 &mut queue.rlm_child_status.steering,
@@ -641,9 +499,6 @@ pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usiz
     }
 }
 
-/// The flattened browse order (TS `flatten`): steering lane first, then the
-/// follow-up lane, both oldest-first, so the last item is the newest
-/// follow-up and the cursor walks newest-first down to the oldest steering.
 fn flatten(queue: &QueuedMessages) -> Vec<QueueSelectionItem> {
     let item = |lane: QueueLane, index: usize, text: &str| QueueSelectionItem {
         lane,

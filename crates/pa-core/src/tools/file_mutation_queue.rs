@@ -1,9 +1,5 @@
-//! Serialize file mutation operations targeting the same file.
-//!
-//! Port of `packages/coding-agent/src/core/tools/file-mutation-queue.ts`:
-//! operations for different files run in parallel; operations for the same
-//! file (after resolving symlinks) run in arrival order. The queue entry is
-//! removed once no waiter remains.
+//! Serialize file mutation operations targeting the same file: different files run
+//! in parallel; the same file (after resolving symlinks) runs in arrival order.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,12 +38,10 @@ where
         let mut map = registry().lock().unwrap();
         map.entry(key.clone()).or_default().clone()
     };
-    // Hold the per-file lock across the operation.
     let result = {
         let _guard = queue.lock().await;
         f().await
     };
-    // Release our queue handle before the cleanup check below.
     drop(queue);
     // Drop the entry when this is the last holder (no queued waiters).
     let mut map = registry().lock().unwrap();

@@ -1,11 +1,8 @@
 //! The worker-side half of worker-to-worker peer delivery: a one-shot
-//! private-frame client for another worker's direct socket (thin-supervisor
-//! stage 3). The supervisor mints a single-use `worker` grant; this client
-//! burns it with `peer_auth` and delivers `worker_deliver_message` straight
-//! to the target worker, bypassing the supervisor's route plane (the
-//! delivery keeps flowing when the supervisor is mid-restart, and the
-//! route plane never sees agent-message traffic). The connection is
-//! short-lived by design: one delivery round trip, then close.
+//! private-frame client for another worker's direct socket. The supervisor
+//! mints a single-use `worker` grant; this client burns it and delivers
+//! `worker_deliver_message` straight to the target, one round trip then
+//! close.
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::daemon::DaemonPeerTransportTicket;
@@ -39,21 +36,15 @@ pub(crate) enum PeerDeliveryOutcome {
 }
 
 /// Burn the ticket's grant on the target worker's socket and deliver one
-/// agent message directly.
+/// agent message directly, addressed to the session the ticket's grant is
+/// bound to (the supervisor's resolution of the selector).
 pub(crate) async fn deliver_message_over_peer_transport(
     ticket: &DaemonPeerTransportTicket,
-    target_active_session_id: &str,
     message: &str,
     sender: &Value,
     delivery_mode: Option<&str>,
 ) -> PeerDeliveryOutcome {
-    let future = deliver_once(
-        ticket,
-        target_active_session_id,
-        message,
-        sender,
-        delivery_mode,
-    );
+    let future = deliver_once(ticket, message, sender, delivery_mode);
     match tokio::time::timeout(
         std::time::Duration::from_millis(DELIVERY_TIMEOUT_MS),
         future,
@@ -67,7 +58,6 @@ pub(crate) async fn deliver_message_over_peer_transport(
 
 async fn deliver_once(
     ticket: &DaemonPeerTransportTicket,
-    target_active_session_id: &str,
     message: &str,
     sender: &Value,
     delivery_mode: Option<&str>,
@@ -106,7 +96,7 @@ async fn deliver_once(
     // Delivery: the command is sent, so every outcome from here is final.
     let mut payload = json!({
         "type": "worker_deliver_message",
-        "targetActiveSessionId": target_active_session_id,
+        "targetActiveSessionId": ticket.active_session_id,
         "message": message,
         "sender": sender,
     });

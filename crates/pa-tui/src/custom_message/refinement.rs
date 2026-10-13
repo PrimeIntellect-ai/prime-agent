@@ -1,10 +1,5 @@
-//! The refinement-outcome row: decode (TS `isRefinementOutcomeMessage`,
-//! `refinementHeader`, `editLabel`, `editFieldRows`) and rendering (TS
-//! `RefinementOutcomeMessageComponent` over `ExpandableEventMessage`, with
-//! the `buildRichDiffLine` -/+ change rows).
-//!
-//! Split from the module root so the dispatch stays small; the shared row
-//! types live in `super`.
+//! The refinement-outcome row: decode and rendering of the applied-edit
+//! list with its -/+ change rows. The shared row types live in `super`.
 
 use super::render::{pad_with, spacer, text_rows};
 use super::{EditField, LabelPart, RefinementEditRow, RefinementOutcomeRow};
@@ -15,8 +10,8 @@ use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
 use serde_json::Value;
 
-/// TS `isRefinementOutcomeMessage` (summary + scope + applied-edit list)
-/// with the full outcome shape; malformed payloads render the notice.
+/// Summary + scope + applied-edit list; malformed payloads render the
+/// notice.
 pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Vec<ChatEntry> {
     let summary = details.get("summary").and_then(Value::as_str);
     let scope_ok = matches!(
@@ -43,8 +38,6 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
             kind: StatusKind::Error,
         }];
     }
-    // Validity guarantees the array; the empty fallback only satisfies the
-    // borrow checker.
     let no_edits: Vec<Value> = Vec::new();
     let edits = edits.unwrap_or(&no_edits);
     let applied: Vec<&Value> = edits
@@ -93,7 +86,7 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
     ))]
 }
 
-/// TS `refinementHeader`: the outcome line over the applied edit list.
+/// The outcome line over the applied edit list.
 fn refinement_outcome_line(
     edits: &[Value],
     applied: &[&Value],
@@ -139,8 +132,8 @@ fn refinement_outcome_line(
         .iter()
         .all(|edit| edit.get("kind").and_then(Value::as_str) == Some(first_kind));
     if same_kind {
-        // TS: `memory` pluralizes to `memories`, every other kind just
-        // appends `s`; mixed actions collapse to `changed`.
+        // `memory` pluralizes to `memories`; mixed actions collapse to
+        // `changed`.
         let kind = if first_kind == "memory" {
             if count == 1 {
                 "memory".to_string()
@@ -169,8 +162,7 @@ fn refinement_outcome_line(
     format!("Harness refined \u{b7} {count} edits applied")
 }
 
-/// TS `editLabel`/`editFieldRows` for one edit; `editScope(edit, fallback)`
-/// takes the edit's own scope, else the message scope.
+/// One edit; the edit's own scope, else the message scope.
 fn refinement_edit_row(edit: &Value, fallback_scope: &str) -> RefinementEditRow {
     let scope = edit
         .get("after")
@@ -224,8 +216,7 @@ fn refinement_edit_row(edit: &Value, fallback_scope: &str) -> RefinementEditRow 
     }
 }
 
-/// The editable harness fields shown per edit, in display order (TS
-/// `EDIT_FIELDS`).
+/// The editable harness fields shown per edit, in display order.
 const EDIT_FIELDS: [&str; 6] = [
     "title",
     "content",
@@ -235,8 +226,8 @@ const EDIT_FIELDS: [&str; 6] = [
     "metadata",
 ];
 
-/// TS `fieldValueLines`: strings split on newlines, objects one JSON row,
-/// everything else (and empty values) no rows.
+/// Strings split on newlines, objects one JSON row, everything else no
+/// rows.
 fn field_value_lines(value: &Value) -> Vec<String> {
     match value {
         Value::String(text) => {
@@ -257,7 +248,7 @@ fn field_value_lines(value: &Value) -> Vec<String> {
     }
 }
 
-/// One entry's field rows (TS `entryFieldRows`).
+/// One entry's field rows.
 fn entry_field_rows(entry: &Value) -> Vec<EditField> {
     EDIT_FIELDS
         .iter()
@@ -272,7 +263,6 @@ fn entry_field_rows(entry: &Value) -> Vec<EditField> {
         .collect()
 }
 
-/// `EDIT_FIELDS` display labels.
 fn key_title_case(key: &str) -> String {
     match key {
         "title" => "Title",
@@ -286,9 +276,8 @@ fn key_title_case(key: &str) -> String {
     .to_string()
 }
 
-/// The edit fields for one edit (TS `editFieldRows`): failed edits show
-/// before/proposed, updates show -/+ changes for changed fields, create and
-/// delete show their value as added/removed rows.
+/// The edit fields for one edit: failed edits show before/proposed,
+/// updates show -/+ changes, create and delete show added/removed rows.
 fn edit_field_rows(edit: &Value) -> Vec<EditField> {
     let applied = edit.get("applied").and_then(Value::as_bool) == Some(true);
     let before = edit.get("before").filter(|v| v.is_object());
@@ -320,8 +309,7 @@ fn edit_field_rows(edit: &Value) -> Vec<EditField> {
         };
     }
     if let (Some(before), Some(after)) = (before, after) {
-        // TS `updateFieldRows`: one plain row per unchanged field, -/+ for
-        // changed ones.
+        // One plain row per unchanged field, -/+ for changed ones.
         return EDIT_FIELDS
             .iter()
             .filter_map(|key| {
@@ -353,8 +341,8 @@ fn edit_field_rows(edit: &Value) -> Vec<EditField> {
     fields
         .into_iter()
         .map(|field| {
-            // TS: delete moves the value to the removed rows, create to
-            // the added rows (one branch or the other, never both).
+            // Delete moves the value to the removed rows, create to the
+            // added rows — never both.
             let (removed, added) = if action == "delete" {
                 (field.value, Vec::new())
             } else if action == "create" {
@@ -381,9 +369,8 @@ enum DiffOp {
     Added(String),
 }
 
-/// Longest-common-subsequence line diff (the full-context form of the TS
-/// `diff` package's `diffLines`): equal runs stay in order, removals come
-/// before the additions that replace them.
+/// Longest-common-subsequence line diff: equal runs stay in order,
+/// removals come before the additions that replace them.
 fn line_diff(removed: &[String], added: &[String]) -> Vec<DiffOp> {
     let mut table = vec![vec![0usize; added.len() + 1]; removed.len() + 1];
     for (i, r) in removed.iter().enumerate().rev() {
@@ -431,7 +418,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
+    // Deliberate decomposed/non-NFC fixtures: the width engine measures the raw sequences.
     #[allow(clippy::unicode_not_nfc)]
     fn geometry_matches_refinement_rows() {
         let theme = theme();
@@ -563,9 +550,8 @@ mod tests {
             vec!["Mission".to_string()]
         );
 
-        // TS `isRefinementOutcomeMessage` runs `edits.every(isAppliedRefinementEdit)`,
-        // which passes on an empty list: an outcome with no edits is valid
-        // and renders the `Harness unchanged` row.
+        // An outcome with no edits is valid and renders the `Harness
+        // unchanged` row.
         let empty = decoded(&json!({
             "role": "custom",
             "customType": REFINEMENT_OUTCOME_CUSTOM_TYPE,
@@ -578,7 +564,7 @@ mod tests {
         };
         assert_eq!(row.header, "Harness unchanged \u{b7} no edits applied");
 
-        // An unknown scope fails the TS envelope check and renders the notice.
+        // An unknown scope fails the envelope check and renders the notice.
         let malformed = decoded(&json!({
             "role": "custom",
             "customType": REFINEMENT_OUTCOME_CUSTOM_TYPE,
@@ -597,11 +583,9 @@ mod tests {
 
     #[test]
     fn refinement_outcome_lines_match_ts() {
-        // TS `refinementHeader` across the applied/total matrix.
+        // The header across the applied/total matrix.
         let edit = |applied: bool, kind: &str, action: &str| json!({ "action": action, "kind": kind, "id": "e", "applied": applied });
-        // TS `refinementHeader` filters `edits.filter((edit) => edit.applied)`
-        // before comparing to the total, so the helper passes only the
-        // applied edits as the applied list.
+        // Only the applied edits count against the total.
         let line = |edits: Vec<serde_json::Value>, rollback: bool| {
             let applied: Vec<&Value> = edits
                 .iter()
@@ -644,8 +628,8 @@ mod tests {
             ),
             "Harness rollback completed \u{b7} 2 edits applied"
         );
-        // Edits present but none applied: the operation-failed line (TS
-        // distinguishes this from the empty-edit "unchanged" line).
+        // Edits present but none applied: the operation-failed line,
+        // distinct from the empty-edit "unchanged" line.
         assert_eq!(
             line(vec![edit(false, "memory", "create")], false),
             "Harness refinement failed \u{b7} 0/1 edits applied"
@@ -672,7 +656,6 @@ mod tests {
             edits: Vec::new(),
         };
         let rows = render_refinement_outcome(&row, Detail::Overview, &theme(), 60);
-        // Blank, diamond header, summary row.
         assert!(rows[0].is_empty());
         assert_eq!(flat(&rows[1]).trim_end(), " \u{25c6} Harness refined");
         assert_eq!(
@@ -683,8 +666,7 @@ mod tests {
             )
         );
         assert_eq!(flat(&rows[2]), " add a memory for the mission");
-        // TS `EventSummary` colors the inset space inside the summary
-        // span (the space is part of the styled text): one styled span.
+        // The inset space is part of the styled text: one styled span.
         assert_eq!(
             rows[2],
             vec![Span::styled(
@@ -702,10 +684,8 @@ mod tests {
             meta: String::new(),
             edits: Vec::new(),
         };
-        // Collapsed (TS `EventSummary` under `setExpanded(false)`, i.e.
-        // tool output not expanded): whitespace-collapsed and clamped to
-        // two lines at width 14 (content width 13), the second line keeps
-        // its ellipsis. `Detail::Details` expands edit diffs but not tool
+        // Collapsed: whitespace-collapsed and clamped to two lines at width 14, the second
+        // line keeps its ellipsis. `Detail::Details` expands edit diffs but not tool
         // output, so the summary stays collapsed there too.
         let rows = render_refinement_outcome(&row, Detail::Overview, &theme(), 14);
         // TS `Text(…, 1, 0)` wraps the header at content width 12, so the
@@ -718,16 +698,14 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| flat(r) == " one two three four five six seven"));
-        // Expanded (`Detail::All`): the raw summary hangs on the branch
-        // grammar — the first row carries the dim `╰─ ` gutter,
-        // the newline-joined source rows the matching continuation indent.
+        // Expanded (`Detail::All`): the raw summary hangs on the branch grammar — the first
+        // row carries the dim `╰─ ` gutter, the newline-joined source rows the continuation indent.
         let rows = render_refinement_outcome(&row, Detail::All, &theme(), 60);
         assert_eq!(
             flat(&rows[2]),
             format!(" {}one   two", crate::branch::BRANCH_GUTTER)
         );
-        // The empty source-line segment renders as an indented blank row,
-        // the wrapped content after it.
+        // The empty source-line segment renders as an indented blank row.
         assert_eq!(flat(&rows[3]), crate::branch::BRANCH_INDENT.to_string());
         assert_eq!(
             flat(&rows[4]),
@@ -773,10 +751,9 @@ mod tests {
             .iter()
             .map(|r| flat(r).trim_end().to_string())
             .collect();
-        // The expanded block hangs on the branch grammar: the meta row
-        // and every edit-section row sit on the continuation indent, each
-        // edit section's label row re-branches with the `\u{2570}\u{2500} `
-        // gutter.
+        // The expanded block hangs on the branch grammar: the meta row and every
+        // edit-section row sit on the continuation indent, each edit section's label row
+        // re-branches with the `\u{2570}\u{2500} ` gutter.
         let meta = text
             .iter()
             .position(|r| {

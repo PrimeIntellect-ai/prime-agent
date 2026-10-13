@@ -7,8 +7,7 @@ fn autonomous_on_enables_the_driver_loop() {
         &serde_json::json!({ "responses": ["unused"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5"],
     );
-    // The enable prompt runs the session command (echo + status rows) and
-    // never admits a model turn.
+    // The enable prompt runs the session command; no model turn admits.
     let status = custom_rows(&events);
     assert!(status
         .iter()
@@ -30,12 +29,9 @@ fn autonomous_limit_stops_the_run_without_a_row() {
         &serde_json::json!({ "responses": ["first", "second"] }),
         &["/autonomous on --max-continuations 1 --max-turns 5", "go"],
     );
-    // The continuation churns INSIDE the one run (the TS in-run shape,
-    // probed against the binary): the settled turn's `turn_end` is
-    // followed by the continuation turn's `turn_start` and user row, with
-    // no run boundary between them. Turn 1 continues (missing terminal
-    // evidence), turn 2 hits the continuation cap: the stop writes no row
-    // (the headless status and exit contracts carry it).
+    // The continuation churns INSIDE the one run (the TS in-run shape):
+    // no run boundary between the settled turn and the continuation. Turn
+    // 2 hits the cap; the stop writes no row.
     assert_eq!(assistant_texts(&events), vec!["first", "second"]);
     let texts = user_texts(&events);
     assert_eq!(
@@ -45,9 +41,7 @@ fn autonomous_limit_stops_the_run_without_a_row() {
             "[autonomous-continuation]\n\nNo human input is available in autonomous mode. Continue working until the host evaluator, verifier, or configured autonomous limits stop the run. If you were asking the user a question, make a reasonable assumption and verify it. If you believe you are blocked, prove it with host-observable evidence, preserve that evidence, and keep looking for safe progress while budget remains. Do not end the session yourself; the verifier/evaluator decides completion when configured gates pass.".to_string()
         ]
     );
-    // The continuation's frames: one `turn_start` frame between the
-    // settled turn's `turn_end` and the continuation user row (the loop's
-    // inner-turn start, the run-opening one stays with the worker).
+    // One `turn_start` frame between the settled `turn_end` and the continuation user row.
     let turn_ends = events
         .iter()
         .filter(|event| matches!(event, EngineEvent::TurnEnd { .. }))
@@ -58,9 +52,7 @@ fn autonomous_limit_stops_the_run_without_a_row() {
         .count();
     assert_eq!(turn_ends, 2);
     assert_eq!(turn_starts, 1, "the continuation turn's inner start");
-    // The stop surfaces no `autonomous_status` row of its own: the enable
-    // announcement is the only one (the limit stop writes no row — the
-    // headless status and exit contracts carry it, the TS shape).
+    // The stop surfaces no `autonomous_status` row: the enable announcement is the only one.
     let status_rows: Vec<_> = custom_rows(&events)
         .into_iter()
         .filter(|row| row["customType"] == "autonomous_status")
@@ -130,10 +122,8 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
             },
         );
     }
-    // Turn 1 fails the gate -> gate-failure continuation (in-run, the next
-    // turn of the same run); turn 2 passes -> the run stops with no row
-    // (the TS shape: the stop surfaces through the status request and the
-    // exit contracts, never a durable row).
+    // Turn 1 fails the gate -> a gate-failure continuation in the same
+    // run; turn 2 passes -> the run stops with no row.
     assert_eq!(assistant_texts(&events), vec!["first attempt", "fixed it"]);
     let texts = user_texts(&events);
     assert_eq!(texts.len(), 2);
@@ -154,8 +144,8 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
     assert_eq!(events.last(), Some(&EngineEvent::Done(Ok(()))));
 }
 
-/// A scripted policy driver: the engine must inject exactly what the trait
-/// returns, consult it after every turn, and account every settled message.
+/// A scripted policy driver: inject what the trait returns, consult after every turn, account
+/// every settled message.
 #[cfg(test)]
 struct ScriptedDriver {
     /// Pops from the end, so reverse the desired order when building.

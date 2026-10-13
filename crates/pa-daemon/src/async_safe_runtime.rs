@@ -4,14 +4,10 @@ use std::ops::Deref;
 
 /// A multi-thread tokio runtime that drops on a dedicated OS thread.
 ///
-/// [`AgentSessionEngine`](crate::agent_engine::AgentSessionEngine) builds a
-/// private runtime and drops when the worker teardown replaces or retires
-/// it — often from inside an async context. Dropping a
-/// `tokio::runtime::Runtime` there panics (`Cannot drop a runtime in a
-/// context where blocking is not allowed`), killing the worker process and
-/// racing its socket on restart. The wrapper keeps the inner runtime fully
-/// usable (`block_on`, `spawn`, ... via `Deref`) but moves the actual drop
-/// onto a fresh OS thread where the runtime's blocking shutdown is legal.
+/// [`AgentSessionEngine`](crate::agent_engine::AgentSessionEngine) drops its private runtime
+/// during worker teardown — often from inside an async context, where dropping a runtime
+/// panics. The wrapper keeps the inner runtime usable via `Deref` but moves the drop onto
+/// a fresh OS thread.
 pub(crate) struct AsyncSafeRuntime {
     runtime: Option<tokio::runtime::Runtime>,
 }
@@ -39,10 +35,8 @@ impl Deref for AsyncSafeRuntime {
 impl Drop for AsyncSafeRuntime {
     fn drop(&mut self) {
         if let Some(runtime) = self.runtime.take() {
-            // Dropping a runtime blocks until its workers drain; that is
-            // illegal on an async thread, so the shutdown rides a fresh OS
-            // thread. Fire-and-forget: the engine is already retired by the
-            // time its runtime drops.
+            // Dropping a runtime blocks until its workers drain; that is illegal on an
+            // async thread, so the shutdown rides a fresh OS thread.
             std::thread::Builder::new()
                 .name("engine-runtime-drop".to_string())
                 .spawn(move || drop(runtime))
@@ -65,8 +59,7 @@ mod tests {
             .expect("test runtime");
         rt.block_on(async {
             let engine_runtime = AsyncSafeRuntime::new_multi_thread().expect("engine runtime");
-            // The Deref seams stay usable from async code (spawn never
-            // blocks the calling thread); only the drop is the hazard.
+            // The Deref seams stay usable from async code; only the drop is the hazard.
             engine_runtime.spawn(async {});
             drop(engine_runtime);
         });

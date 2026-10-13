@@ -1,5 +1,4 @@
-//! Short deterministic hash used for tool-call id normalization.
-//! Ported from `packages/ai/src/utils/hash.ts` (must match TS output exactly).
+//! Short deterministic hash used for tool-call id normalization (must match TS output exactly).
 
 #[allow(dead_code)] // used by tool-call id normalization in upcoming providers
 pub fn short_hash(input: &str) -> String {

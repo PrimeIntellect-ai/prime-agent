@@ -1,15 +1,12 @@
-//! The side-question pane (TS `SideQuestionComponent`): the `/btw`
-//! conversation mounted above the prompt dock. Turns render in the popup
-//! surface (tool panel background); the first turn keeps its `/btw`
-//! header, follow-ups render as user-message bubbles, and local notices
-//! (slash-command and image rejections) render as complete turns that
-//! never reach the daemon and never seed follow-ups.
+//! The side-question pane: the `/btw` conversation mounted above the
+//! prompt dock. Turns render in the popup surface; the first turn keeps
+//! its `/btw` header, follow-ups render as user-message bubbles, and local
+//! notices render as complete turns that never reach the daemon.
 
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::{str_width, wrap_text};
 
-/// One pane turn (TS `AgentConnectionSideQuestionEvent`, plus the local
-/// notices the interactive mode adds the same way).
+/// One pane turn (a streamed event, or a client-local notice).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideQuestionTurn {
     pub id: String,
@@ -18,23 +15,18 @@ pub struct SideQuestionTurn {
     /// `running` | `complete` | `cancelled` | `error`.
     pub status: String,
     pub error_message: Option<String>,
-    /// A client-local notice (slash-command or image rejection): rendered
-    /// like a turn, but never seeds a follow-up's transcript.
+    /// A client-local notice: rendered like a turn, never sent to the daemon.
     pub local: bool,
 }
 
-/// Whether the turn can seed a follow-up side question (TS `sideQuestionTurns`
-/// collects answered turns; local notices never join it).
+/// Whether the turn can seed a follow-up (local notices never join).
 #[must_use]
 pub fn turn_seeds_follow_up(turn: &SideQuestionTurn) -> bool {
     !turn.local && !turn.answer.is_empty()
 }
 
-/// A pane-mounted bash run (TS `SideQuestionComponent.addBash` mounting
-/// the `BashExecutionComponent` inside the pane: the pane renders the
-/// same bordered card the main thread mounts, at the pane width). The
-/// `!` variant seeds follow-up side questions through the pane's seed
-/// list.
+/// A pane-mounted bash run: the pane renders the same bordered card the main thread mounts, at the
+/// pane width. The `!` variant seeds follow-up side questions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PaneBash {
     pub command: String,
@@ -46,14 +38,12 @@ pub struct PaneBash {
     pub truncated: bool,
     pub full_output_path: Option<String>,
     pub error_message: Option<String>,
-    /// The `!!` variant (TS `excludeFromContext` picks the card's color
-    /// key, so the pane card's border renders dim).
+    /// The `!!` variant: the pane card's border renders dim.
     pub excluded: bool,
 }
 
 impl PaneBash {
-    /// A running pane-mounted run for one command (TS the component's
-    /// constructor: the `$ command` header with its running loader).
+    /// A running pane-mounted run for one command.
     #[must_use]
     pub fn new_running(command: &str, excluded: bool) -> Self {
         Self {
@@ -69,9 +59,7 @@ impl PaneBash {
         }
     }
 
-    /// The card the pane renders (TS `addBash` appends the same
-    /// `BashExecutionComponent` the main thread mounts, so the pane's
-    /// rows come from the shared card renderer).
+    /// The card the pane renders: the rows come from the shared card renderer.
     #[must_use]
     pub fn execution_card(&self) -> crate::bash_card::BashExecutionCard {
         let mut card =
@@ -91,18 +79,14 @@ impl PaneBash {
     }
 }
 
-/// The pane: the turns in order, a bash run mounted after them (TS the
-/// pane appends the bash component below the answered turns), the
-/// invisible follow-up seeds a finished bash run contributed, and the
-/// expansion flag the detail cycle toggles (TS `setExpanded`).
+/// The pane: the turns in order, a bash run mounted after them, the invisible follow-up seeds a
+/// finished bash run contributed, and the expansion flag the detail cycle toggles.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SideQuestionPane {
     pub turns: Vec<SideQuestionTurn>,
     pub bash: Option<PaneBash>,
-    /// Follow-up seeds that never render in the pane (TS
-    /// `finishSideQuestionBash` pushes them to `sideQuestionTurns` — the
-    /// seed list — while the pane keeps showing the bash component
-    /// itself): the raw `!input` and the formatted output.
+    /// Follow-up seeds that never render in the pane: the raw `!input` and the
+    /// formatted output.
     pub extra_seeds: Vec<(String, String)>,
     pub expanded: bool,
 }
@@ -112,11 +96,8 @@ pub struct SideQuestionPane {
 const PADDING_X: usize = 2;
 
 impl SideQuestionPane {
-    /// The turn the follow-up seeds its context with (TS
-    /// `sideQuestionTurns.filter(turn => turn.answer)`), plus the
-    /// pane-mounted bash runs the `!` variant contributed (TS
-    /// `finishSideQuestionBash` pushes the same `question`/`answer`
-    /// shape onto the seed list).
+    /// The answered turns the follow-up seeds its context with, plus the
+    /// pane-mounted bash runs the `!` variant contributed.
     #[must_use]
     pub fn seed_turns(&self) -> Vec<(String, String)> {
         self.turns
@@ -127,15 +108,15 @@ impl SideQuestionPane {
             .collect()
     }
 
-    /// Whether any turn or bash run is still running (the hint row's
-    /// condition; a completed notice can sit below a running turn).
+    /// Whether any turn or bash run is still running (a completed notice can
+    /// sit below a running turn).
     #[must_use]
     pub fn running(&self) -> bool {
         self.turns.iter().any(|turn| turn.status == "running")
             || self.bash.as_ref().is_some_and(|bash| bash.running)
     }
 
-    /// Upsert a streamed event into its turn (TS `update`).
+    /// Upsert a streamed event into its turn.
     pub fn upsert(&mut self, turn: SideQuestionTurn) {
         match self
             .turns
@@ -147,8 +128,7 @@ impl SideQuestionPane {
         }
     }
 
-    /// The running turn the escape key cancels (TS `sideQuestionEvent` —
-    /// the latest turn the pane tracks).
+    /// The running turn the escape key cancels (the latest the pane tracks).
     #[must_use]
     pub fn active_turn(&self) -> Option<&SideQuestionTurn> {
         self.turns
@@ -157,12 +137,8 @@ impl SideQuestionPane {
             .find(|turn| turn.status == "running" && !turn.local)
     }
 
-    /// Render the pane (TS `render`): blank surfaced row, the turns, and
-    /// the dim hint row, every row painted with the popup background and
-    /// padded to the full width. The bash run renders through the shared
-    /// `BashExecutionCard` rows (TS `addBash` appends the same component
-    /// the main thread mounts), so the pane passes the card renderer its
-    /// frame, expansion flag, and cancel hint.
+    /// Render the pane: blank surfaced row, the turns, and the dim hint row, every row painted with
+    /// the popup background and padded to the full width.
     #[must_use]
     pub fn render(
         &self,
@@ -193,13 +169,9 @@ impl SideQuestionPane {
         let mut rows: Vec<crate::Line> = vec![blank()];
         for (index, turn) in self.turns.iter().enumerate() {
             if index > 0 {
-                // Follow-ups and notices render as standard user-message
-                // bubbles (TS `questionBubble`): the Box(2,1) surface with
-                // the question wrapped on it in the user-message text color.
+                // Follow-ups and notices render as standard user-message bubbles.
                 rows.extend(render_bubble(&turn.question, theme, width));
             } else {
-                // The first turn keeps the `/btw` header (TS `Text` with
-                // the accent command segment, two spaces, the question).
                 let mut line: crate::Line = Vec::new();
                 line.push(crate::Span::styled(" ".repeat(PADDING_X), bg));
                 line.push(crate::Span::styled("/btw".to_string(), accent));
@@ -210,12 +182,9 @@ impl SideQuestionPane {
                 }
             }
             rows.push(blank());
-            // The answer area: the markdown answer, the error line under
-            // partial output, or the placeholder states.
             let mut style = crate::markdown::MarkdownStyle::from_theme(theme);
-            // TS constructs the answer `Markdown` with `color:
-            // userMessageText`: the plain text renders in the
-            // user-message color, not the markdown body color.
+            // The plain text renders in the user-message color, not the markdown
+            // body color.
             style.body = theme.fg_style(ThemeColor::UserMessageText);
             let content_width = width.saturating_sub(PADDING_X).max(1);
             let mut rendered = if turn.answer.is_empty() {
@@ -224,14 +193,12 @@ impl SideQuestionPane {
                 crate::markdown::render_markdown(&turn.answer, content_width, &style)
             };
             if let Some(message) = &turn.error_message {
-                // TS `renderAnswer`: the error row is a single-paddingX
-                // `Text` row; the `padded` prefix below supplies the pad.
+                // The error row is a single-paddingX row; the `padded` prefix below
+                // supplies the pad.
                 rendered.push(vec![crate::Span::styled(message.clone(), error)]);
             }
             if rendered.is_empty() {
-                // The placeholder rows (`Cancelled`/`No response`/
-                // `Thinking…`) are single-paddingX `Text` rows too (TS
-                // renders each with `new Text(..., this.paddingX, 0)`).
+                // The placeholder rows are single-paddingX rows too.
                 let text = match turn.status.as_str() {
                     "cancelled" => "Cancelled".to_string(),
                     "complete" => "No response".to_string(),
@@ -250,12 +217,8 @@ impl SideQuestionPane {
             }
             rows.push(blank());
         }
-        // A pane-mounted bash run (TS `addBash` — the
-        // `BashExecutionComponent` appended below the answered turns,
-        // its rows surfaced onto the popup background like every pane
-        // row): one blank before and after, the card's own leading
-        // spacer excluded (the pane adds the blank itself, matching the
-        // component's `Spacer(1)` row inside its render).
+        // A pane-mounted bash run: one blank before and after, the card's own leading spacer
+        // excluded (the pane adds the blank itself, matching the component's `Spacer(1)` row).
         if let Some(bash) = &self.bash {
             rows.push(blank());
             let card = bash.execution_card();
@@ -271,8 +234,6 @@ impl SideQuestionPane {
             }
             rows.push(blank());
         }
-        // The hint row (TS `renderHint`): any running turn swaps the
-        // affordance to the cancel hint.
         let hint = if self.running() {
             "esc to cancel and return to session"
         } else {
@@ -287,9 +248,8 @@ impl SideQuestionPane {
     }
 }
 
-/// Wrap one rendered row to the width, keeping the bg style on the tail
-/// (the markdown renderer wraps its own lines; this re-wraps the padded
-/// row when the terminal is narrower than the rendered content).
+/// Wrap one rendered row to the width, keeping the bg style on the tail: the markdown renderer
+/// wraps its own lines, this re-wraps when the terminal is narrower than the rendered content.
 fn wrap_row(line: &crate::Line, width: usize) -> Vec<crate::Line> {
     let used: usize = line.iter().map(|span| str_width(&span.content)).sum();
     if used <= width || width == 0 {
@@ -316,9 +276,8 @@ fn wrap_row(line: &crate::Line, width: usize) -> Vec<crate::Line> {
         .collect()
 }
 
-/// The follow-up bubble (TS `Box(paddingX, 1)` with the user-message
-/// background): blank surface row, wrapped question rows, blank surface
-/// row, every row padded to the full width on the block background.
+/// The follow-up bubble: blank surface row, wrapped question rows, blank
+/// surface row, every row padded to the full width on the block background.
 fn render_bubble(text: &str, theme: &Theme, width: usize) -> Vec<crate::Line> {
     let bg = theme.bg_style(ThemeBg::UserMessageBg);
     let text_style = theme.fg_style(ThemeColor::UserMessageText);

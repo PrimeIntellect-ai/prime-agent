@@ -38,8 +38,7 @@ fn opus_map() -> &'static str {
     r#"{"minimal": null, "low": "low", "medium": "medium", "high": "high", "xhigh": null, "max": "max"}"#
 }
 
-/// A battery-shaped catalog: the mock-1 current model plus the featured
-/// Claude ladder.
+/// A battery-shaped catalog: the mock-1 current model plus the featured Claude ladder.
 fn battery_catalog() -> Vec<Model> {
     vec![
         model("prime-inference", "mock-1", "Mock 1", false, None),
@@ -139,10 +138,8 @@ fn frame_text(picker: &mut ModelPicker) -> Vec<String> {
         .collect()
 }
 
-/// The scope view (TS the model selector's `scope`): a session with
-/// scoped models opens on the scoped list with the scope row above
-/// it, Alt+S swaps to the full catalog and back, and the macOS
-/// option-composed `ß` toggles too (`matchesOptionComposedKey`).
+/// The scope view: a session with scoped models opens on the scoped list, the scope row above it;
+/// Alt+S swaps to the full catalog and back, and the macOS option-composed `ß` toggles too.
 #[test]
 fn scope_toggles_between_the_scoped_list_and_the_catalog() {
     let catalog = battery_catalog();
@@ -161,8 +158,8 @@ fn scope_toggles_between_the_scoped_list_and_the_catalog() {
         "the picker opens on the scoped list"
     );
     let rows = frame_text(&mut picker);
-    // TS v0.9.7 (the parity run's b3 frame): the scope row renders ABOVE
-    // the search field with one leading space.
+    // The scope row renders ABOVE the search field with one leading space (TS
+    // v0.9.7, the parity run's b3 frame).
     let scope_row = rows
         .iter()
         .position(|row| row.starts_with(" Scope: all | scoped"));
@@ -202,10 +199,9 @@ fn scope_toggles_between_the_scoped_list_and_the_catalog() {
     assert_eq!(picker.filtered_len(), 9);
 }
 
-/// A scope the loaded catalog cannot resolve still scopes (TS keys the
-/// scope off the session's list, never off what the catalog resolves):
-/// the picker opens on the scoped side with no rows, Alt+S still works,
-/// and a refresh that brings the entries fills the scoped rows.
+/// A scope the loaded catalog cannot resolve still scopes (the scope keys off the session's list,
+/// never off what the catalog resolves): the picker opens with no rows, Alt+S still works, and a
+/// refresh that brings the entries fills them.
 #[test]
 fn a_scope_the_catalog_cannot_resolve_still_scopes() {
     let catalog = battery_catalog();
@@ -239,14 +235,9 @@ fn a_scope_the_catalog_cannot_resolve_still_scopes() {
     );
 }
 
-/// The frame matches the TS inline menu panel row for row (the f17
-/// model-selector capture geometry: bordered search field, `›` rows
-/// with the effort cluster centered at columns 54/62, trailing flush
-/// right, scroll indicator, price detail, key hint).
-/// The frame matches the TS inline menu panel row for row (the f17
-/// model-selector capture geometry): bordered search field, `›` rows
-/// with the effort cluster centered (squares at column 54, label at
-/// 62), trailing flush right, scroll indicator, price detail, key hint.
+/// The frame matches the TS inline menu panel row for row (the f17 model-selector capture
+/// geometry): bordered search field, `›` rows with the effort cluster centered (squares at column
+/// 54, label at 62), trailing flush right, scroll indicator, price detail, key hint.
 #[test]
 fn renders_the_ts_inline_panel_shape() {
     let mut picker = ModelPicker::new(picker_options(battery_catalog()));
@@ -256,9 +247,8 @@ fn renders_the_ts_inline_panel_shape() {
     assert_eq!(rows[2], border, "bottom rule");
     // The search field: prompt, caret cell, dim placeholder.
     assert_eq!(rows[1], " >  Search models");
-    // The current model leads, marked `current \u{b7} provider`, no
-    // effort cluster (no thinking surface); the trailing sits flush
-    // right.
+    // The current model leads, marked `current · provider`, no effort cluster
+    // (no thinking surface); the trailing sits flush right.
     assert_eq!(
         rows[3],
         format!(
@@ -266,8 +256,8 @@ fn renders_the_ts_inline_panel_shape() {
             " ".repeat(87)
         )
     );
-    // The effort cluster: name cell (17), centered gap (33), arrow
-    // slots, squares, label cell (6), then the trailing provider.
+    // The effort cluster: name cell (17), centered gap (33), arrow slots,
+    // squares, label cell (6), then the trailing provider.
     let effort_row = |name: &str, squares: &str, label: &str| {
         let name_pad = " ".repeat(17 - name.chars().count());
         let label_pad = " ".repeat(6 - label.chars().count());
@@ -297,10 +287,7 @@ fn renders_the_ts_inline_panel_shape() {
             "medium"
         )
     );
-    // The scroll indicator counts the whole catalog.
     assert_eq!(rows[11], "  (1/9)");
-    // The price detail block: blank, labels with the trailing unit,
-    // values, blank.
     assert_eq!(rows[12], "");
     assert_eq!(
         rows[13],
@@ -316,13 +303,11 @@ fn renders_the_ts_inline_panel_shape() {
         format!(" $0{}$0{}$0", " ".repeat(32), " ".repeat(32))
     );
     assert_eq!(rows[15], "");
-    // The key hint.
     assert_eq!(
         rows[16],
         " \u{2191}/\u{2193} model \u{b7} \u{2190}/\u{2192} effort \u{b7} Enter select \u{b7} Esc close"
     );
-    // One blank line of spacing below the shortcuts (the operator's
-    // 2026-09-24 directive), never a rule.
+
     assert_eq!(rows.len(), 18, "the frame ends on the blank: {rows:?}");
     assert_eq!(rows[17], "");
 }
@@ -363,15 +348,14 @@ fn typed_filter_selects_the_match_and_enter_applies_it() {
     );
 }
 
-/// The Tab-intercepted partial keeps the caret at its end, so typing
-/// extends the filter instead of inserting before it.
+/// The Tab-intercepted partial keeps the caret at its end, so typing extends the
+/// filter instead of inserting before it.
 #[test]
 fn a_row_click_lands_the_arrows_on_the_clicked_rows_effort() {
     let kb = kb();
     let mut picker = ModelPicker::new(picker_options(battery_catalog()));
-    // A nonempty search keeps Left/Right on the search field until
-    // the user enters the list (an arrow move) — a row click is the
-    // same entry.
+    // A nonempty search keeps Left/Right on the search field until the user
+    // enters the list (an arrow move) — a row click is the same entry.
     picker.set_query("fable");
     assert!(
         picker.search.value().contains("fable"),
@@ -434,7 +418,6 @@ fn escape_and_ctrl_c_cancel() {
 fn navigation_wraps_and_enter_applies_the_moved_selection() {
     let mut picker = ModelPicker::new(picker_options(battery_catalog()));
     assert_eq!(picker.handle_key("up", &kb()), ModelPickerAction::None);
-    // Wrapped to the bottom of the list.
     assert_eq!(
         picker.handle_key("enter", &kb()),
         ModelPickerAction::Apply(Box::new(ModelSelectionApplied {
@@ -480,12 +463,12 @@ fn a_nonempty_filter_keeps_arrows_on_the_search_cursor() {
     for character in "claude fable".chars() {
         picker.handle_key(&character.to_string(), &kb());
     }
-    // The caret sits at the field's end: left moves the caret inside
-    // the text, not the effort cluster or the picker.
+    // The caret sits at the field's end: left moves the caret inside the text,
+    // not the effort cluster or the picker.
     assert_eq!(picker.handle_key("left", &kb()), ModelPickerAction::None);
     assert_eq!(picker.query(), "claude fable");
-    // Home walks the caret to the field's start; a further left acts
-    // like Esc (TS `shouldTreatAsBack`: back only at column 0).
+    // Home walks the caret to the field's start; a further left acts like Esc (back
+    // only at column 0).
     assert_eq!(picker.handle_key("home", &kb()), ModelPickerAction::None);
     assert_eq!(picker.handle_key("left", &kb()), ModelPickerAction::Cancel);
 }
@@ -506,8 +489,7 @@ fn unconfigured_providers_mark_require_sign_in_and_sort_last() {
     options.current = None;
     let mut picker = ModelPicker::new(options);
     let rows = frame_text(&mut picker);
-    // Configured providers first, unconfigured rows carry the sign-in
-    // marking in their trailing cluster.
+
     assert!(rows
         .iter()
         .any(|row| row.contains("require sign in \u{b7} other")));
@@ -575,9 +557,7 @@ fn paging_moves_by_the_visible_window() {
 
 #[test]
 fn the_sorted_order_matches_the_ts_chain() {
-    // A provider-configured model outranks an unconfigured one; the
-    // current model leads; featured models lead within a provider; ids
-    // compare numerically.
+    // The full sort chain: configured, pinned, current, recent, provider, featured, id.
     let catalog = vec![
         model("other", "b-model", "B", false, None),
         model("prime-inference", "z-model-2", "Z2", false, None),
@@ -597,8 +577,8 @@ fn the_sorted_order_matches_the_ts_chain() {
 
 #[test]
 fn an_empty_catalog_opens_the_empty_panel() {
-    // TS `handleModelCommand` opens the menu regardless: an empty
-    // catalog renders the bordered field and the no-match row.
+    // TS `handleModelCommand` opens the menu regardless: an empty catalog
+    // renders the bordered field and the no-match row.
     let ModelCommandOutcome::Open(mut picker) = ModelPicker::open(picker_options(Vec::new()), "");
     let rows = frame_text(&mut picker);
     assert_eq!(rows[1], " >  Search models");
@@ -646,8 +626,8 @@ fn filtered_ids(picker: &ModelPicker) -> Vec<String> {
 
 #[test]
 fn version_key_parses_the_catalog_id_formats() {
-    // Hyphen- and dot-joined releases, letter-glued versions, dated
-    // snapshots, namespaced ids, and digit-free ids.
+    // Hyphen- and dot-joined releases, letter-glued versions, dated snapshots,
+    // namespaced ids, and digit-free ids.
     assert_eq!(version_key("claude-opus-5-5"), vec!["5", "5"]);
     assert_eq!(version_key("claude-opus-5.5"), vec!["5", "5"]);
     assert_eq!(version_key("glm-5.3"), vec!["5", "3"]);
@@ -726,9 +706,8 @@ fn version_desc_orders_runs_newest_first() {
 
 #[test]
 fn search_ranks_version_descending() {
-    // Searching `opus` lists 5.5 before 4.7; both id spellings of 5.5
-    // tie on their version run, and the dated snapshot of the older
-    // 4.5 stays below the newer 4.7.
+    // Searching `opus` lists 5.5 before 4.7; both id spellings of 5.5 tie on
+    // their version run, and the dated 4.5 snapshot stays below the newer 4.7.
     let catalog = vec![
         model(
             "prime-inference",
@@ -774,9 +753,8 @@ fn search_ranks_version_descending() {
 
 #[test]
 fn search_keeps_logged_in_providers_above_newer_matches() {
-    // The logged-in tier outranks text match and version: the
-    // configured provider's older model leads the unconfigured
-    // provider's newer, better-scoring match.
+    // The logged-in tier outranks text match and version: the configured provider's older model
+    // leads the unconfigured provider's newer, better-scoring match.
     let catalog = vec![
         model(
             "prime-inference",
@@ -799,8 +777,8 @@ fn search_keeps_logged_in_providers_above_newer_matches() {
 
 #[test]
 fn search_ranks_version_above_the_current_model() {
-    // The version tier outranks the current-model marker: searching
-    // `opus` lists 4.8 first even when 4.7 is the session's model.
+    // The version tier outranks the current-model marker: searching `opus` lists
+    // 4.8 first even when 4.7 is the session's model.
     let catalog = vec![
         model(
             "prime-inference",
@@ -832,8 +810,8 @@ fn search_ranks_version_above_the_current_model() {
 
 #[test]
 fn search_keeps_recent_use_within_an_equal_version() {
-    // Equal version runs keep the sub-tier tiebreakers: the recent-use
-    // rank leads `4.7` over the id-sorted-first `4-7` spelling.
+    // Equal version runs keep the sub-tier tiebreakers: the recent-use rank leads
+    // `4.7` over the id-sorted-first `4-7` spelling.
     let catalog = vec![
         model(
             "prime-inference",
@@ -863,8 +841,8 @@ fn search_keeps_recent_use_within_an_equal_version() {
 
 #[test]
 fn search_compares_version_numbers_and_leaves_unversioned_ids_last() {
-    // Digit runs compare by value (10 over 2) and ids without a
-    // version trail every versioned match.
+    // Digit runs compare by value (10 over 2) and ids without a version trail
+    // every versioned match.
     let catalog = vec![
         model("prime-inference", "z-model-2", "Z Model 2", false, None),
         model("prime-inference", "z-model-10", "Z Model 10", false, None),
@@ -886,8 +864,7 @@ fn search_compares_version_numbers_and_leaves_unversioned_ids_last() {
 
 #[test]
 fn search_ranks_preview_suffixed_ids_by_their_version() {
-    // A prerelease suffix never hides the version: `hy4-preview`
-    // outranks `hy3`.
+    // A prerelease suffix never hides the version: `hy4-preview` outranks `hy3`.
     let catalog = vec![
         model("prime-inference", "tencent/hy3", "HY3", false, None),
         model(
@@ -908,8 +885,8 @@ fn search_ranks_preview_suffixed_ids_by_their_version() {
 
 #[test]
 fn search_preserves_overlong_version_runs() {
-    // A digit run beyond `u64` is a version like any other: the
-    // oversized newer release leads, not trails, when text scores tie.
+    // A digit run beyond `u64` is a version like any other: the oversized newer
+    // release leads, not trails, when text scores tie.
     let catalog = vec![
         model("prime-inference", "model-2", "Model Two", false, None),
         model(

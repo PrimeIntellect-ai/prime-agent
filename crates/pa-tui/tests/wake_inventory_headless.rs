@@ -1,11 +1,7 @@
 //! Headless e2e for the run loop's frame-wake inventory: the pending-work
-//! states whose observation needs a loop iteration — the first frame after
-//! the open (a dirty surface with no other wake), the WaitIdle/WaitRender
-//! barriers' deadlines (their re-checks run at the loop top), and the
-//! expiry arms (the Ctrl+C hint window). The old unconditional quiet tick
-//! observed these implicitly; the work-conditional tick parks without
-//! them, so each member needs its own deadline on the frame arm — these
-//! tests pin every member (a missing predicate wedges or drops the state).
+//! states whose observation needs a loop iteration (first frame after the
+//! open, barrier deadlines, expiry arms). The work-conditional tick parks
+//! without them, so each member needs its own frame-arm deadline.
 #![cfg(unix)]
 
 use pa_tui::interactive::{
@@ -18,8 +14,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 /// The plan height and the mock, in the same shape the other headless
-/// batteries use (the mock serves one session and answers the boot
-/// handshake; nothing else arrives unless a step produces it).
+/// batteries use (the mock serves one session and answers the boot handshake).
 const PLAN_HEIGHT: u16 = 40;
 
 struct MockBoot {
@@ -62,7 +57,7 @@ impl MockBoot {
         let _ = writeln!(writer, "{hello}");
         // Serve the boot handshake and then hold the link open without
         // ever sending another frame: the surface is fully quiet after
-        // the open, which is the state the inventory members must wake.
+        // the open — the state the inventory members must wake.
         let mut line = String::new();
         loop {
             line.clear();
@@ -184,9 +179,8 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// The first frame paints without any input after the open: the open's
-/// rebuild leaves the surface dirty and the link is quiet, so the only
-/// wake is the dirty frame's own deadline on the frame arm.
+/// The first frame paints without any input after the open: the open's rebuild leaves the surface
+/// dirty, so the only wake is the dirty frame's own deadline on the frame arm.
 #[test]
 fn the_first_frame_paints_on_a_fully_quiet_link() {
     let outcome = run_boot_plan(vec![]);
@@ -197,9 +191,8 @@ fn the_first_frame_paints_on_a_fully_quiet_link() {
     );
 }
 
-/// A `WaitRender` barrier whose needle never arrives pops on its deadline:
-/// the barrier's re-check runs at the loop top, so the deadline's wake is
-/// the only thing that observes it on a quiet surface.
+/// A `WaitRender` barrier whose needle never arrives pops on its deadline: the barrier's
+/// re-check runs at the loop top, so the deadline's wake is the only thing that observes it.
 #[test]
 fn a_wait_render_barrier_times_out_on_a_quiet_surface() {
     let outcome = run_boot_plan(vec![HeadlessStep::WaitRender {

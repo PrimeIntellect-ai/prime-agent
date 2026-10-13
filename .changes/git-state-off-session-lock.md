@@ -1,0 +1,1 @@
+- Agent runs no longer stall the session while recording git state: the git checks at the start and end of each run now run in parallel in the background instead of blocking other work on the session.

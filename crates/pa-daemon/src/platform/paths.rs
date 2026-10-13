@@ -1,10 +1,7 @@
-//! Per-OS daemon endpoint naming (TS: `daemon-socket.ts`
-//! `defaultDaemonSocketPath` / `daemon-supervisor.ts` `workerSocketPath`).
-//!
-//! Unix: socket files under `<tmpdir>/prime-agent-<uid>/`. Windows: named
-//! pipes in the `\\.\pipe\` namespace (fixed daemon pipe name, hashed worker
-//! pipe names) - the TS product's exact split.
-
+//! Per-OS daemon endpoint naming: Unix socket files under
+//! `<tmpdir>/prime-agent-<uid>/`; Windows named pipes in the `\\.\\pipe\\`
+//! namespace (fixed daemon pipe, hashed worker pipes) - the TS product's
+//! exact split.
 use std::path::{Path, PathBuf};
 
 use crate::paths::hash_key;
@@ -12,36 +9,34 @@ use crate::paths::hash_key;
 /// Default directory holding daemon socket files (Unix).
 #[cfg(unix)]
 pub fn socket_dir() -> PathBuf {
-    let uid = current_uid().unwrap_or_else(|| "user".to_string());
+    let uid = pa_core::platform::process::current_user_id();
     let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    tmp.join(format!("prime-agent-{uid}"))
+    socket_dir_for(&tmp, uid)
 }
 
-/// The socket-dir half of a discovery state root on Windows. Daemon
-/// endpoints are named pipes with no directory, but TS still computes
-/// `<tmpdir>/prime-agent-user` there (`getuid` is undefined, so the uid
-/// suffix is the literal `user`) so `DaemonStateRoot` keeps one shape, and
-/// discovery never sweeps it (the socket-dir scan returns nothing on
-/// Windows).
+/// Reserve the longest generated endpoint before selecting a directory. Linux
+/// can re-anchor deep paths through /proc; other Unix platforms need a short path.
+#[cfg(unix)]
+fn socket_dir_for(tmp: &Path, uid: u32) -> PathBuf {
+    let name = format!("prime-agent-{uid}");
+    let dir = tmp.join(&name);
+    #[cfg(not(target_os = "linux"))]
+    if std::os::unix::net::SocketAddr::from_pathname(
+        dir.join("worker-000000000000-000000000000.sock"),
+    )
+    .is_err()
+    {
+        return Path::new("/tmp").join(name);
+    }
+    dir
+}
+
+/// The socket-dir half of a discovery state root on Windows: TS computes
+/// `<tmpdir>/prime-agent-user` so `DaemonStateRoot` keeps one shape.
 #[cfg(not(unix))]
+#[must_use]
 pub fn socket_dir() -> PathBuf {
     std::env::temp_dir().join("prime-agent-user")
-}
-
-/// Read the effective uid without libc: `/proc/self/status` on Linux,
-/// HOME-derived uniqueness elsewhere (best-effort, same as today).
-#[cfg(unix)]
-fn current_uid() -> Option<String> {
-    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(first) = rest.split_whitespace().next() {
-                    return Some(first.to_string());
-                }
-            }
-        }
-    }
-    None
 }
 
 /// Default supervisor endpoint: `daemon.sock` in the socket dir (Unix) or
@@ -53,6 +48,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
     PathBuf::from(r"\\.\pipe\prime-agent-daemon")
 }
@@ -70,6 +66,7 @@ pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> Pat
 }
 
 #[cfg(not(unix))]
+#[must_use]
 pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> PathBuf {
     let key = hash_key(&supervisor_socket_path.to_string_lossy(), 12);
     PathBuf::from(format!(
@@ -79,15 +76,57 @@ pub fn worker_socket_path(supervisor_socket_path: &Path, worker_id: &str) -> Pat
 }
 
 // Socket-filesystem identity is the shared platform contract
-// `pa_types::platform::socket_identity` (re-exported through
-// `crate::platform`): the same helper serves stale-file cleanup here and
-// direct-transport ticket validation in pa-tui/pa-cli clients.
+// `pa_types::platform::socket_identity`: the same helper serves stale-file
+// cleanup here and direct-transport ticket validation in the clients.
 
 pub use pa_types::daemon::SocketIdentity;
 pub use pa_types::platform::socket_identity;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn default_socket_uses_the_same_real_uid_as_the_typescript_daemon() {
+        let output = std::process::Command::new("id")
+            .arg("-ru")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let uid = String::from_utf8(output.stdout).unwrap();
+        let tmp = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        assert_eq!(
+            socket_dir(),
+            socket_dir_for(&tmp, uid.trim().parse().unwrap())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn generated_endpoints_fit_even_when_tmpdir_is_deep() {
+        use std::os::unix::net::SocketAddr;
+
+        for length in [20, 65, 120] {
+            let tmp = PathBuf::from(format!("/{}", "d".repeat(length - 1)));
+            let dir = socket_dir_for(&tmp, 501);
+            let worker = dir.join("worker-000000000000-000000000000.sock");
+            assert!(SocketAddr::from_pathname(&worker).is_ok());
+            if length >= 65 {
+                assert_eq!(dir, Path::new("/tmp/prime-agent-501"));
+            } else {
+                assert_eq!(dir, tmp.join("prime-agent-501"));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn short_tmpdir_keeps_the_original_socket_directory() {
+        assert_eq!(
+            socket_dir_for(Path::new("/tmp"), 501),
+            Path::new("/tmp/prime-agent-501")
+        );
+    }
 
     #[test]
     fn worker_socket_names_are_deterministic() {
@@ -101,10 +140,8 @@ mod tests {
         assert!(a.starts_with(socket_dir()));
     }
 
-    /// The Windows endpoint names (TS `daemon-socket.ts` /
-    /// `daemon-supervisor.ts` win32 arms): the fixed daemon pipe name and
-    /// the hashed worker pipe name in the `\\.\pipe\` namespace. Runs
-    /// only on the windows-latest job; the cross job compiles it.
+    /// The Windows endpoint names (TS win32 arms): the fixed daemon pipe
+    /// name and the hashed worker pipe name in the `\\.\\pipe\\` namespace.
     #[test]
     #[cfg(windows)]
     fn windows_endpoints_are_the_ts_pipe_names() {

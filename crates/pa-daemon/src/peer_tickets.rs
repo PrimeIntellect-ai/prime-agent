@@ -10,8 +10,7 @@
 //! session socket directly.
 //!
 //! TS refuses tickets for client-owned workers (`ownerClientId`); the Rust
-//! supervisor has no client-owned worker lifecycle (every worker it spawns or
-//! adopts is a resident session), so there is no such class to refuse.
+//! supervisor has not ported that refusal yet (a disclosed divergence).
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -39,7 +38,7 @@ pub(crate) enum PeerGrantPurpose {
     /// A session client attaching directly (TS `issuePeerTransport`).
     SessionClient,
     /// A peer worker delivering agent messages directly, bypassing the
-    /// supervisor's route plane (thin-supervisor stage 3).
+    /// supervisor's route plane.
     Worker,
 }
 
@@ -106,10 +105,8 @@ impl Supervisor {
 
     /// `get_worker_peer_transport`: a worker acting for its session asks
     /// for a single-use `worker`-purpose grant on a target worker's direct
-    /// socket, so agent-message delivery bypasses the supervisor's route
-    /// plane. The requester authenticates with its worker token (the TS
-    /// `list_agent_peers` lookup) and the target resolves through the
-    /// roster with the same errors as the `send_message` arm.
+    /// socket (agent-message delivery bypasses the supervisor's route
+    /// plane); the requester authenticates with its worker token.
     async fn issue_worker_peer_transport(
         self: &std::sync::Arc<Self>,
         worker_token: &str,
@@ -129,9 +126,7 @@ impl Supervisor {
     }
 
     /// The shared mint path (TS `issuePeerTransport` body): availability,
-    /// exact process identity, grant push into worker memory, then the
-    /// ticket. The supervisor is out of the streaming path once the ticket
-    /// returns.
+    /// identity, grant push, then the ticket.
     async fn mint_peer_transport_ticket(
         self: &std::sync::Arc<Self>,
         resident: &std::sync::Arc<ResidentWorker>,
@@ -304,8 +299,6 @@ mod tests {
         )
     }
 
-    /// The worker-peer ticket arm authenticates by worker token and refuses
-    /// self-targeting with the TS `send_message` string.
     #[tokio::test]
     async fn worker_peer_ticket_auth_and_self_target() {
         use crate::registry::ResidentWorker;
@@ -352,7 +345,6 @@ mod tests {
             )
         };
         let supervisor = worker_ticket_supervisor();
-        // An unknown token answers with the TS auth error.
         let rejected = supervisor
             .handle_get_worker_peer_transport("t1", "get_worker_peer_transport", "nope", "aaa111")
             .await;
@@ -361,8 +353,6 @@ mod tests {
             rejected.error.as_deref(),
             Some("Worker authentication failed")
         );
-        // A known requester targeting itself answers with the TS
-        // self-target string.
         supervisor
             .registry
             .insert(tokenized("aaa111", "tok-a"))
@@ -375,8 +365,6 @@ mod tests {
             self_target.error.as_deref(),
             Some("Agent messaging cannot target the sending session")
         );
-        // A known requester with an unknown target answers with the TS
-        // unknown-session error.
         let unknown = supervisor
             .handle_get_worker_peer_transport(
                 "t3",
@@ -390,8 +378,6 @@ mod tests {
             unknown.error.as_deref(),
             Some("Unknown active session: no-such-session")
         );
-        // A different resident without a live worker connection reaches
-        // the mint path and answers with the not-connected state.
         let target = tokenized("bbb222", "tok-b");
         target
             .peer_transport_capable

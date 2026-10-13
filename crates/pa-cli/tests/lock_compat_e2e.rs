@@ -1,13 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack futures on hot paths by design. too_many_lines: style gate
+// only. Casts: 64-bit targets; narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -18,21 +10,13 @@
 )]
 
 //! Lock-convention compatibility, binary level: the TS `prime-agent` and the
-//! Rust `prime-agent` must agree on the lock artifact at `<file>.lock`.
-//!
-//! The TS product locks files with `proper-lockfile`: an empty DIRECTORY at
-//! `{file}.lock` whose mtime is refreshed while held and judged for
-//! staleness on contention. Its release path `rmdir`s the lock path, so a
-//! regular FILE there is fatal to the TS product (`ENOTDIR`), and a stale
-//! directory is reclaimed as a crashed holder's artifact. Pre-compat Rust
-//! builds created flock FILEs there, which wedged real TS installs. These
-//! tests pin the ground truth with the installed TS binary (fixture agent
-//! dirs only; skipped when the binary is absent) and assert the Rust side
-//! produces exactly the artifacts the TS side tolerates.
-//!
-//! Note the deliberate asymmetry: when a stale FILE artifact blocks it, the
-//! Rust binary heals the artifact and proceeds (self-healing its own legacy
-//! output), while the TS binary fails. Both behaviors are asserted as-is.
+//! Rust `prime-agent` must agree on the lock artifact at `<file>.lock`. The
+//! TS product locks with `proper-lockfile`: an empty DIRECTORY whose mtime is
+//! refreshed while held; its release path `rmdir`s the lock path, so a
+//! regular FILE there is fatal (ENOTDIR), and a stale directory is reclaimed
+//! as a crashed holder's artifact. Pre-compat Rust builds created flock FILEs
+//! there, which wedged real TS installs. Deliberate asymmetry: a stale FILE
+//! artifact is healed by the Rust binary and fatal to the TS binary.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};

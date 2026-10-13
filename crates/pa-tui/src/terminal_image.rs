@@ -1,20 +1,9 @@
-//! Terminal image metadata: pixel-dimension parsing for the supported
-//! formats, the bounded-prefix dimension read the render path uses, and
-//! the textual fallback row.
-//!
-//! The behavior contract is the TS TUI package's `terminal-image.ts` for
-//! the surfaces this product renders: every tool-result image row is the
-//! textual fallback (TS `tool-execution.ts` mounts its `Image` components
-//! with `fallbackOnly`), so the TUI never places graphics and never
-//! decodes a whole image payload — the render-path skip (the
-//! image-heavy session-open fix) reads dimensions from a bounded base64
-//! prefix only (see [`get_image_dimensions_prefix`]); the terminal
-//! graphics-protocol encoders the TS package carries for non-fallback
-//! placements had no runtime caller in this port (the tool-result path
-//! was their only mount, always `fallbackOnly`) and were removed with
-//! the skip. [`is_image_line`] stays: the exit-flush inline scrollback
-//! still recognizes a placement sequence another process may have
-//! written into the scrollback it appends.
+//! Terminal image metadata: pixel-dimension parsing, the bounded-prefix
+//! dimension read the render path uses, and the textual fallback row.
+//! Every tool-result image row is the textual fallback (TS mounts `Image`
+//! components with `fallbackOnly`), so the TUI never decodes a whole
+//! payload: [`get_image_dimensions_prefix`] reads dimensions from a
+//! bounded prefix. [`is_image_line`] stays for the exit-flush scrollback.
 
 /// Image pixel dimensions (TS `ImageDimensions`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +16,7 @@ const KITTY_PREFIX: &str = "\x1b_G";
 const ITERM2_PREFIX: &str = "\x1b]1337;File=";
 
 /// Whether a rendered row carries an image placement sequence (TS
-/// `isImageLine`; multi-row images carry a cursor-up prefix first).
+/// `isImageLine`).
 pub fn is_image_line(line: &str) -> bool {
     line.contains(KITTY_PREFIX) || line.contains(ITERM2_PREFIX)
 }
@@ -138,19 +127,15 @@ fn webp_dimensions(bytes: &[u8]) -> Option<ImageDimensions> {
     }
 }
 
-/// The bounded-prefix decode budget for [`get_image_dimensions_prefix`]
-/// (the image-heavy session-open fix): every supported format's dimension
-/// header lives in the first bytes, and a payload whose header spills past
-/// the budget reports `None` (its row renders the payload size instead).
+/// The bounded-prefix decode budget for [`get_image_dimensions_prefix`]:
+/// a payload whose header spills past the budget reports `None`.
 pub const IMAGE_DIMENSIONS_PREFIX_BYTES: usize = 1024;
 
 /// Read an image's pixel dimensions from a BOUNDED PREFIX of its base64
-/// payload (the render-path skip: image-heavy tool results carry megabytes
-/// of base64, and the transcript's image rows must never decode the whole
-/// string to draw their metadata). `None` for unsupported mime types,
-/// payloads that do not decode at the quantum-aligned prefix, or headers
-/// that spill past [`IMAGE_DIMENSIONS_PREFIX_BYTES`]; the caller renders
-/// the size-only placeholder then.
+/// payload (image-heavy tool results must never be decoded whole for a
+/// metadata row). `None` for unsupported mime types, payloads that do
+/// not decode at the quantum-aligned prefix, or headers that spill past
+/// [`IMAGE_DIMENSIONS_PREFIX_BYTES`].
 pub fn get_image_dimensions_prefix(
     base64_data: &str,
     mime_type: &str,
@@ -159,16 +144,12 @@ pub fn get_image_dimensions_prefix(
     use base64::Engine;
     // The bounded window comes first and the trim stays INSIDE it: a
     // payload padded with megabytes of trailing whitespace never pays a
-    // full-suffix scan (the read stays bounded by the window, never the
-    // payload's length). `get` returns `None` when a cut lands inside a
-    // multi-byte character (a non-ASCII payload is not decodable base64
-    // anyway).
+    // full-suffix scan.
     let window = base64_data.trim_start();
     let take = (max_decoded_bytes.div_ceil(3) * 4).min(window.len());
     let window = window.get(..take)?.trim_end();
     // Keep the prefix at a multiple of 4 base64 characters so the slice
-    // decodes as a complete unpadded sequence (the dimension headers all
-    // live well inside the first quantum).
+    // decodes as a complete unpadded sequence.
     let aligned = window.len() - window.len() % 4;
     let prefix = window.get(..aligned)?;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -184,7 +165,7 @@ pub fn get_image_dimensions_prefix(
 }
 
 /// The textual fallback for an image that cannot be displayed (TS
-/// `imageFallback`): `[Image: filename? [mime] WxH?]`.
+/// `imageFallback`).
 pub fn image_fallback(
     mime_type: &str,
     dimensions: Option<ImageDimensions>,
@@ -243,8 +224,7 @@ mod tests {
         bytes.extend(720u16.to_be_bytes()); // height
         bytes.extend(1080u16.to_be_bytes()); // width
         bytes.extend(vec![0u8; 8]); // SOF payload tail: the scan needs
-                                    // `offset + 9 < len`, so the frame must
-                                    // not end right after the width
+                                    // `offset + 9 < len`
         let data = base64::engine::general_purpose::STANDARD.encode(bytes);
         assert_eq!(
             get_image_dimensions_prefix(&data, "image/jpeg", IMAGE_DIMENSIONS_PREFIX_BYTES),
@@ -287,9 +267,6 @@ mod tests {
 
     #[test]
     fn the_prefix_read_stays_bounded_around_whitespace_padding() {
-        // A valid header followed by megabytes of trailing whitespace: the
-        // window trim stays inside the budget, and the dimensions still
-        // parse (the bounded window carries only base64).
         let padded = format!("{}{}", tiny_png(64, 32), " ".repeat(1 << 20));
         assert_eq!(
             get_image_dimensions_prefix(&padded, "image/png", IMAGE_DIMENSIONS_PREFIX_BYTES),
@@ -298,8 +275,6 @@ mod tests {
                 height_px: 32
             })
         );
-        // A small payload with a trailing line return: the window's own
-        // trim drops it and the decode still succeeds.
         let newline = format!("{}\n", tiny_png(64, 32));
         assert_eq!(
             get_image_dimensions_prefix(&newline, "image/png", IMAGE_DIMENSIONS_PREFIX_BYTES),
@@ -308,7 +283,6 @@ mod tests {
                 height_px: 32
             })
         );
-        // Whitespace-only payloads report no dimensions.
         assert_eq!(
             get_image_dimensions_prefix(
                 &" ".repeat(4096),
@@ -321,11 +295,8 @@ mod tests {
 
     #[test]
     fn the_prefix_read_never_touches_the_payload_past_the_budget() {
-        // The budget's behavioral proof: a payload whose PREFIX decodes and
-        // parses but whose tail (past the budget) is invalid base64 still
-        // reports its dimensions — a full decode would fail. The row's
-        // dimension therefore came from the bounded prefix alone: the
-        // poison sits beyond the 1368-character prefix window.
+        // A payload whose prefix decodes but whose tail (past the
+        // budget) is invalid base64 still reports its dimensions.
         let header = tiny_png(640, 480);
         let poisoned = format!("{header}{}{}", "A".repeat(4096), "!".repeat(64));
         assert_eq!(
@@ -335,9 +306,8 @@ mod tests {
                 height_px: 480
             })
         );
-        // A header that spills past the budget reports None (the caller
-        // renders the size-only placeholder): dims sit at byte 16 here, so a
-        // 12-byte budget cannot see them.
+        // A header that spills past the budget reports None: dims sit
+        // at byte 16 here, so a 12-byte budget cannot see them.
         assert_eq!(get_image_dimensions_prefix(&header, "image/png", 12), None);
     }
 

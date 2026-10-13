@@ -1,10 +1,6 @@
-//! Autonomous mode: run-state accounting, limits, continuation text, gate
-//! evaluation, and the per-turn continuation driver.
-//!
-//! The runtime state (`AutonomousRuntimeState`) tracks usage and limits for
-//! one autonomous run. The [`AutonomousDriver`] trait (in [`driver`]) is the
-//! policy seam the session turn loop consults after every settled turn; the
-//! engine never inspects autonomous state itself.
+//! Autonomous mode: run-state accounting, limits, continuation text, gate evaluation, and the
+//! per-turn continuation driver. The [`AutonomousDriver`] trait is the policy seam the session turn
+//! loop consults after every settled turn.
 
 mod driver;
 mod gates;
@@ -360,10 +356,8 @@ pub fn disabled_autonomous_status() -> AgentAutonomousStatus {
     autonomous_status(&state)
 }
 
-/// Limit check against a completed run's status snapshot (TS
-/// `autonomousLimitReason(status)` in acp-stop-reason.ts: the same counter
-/// fields the runtime state carries, evaluated on the wire shape so headless
-/// surfaces can derive the stop reason without the live state).
+/// Limit check against a completed run's status snapshot: the same counters the runtime state
+/// carries.
 #[must_use]
 pub fn autonomous_limit_reason_of_status(
     status: &AgentAutonomousStatus,
@@ -409,7 +403,6 @@ pub fn autonomous_limit_reason(
     None
 }
 
-/// Continuation prompt for a failed gate.
 #[must_use]
 pub fn build_autonomous_gate_failure_continuation(
     failure: &AgentAutonomousGateFailure,
@@ -431,17 +424,13 @@ pub fn build_autonomous_gate_failure_continuation(
     )
 }
 
-/// The plain `[autonomous-continuation]` message body.
 #[must_use]
 pub fn autonomous_continuation_text(state: &AutonomousRuntimeState) -> String {
     format!("[autonomous-continuation]\n\n{}", state.continuation_prompt)
 }
 
-/// The continuation row an in-run continuation hook returns to the agent
-/// loop (TS `createAutonomousContinuationMessage`: `{ role: "user", content:
-/// [{ type: "text", text }], timestamp }`): the loop emits and persists the
-/// row through its own message events, so the surface that mints it owns no
-/// emission of its own.
+/// The continuation row an in-run continuation hook returns to the agent loop; the loop emits and
+/// persists it through its own message events.
 #[must_use]
 pub fn autonomous_continuation_loop_row(
     text: &str,
@@ -552,7 +541,6 @@ mod tests {
             DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT
         );
         assert_eq!(state.subagent_keep_alive_ms, DEFAULT_SUBAGENT_KEEP_ALIVE_MS);
-        // Explicit limits win; invalid (zero) values fall back.
         let custom = AgentAutonomousConfig {
             enabled: Some(true),
             max_turns: Some(2),
@@ -562,11 +550,9 @@ mod tests {
         let custom_state = create_autonomous_runtime_state(Some(&custom), None);
         assert_eq!(custom_state.limits.max_turns, 2);
         assert_eq!(custom_state.limits.max_tokens, DEFAULT_MAX_TOKENS);
-        // Disabled by default.
         let off = create_autonomous_runtime_state(None, None);
         assert!(!off.enabled);
         assert_eq!(off.started_at, None);
-        // Setting limits only changes provided fields.
         let mut state = off;
         set_autonomous_limits(
             &mut state,
@@ -600,7 +586,6 @@ mod tests {
     fn usage_accounting_excludes_cache_reads() {
         let mut state = create_autonomous_runtime_state(Some(&config(true)), None);
         add_autonomous_usage(&mut state, Some(&usage(100, 40)));
-        // Disabled state ignores usage.
         add_autonomous_usage(
             &mut AutonomousRuntimeState {
                 enabled: false,
@@ -659,7 +644,6 @@ mod tests {
         let text = build_autonomous_gate_failure_continuation(&failure, 3, 0);
         assert!(text.starts_with("[autonomous-continuation: gate-failed]\n\nAutonomous quality gate failed (attempt 2/3): `make check` exited with code 1.\n\nOutput:\nerror here\n"));
         assert!(text.contains("Continue working. Fix the failure, then produce terminal evidence."));
-        // Keep-alive text uses minute pluralization.
         let mut short = state.clone();
         short.subagent_keep_alive_ms = 60_000;
         assert!(create_autonomous_subagent_keep_alive_text(&short)

@@ -7,9 +7,7 @@ impl AgentView {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
-        // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
-        // the previous row: a tool call, agent message, bash execution, or
-        // shell completion all count.
+        // TS `precededByToolActivity` = the compact set.
         let preceded_by_tool = index > 0 && Self::is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         let detail = self.entry_detail(index);
@@ -305,20 +303,6 @@ mod tests {
             any::<bool>().prop_map(|restored| InjectedPromptKind::KernelRestored { restored }),
             prop::collection::vec("[a-z 数据]{1,12}", 0..4)
                 .prop_map(|skills| InjectedPromptKind::PythonSkillsUnavailable { skills }),
-            (
-                prop::sample::select(vec![
-                    RlmChildOutcome::Finished,
-                    RlmChildOutcome::Failed,
-                    RlmChildOutcome::Cancelled,
-                ]),
-                "[a-z 数据]{1,12}",
-            )
-                .prop_map(|(outcome, session_name)| {
-                    InjectedPromptKind::RlmChildStatus {
-                        outcome,
-                        session_name,
-                    }
-                }),
         ]
     }
 

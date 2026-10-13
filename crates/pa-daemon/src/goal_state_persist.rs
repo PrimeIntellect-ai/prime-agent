@@ -1,11 +1,7 @@
 //! Durable thread-goal state: the read half of the `thread_goal_state`
-//! persistence contract. The worker's session file is the one durable store
-//! (TS keeps a single session store, so `_loadPersistedGoalState` reads the
-//! same rows `appendCustomEntry` wrote); the daemon engine's in-memory
-//! branch is fresh on every build, so a recovery rebuild rehydrates the
-//! goal driver from the file's latest `thread_goal_state` custom entry —
-//! status, objective, usage counters, and continuation counts included.
-
+//! persistence contract. The worker's session file is the one durable
+//! store; the engine's in-memory branch is fresh on every build, so a
+//! recovery rebuild rehydrates from the file's latest entry.
 use pa_core::goals::{
     is_persisted_goal_state, normalize_goal_state, GoalState, GOAL_STATE_CUSTOM_TYPE,
 };
@@ -17,11 +13,8 @@ use crate::session_store::SessionFile;
 
 /// The standalone goal reader (the TS `_loadPersistedGoalState`
 /// reference): the window's snapshot goal, else the full reader's
-/// active-branch scan. The open path now shares ONE windowed open
-/// between the goal seed and the adoption
-/// (`agent_engine::adopt_built_session`), so in production this reader
-/// has no caller - it stays compiled as the differential oracle's
-/// reference (`agent_engine/tests.rs`) so it cannot bit-rot.
+/// active-branch scan. In production this reader has no caller - it stays
+/// compiled as the differential oracle's reference so it cannot bit-rot.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn persisted_goal_state(path: Option<&Path>) -> Option<GoalState> {
     let path = path?;
@@ -31,11 +24,8 @@ pub(crate) fn persisted_goal_state(path: Option<&Path>) -> Option<GoalState> {
     goal_state_in_session_file(&SessionFile::open(path).ok()?)
 }
 
-/// The newest valid goal state along a loaded store's ACTIVE branch (the
-/// full-reader fallback arm of [`persisted_goal_state`]): the same scan
-/// `SessionFile`'s loaded rows already answer, so callers holding the
-/// store share one full read for both the goal and the branch entries
-/// instead of paying it twice.
+/// The newest valid goal state along a loaded store's ACTIVE branch: the
+/// same scan `SessionFile`'s loaded rows answer, so callers share one read.
 pub(crate) fn goal_state_in_session_file(store: &SessionFile) -> Option<GoalState> {
     store
         .branch()
@@ -242,8 +232,7 @@ mod tests {
 
     /// Parity fixture: a real `thread_goal_state` row captured from the TS
     /// binary's session file (the f18 battery run, 2026-09-19) parses and
-    /// rehydrates through the Rust reader unchanged — the durable row
-    /// shape is the TS one.
+    /// rehydrates through the Rust reader unchanged.
     #[test]
     fn captured_ts_row_rehydrates_unchanged() {
         let ts_row = json!({

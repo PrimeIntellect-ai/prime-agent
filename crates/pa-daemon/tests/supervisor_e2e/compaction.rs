@@ -3,9 +3,7 @@
 
 use super::*;
 
-// Compaction on the daemon surface: `compact`/`abort_compaction`/
-// `set_auto_compaction` over the scripted engine, with response and event
-// shapes captured read-only from the live TS daemon
+// Response and event shapes captured read-only from the live TS daemon
 // (`tests/goldens/compaction-live-ts.json`).
 #[test]
 fn compaction_commands_scripted_session() {
@@ -19,16 +17,14 @@ fn compaction_commands_scripted_session() {
             .expect("golden fixture");
     let (mut client, _hello) = Client::connect(&socket);
 
-    // A scripted session whose compaction script runs: (1) a success with a
-    // delay long enough to observe the in-flight state and abort it,
-    // (2) the TS nothing-to-compact skip, then (3) replay from the top.
+    // The compaction script: (1) an abortable in-flight success, (2) the
+    // TS nothing-to-compact skip, then (3) replay from the top.
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
         serde_json::json!({
             "responses": [{ "text": "one turn" }],
             "compaction": { "responses": [
-                // Run 1 (aborted mid-delay), run 2 (success), run 3 (skip).
                 {
                     "summary": "first summary",
                     "firstKeptEntryId": "",
@@ -80,7 +76,6 @@ fn compaction_commands_scripted_session() {
         serde_json::json!(true)
     );
 
-    // One scripted turn so the session has content.
     client.send_command(
         "p1",
         &serde_json::json!({ "type": "prompt", "activeSessionId": session_id, "message": "hi" }),
@@ -90,7 +85,6 @@ fn compaction_commands_scripted_session() {
     // The turn_end event may precede the prompt reply (TS order).
     let _ = client.take_session_event(&mut turn_lines, "turn_end");
 
-    // Unknown session selector fails with the TS routing error.
     client.send_command(
         "cp-missing",
         &serde_json::json!({ "type": "compact", "activeSessionId": "no-such-session" }),
@@ -99,8 +93,6 @@ fn compaction_commands_scripted_session() {
     assert_eq!(missing["success"], false);
     assert_eq!(missing["error"], golden["compact"]["unknownSessionError"]);
 
-    // First compact: the scripted delay keeps it in flight. A second client
-    // observes `isCompacting` mid-run, then aborts it.
     client.send_command(
         "cp1",
         &serde_json::json!({
@@ -147,8 +139,6 @@ fn compaction_commands_scripted_session() {
     assert_eq!(state["data"]["isSessionActive"], serde_json::json!(true));
     assert_eq!(state["data"]["isStreaming"], serde_json::json!(false));
 
-    // Abort the in-flight compaction: success without data, then the
-    // cancelled compact response and aborted `compaction_end` event.
     second.send_command(
         "ab1",
         &serde_json::json!({
@@ -167,10 +157,9 @@ fn compaction_commands_scripted_session() {
     );
     assert_eq!(compact_aborted["error"], golden["compact"]["abortedError"]);
     let end_aborted = client.take_session_event(&mut cp1_lines, "compaction_end");
-    // The golden's aborted capture ran without instructions; the TS catch
-    // path (the `compact` catch in `agent-session.ts`) echoes the run's
-    // `customInstructions`, so expect the golden plus the field this run
-    // carried.
+    // The golden's aborted capture ran without instructions; the TS catch path
+    // echoes the run's `customInstructions`, so expect the golden plus the field
+    // this run carried.
     let mut end_aborted_expected = golden["compactionEndAborted"].clone();
     end_aborted_expected["customInstructions"] = serde_json::json!("focus on the goal");
     assert_eq!(
@@ -178,8 +167,6 @@ fn compaction_commands_scripted_session() {
         "aborted compaction_end shape"
     );
 
-    // Second compact: the next scripted result answers with the TS
-    // `CompactionResult` response shape.
     client.send_command(
         "cp2",
         &serde_json::json!({
@@ -219,11 +206,9 @@ fn compaction_commands_scripted_session() {
         data.get("usage").is_none(),
         "usage never rides the compact response (TS parity)"
     );
-    // The second compact emitted its own start event before the reply.
     let start = client.take_session_event(&mut cp2_lines, "compaction_start");
     assert_eq!(start["type"], serde_json::json!("compaction_start"));
 
-    // The success `compaction_end` event carries the same result.
     let end_success = client.take_session_event(&mut cp2_lines, "compaction_end");
     let golden_end = &golden["compactionEndSuccess"];
     assert_eq!(end_success["type"], golden_end["type"]);
@@ -237,8 +222,8 @@ fn compaction_commands_scripted_session() {
     );
     assert!(end_success.get("errorMessage").is_none());
 
-    // The compacted read: `compactionSummary` message first, retained
-    // messages after it (the scripted empty cut keeps the whole transcript).
+    // The compacted read: `compactionSummary` first (the scripted empty
+    // cut keeps the whole transcript).
     client.send_command(
         "gm1",
         &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
@@ -257,7 +242,6 @@ fn compaction_commands_scripted_session() {
         "the empty scripted cut retains the transcript"
     );
 
-    // The compaction is durable: a fresh attach replays the compacted view.
     let (mut third, _hello) = Client::connect(&socket);
     third.send_command(
         "a3",
@@ -277,8 +261,6 @@ fn compaction_commands_scripted_session() {
         serde_json::json!(1)
     );
 
-    // Third compact: the script's third entry reports the TS
-    // nothing-to-compact skip.
     client.send_command(
         "cp3",
         &serde_json::json!({ "type": "compact", "activeSessionId": session_id }),
@@ -302,8 +284,6 @@ fn compaction_commands_scripted_session() {
         "skip carries no result"
     );
 
-    // set_auto_compaction: success without data; the flag lands in the
-    // connection state.
     client.send_command(
         "sac1",
         &serde_json::json!({

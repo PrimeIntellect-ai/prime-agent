@@ -4,15 +4,9 @@
 
 use super::*;
 
-/// The operator's 2026-09-26 ask carried by the ONE merged line
-/// (2026-09-28): the collapsed summary row renders the
-/// descendant-tree aggregate in the SAME Cost column the agent rows
-/// bill — the right-aligned `${:.2}` cell, the Age column blank
-/// behind it — and the merged line never unmounts (an all-done tree
-/// keeps its row), so the aggregate always has a surface. TS renders
-/// no cost on the summary row (`createSubagentSummaryRow` pins
-/// `recursiveCost: 0`): the aggregate is a deliberate Rust
-/// divergence.
+/// The operator's 2026-09-26 ask carried by the ONE merged line (2026-09-28): the collapsed
+/// summary row renders the descendant-tree aggregate in the SAME Cost column, and the merged
+/// line never unmounts. TS renders no cost on the summary row — a deliberate Rust divergence.
 #[test]
 fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     let mut parent = parent_summary("p");
@@ -56,8 +50,6 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
         summary.trim_end().ends_with("$4.75"),
         "the Age column stays blank behind the aggregate: {summary:?}"
     );
-    // ONE line carries both statuses: no second per-status summary
-    // row renders.
     assert_eq!(
         mode.rows
             .iter()
@@ -69,9 +61,8 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
     );
 }
 
-/// A query that matches only the parent still bills the parent's row
-/// the whole family's spend: only the rows are filtered, never the
-/// rollup input.
+/// A query that matches only the parent still bills the parent's row the whole family's spend:
+/// only the rows are filtered, never the rollup input.
 #[test]
 fn a_search_keeps_the_rows_totals() {
     let mut parent = parent_summary("p");
@@ -109,9 +100,8 @@ fn a_search_keeps_the_rows_totals() {
     );
 }
 
-/// A tree that spends nothing still prints its `$0.00` aggregate —
-/// the cost cell rides the row, it is never a value-dependent
-/// extra.
+/// A tree that spends nothing still prints its `$0.00` aggregate — the cost cell rides the
+/// row, never a value-dependent extra.
 #[test]
 fn the_summary_line_renders_zero_when_nothing_bills() {
     let mut mode = mode_with_parent_and_child();
@@ -128,12 +118,8 @@ fn the_summary_line_renders_zero_when_nothing_bills() {
     );
 }
 
-/// The all-done state — the frame the operator actually inspects
-/// after work completes: no descendant runs, and the ONE merged line
-/// (which never unmounts — #2843's regression class: an aggregate on
-/// a row that vanished when the children finished) carries the same
-/// descendant-tree aggregate it billed mid-run. Its Cost cell prints
-/// in the same right-aligned column, the Age column blank behind it.
+/// The all-done state: no descendant runs, and the ONE merged line carries the same aggregate
+/// it billed mid-run (#2843's regression class: an aggregate on a vanished row).
 #[test]
 fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     let mut parent = parent_summary("p");
@@ -175,10 +161,8 @@ fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     );
 }
 
-/// The aggregate survives the #2866 incident-notice render path: a
-/// notice rides the header above the list, the list window shrinks,
-/// and the inactive line's Cost cell still prints the aggregate in
-/// the same frame.
+/// The aggregate survives the #2866 incident-notice render path: the list window shrinks, and
+/// the inactive line's Cost cell still prints the aggregate in the same frame.
 #[test]
 fn aggregate_survives_the_incident_notice_render_path() {
     let mut parent = parent_summary("p");
@@ -215,10 +199,8 @@ fn aggregate_survives_the_incident_notice_render_path() {
     );
 }
 
-/// The aggregate survives the #2865 click surface: the rendered
-/// frame records its clickable rows (the summary row among them) in
-/// the same pass that bills the Cost cell, and a plain click on the
-/// inactive line expands its list while the aggregate stays put.
+/// The aggregate survives the #2865 click surface: the frame records its clickable rows in
+/// the same pass that bills the Cost cell; a click expands while the aggregate stays put.
 #[test]
 fn aggregate_survives_the_click_surface_render_path() {
     // Mouse tracking is process-global state: the click grammar's

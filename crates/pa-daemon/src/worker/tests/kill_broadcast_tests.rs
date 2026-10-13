@@ -1,14 +1,8 @@
-//! Kill and aborted-row broadcast e2e tests (moved with their concerns).
+//! Kill and aborted-row broadcast e2e tests.
 use super::*;
 
-/// The aborted turn's row through the worker gate (the #245 flagged
-/// gap: TS broadcasts AND persists it, the gate used to drop it): a
-/// turn aborted mid-provider-wait settles on its aborted assistant
-/// row, and the gate forwards the row — the attached client sees the
-/// row's `message_start/message_end` pair (stopReason "aborted", the
-/// abort error, EMPTY usage) and the session file holds the same
-/// row — while the active goal's accounting skips it (the state the
-/// goal-start turn left is unchanged after the abort).
+/// The #245 gap: the aborted row broadcasts and persists, but the goal's
+/// accounting skips it.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
@@ -66,8 +60,7 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         "the goal-start turn's usage accounted: {goal_before:?}"
     );
     // The turn-end mint queues the next continuation; the runner
-    // admits it and its goal-context row rides the wire, then the
-    // provider fetch holds (the 60s reply).
+    // admits it, then the provider fetch holds (the 60s reply).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let events = session_events_since(&mut subscription);
@@ -85,17 +78,15 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    // Let the admitted turn reach the provider: the held reply keeps
-    // the fetch in flight, so the abort lands mid-provider-wait (the
-    // eager fetch cancel) and the turn settles on its aborted row.
+    // Let the admitted turn reach the provider: the held reply keeps the fetch
+    // in flight, so the abort lands mid-provider-wait and settles the aborted row.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let abort = worker.dispatch("abort", &json!({})).await;
     assert!(abort.success, "abort failed: {abort:?}");
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
-    // The attached client saw the row's pair: the row's own start
-    // frame (a no-partial abort begins a new message) and the settled
-    // end frame with the aborted shape.
+    // The row's own start frame (a no-partial abort begins a new
+    // message) and the settled end frame with the aborted shape.
     let events = session_events_since(&mut subscription);
     let aborted_start = events
         .iter()
@@ -126,10 +117,8 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
     assert_eq!(row["usage"]["input"], json!(0));
     assert_eq!(row["usage"]["output"], json!(0));
     assert_eq!(row["content"], json!([{ "type": "text", "text": "" }]));
-    // The terminal `turn_end` frame follows the row's pair (TS
-    // `turn_end` on an aborted turn): the aborted assistant row is
-    // the frame's payload with the turn's empty tool-result list, and
-    // the trailing `Done` stays silent (no second, bare frame).
+    // The terminal `turn_end` carries the aborted assistant row as
+    // its payload; the trailing `Done` stays silent.
     let aborted_turn_end = events
         .iter()
         .rev()
@@ -139,9 +128,6 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
     assert_eq!(aborted_turn_end["message"], *row);
     assert_eq!(aborted_turn_end["toolResults"], json!([]));
     assert_eq!(aborted_turn_end.get("error"), None);
-    // No bare trailing frame after the payload one: the aborted
-    // turn's terminal `turn_end` is the only frame of this window's
-    // aborted turn (the `Done` fallback stays silent).
     let bare_turn_end_count = events
         .iter()
         .filter(|event| {
@@ -153,8 +139,7 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         bare_turn_end_count, 0,
         "no bare turn_end frames: {events:?}"
     );
-    // The row persisted: the session file holds the same aborted
-    // assistant row (TS `appendMessage` at the message_end hook).
+    // The session file holds the same aborted assistant row.
     let store_row = {
         let core = worker.core.lock().unwrap();
         core.store
@@ -175,10 +160,8 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         store_row["content"],
         json!([{ "type": "text", "text": "" }])
     );
-    // The goal accounting skipped the row (TS
-    // `_accountGoalUsageForAssistantMessage`'s aborted guard): the
-    // accounting fields are the state the goal-start turn left (the
-    // wall-clock fields are time-based).
+    // The accounting fields are the state the goal-start turn left
+    // (the wall-clock fields are time-based).
     let goal_after = worker.engine.goal_state_value();
     assert_eq!(
         goal_after["status"],
@@ -193,11 +176,8 @@ async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
     assert_eq!(goal_after["objective"], goal_before["objective"]);
 }
 
-/// The killed close's schedule cancel (TS `cancelScheduledJobsForSession`
-/// at `closeSessionOnce("killed")`): a session with an active heartbeat
-/// job dies at kill — the job cancels durably and the session file
-/// archives, so no scheduled wake can revive the stopped session (the
-/// zombie fix's stop-side gate).
+/// The job's cancel is durable and the file archives, so no scheduled wake
+/// revives the session.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn kill_cancels_the_sessions_scheduled_jobs() {
@@ -270,18 +250,9 @@ async fn kill_cancels_the_sessions_scheduled_jobs() {
     assert_eq!(info.state.as_deref(), Some("archived"));
 }
 
-/// The `kill` path (the #247 residue, probe-verified): TS
-/// `closeSessionOnce("killed")` fires `session.abort()` —
-/// `requestAbort()` -> `agent.abort()` — whose run-cancel lands before
-/// every close step that can wait on the running turn, so a kill during
-/// a mid-provider-wait turn cancels the fetch immediately instead of
-/// streaming the held reply out and answering the kill only after the
-/// turn settled naturally (the probe showed the blocked archive
-/// holding the kill 15s past the request). The #247 matrix holds:
-/// the aborted row still broadcasts and persists, the `archived`
-/// lifecycle entry lands ahead of the row in the session file (TS
-/// `archiveSession` precedes the abort), and the close reaches the
-/// wire as a `session_closed` frame.
+/// The #247 matrix: the aborted row still broadcasts and persists, the
+/// `archived` entry lands ahead of the row, and the close surfaces as a
+/// `session_closed` frame.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
@@ -327,11 +298,8 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
         )
         .await;
     assert!(prompt.success, "prompt failed: {prompt:?}");
-    // The turn is mid-provider-wait once the runner is busy on it: the
-    // held reply (60s) keeps the fetch in flight, so no assistant
-    // message_start arrives before the kill (the row only starts at
-    // the abort). The busy flag is the runner's own admission marker
-    // (`await_session_work_settled` parks on the same flag).
+    // The busy flag is the runner's own admission marker (`await_session_work_settled`
+    // parks on it too): no assistant message_start arrives before the kill.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if worker.core.lock().unwrap().busy {
@@ -344,9 +312,8 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    // The kill must answer on the cancelled turn, not the 60s hold:
-    // the abort funnel fires before the archive/dispose work waits on
-    // the session mutex the turn holds.
+    // The kill must answer on the cancelled turn, not the 60s hold: the abort
+    // funnel fires before the archive/dispose waits on the session mutex.
     let started = std::time::Instant::now();
     let killed = worker.dispatch("kill", &json!({})).await;
     assert!(killed.success, "kill failed: {killed:?}");
@@ -355,12 +322,9 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
         elapsed < std::time::Duration::from_secs(15),
         "kill waited out the held provider response ({elapsed:?})"
     );
-    // The aborted row surfaced (the #247 matrix): the wire carries its
-    // message_start/message_end pair with the aborted shape. Drain
-    // every session-event frame: wrapped session events expose their
-    // inner `event`; the close rides the same outbound type as the
-    // whole frame (`emit_session_closed` sends the SessionClosed
-    // payload without an `event` wrapper), so it must surface whole.
+    // The aborted row surfaced. Drain every session-event frame: the close
+    // rides the same outbound type as the whole frame (the SessionClosed payload
+    // has no `event` wrapper), so it must surface whole.
     let mut events = Vec::new();
     while let Ok(frame) = subscription.try_recv() {
         if frame.outbound_type != "session_event" {
@@ -396,10 +360,8 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
         }),
         "the kill closed the session on the wire: {events:?}"
     );
-    // The durable store: the aborted assistant row persisted, and the
-    // `archived` lifecycle entry lands ahead of it (TS
-    // `archiveSession` -> `appendSessionState` runs before the abort
-    // settles the row).
+    // The aborted row persisted, and the `archived` entry lands ahead of it
+    // (the archive runs before the abort settles the row).
     let entries = {
         let core = worker.core.lock().unwrap();
         core.store
@@ -434,13 +396,8 @@ async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
     assert!(!worker.core.lock().unwrap().created);
 }
 
-/// The compact path swallows the interrupted turn's aborted row (TS
-/// `compact()` detaches from agent events — `_disconnectFromAgent()`
-/// — before the abort, so the row never reaches the wire or the
-/// session file): a turn aborted by the `compact` command's
-/// interrupt-and-settle shows no aborted assistant row on either
-/// surface, while the same abort through the `abort` command
-/// broadcasts it (the previous test).
+/// TS `compact()` detaches from agent events before the abort, so this row
+/// stays off the wire and file while `abort` broadcasts it.
 #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
 #[tokio::test]
 async fn compact_interrupt_swallows_the_aborted_row() {
@@ -483,8 +440,7 @@ async fn compact_interrupt_swallows_the_aborted_row() {
         )
         .await;
     assert!(turn.success, "the prompt failed: {turn:?}");
-    // Let the admitted turn reach the provider (the 60s hold), then
-    // compact: the interrupt aborts the in-flight fetch and the
+    // Let the admitted turn reach the provider (the 60s hold), then compact: the
     // aborted row must stay off the wire (TS `_disconnectFromAgent`).
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let compact = worker
@@ -493,8 +449,7 @@ async fn compact_interrupt_swallows_the_aborted_row() {
             &json!({ "activeSessionId": "compact-abort-session" }),
         )
         .await;
-    // The scripted faux engine's compact outcome is not the claim
-    // here; either way the turn settled before it.
+    // The faux engine's compact outcome is not the claim; the turn settled before it.
     let _ = compact;
     let idle = worker.dispatch("wait_for_idle", &json!({})).await;
     assert!(idle.success, "never went idle: {idle:?}");
@@ -511,11 +466,8 @@ async fn compact_interrupt_swallows_the_aborted_row() {
         aborted_rows, 0,
         "the compact path swallows the aborted row: {events:?}"
     );
-    // The suppressed run's `agent_end` stays off the wire entirely (TS
-    // `_disconnectFromAgent` before the abort: no `turn_end`, no
-    // `agent_end` for the interrupted run) — neither the engine's
-    // per-run frame (the abort gate swallows it) nor the worker's
-    // trailing fallback.
+    // The suppressed run's `agent_end` stays off the wire entirely — neither
+    // the engine's per-run frame nor the worker's trailing fallback.
     let agent_ends = events
         .iter()
         .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_end"))

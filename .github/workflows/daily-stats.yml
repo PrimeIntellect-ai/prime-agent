@@ -1,0 +1,109 @@
+name: Prime Agent daily stats
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+      timezone: America/Los_Angeles
+  workflow_dispatch:
+    inputs:
+      date:
+        description: Completed UTC date (YYYY-MM-DD); blank means yesterday
+        type: string
+        default: ''
+      publish:
+        description: Send the report to Slack (requires PRIME_AGENT_STATS_ENABLED)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/daily-stats.yml
+      - scripts/daily_stats.py
+      - scripts/test_daily_stats.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s scripts -p test_daily_stats.py -v
+
+  report:
+    needs: test
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.PRIME_AGENT_STATS_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: prime-agent-daily-stats-delivery
+      cancel-in-progress: false
+    env:
+      # A manual preview never receives the Slack credential.
+      PUBLISH: ${{ github.ref == 'refs/heads/main' && vars.PRIME_AGENT_STATS_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.publish == true) }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Select completed UTC day
+        id: day
+        env:
+          REPORT_DATE: ${{ inputs.date }}
+        run: |
+          day=$(python3 scripts/daily_stats.py day --date "$REPORT_DATE")
+          echo "date=$day" >> "$GITHUB_OUTPUT"
+      - name: Check previous delivery attempt
+        id: delivery
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_DAY: ${{ steps.day.outputs.date }}
+        run: |
+          marker="prime-agent-stats-$REPORT_DAY"
+          ids=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$marker&per_page=100" \
+            --jq ".artifacts[] | select(.name == \"$marker\" and .expired == false) | .id")
+          if [[ -n "$ids" ]]; then
+            echo 'attempted=true' >> "$GITHUB_OUTPUT"
+            echo 'A delivery attempt already exists for this date; skipping.'
+          fi
+      - name: Prepare and validate report
+        if: steps.delivery.outputs.attempted != 'true'
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          REPORT_DAY: ${{ steps.day.outputs.date }}
+        run: |
+          python3 scripts/daily_stats.py prepare --date "$REPORT_DAY" \
+            --output "$RUNNER_TEMP/prime-agent-stats.json"
+      - name: Record delivery attempt
+        if: env.PUBLISH == 'true' && steps.delivery.outputs.attempted != 'true'
+        env:
+          REPORT_DAY: ${{ steps.day.outputs.date }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/stats-attempt"
+          printf '%s\n' "$REPORT_DAY" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/stats-attempt/attempt.txt"
+      - name: Save attempt before contacting Slack
+        if: env.PUBLISH == 'true' && steps.delivery.outputs.attempted != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: prime-agent-stats-${{ steps.day.outputs.date }}
+          path: ${{ runner.temp }}/stats-attempt/attempt.txt
+          retention-days: 90
+          if-no-files-found: error
+      - name: Send daily report
+        if: env.PUBLISH == 'true' && steps.delivery.outputs.attempted != 'true'
+        env:
+          SLACK_STATS_WEBHOOK_URL: ${{ secrets.SLACK_STATS_WEBHOOK_URL }}
+        run: python3 scripts/daily_stats.py send --payload "$RUNNER_TEMP/prime-agent-stats.json"
+      - name: Confirm preview
+        if: env.PUBLISH != 'true'
+        run: echo 'Preview validated. No Slack message sent. Metric values are kept off logs and artifacts.'
+      - name: Remove report payload
+        if: always()
+        run: rm -f "$RUNNER_TEMP/prime-agent-stats.json"

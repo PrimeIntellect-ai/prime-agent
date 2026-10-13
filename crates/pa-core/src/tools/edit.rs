@@ -1,7 +1,5 @@
-//! The `edit` tool: exact text replacement in a single file.
-//!
-//! Port of `packages/coding-agent/src/core/tools/edit.ts` (TUI preview
-//! renderers excluded; the execution and model-facing contract is identical).
+//! The `edit` tool: exact text replacement in a single file (the execution
+//! and model-facing contract matches the TS tool).
 
 use std::sync::Arc;
 
@@ -60,13 +58,9 @@ pub fn edit_tool_details(diff: &str, first_changed_line: Option<usize>) -> serde
     details
 }
 
-/// Pluggable file operations for the edit tool (TS: `EditOperations`).
-///
-/// The default is the local filesystem; override to delegate to remote
-/// systems. Error messages must match Node `fs/promises` shapes (see the
-/// local impl) because they surface verbatim to the model.
-///
-/// Object-safe on purpose (`&dyn` injection without generics).
+/// Pluggable file operations for the edit tool: the default is the local filesystem; override to
+/// delegate to remote systems. Error messages must match Node `fs/promises` shapes because they
+/// surface verbatim to the model. Object-safe on purpose (`&dyn` injection).
 pub trait EditOperations: Send + Sync {
     /// Read file contents, matching Node `fs/promises` error messages.
     ///
@@ -84,8 +78,7 @@ pub trait EditOperations: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns an `fs.access`-shaped I/O error when the file is not both
-    /// readable and writable.
+    /// Returns an `fs.access`-shaped I/O error when the file is not both readable and writable.
     fn access(&self, absolute_path: &str) -> std::io::Result<()>;
 }
 
@@ -117,8 +110,7 @@ impl EditOperations for LocalEditOperations {
 ///
 /// # Panics
 ///
-/// The `unwrap` on the string `edits` value cannot fire: it runs only
-/// inside the `is_string` guard.
+/// The `unwrap` on the string `edits` value cannot fire: it runs only inside the `is_string` guard.
 pub fn prepare_edit_arguments(mut input: serde_json::Value) -> serde_json::Value {
     let Some(obj) = input.as_object_mut() else {
         return input;
@@ -220,8 +212,7 @@ fn read_error_message(err: &std::io::Error, absolute_path: &str) -> String {
 
 /// Run the edit tool against the given filesystem operations.
 ///
-/// Returns the model-facing result, or an error whose message is the
-/// model-facing error text (TS: the thrown error).
+/// Returns the model-facing result, or an error whose message is the model-facing error text.
 #[tracing::instrument(
     level = "debug",
     name = "tool_edit_execute",

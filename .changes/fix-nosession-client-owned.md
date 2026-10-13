@@ -1,0 +1,1 @@
+- ACP sessions and TUI `--no-session` sessions are now owned by the client that created them: they are never idle-passivated, and their agents-view row is removed when they stop instead of lingering as a passive row that cannot be resumed.

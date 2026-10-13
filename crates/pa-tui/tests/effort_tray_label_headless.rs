@@ -1,36 +1,22 @@
 //! Headless e2e for the tray model label's effort suffix (TS
-//! `getModelContextLabel`'s `model:effort` arm): a mock supervisor serves
-//! one attached session whose state reports the model's reasoning and the
-//! live thinking level, and the plan drives `/effort` through the same
-//! editor submit path a user's keystrokes take.
-//!
-//! Verifies the parity contract: the tray under the prompt bar renders
-//! `model:effort` while the session's model supports reasoning, keeps the
-//! bare model id when it does not, and the label follows a `/effort`
-//! switch live.
+//! `getModelContextLabel`): the tray renders `model:effort` while the
+//! session's model supports reasoning, keeps the bare model id when not,
+//! and the label follows a `/effort` switch live.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -43,11 +29,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The session the mock serves: the `model` state block (with its
-/// `reasoning` flag), the available thinking levels, and the live level
-/// (the value `set_thinking_level` moves). `fail_state_after_switch`
-/// makes every state read AFTER a thinking switch fail, pinning the
-/// client's failed-read fallback (no stale suffix survives a switch).
+/// The session the mock serves: the `model` state block, the levels, and the live level (the value
+/// `set_thinking_level` moves). `fail_state_after_switch` fails every state read AFTER a switch.
 struct MockSession {
     model: Value,
     levels: Vec<String>,
@@ -55,8 +38,7 @@ struct MockSession {
     fail_state_after_switch: bool,
 }
 
-/// A reasoning model at the default level (the engine's `medium`, TS
-/// `DEFAULT_THINKING_LEVEL`).
+/// A reasoning model at the default level (the engine's `medium`, TS `DEFAULT_THINKING_LEVEL`).
 fn reasoning_session() -> MockSession {
     MockSession {
         model: json!({ "id": "glm-5.3", "name": "GLM 5.3", "provider": "zai", "reasoning": true }),
@@ -96,21 +78,17 @@ impl MockSession {
     }
 }
 
-/// One mock supervisor serving a single attached session: the state
-/// blocks report the session's model and live level, and
-/// `set_thinking_level` moves that level so the client's state re-reads
-/// observe the switch.
+/// One mock supervisor serving a single attached session: `set_thinking_level` moves the live level
+/// so the client's state re-reads observe the switch.
 struct MockSupervisor {
     listener: UnixListener,
     session: MockSession,
 }
 
 impl MockSupervisor {
-    /// Serve one connection: attach an empty session, then answer the
-    /// state reads and the thinking switch off the live level.
     fn serve(mut self) {
-        // Armed by `set_thinking_level` when the session pins the
-        // failed-read fallback: every later state read refuses.
+        // Armed by `set_thinking_level` when the session pins the failed-read fallback: every later
+        // state read refuses.
         let mut state_reads_fail = false;
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -222,8 +200,8 @@ impl MockSupervisor {
         }
     }
 
-    /// The slim attach result: one empty session whose state reports the
-    /// model and its thinking level (the tray label's inputs).
+    /// The slim attach result: one empty session whose state reports the model and its thinking
+    /// level (the tray label's inputs).
     fn attach_data(&self, id: &str) -> Value {
         json!({
             "type": "response",
@@ -260,9 +238,8 @@ impl MockSupervisor {
         })
     }
 
-    /// The live session state (the `get_state`/`get_connection_state`
-    /// data block): the model with its reasoning flag and the level
-    /// `/effort` writes.
+    /// The live session state (the `get_state`/`get_connection_state` data block): the model with
+    /// its reasoning flag and the level `/effort` writes.
     fn state_data(&self, id: &str, command: &str) -> Value {
         json!({
             "type": "response",
@@ -326,8 +303,6 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames.
 fn run_plan(session: MockSession, steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -351,9 +326,8 @@ fn run_plan(session: MockSession, steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/effort` moves the tray's `model:effort` label live: the attach state
-/// seeds `glm-5.3:medium`, the switch's level lands as `glm-5.3:high`,
-/// and the frame that reports the switch carries the new label only.
+/// `/effort` moves the tray's `model:effort` label live: the attach state seeds
+/// `glm-5.3:medium`, and the switch's level lands as `glm-5.3:high`.
 #[test]
 fn effort_command_moves_the_tray_model_label() {
     let steps = vec![
@@ -385,10 +359,8 @@ fn effort_command_moves_the_tray_model_label() {
     );
 }
 
-/// A successful `/effort` switch whose state re-read fails still moves the
-/// label: the requested level renders (TS `applyThinkingLevel` patches the
-/// connection state with the requested level), never the previous model's
-/// stale suffix.
+/// A successful `/effort` switch whose state re-read fails still moves the label: the requested
+/// level renders (TS `applyThinkingLevel` patches the connection state), never the stale suffix.
 #[test]
 fn effort_switch_with_failed_state_read_never_keeps_the_stale_suffix() {
     let mut session = reasoning_session();
@@ -417,8 +389,7 @@ fn effort_switch_with_failed_state_read_never_keeps_the_stale_suffix() {
     );
 }
 
-/// A model without reasoning renders the bare id: the state's level is
-/// "off" but the tray never carries a suffix.
+/// The state's level is "off", but the tray never carries a suffix.
 #[test]
 fn tray_label_stays_bare_without_reasoning() {
     let steps = vec![HeadlessStep::WaitRender {

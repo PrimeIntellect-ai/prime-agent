@@ -1,0 +1,1 @@
+- Long lines inside fenced code blocks now wrap onto the next row instead of being cut off at the edge of the terminal.

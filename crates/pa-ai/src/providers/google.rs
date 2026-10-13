@@ -1,7 +1,6 @@
-//! Google Generative AI (Gemini API) streaming provider.
-//! Port of `packages/ai/src/providers/google.ts` (the `@google/genai` SDK): REST
-//! `streamGenerateContent` SSE streaming, thinking config (levels for Gemini 3,
-//! budgets for Gemini 2.5), tool config, and usage accounting.
+//! Google Generative AI (Gemini API) streaming provider (the `@google/genai` SDK): REST
+//! `streamGenerateContent` SSE streaming, thinking config (levels for Gemini 3, budgets for Gemini
+//! 2.5), tool config, and usage accounting.
 
 use serde_json::{json, Map, Value};
 
@@ -60,7 +59,7 @@ impl GoogleToolChoice {
     }
 }
 
-/// Provider-native options (`GoogleOptions` in the TS reference).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct GoogleOptions {
     pub base: StreamOptions,
@@ -78,7 +77,6 @@ impl GoogleOptions {
     }
 }
 
-/// Port of `streamGoogle`.
 pub fn stream_google(
     model: &Model,
     context: &Context,
@@ -206,7 +204,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleOptions) -> Va
     Value::Object(body)
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -239,8 +237,8 @@ async fn run_stream(
         }
     }
 
-    // @google/genai default: https://generativelanguage.googleapis.com with
-    // the v1beta version path; a model baseUrl replaces both.
+    // @google/genai default: https://generativelanguage.googleapis.com with the v1beta version
+    // path; a model baseUrl replaces both.
     let (base_url, api_version) = if model.base_url.is_empty() {
         (
             "https://generativelanguage.googleapis.com".to_string(),
@@ -297,9 +295,6 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -308,9 +303,9 @@ async fn run_stream(
 
     if response.status >= 400 {
         let body = response.read_all_text().await.unwrap_or_default();
-        // The genai `ApiError` carries no `.error` object for the TS
-        // classifier (its `code` is numeric): the class name is the
-        // provider error type and the classified form carries no detail.
+        // The genai `ApiError` carries no `.error` object for the TS classifier (its `code` is
+        // numeric): the class name is the provider error type and the classified form carries no
+        // detail.
         let mut error =
             ProviderError::from_http_status_body(response.status, &body, response.headers.clone());
         if let ProviderError::Http(http) = &mut error {
@@ -373,7 +368,6 @@ async fn run_stream(
     Ok(())
 }
 
-/// Port of `streamSimpleGoogle`.
 pub fn stream_simple_google(
     model: &Model,
     context: &Context,

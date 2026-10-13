@@ -1,16 +1,9 @@
-//! Direct worker transport: the client half of the direct-attach path (TS
-//! `daemon-routed-client.ts` and the direct half of `daemon-worker-client.ts`).
-//!
-//! One logical daemon connection over two sockets: session-plane commands and
-//! events go straight to the session worker's socket (single-use supervisor
-//! ticket, `peer_auth`), everything else goes to the supervisor. The
-//! supervisor is out of the streaming path entirely, so a supervisor death
-//! mid-stream does not disturb an attached client.
-//!
-//! Every failure to establish or use the direct link degrades silently to
-//! supervisor routing: `connect_direct` returns an error and the caller keeps
-//! the plain supervisor connection (transition-period fallback, TS
-//! `createDaemonSessionTransport`).
+//! Direct worker transport: the client half of the direct-attach path.
+//! One logical daemon connection over two sockets: session-plane
+//! commands and events go straight to the session worker's socket;
+//! everything else goes to the supervisor, so a supervisor death
+//! mid-stream does not disturb an attached client. Every failure to
+//! establish the direct link degrades silently to supervisor routing.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,13 +22,13 @@ use tokio::time::timeout;
 
 use crate::daemon_client::{client_event_from_value, DaemonClientEvent, Shared};
 
-/// TS `DaemonWorkerClient.connect` budget for the worker socket.
+/// The worker socket connect budget.
 const CONNECT_TIMEOUT_MS: u64 = 1_000;
 /// TS `waitForHello` / `authenticatePeer` budget, raised from 3s to 15s
 /// so daemons busy loading large sessions can still greet in time.
 const HELLO_TIMEOUT_MS: u64 = 15_000;
-/// TS `get_direct_worker_transport` request budget in
-/// `createDaemonSessionTransport` (with `recoverable: false`).
+/// The direct-worker-transport ticket request budget (with
+/// `recoverable: false`).
 pub(crate) const TICKET_TIMEOUT_MS: u64 = 5_000;
 /// The supervisor capability that enables the upgrade.
 pub(crate) const DIRECT_PEER_TRANSPORT_CAPABILITY: &str = "direct_peer_transport";
@@ -47,6 +40,8 @@ pub(crate) struct DirectLink {
     pub(crate) active_session_id: String,
     /// The worker socket this link is pinned to.
     pub(crate) socket_path: String,
+    /// Private per-connection identity; a reconnect to the same session is distinct.
+    pub(crate) owner: Arc<()>,
     writer: mpsc::UnboundedSender<Vec<u8>>,
     alive: Arc<AtomicBool>,
 }
@@ -69,9 +64,7 @@ impl DirectLink {
 
 /// The client's direct-transport state: the retained event-channel sender
 /// (spawning direct reader pumps needs one; `close` drops it so the UI's
-/// event channel closes with the last reader) and the live link. Held by
-/// [`DaemonClient`](crate::daemon_client::DaemonClient) behind one `Arc` so
-/// the client struct stays small.
+/// event channel closes with the last reader) and the live link.
 #[derive(Default)]
 pub(crate) struct DirectState {
     event_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<DaemonClientEvent>>>,
@@ -134,8 +127,8 @@ pub(crate) struct DirectPeerClaim {
     pub(crate) purpose: String,
 }
 
-/// Port of `readSessionTransportTicket` plus the client-side validation:
-/// shape, target session, freshness, and socket-filesystem identity.
+/// The ticket validation: shape, target session, freshness, and
+/// socket-filesystem identity.
 pub(crate) fn read_session_transport_ticket(
     data: &Value,
     active_session_id: &str,
@@ -180,10 +173,9 @@ pub(crate) fn supervisor_supports_direct(hello: &Value) -> bool {
         })
 }
 
-/// Connect to the worker socket, complete the hello + `peer_auth` handshake,
-/// and spawn the link's writer and reader pumps. The reader resolves
-/// responses through `shared` and forwards events to `event_tx` (the same
-/// channel the supervisor reader feeds).
+/// Connect to the worker socket, complete the hello + `peer_auth`
+/// handshake, and spawn the link's writer and reader pumps; the reader
+/// resolves responses through `shared` and forwards events to `event_tx`.
 pub(crate) async fn connect_direct(
     ticket: &DaemonPeerTransportTicket,
     shared: Arc<Shared>,
@@ -246,6 +238,7 @@ pub(crate) async fn connect_direct(
     }
 
     let alive = Arc::new(AtomicBool::new(true));
+    let owner = Arc::new(());
     let (frame_tx, mut frame_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     // Writer pump: one frame at a time, exits when the link closes.
     tokio::spawn(async move {
@@ -261,6 +254,7 @@ pub(crate) async fn connect_direct(
         let shared = Arc::clone(&shared);
         let event_tx = event_tx.clone();
         let alive = Arc::clone(&alive);
+        let owner = Arc::clone(&owner);
         let active_session_id = ticket.active_session_id.clone();
         tokio::spawn(async move {
             while let Ok(Some(frame)) = reader.read_frame().await {
@@ -275,7 +269,7 @@ pub(crate) async fn connect_direct(
                 };
                 if header_type == "response" {
                     if let Ok(response) =
-                        serde_json::from_value::<pa_types::daemon::DaemonResponse>(payload.clone())
+                        serde_json::from_value::<pa_types::daemon::DaemonResponse>(payload)
                     {
                         let request_id = frame
                             .header
@@ -289,9 +283,9 @@ pub(crate) async fn connect_direct(
                     let _ = event_tx.send(event);
                 }
             }
-            // The worker socket closed: every direct-link request in
-            // flight fails now instead of riding out its timeout.
-            shared.fail_pending("direct_", "the session connection closed");
+            // Only this connection's requests fail: a replacement may already
+            // have registered its own requests in the same pending map.
+            shared.fail_direct_pending(&owner, "the session connection closed");
             // An intentional close (client `close`, session switch, link
             // replacement) marks the link dead before its writer's
             // shutdown reaches this EOF; only an unmarked exit is the
@@ -306,6 +300,7 @@ pub(crate) async fn connect_direct(
     Ok(DirectLink {
         active_session_id: ticket.active_session_id.clone(),
         socket_path: ticket.socket_path.clone(),
+        owner,
         writer: frame_tx,
         alive,
     })
@@ -425,6 +420,7 @@ pub(crate) fn direct_attach_capabilities() -> Vec<DaemonClientCapability> {
         "event_sequence".to_string(),
         "slim_attach".to_string(),
         "elide_snapshot_images".to_string(),
+        "windowed_snapshot".to_string(),
     ]
 }
 
@@ -451,10 +447,12 @@ mod tests {
         (ticket, dir)
     }
 
-    /// Minimal scripted worker used by the link tests: hello, one
-    /// `peer_auth` response, then the process dies (the socket tears down
-    /// the way a `SIGKILLed` worker does).
-    async fn spawn_mock_worker(listener: tokio::net::UnixListener) {
+    /// Minimal scripted worker: hello, one `peer_auth` response, then the
+    /// process dies (the socket tears down like a `SIGKILLed` worker).
+    async fn spawn_mock_worker(
+        listener: tokio::net::UnixListener,
+        close: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) {
         let (stream, _) = listener.accept().await.expect("accept");
         let (reader, mut writer) = stream.into_split();
         let mut reader =
@@ -495,7 +493,9 @@ mod tests {
         .unwrap();
         writer.write_all(&frame).await.unwrap();
         writer.flush().await.unwrap();
-        // The worker process dies.
+        if let Some(close) = close {
+            let _ = close.await;
+        }
         drop(writer);
     }
 
@@ -518,7 +518,7 @@ mod tests {
             token: "t".to_string(),
             expires_at: "2999-01-01T00:00:00.000Z".to_string(),
         };
-        tokio::spawn(async move { spawn_mock_worker(listener).await });
+        tokio::spawn(async move { spawn_mock_worker(listener, None).await });
         let shared = Arc::new(crate::daemon_client::Shared::default());
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let link = connect_direct(&ticket, shared, event_tx)
@@ -531,8 +531,6 @@ mod tests {
     async fn worker_death_emits_direct_link_lost() {
         let (link, mut events, _dir) = live_link_and_channel().await;
         assert!(link.is_alive());
-        // The worker socket tears down; the reader pump must report the
-        // lost session so the UI arms its re-attach loop.
         let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
             .await
             .unwrap()
@@ -551,16 +549,93 @@ mod tests {
     #[tokio::test]
     async fn intentional_close_does_not_emit_direct_link_lost() {
         let (link, mut events, _dir) = live_link_and_channel().await;
-        // A session switch marks the link dead before its EOF arrives;
-        // the pump must not arm a re-attach for an intentional close.
+        // A session switch marks the link dead before its EOF; the pump must not arm a re-attach
+        // for an intentional close.
         link.close();
         let event = tokio::time::timeout(Duration::from_millis(300), events.recv()).await;
-        // The worker's EOF still ends the pump (the channel closes), but no
-        // `DirectLinkLost` may ride it for an intentionally closed link.
         assert!(
             !matches!(event, Ok(Some(DaemonClientEvent::DirectLinkLost { .. }))),
             "intentional close must not emit DirectLinkLost: {event:?}"
         );
+    }
+
+    /// Hold both real worker sockets open until all pending requests are
+    /// registered. Releasing A's EOF is the observable cancellation barrier;
+    /// no scheduler delay can move it before B's registration.
+    #[tokio::test]
+    async fn replaced_link_eof_only_fails_its_own_pending_requests() {
+        async fn held_link(
+            shared: Arc<Shared>,
+        ) -> (
+            DirectLink,
+            tokio::sync::oneshot::Sender<()>,
+            tempfile::TempDir,
+        ) {
+            let dir = tempfile::TempDir::new().unwrap();
+            let socket = dir.path().join("worker.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let ticket = DaemonPeerTransportTicket {
+                purpose: "session_client".to_string(),
+                socket_path: socket.to_string_lossy().to_string(),
+                socket_identity: pa_types::platform::socket_identity(&socket).unwrap(),
+                worker_instance_id: "inst-1".to_string(),
+                active_session_id: "abc123".to_string(),
+                grant_id: "g1".to_string(),
+                token: "t".to_string(),
+                expires_at: "2999-01-01T00:00:00.000Z".to_string(),
+            };
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move { spawn_mock_worker(listener, Some(close_rx)).await });
+            let (event_tx, _) = mpsc::unbounded_channel();
+            let link = connect_direct(&ticket, shared, event_tx).await.unwrap();
+            (link, close_tx, dir)
+        }
+
+        let shared = Arc::new(Shared::default());
+        // Even reconnects to the same session need distinct ownership.
+        let (a, close_a, _a_dir) = held_link(Arc::clone(&shared)).await;
+        let (b, close_b, _b_dir) = held_link(Arc::clone(&shared)).await;
+        assert!(!Arc::ptr_eq(&a.owner, &b.owner));
+        let (a_tx, a_rx) = tokio::sync::oneshot::channel();
+        let (b_tx, mut b_rx) = tokio::sync::oneshot::channel();
+        let (daemon_tx, mut daemon_rx) = tokio::sync::oneshot::channel();
+        shared.register_pending("direct_1".to_string(), a_tx, Some(Arc::clone(&a.owner)));
+        shared.register_pending("direct_2".to_string(), b_tx, Some(Arc::clone(&b.owner)));
+        shared.register_pending("daemon_3".to_string(), daemon_tx, None);
+        a.close();
+        close_a.send(()).unwrap();
+        let failure = timeout(Duration::from_secs(2), a_rx)
+            .await
+            .expect("A EOF processed")
+            .expect("transport error delivered")
+            .unwrap_err();
+        assert_eq!(failure.to_string(), "the session connection closed");
+        assert!(matches!(
+            b_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            daemon_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        for id in ["direct_2", "daemon_3"] {
+            let response = serde_json::from_value(json!({
+                "type": "response", "id": id, "command": "prompt", "success": true,
+            }))
+            .unwrap();
+            assert!(shared.resolve(id, response));
+        }
+        assert!(b_rx.await.unwrap().is_ok());
+        assert!(daemon_rx.await.unwrap().is_ok());
+        // B's own EOF still fails B's requests; ownership does not mask death.
+        let (b_tx, b_rx) = tokio::sync::oneshot::channel();
+        shared.register_pending("direct_4".to_string(), b_tx, Some(Arc::clone(&b.owner)));
+        close_b.send(()).unwrap();
+        assert!(timeout(Duration::from_secs(2), b_rx)
+            .await
+            .expect("B EOF processed")
+            .unwrap()
+            .is_err());
     }
 
     #[test]
@@ -571,16 +646,12 @@ mod tests {
         let ticket = read_session_transport_ticket(&value, "abc123").expect("valid ticket");
         assert_eq!(ticket.grant_id, "g1");
 
-        // Wrong session target.
         assert!(read_session_transport_ticket(&value, "other").is_err());
-        // Expired.
         let (expired, _d2) = ticket_json(STALE);
         assert!(read_session_transport_ticket(&expired, "abc123").is_err());
-        // Wrong socket identity (a different file).
         let (mut moved, _d3) = ticket_json(FRESH);
         moved["socketIdentity"]["ino"] = json!(1);
         assert!(read_session_transport_ticket(&moved, "abc123").is_err());
-        // Missing fields.
         let (mut missing, _d4) = ticket_json(FRESH);
         missing["token"] = json!("");
         assert!(read_session_transport_ticket(&missing, "abc123").is_err());

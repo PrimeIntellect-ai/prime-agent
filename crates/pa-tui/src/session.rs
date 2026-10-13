@@ -1,6 +1,5 @@
 //! Headless session-message stream: the same UI renders history JSONL
 //! (captured sessions under `~/.prime/agent/sessions`) and live events.
-//!
 //! `SessionStream` is the seam the interactive mode and the replay binary
 //! share; `JsonlSessionStream` implements it over pa-types session entries.
 
@@ -14,13 +13,12 @@ pub enum TranscriptItem {
     UserMessage {
         text: String,
     },
-    /// One assistant message's rendered content (text and thinking blocks
-    /// in wire order). Thinking blocks keep their type through the replay:
-    /// the transcript gates them on the detail level like the live path.
+    /// One assistant message's rendered content (text and thinking blocks in wire order); thinking
+    /// blocks keep their type, gated on the detail level like the live path.
     Assistant {
         blocks: Vec<crate::chat::MessageBlock>,
-        /// `toolUse` when the message carried tool calls (drives the
-        /// trailing spacer before its tool cards).
+        /// `toolUse` when the message carried tool calls (drives the trailing spacer before its
+        /// tool cards).
         has_tool_calls: bool,
     },
     ToolCall {
@@ -32,12 +30,11 @@ pub enum TranscriptItem {
         tool_call_id: String,
         tool_name: String,
         text: String,
-        /// The full wire content blocks (text and image), so replayed tool
-        /// results render their image rows like live ones.
+        /// The full wire content blocks (text and image), so replayed tool results render their
+        /// image rows like live ones.
         content: Vec<serde_json::Value>,
-        /// The wire `details` record (stdout/stderr/result/sent receipts),
-        /// folded onto the pending tool card so replayed cells render their
-        /// structured output exactly like live ones.
+        /// The wire `details` record, folded onto the pending tool card so replayed
+        /// cells render their structured output like live ones.
         details: serde_json::Value,
         is_error: bool,
     },
@@ -58,8 +55,8 @@ pub enum TranscriptItem {
     SystemNote {
         text: String,
     },
-    /// One decoded custom-message row (agent messages, injected prompts,
-    /// outcomes, and the generic custom box).
+    /// One decoded custom-message row (agent messages, injected prompts, outcomes, and the generic
+    /// custom box).
     CustomRow {
         entry: crate::chat::ChatEntry,
     },
@@ -81,9 +78,8 @@ pub trait SessionStream: Send {
     ///
     /// # Errors
     ///
-    /// Implementations report their own transport or decode failures;
-    /// the bundled JSONL replay stream never returns `Err` (its entries
-    /// were validated at load).
+    /// Implementations report their own transport or decode failures; the
+    /// bundled JSONL replay stream never returns `Err`.
     fn poll(&mut self) -> Result<SessionEvent>;
 }
 
@@ -108,9 +104,8 @@ impl JsonlSessionStream {
     ///
     /// # Errors
     ///
-    /// Returns `Err` when the file cannot be read, or a non-empty line
-    /// fails to decode as an entry (the error carries the line's
-    /// 1-based number).
+    /// Returns `Err` when the file cannot be read or a non-empty line fails
+    /// to decode as an entry (the error carries the line's 1-based number).
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading session {}", path.display()))?;
@@ -152,8 +147,7 @@ pub fn entry_to_items(entry: &FileEntry) -> Vec<TranscriptItem> {
             provider: payload.provider.clone(),
             model_id: payload.model_id.clone(),
         }],
-        // Custom rows rejoin as their wire message form and decode through
-        // the same custom-type dispatch the live path uses.
+
         FileEntry::CustomMessage { payload, .. } => {
             let message = custom_message_wire_value(payload);
             crate::custom_message::custom_message_entries(&message)
@@ -185,14 +179,11 @@ fn custom_message_wire_value(payload: &pa_types::session::CustomMessageEntry) ->
 fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
     match message {
         AgentMessage::User(u) => {
-            // TS `readUserText` + the image-only placeholder: a prompt
-            // with content but no text shows `[image]` instead of
-            // rendering nothing.
+            // A prompt with content but no text shows `[image]` instead of
+            // rendering nothing (TS `readUserText` + the image-only placeholder).
             let text = user_display_text(&u.content);
-            // TS `addMessageToChat`'s user case: a skill block parses into
-            // the skill-invocation card (+ its trailing argument text as a
-            // user block); both ride the custom-row channel so the replay
-            // renders them exactly like the live path.
+            // A skill block parses into the skill-invocation card (+ its trailing argument text as
+            // a user block); both ride the custom-row channel.
             match crate::custom_message::skill_invocation_entries(&text) {
                 Some(entries) => entries
                     .into_iter()
@@ -201,12 +192,9 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
                 None => vec![TranscriptItem::UserMessage { text }],
             }
         }
-        // TS `buildConversationComponents`: one assistant component per
-        // message (text and thinking blocks together, in wire order), then
-        // the message's tool cards. Thinking blocks keep their type —
-        // `AssistantMessageComponent` renders them gated on the detail
-        // level (hidden at `overview`, dim at `details`/`all`), so a
-        // replayed thinking trace renders exactly like a live one.
+        // One assistant component per message (text and thinking blocks together, in wire order),
+        // then the message's tool cards; thinking blocks keep their type, gated on the detail level
+        // like the live path.
         AgentMessage::Assistant(a) => {
             let mut items = Vec::new();
             let mut blocks = Vec::new();
@@ -266,15 +254,13 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
             full_output_path: b.full_output_path.clone(),
             excluded: b.exclude_from_context.unwrap_or(false),
         }],
-        // Custom/branch/compaction messages carry UI-specific payloads; the
-        // standard agent view skips non-displayed ones.
+
         _ => Vec::new(),
     }
 }
 
-/// The concatenated text of a replayed tool result's text blocks
-/// (un-modeled blocks have no display text, TS renders only typed text
-/// blocks).
+/// The concatenated text of a replayed tool result's text blocks (un-modeled blocks have no display
+/// text).
 fn tool_result_text(content: &[pa_types::ai::UserContentBlock]) -> String {
     content
         .iter()
@@ -288,9 +274,8 @@ fn tool_result_text(content: &[pa_types::ai::UserContentBlock]) -> String {
         .join("\n")
 }
 
-/// The user-message display text (TS `conversation-components`' user
-/// branch): the text blocks joined, or the `[image]` placeholder when the
-/// message carries content but no text.
+/// The user-message display text: the text blocks joined, or the `[image]`
+/// placeholder when the message carries content but no text.
 fn user_display_text(content: &pa_types::ai::UserContent) -> String {
     let text = content.text();
     if !text.is_empty() {
@@ -336,9 +321,8 @@ mod tests {
 
     #[test]
     fn custom_message_entries_rejoin_and_decode() {
-        // A persisted custom_message entry rejoins as its wire shape and
-        // decodes through the same custom-type dispatch the live path
-        // uses; a non-display row renders nothing.
+        // A non-display row renders nothing.
+
         let entry = |display: bool| FileEntry::CustomMessage {
             payload: pa_types::session::CustomMessageEntry {
                 custom_type: "agent_message".to_string(),
@@ -377,10 +361,8 @@ mod tests {
 
     #[test]
     fn a_skill_block_user_message_replays_as_the_card() {
-        // TS `addMessageToChat`'s user case parses a `<skill>` block out
-        // of the persisted user message: the replay renders the card plus
-        // the trailing argument text as a user block, never the raw
-        // block text.
+        // A `<skill>` block parses out of the persisted user message: the replay renders the card
+        // plus the trailing argument text as a user block, never the raw block text.
         let entry = FileEntry::Message {
             message: AgentMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text(
@@ -420,10 +402,8 @@ mod tests {
 
     #[test]
     fn replay_keeps_thinking_blocks_and_tool_flags() {
-        // A replayed assistant message keeps its thinking blocks' type (the
-        // dim/gated treatment) alongside the text, and flags its tool calls
-        // for the trailing spacer — one Assistant item before the ToolCall
-        // items, TS `buildConversationComponents` order.
+        // A replayed assistant message keeps its thinking blocks' type (dim/gated) alongside the
+        // text, and flags its tool calls for the trailing spacer.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"probe the replay trace","thinkingSignature":"sig-1"},{"type":"text","text":"body after thinking"},{"type":"toolCall","id":"toolu_1","name":"bash","arguments":{"command":"ls"}}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":1},"id":"e1"}"#;
         let entries = parse_jsonl(line).unwrap();
         let items = entry_to_items(&entries[0]);
@@ -447,9 +427,9 @@ mod tests {
 
     #[test]
     fn thinking_signature_round_trips_through_the_file_entry() {
-        // The persisted thinking block's provider signature survives the
-        // replay round-trip verbatim, so a resumed session can replay its
-        // reasoning context to the provider unchanged.
+        // The persisted thinking block's provider signature survives the replay round-trip
+        // verbatim, so a resumed session can replay its reasoning context to the provider
+        // unchanged.
         let line = r#"{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"keep my signature","thinkingSignature":"sig-abc","redacted":false},{"type":"text","text":"done"}],"api":"openai-completions","provider":"prime-inference","model":"m","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1},"id":"e1"}"#;
         let entries = parse_jsonl(line).unwrap();
         let wire = serde_json::to_string(&entries[0]).unwrap();
@@ -471,9 +451,8 @@ mod tests {
             .expect("thinking block survives the round-trip");
         assert_eq!(thinking.thinking, "keep my signature");
         assert_eq!(thinking.thinking_signature.as_deref(), Some("sig-abc"));
-        // The re-serialized wire keeps the signature key (computed before
-        // the destructure moves the entry): the replay feeds the provider
-        // the same reasoning context it produced.
+        // The re-serialized wire keeps the signature key (computed before the destructure moves the
+        // entry): the replay feeds the provider the same reasoning context it produced.
         assert!(
             rewire.contains("\"thinkingSignature\":\"sig-abc\""),
             "wire: {rewire}"

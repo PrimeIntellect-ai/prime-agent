@@ -1,12 +1,7 @@
-//! Daemon wire protocol, ported from
-//! `packages/coding-agent/src/modes/daemon/daemon-protocol.ts` and
-//! `daemon-worker-protocol.ts`.
-//!
-//! This is the local JSONL transport between clients (TUI/CLI), the supervisor,
-//! and per-session worker processes. Frame and command shapes match the TS
-//! wire format exactly. Payloads owned by other subsystems (session summaries,
-//! agent-connection state objects, session events) are carried as opaque
-//! [`Value`]s and will gain typed shapes in their owning crates.
+//! Daemon wire protocol (TS `daemon-protocol.ts`, `daemon-worker-protocol.ts`): the local JSONL
+//! transport between clients (TUI/CLI), the supervisor, and per-session workers; shapes match the
+//! TS
+//! wire exactly, payloads owned by other subsystems ride as opaque [`Value`]s.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,10 +11,8 @@ use crate::JsonMap;
 
 pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
 pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
-/// Revision 30 publishes `deletedDescendantUsage` on saved-session rows
-/// (TS #2506's field, landing ahead of TS main: the Rust deletion lifecycle
-/// captures the tombstoned child's usage durably before any unlink, so the
-/// field is populated where TS's open PR reads a removed path).
+/// Revision 30 publishes `deletedDescendantUsage` on saved-session rows (landing ahead of TS main:
+/// the Rust lifecycle captures the tombstoned child's usage before the unlink).
 pub const DAEMON_SCHEMA_REVISION: u64 = 30;
 pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-30-8e4b17c2a9f5";
 
@@ -27,14 +20,9 @@ pub type DaemonClientId = String;
 pub type DaemonCommandId = String;
 pub type DaemonEventId = String;
 pub type DaemonEventSequence = u64;
-/// Client/server capability wire strings (closed TS unions, open on the wire
-/// for older/newer builds, so carried as raw strings).
+/// Client/server capability wire strings (closed TS unions, open on the wire, so raw strings).
 pub type DaemonClientCapability = String;
 pub type DaemonServerCapability = String;
-
-// ---------------------------------------------------------------------------
-// Common frames
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,11 +38,9 @@ pub struct DaemonEventCursor {
     pub sequence: DaemonEventSequence,
 }
 
-/// Resume cursor accepted on attach. The TS wire shape is a union: either a
-/// `DaemonEventCursor` (`generation` + `sequence`, optionally with
-/// `activeSessionId`) or a bare `eventSequence` with optional
-/// `activeSessionId`. A single optional-field struct accepts both forms and
-/// serializes each back to its original shape.
+/// Resume cursor accepted on attach. The TS wire shape is a union (`DaemonEventCursor`, or a bare
+/// `eventSequence`, each with optional `activeSessionId`); this optional-field struct accepts both
+/// forms and serializes each back to its original shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonResumeCursor {
@@ -110,6 +96,7 @@ pub struct DaemonEventMeta {
 pub mod agent_roster;
 mod command;
 pub mod framing;
+pub mod herdr_env;
 mod outbound;
 mod plane;
 pub mod update_flow;
@@ -117,14 +104,13 @@ mod worker;
 
 pub use command::{
     CycleDirection, DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType,
-    DaemonCommandWire, DaemonExtensionUiResponse, DaemonSessionLifecycle, ForkPosition,
-    PromptInput, StreamingBehavior,
+    DaemonCommandWire, DaemonSessionLifecycle, ForkPosition, PromptInput, StreamingBehavior,
 };
 pub use outbound::{
     DaemonClosingReason, DaemonErrorInfo, DaemonEventEnvelope, DaemonOutbound,
     DaemonPeerTransportTicket, DaemonResponse, DaemonRuntimeIdentity, DaemonSavedSessionInfo,
     DaemonSessionClosedReason, DaemonSessionSnapshot, SnapshotPurpose, SocketIdentity,
-    UPDATE_RESTART_PREPARING_MESSAGE,
+    KERNEL_NOT_RUNNING_MESSAGE, UPDATE_RESTART_PREPARING_MESSAGE,
 };
 pub use plane::{
     command_plane, is_daemon_mutating_command, is_session_plane_daemon_command,
@@ -150,8 +136,7 @@ pub use worker::{
     DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 };
 
-/// Round-trip helper shared by the daemon wire tests: a parsed type must
-/// serialize back to the exact original value.
+/// Round-trip helper: a parsed type must serialize back to the exact original value.
 #[cfg(test)]
 pub(crate) fn rt<T: serde::Serialize + for<'de> serde::Deserialize<'de>>(json: &str) {
     let original: serde_json::Value = serde_json::from_str(json).unwrap();

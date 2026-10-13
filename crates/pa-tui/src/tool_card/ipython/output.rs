@@ -202,7 +202,7 @@ pub(super) fn render_output(
     }
 
     // Background output rides the structured fields only (the fallback
-    // text above already carries it otherwise).
+    // text above already carries it).
     let background_output = if has_structured_output {
         details
             .background_output

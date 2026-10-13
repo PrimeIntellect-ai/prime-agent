@@ -1,8 +1,5 @@
-//! Shared diff computation utilities for the edit tool.
-//!
-//! Port of `packages/coding-agent/src/core/tools/edit-diff.ts`, including a
-//! faithful port of jsdiff v9 `diffLines` (Myers O(ND) with the diagonal-bounds
-//! optimization) so generated diffs match the TypeScript product byte for byte.
+//! Shared diff computation utilities for the edit tool: a faithful port of jsdiff
+//! v9 `diffLines` so generated diffs match the TypeScript product byte for byte.
 
 use std::path::Path;
 
@@ -11,9 +8,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::tools::jsdiff::diff_lines;
 use crate::tools::path_utils::resolve_to_cwd;
 
-// ---------------------------------------------------------------------------
 // Line endings / normalization
-// ---------------------------------------------------------------------------
 
 /// Detect whether the content uses CRLF or LF line endings.
 pub fn detect_line_ending(content: &str) -> LineEnding {
@@ -85,12 +80,10 @@ fn js_trim_end(line: &str) -> &str {
     line.trim_end_matches(is_js_whitespace)
 }
 
-/// Normalize text for fuzzy matching. Applies progressive transformations:
+/// Normalize text for fuzzy matching, progressively:
 /// - NFKC normalization
-/// - Strip trailing whitespace from each line
-/// - Normalize smart quotes to ASCII equivalents
-/// - Normalize Unicode dashes/hyphens to ASCII hyphen
-/// - Normalize special Unicode spaces to regular space
+/// - strip trailing whitespace per line
+/// - smart quotes, Unicode dashes, and special spaces to ASCII/space
 pub fn normalize_for_fuzzy_match(text: &str) -> String {
     let nfkc: String = text.chars().nfkc().collect();
     let trimmed: String = nfkc
@@ -123,17 +116,13 @@ pub fn strip_bom(content: &str) -> (&str, &str) {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Fuzzy matching
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuzzyMatchResult {
-    /// Whether a match was found.
     pub found: bool,
     /// The match start index (in `content_for_replacement`).
     pub index: usize,
-    /// Length of the matched text.
     pub match_length: usize,
     /// Whether fuzzy matching was used (false = exact match).
     pub used_fuzzy_match: bool,
@@ -247,11 +236,9 @@ fn get_no_change_error(path: &str, total_edits: usize) -> String {
     format!("No changes made to {path}. The replacements produced identical content.")
 }
 
-/// Apply one or more exact-text replacements to LF-normalized content.
-///
-/// All edits are matched against the same original content. Replacements are
-/// then applied in reverse order so offsets remain stable. If any edit needs
-/// fuzzy matching, the operation runs in fuzzy-normalized content space.
+/// Apply one or more exact-text replacements to LF-normalized content: all edits
+/// are matched against the same original content and applied in reverse order so
+/// offsets remain stable; a fuzzy edit runs in fuzzy-normalized content space.
 pub fn apply_edits_to_normalized_content(
     normalized_content: &str,
     edits: &[Edit],
@@ -492,9 +479,7 @@ pub fn generate_diff_string_default(old_content: &str, new_content: &str) -> Dif
     generate_diff_string(old_content, new_content, 4, 1)
 }
 
-// ---------------------------------------------------------------------------
 // Preview diff computation (reads the file from disk)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]

@@ -1,6 +1,6 @@
-//! The outcome/provider/model/error classification family (moved with its
-//! concern): the TS `runOutcome`/`telemetryProviderCategory`/`modelCategory`/
-//! `errorCategory` ports and their string-matching helpers.
+//! The outcome/provider/model/error classification family: the TS
+//! `runOutcome`/`telemetryProviderCategory`/`modelCategory`/`errorCategory`
+//! ports and their string-matching helpers.
 use super::{AssistantMessage, StopReason, Value};
 
 /// Run outcome per the TS `runOutcome`: aborted beats error beats success.
@@ -19,7 +19,6 @@ pub(super) fn opt_value(value: Option<u64>) -> Value {
     value.map_or(Value::Null, Value::from)
 }
 
-/// TS `telemetryProviderCategory`.
 pub fn provider_category(provider: Option<&str>) -> String {
     let Some(provider) = provider else {
         return "unknown".to_string();
@@ -43,7 +42,6 @@ pub fn provider_category(provider: Option<&str>) -> String {
         .map_or_else(|| "custom".to_string(), std::string::ToString::to_string)
 }
 
-/// TS `modelCategory`.
 pub(super) fn model_category(model: &str) -> &str {
     let normalized = model.to_ascii_lowercase();
     let categories = [

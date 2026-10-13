@@ -1,8 +1,6 @@
-//! The API-key lookup + OAuth refresh arm (moved with its concern): the
-//! resolution walk over the candidate sources (runtime override, prime
-//! inference env-before-stored, stored, environment, fallback) with the
-//! staleness gate, the OAuth expiry refresh under the per-provider
-//! single-flight, and the passthrough `get_api_key` (TS getApiKey).
+//! The API-key lookup + OAuth refresh arm: the resolution walk over the candidate sources (runtime
+//! override, prime inference env-before-stored, stored, environment, fallback) with the staleness
+//! gate.
 
 use super::{
     now_epoch_ms, parse_storage_data, refresh_flight, resolve_config_value,
@@ -69,7 +67,6 @@ impl AuthStorage {
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
-                                // Refresh under the backend lock.
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
                                     let candidate = self.stored_candidate(provider_id);
                                     return AuthApiKeyResult {
@@ -90,8 +87,7 @@ impl AuthStorage {
                             };
                         }
                         // A pasted MCP static token IS the api key for its
-                        // `mcp:<server>` provider: the bearer value, used
-                        // verbatim (no resolution, no expiry).
+                        // `mcp:<server>` provider: the bearer value, used verbatim.
                         AuthCredential::McpStaticToken { bearer, .. } => {
                             return AuthApiKeyResult {
                                 api_key: Some(bearer.clone()),
@@ -142,38 +138,24 @@ impl AuthStorage {
             .api_key
     }
 
-    /// Refresh an expired OAuth credential, returning the new credential on
-    /// success.
+    /// Refresh an expired OAuth credential, returning the new credential on success.
     ///
-    /// Load-then-lock shape: the token fetch is a network round trip and
-    /// never runs under the document lock. The TS product runs the same
-    /// refresh inside its `withLockAsync` (its single-threaded runtime
-    /// pays nothing for holding the lock across the `await`); this engine
-    /// is threaded, and the port's [`FileAuthStorageBackend::with_lock`]
-    /// spans the whole critical section, so a fetch under the lock stalls
-    /// every other same-process auth read and write for the round trip.
-    /// The phases:
+    /// Load-then-lock shape: the token fetch never runs under the document lock
+    /// (TS refreshes inside `withLockAsync`; its single-threaded runtime pays nothing,
+    /// but a fetch under this port's lock would stall every same-process auth read
+    /// and write). The phases:
     ///
-    /// 1. LOAD: the current document through the consolidated read arm
-    ///    (no document lock; a cache miss pays the read arm's one short
-    ///    locked read).
-    /// 2. FETCH: the OAuth integration's token call outside every lock,
-    ///    behind [`refresh_flight`]'s per-provider single-flight gate. The
-    ///    expiry is re-checked under the gate: the first flight may have
-    ///    just written a fresh credential, and a second fetch would waste
-    ///    a single-use refresh token. In-process callers therefore join
-    ///    one flight per provider — the same serialization TS's
-    ///    single-threaded runtime gives its locked refresh.
-    /// 3. WRITE: the same locked read-modify-write the TS product runs,
-    ///    now holding the lock only for the re-read, the insert, and the
-    ///    atomic write. A peer that refreshed while this fetch ran keeps
-    ///    its fresher credential: this attempt writes nothing and serves
-    ///    the peer's.
+    /// 1. LOAD: the document through the read arm (no document lock).
+    /// 2. FETCH: the token call outside every lock, behind [`refresh_flight`]'s
+    ///    single-flight gate; the expiry is re-checked under the gate so a second
+    ///    fetch never wastes a single-use refresh token.
+    /// 3. WRITE: the locked read-modify-write, holding the lock only for the re-read,
+    ///    insert, and atomic write. A peer that refreshed meanwhile keeps its fresher
+    ///    credential.
     fn refresh_oauth(&mut self, provider_id: &str) -> Option<AuthCredential> {
         // LOAD: no document lock.
         let Ok(content) = self.storage.read() else {
-            // The locked run failed the way the old single-lock shape
-            // failed: reload, then serve the stored credential.
+            // A failed read: reload, then serve the stored credential.
             self.reload();
             return self
                 .data
@@ -226,8 +208,7 @@ impl AuthStorage {
             self.reload();
             return None;
         };
-        // WRITE: the locked read-modify-write, holding the document lock
-        // only for the re-read, insert, and atomic write.
+        // WRITE: the locked read-modify-write.
         let mut refreshed: Option<AuthCredential> = Some(new_credential.clone());
         let result = self.storage.with_lock(&mut |current| {
             let mut data = parse_storage_data(current.as_deref())?;
@@ -254,9 +235,8 @@ impl AuthStorage {
                 .credential(provider_id)
                 .filter(|c| matches!(c, AuthCredential::Oauth { .. }));
         }
-        // Reload from what we wrote: the in-memory snapshot must not
-        // serve the pre-refresh credential to a later read (a rotated
-        // refresh token is single-use).
+        // Reload from what we wrote: the in-memory snapshot must not serve the
+        // pre-refresh credential (a rotated refresh token is single-use).
         self.reload();
         refreshed
     }

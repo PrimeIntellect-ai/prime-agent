@@ -1,13 +1,6 @@
 //! The selection restyle: visible window rows restyle only where the
-//! selection changed. A drag frame recomputes the highlight for the rows
-//! inside the selection range's diff — the rows the previous frame
-//! already styled (and the untouched rows around them) reuse the cached
-//! styled copies verbatim, so extending a drag by one row styles one row,
-//! not the window. Frames with no selection armed skip the pass entirely,
-//! so a drag's first styled frame is a cold rebuild and the diff below owns
-//! every frame after it; an armed selection — degenerate or not — keeps the
-//! pass and its warm cache. Rebuilt rows re-style from the cached window rows
-//! (the per-entry line cache), never from the raw entries.
+//! selection changed — a drag extension styles the newly covered row,
+//! not the window. Frames with no selection armed skip the pass.
 
 use super::AgentView;
 use crate::Line;
@@ -20,11 +13,8 @@ thread_local! {
     pub(super) static RESTYLE_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// One cached window of styled rows: the walked (unstyled) base rows, the
-/// highlighted rows rendered from them, and the span each row carries.
-/// Valid while the base rows and the window start hold; a content change
-/// (streaming, stale marks, appends the walk picks up) fails the base
-/// comparison and rebuilds.
+/// One cached window of styled rows: the walked (unstyled) base rows, the highlighted rows,
+/// and the span each row carries. Valid while the base rows and start hold.
 #[derive(Default)]
 pub(crate) struct SelectionRestyle {
     start: usize,
@@ -40,21 +30,17 @@ impl SelectionRestyle {
 }
 
 impl AgentView {
-    /// Style the window rows for the active selection, reusing cached rows
-    /// wherever the highlight did not change (the drag frame's cost is the
-    /// selection diff, not the window).
+    /// Style the window rows for the active selection, reusing cached
+    /// rows wherever the highlight did not change (a drag frame's cost
+    /// is the selection diff).
     pub(crate) fn selection_styled_window(&mut self, base: Vec<Line>, start: usize) -> Vec<Line> {
         #[cfg(test)]
         {
             RESTYLE_ROWS.with(|count| count.set(0));
             RESTYLE_REBUILDS.with(|count| count.set(0));
         }
-        // No selection anchor is armed, so every span below is `None`
-        // and no drag can extend into one without a fresh begin: the
-        // styled window is the base rows themselves, and a scroll frame
-        // (whose window always changed) skips the whole-window clone and
-        // the cache churn it feeds. An armed selection — degenerate or
-        // not — keeps the pass and its warm cache.
+        // No selection anchor is armed: the styled window is the base rows themselves, and a
+        // scroll frame skips the whole-window clone; an armed selection keeps the pass.
         if !self.has_selection() && !self.selection.is_dragging() {
             return base;
         }
@@ -137,8 +123,8 @@ mod tests {
         view.visible_transcript_window(100, 30)
     }
 
-    /// The screen row holding a needle (screen geometry, not a guess):
-    /// one header row above the window, so the window index plus one.
+    /// The screen row holding a needle (screen geometry): one header
+    /// row above the window, so the window index plus one.
     fn row_of(view: &mut AgentView, needle: &str) -> usize {
         let (base, _) = base_rows(view);
         (0..base.len())
@@ -161,9 +147,8 @@ mod tests {
         }
         view.render_frame(100, 30);
         view.scroll_by(-5);
-        // The scrolled frame's window changed: without a selection the
-        // styled window is the base rows themselves, so the restyle
-        // neither rebuilds nor re-styles a row.
+        // Without a selection the restyle neither rebuilds nor
+        // re-styles a row.
         view.render_frame(100, 30);
         RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), 0));
         RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 0));
@@ -184,16 +169,13 @@ mod tests {
         view.render_frame(100, 30);
         let (base, start) = base_rows(&mut view);
         let row = row_of(&mut view, "row zero");
-        // Drag across three window rows, then extend by one more: the
-        // first styled frame is a cold rebuild (the composed frame skipped
-        // the restyle without a selection), the extension's frame styles
-        // only the newly covered row.
+        // Drag across three window rows, then extend by one more: the first styled frame is a
+        // cold rebuild, the extension styles only the newly covered row.
         view.begin_selection(row, 2);
         view.extend_active_selection(row + 3, 6);
         let styled = view.selection_styled_window(base.clone(), start);
-        // The drag's first styled frame rebuilds the whole window (the
-        // no-selection frame before it cached nothing); the extension
-        // below proves the steady-state diff takes over from there.
+        // The drag's first styled frame rebuilds the whole window; the
+        // extension below proves the steady-state diff takes over.
         RESTYLE_ROWS.with(|rows| assert_eq!(rows.get(), base.len()));
         RESTYLE_REBUILDS.with(|rebuilds| assert_eq!(rebuilds.get(), 1));
         view.extend_active_selection(row + 4, 6);

@@ -1,6 +1,5 @@
-//! The model-compat family: the OpenAI-completions compat block, the
-//! format enums, the OpenAI-responses and Anthropic compat blocks, and
-//! the `ModelCompat`/`CompatKind` descriptor.
+//! The model-compat family: the OpenAI-completions compat block, the format enums, the
+//! OpenAI-responses and Anthropic compat blocks, and the `ModelCompat`/`CompatKind` descriptor.
 use super::{Deserialize, JsonMap, OpenRouterRouting, Serialize, Value, VercelGatewayRouting};
 
 /// Compatibility settings for OpenAI-compatible completions APIs.
@@ -88,13 +87,12 @@ pub struct AnthropicMessagesCompat {
     pub supports_long_cache_retention: Option<bool>,
 }
 
-/// TS models `Model.compat` as an API-dependent conditional type. On the wire
-/// it is one of the three compat objects, all with optional fields, so the
-/// variant cannot be tagged. serde's `flatten` also cannot carry nested
-/// untagged enums, so this wrapper keeps the raw object and offers typed
-/// views: [`ModelCompat::kind`] sniffs distinctive keys and decodes into the
-/// matching typed struct, and [`ModelCompat::from_kind`] encodes one back.
-/// Keeping the raw object makes wire round-trips exactly lossless.
+/// TS models `Model.compat` as an API-dependent conditional type; on the wire it is one of the
+/// three
+/// compat objects, all with optional fields, so the variant cannot be tagged. This wrapper keeps
+/// the
+/// raw object and offers typed views: [`ModelCompat::kind`] sniffs distinctive keys and decodes the
+/// matching struct, [`ModelCompat::from_kind`] encodes one back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelCompat {
@@ -116,11 +114,9 @@ impl ModelCompat {
     ///
     /// # Panics
     ///
-    /// Panics if serializing `kind` to a JSON value fails or if that value
-    /// is not a JSON object. Both are unreachable for the current compat
-    /// structs, which serialize to plain JSON objects.
-    // Workspace API consumed across crates (pa-ai, pa-models, pa-core); the
-    // by-value `CompatKind` signature is fleet-wide, out of this lane's scope.
+    /// Panics if serializing `kind` to a JSON value fails or if that value is not a JSON object.
+    /// Both are unreachable for the current compat structs, which serialize to plain JSON objects.
+    /// Workspace API consumed across crates; the by-value signature is fleet-wide.
     #[allow(clippy::needless_pass_by_value)]
     #[must_use]
     pub fn from_kind(kind: CompatKind) -> Self {
@@ -136,15 +132,14 @@ impl ModelCompat {
         ModelCompat { raw: map }
     }
 
-    /// Decode the raw object into the typed compat struct its keys select.
-    /// When only shared keys (e.g. `supportsLongCacheRetention`) are present,
-    /// every shape encodes them identically; the completions shape is the
-    /// fallback because it is the common case for OpenAI-compatible providers.
+    /// Decode the raw object into the typed compat struct its keys select; shared-only keys encode
+    /// identically everywhere, and the completions shape is the fallback (the common case for
+    /// OpenAI-compatible providers).
     ///
     /// # Errors
     ///
-    /// Returns the `serde_json` error when the raw object does not
-    /// deserialize into the compat struct its keys selected.
+    /// Returns the `serde_json` error when the raw object does not deserialize into the compat
+    /// struct its keys selected.
     pub fn kind(&self) -> Result<CompatKind, serde_json::Error> {
         let has_key = |keys: &[&str]| keys.iter().any(|k| self.raw.contains_key(*k));
         let value = Value::Object(self.raw.clone());

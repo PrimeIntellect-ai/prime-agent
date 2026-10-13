@@ -5,14 +5,12 @@ use serde_json::Value;
 use super::{dim, grouped, js_to_fixed, raw_span, ClientLine, ClientSpan};
 use crate::theme::ThemeColor;
 use crate::width::{char_width, str_width};
-/// The context-utilization bar width (TS `CONTEXT_BAR_WIDTH`).
 const CONTEXT_BAR_WIDTH: usize = 10;
-/// The minimum agent-label column width (TS `MIN_LABEL_WIDTH`).
 const MIN_LABEL_WIDTH: usize = 16;
 /// The collapsed view's agent-row budget (a deliberate TS delta: TS
-/// renders every row of every tree): a tree with at most this many rows
-/// renders the full TS shape; a bigger tree keeps its highest-usage rows
-/// and folds the rest into the summary row behind the expand hint.
+/// renders every row): a tree with at most this many rows renders the
+/// full TS shape; a bigger tree keeps its highest-usage rows and folds
+/// the rest into the summary row behind the expand hint.
 const CONTEXT_ROW_BUDGET: usize = 10;
 
 /// A JS number rendered with at most one decimal: `Math.round(x * 10) / 10`
@@ -25,10 +23,6 @@ fn js_tenth(value: f64) -> String {
         format!("{tenth:.1}")
     }
 }
-
-// ---------------------------------------------------------------------------
-// /context (TS formatContextTree)
-// ---------------------------------------------------------------------------
 
 /// The spend-relevant usage of one tree node (TS `Usage`, the fields the
 /// display reads).
@@ -107,9 +101,8 @@ struct ModelUsage {
 }
 
 /// One agent row of the context tree (TS `ContextTreeNode`), plus this
-/// port's per-model own-usage breakdown (a deliberate TS delta: a
-/// session that switches models mid-conversation — or hosts subagents on
-/// other models — shows which model billed what).
+/// port's per-model own-usage breakdown (a deliberate TS delta: a session
+/// that switches models mid-conversation shows which model billed what).
 #[derive(Debug, Clone, PartialEq)]
 struct ContextNode {
     id: String,
@@ -186,8 +179,7 @@ fn parse_context_node(value: &Value) -> ContextNode {
     }
 }
 
-/// One flattened tree row: the node and its drawing prefix (TS
-/// `ContextTreeRow`).
+/// One flattened tree row: the node and its drawing prefix.
 struct TreeRow<'a> {
     node: &'a ContextNode,
     prefix: String,
@@ -223,9 +215,9 @@ fn walk_tree<'a>(children: &'a [ContextNode], ancestors: &str, rows: &mut Vec<Tr
     }
 }
 
-/// The status icon and its color (TS `statusIcon`); statuses outside the
-/// TS vocabulary render like `queued` (the TS switch is type-exhaustive and
-/// cannot produce one).
+/// The status icon and its color; statuses outside the TS vocabulary
+/// render like `queued` (the TS switch is type-exhaustive and cannot
+/// produce one).
 fn status_icon(status: &str) -> (&'static str, ThemeColor) {
     match status {
         "active" => ("\u{25cf}", ThemeColor::Accent),
@@ -236,8 +228,7 @@ fn status_icon(status: &str) -> (&'static str, ThemeColor) {
     }
 }
 
-/// Plain-space padding to a visible width (TS `padEndAnsi` for the
-/// default-foreground padding these tables append).
+/// Plain-space padding to a visible width.
 fn pad_end(text: &str, width: usize) -> String {
     let used = str_width(text);
     format!("{text}{}", " ".repeat(width.saturating_sub(used)))
@@ -279,7 +270,7 @@ pub(super) fn truncate_plain(text: &str, max_width: usize) -> String {
     format!("{out}{ellipsis}")
 }
 
-/// The context column for one row (TS `formatContextColumn`).
+/// The context column for one row.
 fn context_column(usage: Option<&ContextUsageSnapshot>, with_bar: bool) -> Vec<ClientSpan> {
     let Some(usage) = usage else {
         return vec![dim("-")];
@@ -330,12 +321,9 @@ fn sum_own_usage(node: &ContextNode, total: &mut UsageTotals) {
 }
 
 /// The whole tree's own usage summed per model (the `/context` Cost
-/// section's breakdown): every node's per-model buckets fold into tree
-/// buckets keyed by `provider/id`, so a mid-conversation switch — or
-/// subagents on other models — shows each model's share of the total.
-/// `None` when a node with billable own usage carries no per-model fold
-/// (a foreign file): a partial breakdown would not add up to the
-/// displayed total, so the Cost section stays plain.
+/// section's breakdown), so a mid-conversation model switch shows each
+/// model's share. `None` when a node with billable own usage carries no
+/// per-model fold (a foreign file): a partial breakdown would not add up.
 fn sum_own_usage_by_model(node: &ContextNode, total: &mut Vec<ModelUsage>) {
     for bucket in &node.own_usage_by_model {
         if let Some(existing) = total
@@ -378,9 +366,8 @@ struct HiddenAgents {
 }
 
 /// Which agent rows [`context_tree_rows`] renders — this port's collapse
-/// knob, a deliberate TS delta (TS `formatContextTree` renders every row):
-/// a fleet session's tree outgrows the terminal, so the default keeps the
-/// display bounded and names the command that renders the whole tree.
+/// knob, a deliberate TS delta (TS renders every row): a fleet session's
+/// tree outgrows the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextTreeScope {
     /// The default: a tree over the row budget renders its highest-usage
@@ -394,17 +381,13 @@ pub enum ContextTreeScope {
 /// The `/context` rows (TS `formatContextTree`): the agent tree with own
 /// token/cost columns and per-agent context utilization, then the grand
 /// totals. `width` is the TS render width: `clamp(columns - 2, 60, 120)`.
-/// `scope` is this port's collapse knob (see [`ContextTreeScope`]); TS
-/// has no collapse.
 pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) -> Vec<ClientLine> {
     let root = parse_context_node(tree);
     let mut rows = flatten_tree(&root);
 
-    // The collapse (a deliberate TS delta: TS renders every row): a tree
-    // over the row budget keeps its highest-usage rows — spend decides
-    // which agents matter — and folds the rest into the summary row
-    // under the table. Ties keep tree order (the sort is stable); the
-    // summary and the grand totals still cover the whole tree.
+    // The collapse: a tree over the row budget keeps its highest-usage
+    // rows (spend decides which agents matter) and folds the rest into
+    // the summary row. Ties keep tree order (stable sort).
     let mut summary: Option<HiddenAgents> = None;
     if scope == ContextTreeScope::Collapsed && rows.len() > CONTEXT_ROW_BUDGET {
         rows.sort_by(|left, right| {
@@ -458,10 +441,9 @@ pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) ->
         .max()
         .unwrap_or_default();
     // The per-row model column — a deliberate TS delta (TS shows only the
-    // root's `Model:` line): the model decides the cost, so every agent
-    // row carries its bare model id, "-" when the node carries no model.
-    // The column appears only when at least one node has a model; a tree
-    // without model identity renders exactly the TS layout.
+    // root's `Model:` line): the model decides the cost, so every agent row
+    // carries its bare model id ("-" without one); the column appears only
+    // when at least one node has a model.
     let model_cells: Vec<String> = rows
         .iter()
         .map(|row| match &row.node.model {
@@ -553,9 +535,7 @@ pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) ->
     }
 
     if let Some(hidden) = &summary {
-        // The summary row (the hidden agents' folded spend, so the
-        // visible rows plus the summary still add up to the totals) and
-        // the expand affordance: the whole tree stays one command away.
+        // The summary row and the expand affordance.
         let label_space = label_width.saturating_sub(2).max(1);
         let label = truncate_plain(&hidden.label, label_space);
         let mut spans = vec![dim("..."), dim(format!(" {label}"))];
@@ -627,11 +607,9 @@ pub fn context_tree_rows(tree: &Value, width: usize, scope: ContextTreeScope) ->
             dim("Total:"),
             raw_span(format!(" ${}", js_to_fixed(totals.cost_total, 4))),
         ]);
-        // The per-model breakdown (the model mix decides the cost): the
-        // whole tree's per-model buckets, most expensive model first.
-        // Rendered only when the daemon sent buckets and the tree used
-        // more than one model — a single-model tree already names its
-        // model in the `Model:` line and renders exactly TS.
+        // The per-model breakdown (the model mix decides the cost): the whole
+        // tree's buckets, most expensive model first. Rendered only when the tree
+        // used more than one model — a single-model tree already names its model.
         let by_model = tree_own_usage_by_model(&root);
         if let Some(mut by_model) = by_model.filter(|by_model| by_model.len() > 1) {
             by_model.sort_by(|a, b| {

@@ -1,12 +1,9 @@
-//! Agent-engine artifact references (moved with their concern): the
-//! sha256 artifact-id mint, the cwd-relative logical-path resolution,
-//! and the epoch-millis clock.
+//! Agent-engine artifact references: the sha256 artifact-id mint, the
+//! cwd-relative logical-path resolution, and the epoch-millis clock.
 use super::{json, Value};
 
-/// One artifact reference (TS `createArtifactReference` in
-/// modes/agent-connection/snapshot.ts): the sha256-derived id, the owning
-/// session, the artifact type, and the logical path (cwd-relative when the
-/// file lives under the cwd, else the basename).
+/// One artifact reference: the sha256-derived id, the session, the type,
+/// and the logical path (cwd-relative, else the basename).
 pub(crate) fn artifact_reference(
     session_id: &str,
     cwd: &str,
@@ -50,9 +47,8 @@ pub(crate) fn hex_prefix(digest: &[u8], len: usize) -> String {
         .collect()
 }
 
-/// TS `createArtifactPathInfo`: synthetic paths (`<...>`) stay as-is; a
-/// path under the cwd keeps its cwd-relative form; anything else degrades
-/// to the basename.
+/// Synthetic paths (`<...>`) stay as-is; a path under the cwd keeps its
+/// cwd-relative form; anything else degrades to the basename.
 pub(crate) fn logical_artifact_path(cwd: &str, file_path: &str) -> String {
     if file_path.starts_with('<') && file_path.ends_with('>') {
         return file_path.to_string();

@@ -1,15 +1,7 @@
-//! Named-pipe transport for Windows endpoints (`\\.\pipe\` namespace).
-//!
-//! The TS product binds and connects its daemon endpoints through Node's
-//! `net` module; on Windows that is backed by named pipes (byte-mode duplex
-//! instances, local-only, clients waiting while every instance is busy).
-//! This module implements the shared [`TransportListener`] /
-//! [`TransportStream`] / [`BlockingTransportStream`] contracts with those
-//! semantics, so daemon supervisor, worker, TUI, and CLI callers stay
-//! trait-typed and unchanged across platforms.
-//!
-//! Endpoint naming lives in `pa-daemon::platform` (fixed daemon pipe name,
-//! hashed worker pipe names - the TS product's split).
+//! Named-pipe transport for Windows endpoints (`\\.\pipe\` namespace): byte-mode duplex instances,
+//! local-only, clients waiting while every instance is busy (Node's `net` on Windows); implements
+//! the shared [`TransportListener`] / [`TransportStream`] / [`BlockingTransportStream`] contracts.
+//! Endpoint naming lives in `pa-daemon::platform`.
 
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -25,22 +17,17 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::transport::BlockingTransportStream;
 
 /// `winerror.h` `ERROR_PIPE_BUSY`: the pipe name exists but no instance is
-/// listening right now (pinned constant to keep the Windows API surface out
-/// of the dependency tree).
+/// listening (pinned constant, no windows-sys dependency).
 const ERROR_PIPE_BUSY: i32 = 231;
-/// Busy-pipe poll interval. The TS runtime's clients wait on a busy pipe
-/// through Node's connect machinery; this is the same patience in tokio.
+/// Busy-pipe poll interval; Node's clients wait the same way.
 const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// Overall cap on busy-pipe waiting, so a wedged server surfaces as an
 /// error instead of hanging the caller.
 const BUSY_RETRY_DEADLINE: Duration = Duration::from_secs(10);
 
-/// A listening named-pipe endpoint.
-///
-/// One pipe instance waits for the next client at all times. `accept`
-/// connects that instance and has already created its replacement, so the
-/// pipe name stays connectable while the accepted stream is being served -
-/// the named-pipe equivalent of a Unix listener's backlog.
+/// A listening named-pipe endpoint. One instance waits for the next client at all times; `accept`
+/// connects that instance and has already created its replacement, so the pipe name stays
+/// connectable - the named-pipe equivalent of a backlog.
 pub(crate) struct NamedPipeListener {
     name: String,
     /// The instance currently listening for the next client.
@@ -48,12 +35,9 @@ pub(crate) struct NamedPipeListener {
 }
 
 impl NamedPipeListener {
-    /// Create the first pipe instance at `name`.
-    ///
-    /// `first_pipe_instance` fails when any other process already owns the
-    /// pipe name - the named-pipe equivalent of a live Unix socket file
-    /// blocking `bind`. A stale pipe cannot exist: instances die with their
-    /// creating process, so `bind` never needs a stale-file dance.
+    /// Create the first pipe instance at `name`. `first_pipe_instance`
+    /// fails when another process owns the name (a live Unix socket blocking
+    /// `bind`); a stale pipe cannot exist - instances die with their process.
     pub(crate) fn bind(name: &str) -> io::Result<Self> {
         let first = ServerOptions::new()
             .first_pipe_instance(true)
@@ -64,12 +48,9 @@ impl NamedPipeListener {
         })
     }
 
-    /// Hand the next client a connected server instance.
-    ///
-    /// The next instance is created before waiting on the current one, so a
-    /// creation failure surfaces before the connection is handed out. Two
-    /// instances listen while this call waits (the connecting one plus its
-    /// replacement), which keeps concurrent clients off the busy path.
+    /// Hand the next client a connected server instance. The next instance is created before
+    /// waiting, so a creation failure surfaces first; two instances listen while this call waits,
+    /// keeping clients off the busy path.
     pub(crate) async fn accept(&self) -> io::Result<NamedPipeServer> {
         let mut pending = self.pending.lock().await;
         let next = ServerOptions::new().create(&self.name)?;
@@ -81,11 +62,8 @@ impl NamedPipeListener {
     }
 }
 
-/// Open a client connection to the named pipe at `name`.
-///
-/// Opening a pipe name fails with `ERROR_PIPE_BUSY` while every instance is
-/// occupied; connect waits and retries until the server frees one (Node's
-/// clients get the same waiting behavior from libuv's connect machinery).
+/// Open a client connection; a busy pipe (`ERROR_PIPE_BUSY`) is retried until the server frees one
+/// (Node's clients wait the same way through libuv's connect machinery).
 pub(crate) async fn connect(name: &str) -> io::Result<NamedPipeClient> {
     let deadline = tokio::time::Instant::now() + BUSY_RETRY_DEADLINE;
     loop {
@@ -104,13 +82,9 @@ pub(crate) async fn connect(name: &str) -> io::Result<NamedPipeClient> {
     }
 }
 
-/// State shared by the read and write halves of a blocking client: one
-/// pipe handle driven by a dedicated single-threaded runtime.
-///
-/// The blocking surface cannot be a plain `File` on the pipe name because
-/// std exposes no read deadline for named pipes; driving the tokio pipe
-/// client through a private runtime gives `set_read_timeout` a real
-/// implementation (a bounded wait, not a poll on raw handles).
+/// State shared by the read and write halves of a blocking client: one pipe handle driven by a
+/// dedicated single-threaded runtime, because std exposes no read deadline for named pipes; the
+/// runtime gives `set_read_timeout` a real bounded wait.
 struct BlockingPipeState {
     runtime: Runtime,
     client: AsyncMutex<NamedPipeClient>,
@@ -129,7 +103,7 @@ impl std::fmt::Debug for BlockingPipeClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlockingPipeClient")
             .field("name", &self.name)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -171,12 +145,12 @@ impl BlockingPipeClient {
             Some(timeout) => match self
                 .state
                 .runtime
-                .block_on(tokio::time::timeout(timeout, read))
+                // Construct the timer only after entering this client's runtime.
+                .block_on(async { tokio::time::timeout(timeout, read).await })
             {
                 Ok(result) => result,
                 // Cancelled reads leave the buffer untouched; callers treat
-                // the deadline as an empty poll, the Unix behavior for a
-                // socket read that hits its SO_RCVTIMEO.
+                // the deadline as an empty poll, like Unix `SO_RCVTIMEO`.
                 Err(_elapsed) => Err(io::ErrorKind::TimedOut.into()),
             },
             None => self.state.runtime.block_on(read),
@@ -221,20 +195,19 @@ impl BlockingTransportStream for BlockingPipeClient {
 
 #[cfg(all(test, windows))]
 mod tests {
-    //! Round-trips through the public transport API. Windows-only; the
-    //! sandbox verifies these compile for the cross target (a real Windows
-    //! runner executes them).
+    //! Round-trips through the public transport API. Windows-only; the sandbox verifies compilation
+    //! for the cross target, a real Windows runner executes them.
 
     use std::io::{Read, Write};
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::super::transport::{bind_transport, connect_blocking, connect_transport};
 
-    /// Unique pipe name per test process: parallel test binaries must not
-    /// collide in the global `\.\pipe\` namespace.
+    /// Unique pipe name per test process (parallel binaries must not
+    /// collide in the global `\.\pipe\` namespace).
     fn test_pipe(tag: &str) -> PathBuf {
         PathBuf::from(format!(
             r"\\.\pipe\prime-agent-pa-types-test-{}-{tag}",
@@ -266,7 +239,7 @@ mod tests {
     #[tokio::test]
     async fn second_bind_on_a_live_pipe_name_fails() {
         let path = test_pipe("bind-conflict");
-        bind_transport(&path).await.expect("first bind");
+        let _listener = bind_transport(&path).await.expect("first bind");
         let error = bind_transport(&path)
             .await
             .err()
@@ -280,16 +253,18 @@ mod tests {
     #[test]
     fn blocking_client_deadline_then_roundtrip() {
         let path = test_pipe("blocking-roundtrip");
-        let setup = tokio::runtime::Runtime::new().expect("setup runtime");
-        let listener = setup.block_on(bind_transport(&path)).expect("bind");
-        drop(setup);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let server_path = path.clone();
 
         let server = std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("server runtime");
             runtime.block_on(async move {
+                let listener = bind_transport(&server_path).await.expect("bind");
+                ready_tx.send(()).expect("listener ready");
                 let server = listener.accept().await.expect("accept");
                 let (mut reader, mut writer) = server.split();
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                reply_rx.await.expect("release reply");
                 writer.write_all(b"hello").await.expect("server write");
                 let mut buf = [0u8; 4];
                 reader.read_exact(&mut buf).await.expect("server read");
@@ -297,28 +272,27 @@ mod tests {
             });
         });
 
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("listener ready");
         let mut stream = connect_blocking(&path).expect("blocking connect");
         stream
             .set_read_timeout(Duration::from_millis(50))
             .expect("deadline");
-        let started = Instant::now();
         let mut buf = [0u8; 5];
-        loop {
-            match stream.read(&mut buf) {
-                Ok(5) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-                other => panic!("unexpected read result: {other:?}"),
-            }
-            assert!(
-                started.elapsed() < Duration::from_secs(5),
-                "server reply never arrived"
-            );
-        }
-        assert_eq!(&buf, b"hello");
-        assert!(
-            started.elapsed() >= Duration::from_millis(200),
-            "the read deadline must be honored while the reply is held back"
+        assert_eq!(
+            stream
+                .read(&mut buf)
+                .expect_err("reply is held back")
+                .kind(),
+            std::io::ErrorKind::TimedOut
         );
+        reply_tx.send(()).expect("release reply");
+        stream
+            .set_read_timeout(Duration::from_secs(5))
+            .expect("roundtrip deadline");
+        stream.read_exact(&mut buf).expect("client read");
+        assert_eq!(&buf, b"hello");
         stream.write_all(b"echo").expect("client write");
         stream.flush().expect("client flush");
         server.join().expect("server thread");
@@ -328,8 +302,7 @@ mod tests {
     fn blocking_connect_to_missing_pipe_reports_not_found() {
         let path = test_pipe("missing");
         let error = connect_blocking(&path).expect_err("no listener owns this pipe name");
-        // The CLI maps NotFound to Node's `connect ENOENT <path>` error
-        // text; missing pipes must surface as that kind.
+        // The CLI maps NotFound to Node's `connect ENOENT <path>` error text.
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 }

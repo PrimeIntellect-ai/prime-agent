@@ -1,0 +1,1 @@
+- Removed the `-t/--tools`, `-nt/--no-tools` and `-nbt/--no-builtin-tools` flags. They were silently ignored; they now fail as unknown options.

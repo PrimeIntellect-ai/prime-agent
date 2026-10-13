@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -19,12 +12,8 @@
 
 //! End-to-end verifier for the `/mcp` service catalog view: a
 //! settings-declared stdio MCP server (the committed echo fixture) must
-//! appear in the daemon's `get_mcp_connections` roster and in the
-//! resolved service cards, answered from local state (no kernel
-//! round-trip, so the view opens instantly), and the headless TUI
-//! driving `/mcp` must render the inline view — the connected card with
-//! its status, one fixed detail line, the key hint — while the
-//! login/logout argument arms keep their notes.
+//! appear in the daemon's roster and service cards, answered from local
+//! state (no kernel round-trip), and the headless TUI must render it.
 #![cfg(unix)]
 
 use std::io::Write as _;
@@ -43,10 +32,8 @@ fn echo_fixture() -> PathBuf {
         .expect("echo fixture")
 }
 
-/// The scripted-engine config: the `{"engine": "faux"}` script drives the
-/// real agent engine over the scripted faux provider (no ambient
-/// credentials, no network), so the session owns a real MCP manager and
-/// kernel like a product session.
+/// The `{"engine": "faux"}` script drives the real agent engine,
+/// with a real MCP manager and kernel.
 fn scripted_engine(dir: &Path) -> PathBuf {
     let script = dir.join("script.json");
     std::fs::write(
@@ -57,9 +44,8 @@ fn scripted_engine(dir: &Path) -> PathBuf {
     script
 }
 
-/// The held-turn script: the one scripted response paces its stream closed
-/// (`delayMs`) well past the probe window, so the turn it drives holds the
-/// session slot across its provider wait exactly like a real running turn.
+/// The held-turn script: `delayMs` holds the stream closed well past the
+/// probe window, so the turn holds the session slot.
 fn held_engine(dir: &Path) -> PathBuf {
     let script = dir.join("script.json");
     std::fs::write(
@@ -174,9 +160,8 @@ fn graceful_shutdown(socket: &Path) {
     let _ = reader.read_line(&mut response);
 }
 
-/// Spawn the real supervisor binary over a hermetic agent dir whose
-/// settings declare the fixture echo server, a hermetic kernel venv, and
-/// no ambient provider credentials.
+/// Spawn the real supervisor over a hermetic agent dir declaring the echo
+/// fixture, with no ambient credentials.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(dir: &Path) -> Supervisor {
     let socket = dir.join("daemon.sock");
@@ -242,9 +227,8 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     panic!("supervisor socket never appeared");
 }
 
-/// The interactive options the headless run attaches with (the same shape
-/// the other TUI e2e verifiers use; `client_auth` stays `None` so the
-/// login/logout argument arms answer through the same client path).
+/// The headless run's interactive options (`client_auth` stays `None` so
+/// the login/logout arms answer through the client path).
 fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::InteractiveOptions {
     pa_tui::interactive::InteractiveOptions {
         models: None,
@@ -283,8 +267,7 @@ fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::Interacti
     }
 }
 
-/// The empty `PromptInput` (the same explicit shape the interactive
-/// daemon e2e uses; the struct carries no `Default`).
+/// The empty `PromptInput` (the struct carries no `Default`).
 fn empty_prompt_input() -> pa_types::daemon::PromptInput {
     pa_types::daemon::PromptInput {
         content: None,
@@ -307,8 +290,7 @@ async fn create_session(socket: &Path, dir: &Path) -> String {
     create_session_with(socket, dir, &scripted_engine(dir)).await
 }
 
-/// Create a live session driven by the given script (the empty-response
-/// default or the held-turn variant).
+/// Create a live session driven by the given script.
 async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String {
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
         .await
@@ -342,22 +324,16 @@ async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String
         .to_string()
 }
 
-/// The daemon seam: `get_mcp_connections` answers from local state —
-/// the roster and the resolved service catalog, never a kernel
-/// round-trip — so the FIRST request after create returns within the
-/// interactive deadline (the old handler waited out the session build
-/// and then listed each connected server's tools, freezing `/mcp` for
-/// seconds). Assert the fast answer's shape: the connected fixture
-/// roster row (no live tool listing), its service card, and the
-/// disconnected built-ins.
+/// The daemon seam: `get_mcp_connections` answers from local state (never
+/// a kernel round-trip), so the FIRST request after create returns within
+/// the interactive deadline (the old handler froze `/mcp` for seconds).
 async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
     let session = create_session(socket, dir).await;
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
         .await
         .expect("connect supervisor");
-    // The worker's created flag commits before the create response, but
-    // a fresh supervisor can still be settling: retry within the
-    // overall deadline, and every single request must answer fast.
+    // A fresh supervisor can still be settling: retry within the
+    // deadline, and every request must answer fast.
     let deadline = Instant::now() + Duration::from_mins(2);
     let mut last_error = String::new();
     let data = loop {
@@ -397,19 +373,16 @@ async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
         .expect("fixture-echo entry");
     assert_eq!(fixture.get("connected"), Some(&json!(true)));
     assert_eq!(fixture.get("authKind"), Some(&json!("stdio")));
-    // No live tool listing rides the roster (the picker opens from local
-    // state; the kernel stays untouched).
+    // No live tool listing rides the roster (the kernel stays untouched).
     assert_eq!(fixture.get("tools"), None, "no tools overlay: {fixture}");
     assert_eq!(fixture.get("error"), None, "no error overlay: {fixture}");
-    // The disconnected built-ins keep their roster rows.
     let linear = connections
         .iter()
         .find(|entry| entry.get("server").and_then(Value::as_str) == Some("linear"))
         .expect("linear entry");
     assert_eq!(linear.get("connected"), Some(&json!(false)));
     assert_eq!(linear.get("authKind"), Some(&json!("subscription")));
-    // The service cards: the fixture's user-declared stdio card is
-    // connected-first with its account id (TS `buildPluginViews` rank).
+    // The fixture's user-declared card ranks connected-first (TS `buildPluginViews`).
     let services = data
         .get("services")
         .and_then(Value::as_array)
@@ -437,10 +410,7 @@ async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
 }
 
 /// The TUI surface: the headless client opens `/mcp`, the inline view
-/// renders the service catalog — the connected fixture card with its
-/// status flush right, ONE fixed detail line, the hint — Esc closes it,
-/// Enter dispatches the selected card's login command, and the argument
-/// arms keep their notes.
+/// renders the catalog, Esc closes it, and Enter dispatches the login.
 #[tokio::test]
 async fn mcp_view_lists_the_configured_mock_connection() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -450,11 +420,8 @@ async fn mcp_view_lists_the_configured_mock_connection() {
     // Part A: the daemon seam answers from local state, instantly.
     assert_roster_answers_fast(&supervisor.socket, dir.path()).await;
 
-    // Part B: the rendered surface. Escape closes; a second open plus
-    // Enter resolves to the fixture's login command (this client wires no
-    // auth hook, so the command lands in the not-available note — the
-    // login/logout arms still route through the client seam); the
-    // argument-only invocations keep their notes.
+    // Part B: the rendered surface. Esc closes; a second open plus Enter
+    // resolves to the login command (no auth hook wired, so it lands in the not-available note).
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/mcp".to_string()),
@@ -480,8 +447,6 @@ async fn mcp_view_lists_the_configured_mock_connection() {
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
 
-    // The inline view: the bordered search field, the connected fixture
-    // card with its status flush right, ONE fixed detail line, the hint.
     assert!(
         rendered.contains("Search MCP connections"),
         "search field rendered:\n{rendered}"
@@ -498,14 +463,12 @@ async fn mcp_view_lists_the_configured_mock_connection() {
         rendered.contains("Enter manage accounts \u{b7} Esc close"),
         "key hint rendered:\n{rendered}"
     );
-    // The live tool listing is gone: the picker opens from local state,
-    // and no kernel ever boots for the view.
+    // The live tool listing is gone: no kernel ever boots for the view.
     assert!(
         !rendered.contains("Echoes the message argument back."),
         "no live tool detail: {rendered}"
     );
-    // Esc closed the view: a frame after the last open one shows the
-    // editor dock again (no search field).
+    // Esc closed the view: a later frame shows the editor dock again.
     let last_open = outcome
         .frames
         .iter()
@@ -517,24 +480,15 @@ async fn mcp_view_lists_the_configured_mock_connection() {
             .any(|frame| !frame.contains("Search MCP connections")),
         "the view closed on Esc:\n{rendered}"
     );
-    // Enter dispatched the selected connection's login command, and the
-    // logout argument arm kept its routing: without a client auth hook
-    // both land in the not-available note (the same client seam the
-    // client_auth unit tests cover for the wired wording).
     assert!(
         rendered.contains("/mcp is not available in this client yet"),
         "Enter dispatched the login and the logout arm stayed routed:\n{rendered}"
     );
 }
 
-/// The mid-turn open (the operator's freeze): a running turn holds the
-/// session slot across its provider wait, and the old daemon handler
-/// waited out the whole session-build window before answering the roster
-/// alone, so `/mcp`/`/plugins` opened mid-turn froze the view for the
-/// bound (the `SESSION_BUILD_WAIT` seconds the freeze reported). The TS
-/// picker builds its rows from local state, so the mid-turn open is
-/// instant: the held-turn probe must answer within the interactive
-/// deadline.
+/// The mid-turn open (the operator's freeze): the old handler waited out
+/// the session-build window, so `/mcp` froze mid-turn. The TS picker builds
+/// rows from local state, so the mid-turn open is instant.
 #[tokio::test]
 async fn get_mcp_connections_answers_instantly_mid_turn() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -555,9 +509,8 @@ async fn get_mcp_connections_answers_instantly_mid_turn() {
         })
         .await
         .expect("start the held turn");
-    // The held turn's admission settles before the probe: the scripted
-    // response keeps the stream closed for the whole assertion window, so
-    // the session slot stays held across the provider wait.
+    // The held turn's admission settles before the probe: the stream stays
+    // closed for the whole assertion window.
     tokio::time::sleep(Duration::from_millis(1_000)).await;
     let started = Instant::now();
     let data = client
@@ -573,8 +526,7 @@ async fn get_mcp_connections_answers_instantly_mid_turn() {
         elapsed < Duration::from_secs(5),
         "mid-turn get_mcp_connections took {elapsed:?}: the catalog open must be instant (the TS picker reads local state; the old handler waited out the session-build bound and froze the open mid-turn)"
     );
-    // The roster itself answered with the connected fixture (local state,
-    // not a kernel listing).
+    // The roster answered with the connected fixture (local state).
     let connections = data
         .get("connections")
         .and_then(Value::as_array)

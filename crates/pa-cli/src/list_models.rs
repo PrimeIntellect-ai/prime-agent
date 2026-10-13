@@ -1,12 +1,10 @@
-//! `prime-agent model list [search]`: the models catalog table. Port of
-//! `cli/list-models.ts` — registry refresh, fuzzy search, and the
-//! provider/model/context/max-out/thinking/images table.
+//! `prime-agent model list [search]`: the models catalog table — registry
+//! refresh, fuzzy search, and the columns rendered.
 
 use crate::mode::RunOptions;
 
-/// Run the model-list runtime path: build the registry against the agent
-/// dir, refresh entitlements, and print the catalog table. The TS product
-/// exits 0 after listing (including the no-models message).
+/// Build the registry against the agent dir, refresh entitlements, and print
+/// the catalog table; exits 0 after listing.
 pub fn run(options: &RunOptions) -> Result<i32, String> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -48,8 +46,7 @@ async fn list(options: &RunOptions) -> Result<i32, String> {
     Ok(0)
 }
 
-/// The TS `formatNoModelsAvailableMessage`: guidance plus the bundled docs
-/// paths for providers and models.
+/// Guidance plus the bundled docs paths for providers and models.
 fn no_models_available_message() -> String {
     let docs = pa_core::packages::docs_path();
     format!(
@@ -59,7 +56,6 @@ fn no_models_available_message() -> String {
     )
 }
 
-/// One table row's rendered columns.
 struct Row {
     provider: String,
     model: String,
@@ -102,7 +98,7 @@ fn yes_no(value: bool) -> String {
     (if value { "yes" } else { "no" }).to_string()
 }
 
-/// The TS `formatTokenCount`: `1M`/`1.0M`, `128K`/`163.8K`, plain below 1K.
+/// `1M`/`1.0M`, `128K`/`163.8K`, plain below 1K.
 fn format_token_count(count: u64) -> String {
     let count = count as f64;
     if count >= 1_000_000.0 {
@@ -124,9 +120,8 @@ fn format_token_count(count: u64) -> String {
     }
 }
 
-/// The catalog table: fixed headers, two-space gutters, and every column
-/// padded to its widest value (trailing padding included, like the TS
-/// `padEnd` render).
+/// The catalog table: fixed headers, two-space gutters, and every
+/// column padded to its widest value (trailing padding included).
 fn print_table(models: &[pa_types::ai::Model]) {
     const HEADERS: [&str; 6] = [
         "provider", "model", "context", "max-out", "thinking", "images",

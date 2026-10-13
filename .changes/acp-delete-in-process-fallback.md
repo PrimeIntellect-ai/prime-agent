@@ -1,0 +1,1 @@
+- `--mode acp` no longer falls back to a separate in-process engine when the background service cannot start: it now requires the daemon, and a startup failure prints `Error:` and exits 1, like the TypeScript version. A `session/cancel` sent as a request instead of a notification now answers "method not found", like the TypeScript version.

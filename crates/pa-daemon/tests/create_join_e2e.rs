@@ -1,29 +1,16 @@
-//! Concurrent-create join e2e (TS `openingSessions` parity): two `create`
-//! commands racing on the worker's own socket must join the first create
-//! instead of both initializing the session — duplicating creation-prefix
-//! rows and overwriting the initialized core state. The race window is the
-//! session-model restore's awaits (the `spawn_blocking` file scan), so the
-//! driver runs the real engine (no script) and pads the session file until
-//! the scan holds the first create open long enough for the second to land.
-//! The join keeps the session file at exactly one creation prefix and one
-//! `session_state` row, and both creates answer the created summary.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! Concurrent-create join e2e (TS `openingSessions` parity): two racing
+//! creates must join the first instead of both initializing the session.
+//! The race window is the restore's `spawn_blocking` file scan: the driver
+//! pads the session file so the scan holds the first create open.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// 64-bit-only targets; the narrowing casts sit at bounded OS boundaries.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Fn length is a style gate, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -42,8 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// Kill a leftover worker at scope exit (the shutdown path is the primary
-/// cleanup; this is the fallback).
+/// Kill a leftover worker at scope exit (the shutdown path is the primary cleanup).
 struct WorkerGuard {
     child: Child,
 }
@@ -55,9 +41,9 @@ impl Drop for WorkerGuard {
     }
 }
 
-/// Spawn the real `pa-daemon worker` binary with no create-config model
-/// (the restore path runs) and a nonexistent supervisor socket (the two
-/// authenticated clients below disarm the orphan monitor).
+/// Spawn the real `pa-daemon worker` binary with no create-config model (the restore
+/// path runs) and a nonexistent supervisor socket (the two authenticated clients
+/// below disarm the orphan monitor).
 fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> WorkerGuard {
     std::fs::create_dir_all(dir.join("agent")).expect("agent dir");
     let child = Command::new(env!("CARGO_BIN_EXE_pa-daemon"))
@@ -81,8 +67,8 @@ fn spawn_worker(dir: &Path, socket: &Path, token: &str) -> WorkerGuard {
         .env("PRIME_AGENT_CODING_AGENT_DIR", dir.join("agent"))
         .env_remove("PRIME_AGENT_MODEL")
         .env_remove("PRIME_AGENT_MODEL_PROVIDER")
-        // A supervisor killed at teardown must not leak this worker into
-        // later test binaries: the orphan exit runs on this short window.
+        // A supervisor killed at teardown must not leak this worker into later test
+        // binaries: the orphan exit runs on this short window.
         .env(
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
@@ -106,8 +92,8 @@ fn wait_socket_ready(socket: &Path) {
     }
 }
 
-/// A raw private-frame client for the worker socket (the same wire the
-/// supervisor's request pump speaks).
+/// A raw private-frame client for the worker socket (the same wire the supervisor's request pump
+/// speaks).
 struct WorkerClient {
     stream: UnixStream,
 }
@@ -145,8 +131,8 @@ impl WorkerClient {
         self.stream.flush().expect("flush");
     }
 
-    /// Fire a request and return without waiting for its response (the
-    /// concurrent creates must both be in flight before either answer).
+    /// Fire a request and return without waiting (both concurrent creates must be in
+    /// flight before either answer).
     fn fire(&mut self, command_type: &str, payload: &Value) -> String {
         let request_id = format!("req-{command_type}-{}", std::process::id());
         self.send_frame(
@@ -208,9 +194,9 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
     }
 }
 
-/// A models.json custom provider whose apiKey rides the file (registry
-/// auth without env or auth.json), pinned by the session file below so
-/// the create's session-model restore resolves on the registry fast path.
+/// A models.json custom provider whose apiKey rides the file (registry auth
+/// without env or auth.json), pinned by the session file so the create's
+/// session-model restore resolves on the registry fast path.
 fn write_models_json(agent_dir: &Path) {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
     std::fs::write(
@@ -238,11 +224,9 @@ fn write_models_json(agent_dir: &Path) {
     .expect("write models.json");
 }
 
-/// The session file the two racing creates both open: it pins the battery
-/// model (the restore reads the pin) and carries filler messages so the
-/// `spawn_blocking` scan of `saved_model_from_session_file` holds the first
-/// create open long enough for the second create to land inside the
-/// window the created check guards.
+/// The session file the two racing creates both open: it pins the battery model and
+/// carries filler messages so the `spawn_blocking` scan of `saved_model_from_session_file`
+/// holds the first create open long enough for the second to land.
 fn write_padded_session_file(dir: &Path) -> PathBuf {
     let mut session =
         pa_daemon::session_store::SessionFile::create(dir.to_str().expect("utf8 dir"), None, 0);
@@ -278,8 +262,8 @@ fn concurrent_creates_join_the_first_create() {
         "sessionPath": session_path.to_string_lossy(),
         "cwd": dir.to_string_lossy(),
     });
-    // Two authenticated clients race the same create: both frames land
-    // while the first create is still inside its restore awaits.
+    // Two authenticated clients race the same create: both frames land while the
+    // first create is still inside its restore awaits.
     let mut first = WorkerClient::connect(&socket, token);
     let mut second = WorkerClient::connect(&socket, token);
     let first_id = first.fire("create", &payload);
@@ -294,15 +278,12 @@ fn concurrent_creates_join_the_first_create() {
         second_response["success"], true,
         "second create failed: {second_response}"
     );
-    // The join answer is the created summary: both creates serve the
-    // same session.
+    // The join answer is the created summary: both creates serve the same session.
     assert_eq!(
         first_response["data"]["sessionId"], second_response["data"]["sessionId"],
         "both creates answer the same created session"
     );
 
-    // The worker is shut down through its own dispose path before the
-    // file is inspected, so the creation-prefix writes are final.
     let shutdown = first.request("shutdown", &json!({}));
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -317,9 +298,8 @@ fn concurrent_creates_join_the_first_create() {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    // The join contract: exactly one creation prefix. A raced double
-    // initialization appends the thinking level (and the active-state
-    // row) twice.
+    // The join contract: exactly one creation prefix. A raced double initialization
+    // appends the thinking level (and the active-state row) twice.
     let store =
         pa_daemon::session_store::SessionFile::open(&session_path).expect("reopen session file");
     let entries = store.entries();

@@ -1,4 +1,4 @@
-//! Skill directory discovery. Port of loadSkillsFromDir in core/skills.ts.
+//! Skill directory discovery.
 
 use std::path::{Path, PathBuf};
 

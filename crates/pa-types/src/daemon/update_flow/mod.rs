@@ -1,22 +1,8 @@
-//! The update-flow state-machine vocabulary.
-//!
-//! Slice 1 of the update flow: pure serde types and path layout shared by the
-//! coordinator (pa-cli detached process mode), the old and new supervisor
-//! (pa-daemon), and the clients (pa-tui/pa-cli). No behavior lives here —
-//! the FSM drivers and watchdogs are owned by pa-daemon/pa-cli.
-//!
-//! Naming convention: `intent.json`, `marker.json`, and `roster.json` are
-//! Rust-owned scratch artifacts and use `snake_case` field names exactly as the
-//! spec writes them. `status.json` keeps the TS status-file schema (camelCase
-//! field names, TS `DaemonUpdateRestartStatus` parity), extended with the
-//! spec's `updateId`/`state`/`epoch` fields, so differential tests against the
-//! TS binary can compare the files directly.
-//!
-//! All artifacts live under `<agent-dir>/update-restarts/<socket-hash>/` and
-//! are per-update scratch state, swept unconditionally at supervisor boot
-//! (spec §6): nothing here is durable session state, and the update flow
-//! never touches `sessions/`, `session-artifacts/`, `harness/`, or
-//! `rlm-ledger/`.
+//! The update-flow state-machine vocabulary: pure serde types and path layout shared by the
+//! coordinator, the supervisors, and the clients. `intent.json`/`marker.json`/`roster.json` are
+//! Rust-owned scratch (`snake_case`, per spec); `status.json` keeps the TS camelCase schema plus
+//! `updateId`/`state`/`epoch`, so differential tests compare directly. All artifacts are
+//! per-update scratch, swept at supervisor boot - never durable session state.
 
 mod artifact;
 mod budget;

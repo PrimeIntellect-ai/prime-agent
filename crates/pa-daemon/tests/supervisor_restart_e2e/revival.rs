@@ -4,13 +4,10 @@ use super::*;
 
 /// One captured-shape revival fixture: a durable session file, a dead
 /// worker's descriptor, and the worker's recovery journal — the on-disk
-/// state a supervisor boots into on the rust-agent box after a failure
-/// era (the 17:07 storm slots and the stopped fleet sessions). The
-/// shapes mirror the captured artifacts: descriptor
-/// `daemon-workers/<socket-key>/<workerId>.json`, journal
-/// `<workerId>.recovery.jsonl` (the busy-record shape of
-/// `93320d14c7d3`, busy written at 12:02 and read at 17:07), and a
-/// session file with an explicit `session_state` row.
+/// state a supervisor boots into. The shapes mirror the captured
+/// artifacts: descriptor `daemon-workers/<socket-key>/<workerId>.json`,
+/// journal `<workerId>.recovery.jsonl`, and a session file with an
+/// explicit `session_state` row.
 struct RevivalFixture {
     worker_id: String,
     session_file: PathBuf,
@@ -40,9 +37,8 @@ fn write_revival_fixture(
     session.rewrite().expect("session file");
     let session_bytes = std::fs::read(&session_file).expect("session bytes");
 
-    // A script the relaunched create would drive: on the unpatched base
-    // the fixture's worker comes back as a registered live worker; the
-    // gate must park it instead.
+    // A script the relaunched create would drive; the gate must park the
+    // worker instead of reviving it.
     let script = dir.join(format!("{worker_id}-script.json"));
     std::fs::write(
         &script,
@@ -105,9 +101,6 @@ fn write_revival_fixture(
     }
 }
 
-/// Boot one fixture supervisor, wait out the adoption pass, and answer the
-/// (park log line, registered worker ids, listed session ids) the boot
-/// produced — the shared assert core of the park regressions.
 fn boot_and_observe(agent_dir: &Path, socket: &Path) -> (Daemon, PathBuf, String) {
     let daemon = spawn_supervisor(socket, agent_dir);
     wait_socket_ready(socket);
@@ -115,9 +108,8 @@ fn boot_and_observe(agent_dir: &Path, socket: &Path) -> (Daemon, PathBuf, String
     let boot_before = pa_daemon::util::now_iso();
     // The adoption pass runs concurrently with the accept loop; give it a
     // bounded window to reach every descriptor before the assertions read
-    // the log and the roster. A boot that revives instead of parking (the
-    // unpatched base) never writes the line and falls through — the park
-    // assertions below carry the failure with the log dump.
+    // the log. A boot that revives never writes the line and falls
+    // through — the park assertions carry the failure.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(&log_path)
         .unwrap_or_default()
@@ -129,10 +121,6 @@ fn boot_and_observe(agent_dir: &Path, socket: &Path) -> (Daemon, PathBuf, String
     (daemon, log_path, boot_before)
 }
 
-/// The 17:07 storm, as a regression: a plain boot must not relaunch a
-/// dead descriptor whose journal busy record is hours old — the captured
-/// 93320d14c7d3 shape (busy written at 12:02, read at the 17:07 boot)
-/// resurrects on the unpatched base as a registered worker.
 #[test]
 fn plain_boot_parks_stale_busy_evidence() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -173,7 +161,6 @@ fn plain_boot_parks_stale_busy_evidence() {
         listed.is_empty(),
         "the parked session must not come back as a worker"
     );
-    // Preserve the session file: the park never touches it.
     assert_eq!(
         std::fs::read(&fixture.session_file).expect("session bytes"),
         fixture.session_bytes,
@@ -181,10 +168,8 @@ fn plain_boot_parks_stale_busy_evidence() {
     );
 }
 
-/// The stopped-session resurrection, as a regression: even FRESH busy
-/// evidence must not revive a session whose durable state is the stop
-/// lifecycle's `archived` belt (#2592) — the captured zombie shape (a
-/// fleet lane stopped at 15:57, journal still busy from its last turn).
+/// Even FRESH busy evidence must not revive a session whose durable state
+/// is the stop lifecycle's `archived` belt (#2592).
 #[test]
 fn plain_boot_never_revives_a_stopped_session() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -222,7 +207,6 @@ fn plain_boot_never_revives_a_stopped_session() {
         workers_registered_since(&log_path, &boot_before).is_empty(),
         "the stopped session resurrected as a worker"
     );
-    // The archived belt survives the boot untouched.
     assert_eq!(
         std::fs::read(&fixture.session_file).expect("session bytes"),
         fixture.session_bytes,
@@ -230,9 +214,8 @@ fn plain_boot_never_revives_a_stopped_session() {
     );
 }
 
-/// The storm-cycle breaker, as a regression: a descriptor the supervisor
-/// already gave up on (`lifecycle: failed`) never relaunches at a later
-/// boot — the give-up verdict is durable (the 12:00 → 17:07 recurrence).
+/// The give-up verdict is durable: a descriptor the supervisor already
+/// gave up on never relaunches at a later boot.
 #[test]
 fn plain_boot_never_revives_a_given_up_worker() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -272,11 +255,8 @@ fn plain_boot_never_revives_a_given_up_worker() {
     );
 }
 
-/// The gate keeps the genuine case: a worker whose journal proves live
-/// work that just crashed — fresh busy evidence, an active session, no
-/// give-up, no lease holder — still relaunches at a plain boot (the
-/// no-false-negative half of #2584's contract, driven through the same
-/// captured fixture shape the park regressions use).
+/// The no-false-negative half of #2584's contract: fresh busy evidence,
+/// an active session, no give-up, no lease holder — still relaunches.
 #[test]
 fn plain_boot_still_revives_fresh_busy_evidence() {
     let dir = tempfile::TempDir::new().expect("temp dir");

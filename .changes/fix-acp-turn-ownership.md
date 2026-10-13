@@ -1,0 +1,1 @@
+- ACP sessions run one prompt turn at a time: a prompt sent while a turn runs, or while a cancel is stopping it, is refused instead of overlapping it; a cancel now stops only its own turn, and a failed turn no longer reports itself as finished.

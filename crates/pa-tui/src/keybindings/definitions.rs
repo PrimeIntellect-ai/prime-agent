@@ -27,8 +27,7 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.cursorLineStart",
-        // "super+left" is the macOS Cmd+Left line-start key (a prompt-
-        // editor-keybinds addition; see the divergence note above).
+        // "super+left" is the macOS Cmd+Left line-start key (see the divergence note above).
         def!(
             &["home", "ctrl+a", "super+left"],
             "Move to line start",
@@ -92,15 +91,12 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "tui.editor.undo",
         def!(&["ctrl+-", "super+z"], "Undo", scope "editor"),
     ),
-    // SANCTIONED DIVERGENCE from TS (operator ask 2026-09-24, documented
-    // per the #289 precedent): the ids below have no TS counterpart — the
-    // TS editor's key set stops at the bindings above. The prompt bar
-    // carries the full standard text-editing set instead: redo, selection
-    // (shift+arrow families, select-all), document/paragraph jumps, word
-    // selection, cut/copy of the selection, and character transposition.
-    // The `super+` defaults are the macOS Cmd keys (the kitty protocol
-    // delivers them as the SUPER modifier); every binding stays
-    // user-configurable through keybindings.json exactly like the rest.
+    // SANCTIONED DIVERGENCE from TS (operator ask 2026-09-24, documented per the #289 precedent):
+    // the ids below have no TS counterpart — the prompt bar carries the full standard text-editing
+    // set instead: redo, selection (shift+arrow families, select-all), document/paragraph jumps,
+    // word selection, cut/copy of the selection, and character transposition. The `super+` defaults
+    // are the macOS Cmd keys (the kitty protocol delivers them as the SUPER modifier); every
+    // binding stays user-configurable through keybindings.json exactly like the rest.
     (
         "tui.editor.redo",
         def!(
@@ -183,9 +179,9 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.selectParagraphDown",
-        // `shift+ctrl+down` is `tui.viewport.follow` (the fullscreen
-        // transcript key the session dispatch consumes before the editor),
-        // so the paragraph-select default is `shift+alt+down` instead.
+        // `shift+ctrl+down` is `tui.viewport.follow` (the fullscreen transcript key the
+        // session dispatch consumes before the editor), so the paragraph-select default
+        // is `shift+alt+down` instead.
         def!(
             &["shift+alt+down"],
             "Select down one paragraph",

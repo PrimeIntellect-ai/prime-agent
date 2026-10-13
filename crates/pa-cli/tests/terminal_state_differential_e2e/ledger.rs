@@ -1,8 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
-// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
-// boundaries where the values are bounded (pid syscalls, epoch/elapsed
-// milliseconds), and checked conversions would add panic paths where silent
-// wrap was deliberate.
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate. Casts: 64-bit targets; narrowing sits at
+// bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::cast_possible_truncation,
@@ -12,27 +10,18 @@
     clippy::too_many_lines
 )]
 
-//! The mode ledger: the recording mock terminal's state machine over
-//! the child's whole byte stream. One `scan` walks the stream and one
-//! `leaks` answers the differential — nothing the child armed may still
-//! be armed at the end of the scanned range.
+//! The mode ledger: the recording mock terminal's state machine over the
+//! child's whole byte stream — nothing the child armed may still be armed
+//! at the end of the scanned range.
 
 use std::collections::BTreeMap;
 
-// ---------------------------------------------------------------------------
-// The recording mock terminal's mode ledger
-// ---------------------------------------------------------------------------
-
-/// DEC private modes whose VT default is ON: the deviation is the `l`
-/// write (25 = the cursor visible by default, 7 = autowrap on by
-/// default). The differential is against the DEFAULT, so a mode left at
-/// its default is clean however many times it flipped.
+/// DEC private modes whose VT default is ON (25 = cursor visible, 7 =
+/// autowrap): a mode left at its default is clean however often it flipped.
 const DEFAULT_ON_MODES: [u32; 2] = [7, 25];
 
-/// One DEC private mode's tally: how often the stream wrote it, and
-/// whether it stands DEVIATING from its default at the end of the
-/// scanned range (that is the leak: an `h`-armed mode never reset, or a
-/// default-on mode never restored).
+/// One DEC private mode's tally: how often the stream wrote it, and whether
+/// it stands DEVIATING from its default at the end of the range (the leak).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ModeTally {
     sets: usize,
@@ -40,39 +29,33 @@ pub(crate) struct ModeTally {
     armed: bool,
 }
 
-/// The terminal-state ledger: the mock terminal's answer to "what did
-/// the child change?". Fed a complete byte range (the whole stream, or
-/// the range up to a mark for a mid-run snapshot), it models every
-/// mode-affecting write so [`ModeLedger::assert_delta_empty`] can state
-/// the differential: nothing the child armed is still armed.
+/// The terminal-state ledger: the mock terminal's answer to "what did the
+/// child change?". Fed a complete byte range (whole stream, or up to a mark
+/// for a mid-run snapshot), it models every mode-affecting write so
+/// [`ModeLedger::assert_delta_empty`] can state the differential.
 #[derive(Debug, Default)]
 pub(crate) struct ModeLedger {
     /// Every DEC private mode (`ESC[?NNNh`/`l`) the stream wrote.
     pub(crate) dec_modes: BTreeMap<u32, ModeTally>,
-    /// The kitty keyboard protocol's flags stack (a push deepens it, a
-    /// pop shallows it; the process must hand back depth zero).
+    /// The kitty flags stack (push deepens, pop shallows; the process must hand back depth zero).
     kitty_depth: usize,
     pub(crate) kitty_pushes: usize,
     kitty_pops: usize,
-    /// The last kitty stack write was a push (a re-arm after the final
-    /// pop — the exact leak shape the exit release guards).
+    /// The last kitty stack write was a push (the re-arm-after-pop leak).
     kitty_re_armed: bool,
     /// Absolute kitty sets (`ESC[=Nu`): the flags value left behind.
     pub(crate) kitty_sets: Vec<u32>,
-    /// modifyOtherKeys (`ESC[>4;Nm`): the value left behind (zero is the
-    /// reset; a nonzero value arms xterm encoding a shell would leak).
+    /// modifyOtherKeys (`ESC[>4;Nm`): the value left behind (0 is the reset;
+    /// nonzero arms xterm encoding a shell would leak).
     modify_other_keys: u32,
-    /// Other `ESC[>Nm` modify-form writes (cursor keys and friends): the
-    /// product owns none, so any appearance is recorded as a finding.
+    /// Other `ESC[>Nm` modify forms (cursor keys and friends): the product
+    /// owns none, so any appearance is a finding.
     modify_forms: BTreeMap<String, u32>,
-    /// The live SGR attribute state (fg/bg/colors/weight): must be empty
-    /// at the end of the range.
+    /// The live SGR attribute state (fg/bg/colors/weight): empty at exit.
     sgr_active: Vec<String>,
-    /// The stream's last SGR write was a reset (the "SGR ends at reset"
-    /// contract of the exit tail).
+    /// The last SGR write was a reset (the "SGR ends at reset" contract).
     sgr_ended_reset: bool,
-    /// OSC 8 hyperlink opens minus closes (a dangling open wraps the
-    /// shell's own output in the link).
+    /// OSC 8 hyperlink opens minus closes (a dangling open wraps the shell's output in the link).
     hyperlink_depth: usize,
     /// One-shot, state-free writes the ledger counts for the report.
     osc_52_writes: usize,
@@ -115,10 +98,8 @@ impl ModeLedger {
                 }
                 b'_' => at += Self::skip_dcs(&bytes[at..]),
                 b'(' | b')' => {
-                    // A charset designation to US ASCII (`ESC(B`/`ESC)B`) is
-                    // the terminal's DEFAULT state — benign (a test runner's
-                    // own reporter writes it). Any other charset left
-                    // designated would repaint the shell's output in it.
+                    // US ASCII is the terminal's DEFAULT (a runner's own
+                    // reporter writes it); any other charset would repaint the shell's output.
                     let designated = bytes.get(at + 2).copied();
                     if designated != Some(b'B') {
                         self.findings.push(format!(
@@ -134,9 +115,8 @@ impl ModeLedger {
         }
     }
 
-    /// One CSI sequence: `ESC[`, an optional private prefix
-    /// (`? < = > !`), parameters, intermediates, then the final byte.
-    /// Returns the bytes consumed.
+    /// One CSI sequence: `ESC[`, an optional private prefix (`? < = > !`),
+    /// parameters, intermediates, then the final byte.
     pub(crate) fn scan_csi(&mut self, bytes: &[u8]) -> usize {
         let mut at = 2;
         let prefix = bytes
@@ -157,8 +137,8 @@ impl ModeLedger {
         }
         let Some(final_byte) = bytes.get(at).copied() else {
             // An unterminated tail: the range was cut mid-sequence (the
-            // suspend snapshot's mark landed inside a paint). Nothing
-            // state-affecting can hide in an unterminated sequence.
+            // suspend snapshot's mark landed inside a paint); nothing
+            // state-affecting can hide in it.
             return bytes.len();
         };
         let params = &bytes[params_start..at];
@@ -222,8 +202,7 @@ impl ModeLedger {
                     self.kitty_re_armed = value != 0;
                 }
                 Some(b'?') => {
-                    // The capability query (`ESC[?u`): a question, not a
-                    // mode write.
+                    // The capability query (`ESC[?u`): a question, not a mode write.
                 }
                 other => {
                     self.findings
@@ -245,14 +224,14 @@ impl ModeLedger {
                 ));
             }
             _ => {
-                // Cursor positioning, clears, and device queries (`ESC[c`
-                // DA1, `ESC[6n` DSR): no mode state to leak.
+                // Cursor positioning, clears, device queries (`ESC[c` DA1,
+                // `ESC[6n` DSR): no mode state to leak.
             }
         }
     }
 
-    /// `ESC[>4;Nm`: modifyOtherKeys. The product only ever resets it (0);
-    /// any other value left behind changes the shell's own key encodings.
+    /// `ESC[>4;Nm`: the product only ever resets it (0); any other value
+    /// left behind changes the shell's own key encodings.
     pub(crate) fn classify_modify_other_keys(&mut self, params: &[u8]) {
         let text = String::from_utf8_lossy(params).to_string();
         let mut parts = text.split(';');
@@ -267,11 +246,8 @@ impl ModeLedger {
     }
 
     /// A plain SGR write: maintain the live attribute set. The
-    /// extended-color forms consume their own sub-parameters — a
-    /// `38;5;N` or `38;2;R;G;B` walk is ONE attribute, not a sequence of
-    /// standalone codes (a `0` channel inside an RGB triple is a color
-    /// component, never a reset; the `5`/`2` selectors are never blink or
-    /// dim), so the param cursor advances past what each form owns.
+    /// extended-color forms consume their own sub-parameters (a `38;5;N`
+    /// or `38;2;R;G;B` walk is ONE attribute), so the cursor advances past what each form owns.
     pub(crate) fn classify_sgr(&mut self, params: &[u8]) {
         let text = String::from_utf8_lossy(params);
         let parts: Vec<Option<u16>> = text
@@ -325,10 +301,8 @@ impl ModeLedger {
                 28 => remove(&mut self.sgr_active, "conceal"),
                 29 => remove(&mut self.sgr_active, "strike"),
                 38 | 48 | 58 => {
-                    // The extended-color form: `N;5;<idx>` (one more
-                    // param) or `N;2;<r>;<g>;<b>` (three more). The
-                    // consumed params belong to the form - a zero
-                    // channel is a color component, not a reset.
+                    // The extended-color form: `N;5;<idx>` or `N;2;<r>;<g>;<b>`;
+                    // the consumed params belong to the form, not standalone codes.
                     let kind = match code {
                         38 => "fg",
                         48 => "bg",
@@ -352,8 +326,7 @@ impl ModeLedger {
         self.sgr_ended_reset = self.sgr_active.is_empty();
     }
 
-    /// One OSC sequence (`ESC]` to BEL or ST): the hyperlink state and
-    /// the one-shot writes. Returns the bytes consumed.
+    /// One OSC sequence (`ESC]` to BEL or ST): the hyperlink state and the one-shot writes.
     pub(crate) fn scan_osc(&mut self, bytes: &[u8]) -> usize {
         let mut at = 2;
         while at < bytes.len() {
@@ -367,8 +340,7 @@ impl ModeLedger {
                     return at + 2;
                 }
                 0x1b => {
-                    // A raw ESC inside an OSC (no ST): the sequence was
-                    // cut short — treat the OSC as unterminated content.
+                    // A raw ESC inside an OSC (no ST): treat the OSC as unterminated content.
                     self.classify_osc(&bytes[2..at]);
                     return at;
                 }
@@ -408,8 +380,7 @@ impl ModeLedger {
         }
     }
 
-    /// A DCS sequence (kitty graphics, `ESC_G ... ESC\`): image payload,
-    /// no mode state. Returns the bytes consumed.
+    /// A DCS sequence (kitty graphics, `ESC_G ... ESC\`): image payload, no mode state.
     pub(crate) fn skip_dcs(bytes: &[u8]) -> usize {
         let mut at = 2;
         while at < bytes.len() {
@@ -421,10 +392,8 @@ impl ModeLedger {
         bytes.len()
     }
 
-    /// The differential's findings: every armed mode disarmed, the
-    /// kitty stack popped, modifyOtherKeys reset, SGR empty, hyperlinks
-    /// closed, no forbidden writes. The unit tests drive this directly
-    /// with synthetic streams — the net's proof it catches a leak.
+    /// The differential's findings: every armed mode disarmed, the kitty
+    /// stack popped, modifyOtherKeys reset, SGR empty, hyperlinks closed.
     pub(crate) fn leaks(&self) -> Vec<String> {
         let mut leaks: Vec<String> = Vec::new();
         for (number, tally) in &self.dec_modes {
@@ -492,8 +461,8 @@ impl ModeLedger {
         leaks
     }
 
-    /// The differential itself (the route assertions): the findings
-    /// must be empty. `context` names the route in the failure message.
+    /// The differential itself: the findings must be empty (`context` names
+    /// the route in the failure).
     pub(crate) fn assert_delta_empty(&self, context: &str) {
         let leaks = self.leaks();
         assert!(
@@ -510,8 +479,7 @@ fn push_unique(attrs: &mut Vec<String>, name: &str) {
     }
 }
 
-/// The `;`-separated mode numbers of a DEC private mode write
-/// (`ESC[?1002h`, `ESC[?1002;1006h`).
+/// The `;`-separated mode numbers of a DEC private mode write.
 fn split_mode_params(params: &[u8]) -> Vec<u32> {
     String::from_utf8_lossy(params)
         .split(';')
@@ -527,11 +495,6 @@ fn first_param(params: &[u8]) -> Option<u32> {
         .and_then(|part| part.trim().parse().ok())
 }
 
-// ---------------------------------------------------------------------------
-// The ledger's negative controls: synthetic streams prove the net catches
-// every leak class before the product ever regresses into one.
-// ---------------------------------------------------------------------------
-
 /// Scan a synthetic stream and return the findings.
 fn findings_of(stream: &[u8]) -> Vec<String> {
     let mut ledger = ModeLedger::default();
@@ -541,8 +504,8 @@ fn findings_of(stream: &[u8]) -> Vec<String> {
 
 #[test]
 fn the_ledger_passes_the_balanced_restore() {
-    // The exact write set of a whole mount/exit session: every mode
-    // armed, every mode restored, the kitty push popped, the SGR reset.
+    // The exact write set of a whole mount/exit session: every mode armed
+    // and restored, the push popped, the SGR reset.
     let stream = concat!(
         "\x1b[?1049h\x1b[?2004h\x1b[>4;0m\x1b[?u\x1b[c\x1b[>7u", // mount + probe
         "\x1b[?1002h\x1b[?1003h\x1b[?1006h",                     // mouse
@@ -559,7 +522,6 @@ fn the_ledger_passes_the_balanced_restore() {
 
 #[test]
 fn the_ledger_catches_a_leaked_mouse_mode() {
-    // The mouse enable with NO disable: the classic leak.
     let stream = b"\x1b[?1002h\x1b[?1003h\x1b[?1006h";
     let findings = findings_of(stream);
     assert!(
@@ -570,8 +532,7 @@ fn the_ledger_catches_a_leaked_mouse_mode() {
 
 #[test]
 fn the_ledger_catches_an_unknown_leaked_mode() {
-    // Focus reporting (?1004): a mode the product never writes — the
-    // net must catch it anyway the day a future surface arms it.
+    // A mode the product never writes: the net must catch it anyway.
     let findings = findings_of(b"\x1b[?1004h");
     assert!(
         findings.iter().any(|f| f.contains("?1004")),
@@ -581,14 +542,12 @@ fn the_ledger_catches_an_unknown_leaked_mode() {
 
 #[test]
 fn the_ledger_catches_a_default_on_mode_left_off() {
-    // Cursor visibility: the default is ON (`?25h`); a session that
-    // hides (`?25l`) and never shows again leaves it deviating.
+    // Cursor visibility's default is ON: hide and never show again = deviating.
     let findings = findings_of(b"\x1b[?25l");
     assert!(
         findings.iter().any(|f| f.contains("?25")),
         "the hidden cursor went unnoticed: {findings:?}"
     );
-    // The balanced pair is clean.
     assert!(
         findings_of(b"\x1b[?25l\x1b[?25h").is_empty(),
         "the shown-back cursor leaked"
@@ -597,8 +556,7 @@ fn the_ledger_catches_a_default_on_mode_left_off() {
 
 #[test]
 fn the_ledger_catches_a_kitty_re_arm_after_the_pop() {
-    // A push after the final pop: the exact "answer lands around the
-    // exit" leak shape the exit release guards.
+    // A push after the final pop: the re-arm leak shape.
     let stream = b"\x1b[>7u\x1b[<u\x1b[>7u";
     let findings = findings_of(stream);
     assert!(
@@ -609,8 +567,7 @@ fn the_ledger_catches_a_kitty_re_arm_after_the_pop() {
 
 #[test]
 fn the_ledger_catches_a_dangling_sgr() {
-    // A styled write with no reset: the shell's own output would paint
-    // in the dangling color.
+    // A styled write with no reset: the shell paints in the color.
     let findings = findings_of(b"\x1b[38;5;1mred");
     assert!(
         findings.iter().any(|f| f.contains("SGR")),
@@ -620,7 +577,6 @@ fn the_ledger_catches_a_dangling_sgr() {
 
 #[test]
 fn the_ledger_catches_a_dangling_hyperlink() {
-    // An OSC 8 open with no close: the shell's output becomes the link.
     let findings = findings_of(b"\x1b]8;;https://example.com\x1b\\link");
     assert!(
         findings.iter().any(|f| f.contains("hyperlink")),
@@ -630,8 +586,6 @@ fn the_ledger_catches_a_dangling_hyperlink() {
 
 #[test]
 fn the_ledger_catches_forbidden_writes() {
-    // Keypad mode, a cursor shape, and a title set: writes the product
-    // owns no restore for.
     let findings = findings_of(b"\x1b=\x1b[2 q\x1b]0;title\x07");
     assert!(
         findings.iter().any(|f| f.contains("DECKPAM")),
@@ -649,7 +603,6 @@ fn the_ledger_catches_forbidden_writes() {
 
 #[test]
 fn the_ledger_catches_an_absolute_kitty_set_left_on() {
-    // `ESC[=Nu` (an absolute set, not a stack push) left nonzero.
     let findings = findings_of(b"\x1b[=5u");
     assert!(
         findings.iter().any(|f| f.contains("absolutely")),
@@ -657,17 +610,14 @@ fn the_ledger_catches_an_absolute_kitty_set_left_on() {
     );
 }
 
-/// The extended-color forms are one attribute, not a code walk: an
-/// `38;5;N` does not arm phantom blink (5) or bold (1), and a zero
-/// channel inside `38;2;R;G;B` is a color component, never a reset
-/// (the stream below ENDS with the color still active - the dangling
-/// fg must be caught).
+/// The extended-color forms are one attribute, not a code walk: `38;5;N`
+/// arms no phantom blink (5) or bold (1), and a zero channel inside
+/// `38;2;R;G;B` is a color component, never a reset.
 #[test]
 fn the_ledger_reads_extended_color_forms_as_one_attribute() {
     // The balanced pair: the extended color sets fg, the 39 clears it.
     assert!(findings_of(b"\x1b[38;5;13mrow\x1b[39m").is_empty());
     assert!(findings_of(b"\x1b[38;2;0;0;0mrow\x1b[39m").is_empty());
-    // The dangling extended color: the ledger must see fg active.
     let findings = findings_of(b"\x1b[38;5;13mrow");
     assert!(
         findings.iter().any(|f| f.contains("SGR")),
@@ -682,7 +632,6 @@ fn the_ledger_reads_extended_color_forms_as_one_attribute() {
 
 #[test]
 fn the_ledger_catches_modify_other_keys_left_armed() {
-    // modifyOtherKeys mode 2 (xterm encoding) left armed.
     let findings = findings_of(b"\x1b[>4;2m");
     assert!(
         findings.iter().any(|f| f.contains("modifyOtherKeys")),

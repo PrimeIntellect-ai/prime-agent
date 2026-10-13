@@ -1,7 +1,7 @@
-//! The request-timing unit battery (moved with its concern): the flag,
-//! the log's rotation + emit shape, the wiring correlation, the transform
-//! and convert instrumentation, the stream seam's first-token capture, and
-//! the summary's usage fields (the TS test port).
+//! The request-timing unit battery: the flag, the log's rotation + emit
+//! shape, the wiring correlation, the transform and convert
+//! instrumentation, the stream seam's first-token capture, and the
+//! summary's usage fields (the TS test port).
 
 use super::*;
 use pa_agent::stream::{event_stream, LlmContext};
@@ -25,6 +25,7 @@ fn test_model() -> pa_agent::types::Model {
         cost: UsageCost::default(),
         context_window: 1_000_000,
         max_tokens: 128_000,
+        max_tokens_explicit: false,
     }
 }
 
@@ -80,8 +81,7 @@ fn gate() -> (
     tokio::sync::oneshot::channel()
 }
 
-/// The timing entries from the JSONL log (TS `timingEntries()` filters
-/// the sink by component).
+/// The timing entries from the JSONL log (filtered by component).
 fn timing_entries(path: &Path) -> Vec<Value> {
     let content = std::fs::read_to_string(path).unwrap_or_default();
     content
@@ -107,9 +107,9 @@ async fn drain(mut stream: Box<dyn ModelStream>) {
     while stream.next_event().await.is_some() {}
 }
 
-/// TS `scriptedProvider`: the payload hook fires at request time, the
-/// response hook (when the provider reports one) after the response
-/// gate, then start / first-token / done behind their gates.
+/// The payload hook fires at request time, the response hook (when the
+/// provider reports one) after the response gate, then start /
+/// first-token / done behind their gates.
 fn scripted_provider(
     model: pa_agent::types::Model,
     response_gate: tokio::sync::oneshot::Receiver<()>,
@@ -118,8 +118,7 @@ fn scripted_provider(
     with_response_hook: bool,
 ) -> StreamFn {
     // An `Fn` stream seam cannot move its captures per call, so the
-    // one-shot receivers ride an interior-mutable slot the task takes
-    // them from.
+    // one-shot receivers ride an interior-mutable slot.
     let response_gate = Arc::new(Mutex::new(Some(response_gate)));
     let first_token_gate = Arc::new(Mutex::new(Some(first_token_gate)));
     let done_gate = Arc::new(Mutex::new(Some(done_gate)));
@@ -183,8 +182,8 @@ fn scripted_provider(
     })
 }
 
-/// TS `runTimedRequest`: transform -> convert (prompt-built entry) ->
-/// the instrumented stream seam, with timing always on.
+/// Transform -> convert (prompt-built entry) -> the instrumented
+/// stream seam, with timing always on.
 async fn run_timed_request(
     wiring: Arc<RequestTimingWiring>,
     stream_fn: StreamFn,
@@ -235,12 +234,10 @@ async fn emits_the_full_timeline_first_byte_from_the_start_event() {
     emits_the_full_timeline(false).await;
 }
 
-/// TS `it.each(["first-byte from onResponse", "first-byte from the
-/// start event when onResponse is omitted"])`: the five phases in order,
-/// one request sequence, and the summary's accounting. The TS fake
-/// timers pin exact deltas; the Rust port pins the timeline shape (the
-/// entries, their order, and their fields — every measured delta is
-/// present and non-negative).
+/// The five phases in order, one request sequence, and the summary's
+/// accounting. The TS fake timers pin exact deltas; this port pins the
+/// timeline shape (the entries, their order, their fields — every
+/// measured delta is present and non-negative).
 async fn emits_the_full_timeline(with_response_hook: bool) {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("agent.jsonl");
@@ -353,8 +350,8 @@ async fn measures_the_payload_once_and_never_when_disabled() {
         })
     };
 
-    // Disabled: the options pass through untouched (the hook the inner
-    // stream sees is the same `Arc`), and no entry is written.
+    // Disabled: the options pass through untouched, and no entry is
+    // written.
     let wiring_off = Arc::new(RequestTimingWiring::new(
         Arc::new(|| false),
         RequestTimingLog::at(&log_path),
@@ -385,9 +382,9 @@ async fn measures_the_payload_once_and_never_when_disabled() {
         );
     }
 
-    // Enabled: the composed hook measures the payload the inner hook
-    // returned exactly once (one request-sent entry), the size lands on
-    // the later entries, not request-sent.
+    // Enabled: the composed hook measures the inner hook's payload
+    // exactly once; the size lands on the later entries, not
+    // request-sent.
     let wiring = timing_on(&log_path);
     let on_options = StreamRequestOptions {
         on_payload: Some(Arc::clone(&marked_hook)),
@@ -436,11 +433,8 @@ async fn measures_the_payload_once_and_never_when_disabled() {
     );
 }
 
-/// A cloned stream seam without the paired convert (the side-question
-/// runs) must not consume the parent request's correlation: the TS
-/// `WeakMap` lookup on its never-marked array returns nothing, so the
-/// port's identity-matched slot leaves the parent's entry in place and
-/// the side question correlates on a fresh sequence.
+/// The identity-matched slot leaves the parent's entry in place; the
+/// side question correlates on a fresh sequence.
 #[tokio::test]
 async fn a_cloned_stream_seam_never_steals_the_parent_correlation() {
     let dir = tempfile::tempdir().unwrap();
@@ -536,11 +530,9 @@ async fn a_cloned_stream_seam_never_steals_the_parent_correlation() {
     );
 }
 
-/// TS "reports provider failures as failed instead of losing the
-/// timeline": the fn-level failure (auth rejects before the request is
-/// sent) maps to the Rust `StreamFn` error — the closest seam, since
-/// the Rust stream protocol encodes failures as terminal events and
-/// cannot throw mid-iteration.
+/// The fn-level failure maps to the Rust `StreamFn` error — the stream
+/// protocol encodes failures as terminal events and cannot throw
+/// mid-iteration.
 #[tokio::test]
 async fn reports_stream_fn_failures_as_failed() {
     let dir = tempfile::tempdir().unwrap();
@@ -571,8 +563,6 @@ async fn reports_stream_fn_failures_as_failed() {
     );
 }
 
-/// Terminal provider error events report as failed (or aborted), with
-/// the stop reason, error message, and usage from the error message.
 #[tokio::test]
 async fn reports_terminal_error_events() {
     for (stop_reason, outcome, reason_text) in [
@@ -633,9 +623,6 @@ async fn reports_terminal_error_events() {
     }
 }
 
-/// A stream that ends without a terminal event (abort, hung stream)
-/// still reports what was measured — outcome aborted (the TS iterator
-/// `finally`).
 #[tokio::test]
 async fn reports_early_termination_as_aborted() {
     let dir = tempfile::tempdir().unwrap();
@@ -661,7 +648,6 @@ async fn reports_early_termination_as_aborted() {
     assert_eq!(summary.get("outcome"), Some(&json!("aborted")));
 }
 
-/// TS `truthyEnvFlag` parsing (the env values that count as on).
 #[test]
 fn truthy_env_flag_follows_the_offline_convention() {
     for on in ["1", "true", "yes", "TRUE", "Yes"] {
@@ -679,8 +665,7 @@ fn truthy_env_flag_follows_the_offline_convention() {
     }
 }
 
-/// The env half of `is_request_timing_enabled` (serialized on the env
-/// lock: the process env is global).
+/// Serialized on the env lock: the process env is global.
 #[tokio::test]
 async fn the_env_override_enables_request_timing() {
     let _guard = REQUEST_TIMING_ENV_LOCK.lock().await;
@@ -696,8 +681,6 @@ async fn the_env_override_enables_request_timing() {
     }
 }
 
-/// The settings half: the `requestTiming` key (camelCase on the wire)
-/// round-trips and the getter defaults to off.
 #[test]
 fn the_settings_flag_round_trips_and_defaults_off() {
     let settings: crate::settings::Settings =
@@ -714,11 +697,9 @@ fn the_settings_flag_round_trips_and_defaults_off() {
     );
 }
 
-/// TS "pins the sdk wiring: faux sessions emit the timeline only when
-/// the flag is on". The faux provider never invokes the payload hook,
-/// so request-sent is absent and its deltas are omitted (the TS
-/// omission shape); the engine wires the instrumented seams from the
-/// `requestTiming` settings key.
+/// The faux provider never invokes the payload hook, so request-sent is
+/// absent (the TS omission shape); the engine wires the instrumented
+/// seams from the `requestTiming` settings key.
 #[tokio::test]
 async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
     use crate::session_engine::engine::{create_session, SessionEngineConfig};
@@ -843,6 +824,194 @@ async fn engine_sessions_emit_the_timeline_only_when_the_flag_is_on() {
     assert!(
         timing_entries(&off_dir.path().join("logs").join("agent.jsonl")).is_empty(),
         "flag off writes no entries"
+    );
+    match previous_env {
+        Some(value) => std::env::set_var(REQUEST_TIMING_ENV, value),
+        None => std::env::remove_var(REQUEST_TIMING_ENV),
+    }
+}
+
+/// A provider seam that invokes the payload hook once with the TS
+/// `PAYLOAD` fixture, then settles with a zero-usage message (the pin is
+/// the capture, not the turn). Unix-only like its callers: the capture
+/// the payload tests prove is Unix-only by the confidentiality design.
+#[cfg(unix)]
+fn payload_calling_provider() -> StreamFn {
+    Arc::new(move |model, _context, options| {
+        Box::pin(async move {
+            if let Some(on_payload) = options.on_payload.as_ref() {
+                let _ = on_payload(payload(), &model);
+            }
+            let (handle, consumer) = event_stream();
+            let final_msg = empty_partial(&model);
+            tokio::spawn(async move {
+                handle.push(AssistantMessageEvent::Start {
+                    partial: final_msg.clone(),
+                });
+                handle.push(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    message: final_msg,
+                });
+            });
+            Ok(Box::new(consumer) as Box<dyn ModelStream>)
+        })
+    })
+}
+
+/// The identity fields the timeline entries correlate by ride the
+/// captured body.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_payload_capture_writes_the_exact_outbound_body() {
+    let _writer_lock = super::payload::WRITER_TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("agent.jsonl");
+    let capture_dir = dir.path().join("request-payloads");
+    let wiring = Arc::new(
+        RequestTimingWiring::new(Arc::new(|| true), RequestTimingLog::at(&log_path))
+            .with_payload_capture(RequestPayloadCapture::at(&capture_dir, 64)),
+    );
+    let stream = run_timed_request(
+        Arc::clone(&wiring),
+        scripted_provider(test_model(), gate().1, gate().1, gate().1, false),
+    )
+    .await
+    .unwrap();
+    drain(stream).await;
+
+    super::payload::tests::wait_for_payload_files(&capture_dir, 1);
+    let names = super::payload::tests::payload_files(&capture_dir);
+    let envelope = super::payload::tests::payload_envelope(&capture_dir, &names[0]);
+    assert_eq!(
+        envelope.get("payload"),
+        Some(&payload()),
+        "the file carries the exact outbound body: {envelope}"
+    );
+    assert_eq!(
+        envelope.get("model").and_then(Value::as_str),
+        Some("bench/bench-model")
+    );
+    assert_eq!(
+        envelope.get("provider").and_then(Value::as_str),
+        Some("bench")
+    );
+    assert_eq!(envelope.get("sessionId"), Some(&json!("sess-timing")));
+    assert_eq!(envelope.get("requestSeq"), Some(&json!(1)));
+    assert_eq!(
+        envelope.get("requestBytes"),
+        Some(&json!(serde_json::to_vec(&payload()).unwrap().len() as u64)),
+        "UTF-8 bytes, not a code-unit count: {envelope}"
+    );
+    // The timeline still emits: the capture rides the same flag.
+    assert!(
+        timing_entries(&log_path)
+            .iter()
+            .any(|entry| { entry.get("phase").and_then(Value::as_str) == Some("request-sent") }),
+        "the phase timeline is unchanged"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_payload_capture_writes_nothing_when_the_flag_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_path = dir.path().join("agent.jsonl");
+    let capture_dir = dir.path().join("request-payloads");
+    let wiring = Arc::new(
+        RequestTimingWiring::new(Arc::new(|| false), RequestTimingLog::at(&log_path))
+            .with_payload_capture(RequestPayloadCapture::at(&capture_dir, 64)),
+    );
+    let stream = run_timed_request(
+        Arc::clone(&wiring),
+        scripted_provider(test_model(), gate().1, gate().1, gate().1, false),
+    )
+    .await
+    .unwrap();
+    drain(stream).await;
+    assert!(
+        super::payload::tests::payload_files(&capture_dir).is_empty(),
+        "flag off captures no bodies"
+    );
+    assert!(
+        timing_entries(&log_path).is_empty(),
+        "flag off writes no entries"
+    );
+}
+
+/// The daemon workers' session build is this same `create_session`.
+#[cfg(unix)]
+#[tokio::test]
+async fn engine_sessions_capture_the_outbound_payload_when_the_flag_is_on() {
+    use crate::session_engine::engine::{create_session, SessionEngineConfig};
+
+    // Both shared-process locks: the env pin and the writer queue.
+    let _writer_lock = super::payload::WRITER_TEST_LOCK.lock().await;
+    let _env = REQUEST_TIMING_ENV_LOCK.lock().await;
+    let previous_env = std::env::var(REQUEST_TIMING_ENV).ok();
+    std::env::remove_var(REQUEST_TIMING_ENV);
+
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"requestTiming": true}"#,
+    )
+    .unwrap();
+
+    let engine = create_session(SessionEngineConfig {
+        cwd: dir.path().to_path_buf(),
+        agent_dir: agent_dir.clone(),
+        model: Some(test_model()),
+        stream_fn: Some(payload_calling_provider()),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    engine
+        .session
+        .prompt("hello", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+
+    let capture_dir = agent_dir.join("logs").join("request-payloads");
+    super::payload::tests::wait_for_payload_files(&capture_dir, 1);
+    let names = super::payload::tests::payload_files(&capture_dir);
+    let envelope = super::payload::tests::payload_envelope(&capture_dir, &names[0]);
+    assert_eq!(
+        envelope.get("payload"),
+        Some(&payload()),
+        "the engine's capture carries the exact outbound body: {envelope}"
+    );
+    assert_eq!(
+        envelope.get("model").and_then(Value::as_str),
+        Some("bench/bench-model")
+    );
+
+    // Flag off: no capture directory at all.
+    let off_dir = tempfile::tempdir().unwrap();
+    let engine = create_session(SessionEngineConfig {
+        cwd: off_dir.path().to_path_buf(),
+        agent_dir: off_dir.path().to_path_buf(),
+        model: Some(test_model()),
+        stream_fn: Some(payload_calling_provider()),
+        tools: Vec::new(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    engine
+        .session
+        .prompt("hello", crate::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let off_capture = off_dir.path().join("logs").join("request-payloads");
+    assert!(
+        super::payload::tests::payload_files(&off_capture).is_empty() && !off_capture.exists(),
+        "flag off leaves no capture"
     );
     match previous_env {
         Some(value) => std::env::set_var(REQUEST_TIMING_ENV, value),

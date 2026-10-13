@@ -1,5 +1,4 @@
 //! `OpenAI` Completions request params assembly.
-//! Section of the port of `packages/ai/src/providers/openai-completions.ts`.
 
 use std::collections::HashMap;
 
@@ -13,7 +12,7 @@ use crate::providers::openai_completions::{
 };
 use crate::types::{CacheRetention, Context, Model, ModelExt, ModelThinkingLevel};
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_params(
     model: &Model,
@@ -75,8 +74,8 @@ pub(crate) fn build_params(
         }
     }
     if tools.is_none() && has_tool_history(&context.messages) {
-        // Anthropic (via LiteLLM/proxy) requires the tools param when the
-        // conversation has tool_calls/tool_results.
+        // Anthropic (via LiteLLM/proxy) requires the tools param when the conversation has
+        // tool_calls/tool_results.
         tools = Some(Vec::new());
     }
     if let Some(tools) = &tools {
@@ -125,9 +124,8 @@ pub(crate) fn build_params(
                 }
             }
             crate::types::ThinkingFormat::Openrouter => {
-                // OpenRouter distinguishes an omitted reasoning preference (use
-                // the model default), an explicit toggle, and an explicit
-                // effort selection.
+                // OpenRouter distinguishes an omitted reasoning preference (use the model default),
+                // an explicit toggle, and an explicit effort selection.
                 let declared_effort = options
                     .reasoning_effort
                     .filter(|_| compat.supports_reasoning_effort);
@@ -145,9 +143,8 @@ pub(crate) fn build_params(
                         .thinking_level_map
                         .as_ref()
                         .and_then(|map| map.get(&ModelThinkingLevel::Off));
-                    // TS `thinkingLevelMap?.off !== null`: only an explicit
-                    // null suppresses the disable; a missing key or map still
-                    // disables reasoning.
+                    // TS `thinkingLevelMap?.off !== null`: only an explicit null suppresses the
+                    // disable; a missing key or map still disables reasoning.
                     if !off.is_some_and(std::option::Option::is_none) {
                         if compat.supports_reasoning_effort {
                             let off_value = off
@@ -178,9 +175,8 @@ pub(crate) fn build_params(
                         .thinking_level_map
                         .as_ref()
                         .and_then(|map| map.get(&ModelThinkingLevel::Off));
-                    // TS `thinkingLevelMap?.off !== null`: only an explicit
-                    // null suppresses the disable; a missing key or map still
-                    // sends the off value.
+                    // TS `thinkingLevelMap?.off !== null`: only an explicit null suppresses the
+                    // disable; a missing key or map still sends the off value.
                     if !off.is_some_and(std::option::Option::is_none) {
                         let off_value = off
                             .and_then(|value| value.as_deref())
@@ -193,12 +189,10 @@ pub(crate) fn build_params(
         }
     }
 
-    // OpenAI and OpenRouter accept a top-level service_tier (OpenRouter:
-    // flex and priority for every model,
-    // https://openrouter.ai/docs/guides/features/service-tiers). Prime
-    // Inference tolerates but ignores the field (probed 2026-09-01), so it
-    // is not forwarded; other OpenAI-compatible gateways may reject
-    // unknown fields (TS #2144).
+    // OpenAI and OpenRouter accept a top-level service_tier
+    // (https://openrouter.ai/docs/guides/features/service-tiers). Prime Inference tolerates but
+    // ignores the field (probed 2026-09-01), so it is not forwarded; other OpenAI-compatible
+    // gateways may reject unknown fields.
     if let Some(service_tier) = options.base.service_tier {
         if model.provider == "openai" || model.provider == "openrouter" {
             params.insert(
@@ -365,11 +359,9 @@ mod tests {
     use crate::models_generated;
     use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
 
-    /// Port of the TS #2497 pin: the provider layer owns no Prime
-    /// Inference team lookup — a prime-inference request with
-    /// `PRIME_TEAM_ID` set and no caller header carries no
-    /// `X-Prime-Team-ID` (the auth storage is the single owner of the
-    /// team header).
+    /// TS #2497 pin: the provider layer owns no Prime Inference team lookup — a prime-inference
+    /// request with `PRIME_TEAM_ID` set and no caller header carries no `X-Prime-Team-ID` (the auth
+    /// storage is the single owner of the team header).
     #[test]
     fn prime_inference_adds_no_team_header_the_caller_did_not_pass() {
         std::env::set_var("PRIME_TEAM_ID", "cli-profile-team");
@@ -399,11 +391,9 @@ mod tests {
         );
     }
 
-    /// Assemble params for a compiled catalog model with a reasoning level
-    /// requested. Mirrors `streamSimpleOpenAICompletions`: the requested
-    /// level clamps through the model's thinking-level map, the effort
-    /// rides along as `reasoning_effort` unless clamped to off, and the
-    /// explicit on/off toggle rides along as `reasoning_enabled`.
+    /// Assemble params for a compiled catalog model with a reasoning level requested, mirroring
+    /// `streamSimpleOpenAICompletions`: the level clamps through the model's thinking-level map;
+    /// the effort and the on/off toggle ride along unless clamped to off.
     fn reasoning_params_for(model: &Model, level: ModelThinkingLevel) -> Map<String, Value> {
         let context = Context {
             system_prompt: None,
@@ -435,9 +425,8 @@ mod tests {
         }
     }
 
-    /// Assemble params with a service tier requested over the base
-    /// stream options (the shape the daemon's provider adapter and
-    /// `stream_simple` both hand the completions path).
+    /// Assemble params with a service tier requested over the base stream options (the shape the
+    /// daemon's provider adapter and `stream_simple` both hand the completions path).
     fn tiered_params(
         provider: &str,
         model_id: &str,
@@ -473,9 +462,7 @@ mod tests {
         }
     }
 
-    /// TS #2144: the completions path forwards `service_tier` for `OpenAI`
-    /// and `OpenRouter` only — other OpenAI-compatible gateways may reject
-    /// unknown fields, and Prime Inference tolerates but ignores the field.
+    /// TS #2144: `service_tier` forwards for `OpenAI` and `OpenRouter` only.
     #[test]
     fn forwards_service_tier_for_openai_and_openrouter_only() {
         use crate::types::ServiceTier;
@@ -506,8 +493,8 @@ mod tests {
         );
     }
 
-    /// A compiled fallback catalog entry, straight from `models_generated`
-    /// (the conservative offline floor).
+    /// A compiled fallback catalog entry, straight from `models_generated` (the conservative
+    /// offline floor).
     fn compiled_params(
         provider: &str,
         model_id: &str,
@@ -518,19 +505,13 @@ mod tests {
         reasoning_params_for(model, level)
     }
 
-    /// Port of the TS regression (#2519, gateway-verified 2026-09-21):
-    /// a Prime Inference route sends only the reasoning parameters its live
-    /// catalog declaration selects — an effort-declared route sends
-    /// `reasoning_effort` values, a toggle-declared route the `reasoning`
-    /// object — and `enable_thinking` never reaches a Prime Inference
-    /// route. The live declarations rebuild each model's compat and
-    /// thinking levels (pa-models `build_prime_inference_models`); these
-    /// fixtures hold the two rebuilt shapes, so the request shaping keeps
-    /// its #2519 coverage independent of the compiled fallback catalog.
+    /// A Prime Inference route sends only the reasoning parameters its live catalog declaration
+    /// selects (effort-declared → `reasoning_effort`, toggle-declared → the `reasoning` object);
+    /// `enable_thinking` never reaches a Prime Inference route (TS regression #2519).
     #[test]
     fn sends_only_the_declared_reasoning_parameters_for_live_rebuilt_routes() {
-        // Effort-declared route (the glm-5.3 shape): reasoning_effort with
-        // the declared levels, no reasoning object, no enable_thinking.
+        // Effort-declared route (the glm-5.3 shape): reasoning_effort with the declared levels, no
+        // reasoning object, no enable_thinking.
         let mut effort_model = models_generated::get_model("prime-inference", "z-ai/glm-5.3")
             .expect("compiled template")
             .clone();
@@ -554,8 +535,8 @@ mod tests {
             assert_eq!(params.get("reasoning_effort"), Some(&json!("high")));
         }
 
-        // Toggle-declared route (the glm-4.7 shape): the reasoning object
-        // only, with the declared on and off arms.
+        // Toggle-declared route (the glm-4.7 shape): the reasoning object only, with the declared
+        // on and off arms.
         let mut toggle_model = effort_model;
         toggle_model.compat = Some(crate::types::ModelCompat::from_kind(
             crate::types::CompatKind::OpenAiCompletions(Box::new(
@@ -588,11 +569,9 @@ mod tests {
         assert_eq!(params.get("reasoning"), Some(&json!({ "enabled": false })));
     }
 
-    /// The compiled fallback catalog is conservative (TS #2519: the live
-    /// catalog owns the reasoning declarations): offline, a Prime
-    /// Inference route declares neither the effort selector nor a thinking
-    /// format, so a reasoning request sends no reasoning parameter at all
-    /// — and `enable_thinking` still never reaches the route.
+    /// The compiled fallback catalog is conservative (TS #2519: the live catalog owns the reasoning
+    /// declarations): offline, a Prime Inference route declares neither the effort selector nor a
+    /// thinking format, so a reasoning request sends no reasoning parameter at all.
     #[test]
     fn compiled_fallback_prime_inference_routes_send_no_reasoning_parameters() {
         for (model_id, level) in [
@@ -616,19 +595,18 @@ mod tests {
         }
     }
 
-    /// The direct z.ai routes keep the toggle: their compat still selects the
-    /// zai thinking format, so reasoning requests send `enable_thinking`.
+    /// The direct z.ai routes keep the toggle: their compat still selects the zai thinking format,
+    /// so reasoning requests send `enable_thinking`.
     #[test]
     fn keeps_the_zai_thinking_toggle_on_direct_zai_routes() {
         let params = compiled_params("zai", "glm-4.7", ModelThinkingLevel::High);
         assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
     }
 
-    /// A `reasoning: false` model whose map addresses levels (the live
-    /// catalog's `gpt-5.3-chat-latest` / `openai/gpt-5.2-chat` shape) is
-    /// thinking-capable: the requested level clamps through the map and
-    /// the request carries the mapped reasoning parameter. The flag alone
-    /// must not veto a route that declares addressable levels.
+    /// A `reasoning: false` model whose map addresses levels (the live catalog's
+    /// `gpt-5.3-chat-latest` / `openai/gpt-5.2-chat` shape) is thinking-capable: the requested
+    /// level clamps through the map and the request carries the mapped reasoning parameter. The
+    /// flag alone must not veto a route that declares addressable levels.
     #[test]
     fn a_map_addressable_model_sends_reasoning_without_the_flag() {
         let model = serde_json::from_value::<Model>(json!({

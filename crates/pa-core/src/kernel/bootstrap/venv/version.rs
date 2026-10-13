@@ -1,6 +1,4 @@
-//! The version-file concern (moved with its concern): the schema consts, the
-//! `.bootstrap-version` read/write, and the current-version predicates the
-//! flows and the readiness gates compose.
+//! The version-file concern: the schema consts, the `.bootstrap-version` read/write.
 
 use super::{default_rlm_extra_uv_args, BootstrapPythonSkill, BootstrapVersion, Path};
 
@@ -27,10 +25,8 @@ pub(super) fn bootstrap_skill_key(skill: &BootstrapPythonSkill) -> String {
     format!("{}\u{0}{}", skill.import_name, skill.package_path)
 }
 
-/// True when the recorded installs cover every current skill at the same
-/// path with the same pyproject hash. Extra recorded skills from other
-/// sessions are fine: the venv is a shared cache, not a per-session manifest,
-/// so a session whose skill set differs must not force reinstalls.
+/// True when the recorded installs cover every current skill at the same path with the same
+/// pyproject hash. Extra recorded skills from other sessions are fine: the venv is a shared cache.
 pub(super) fn recorded_skills_cover(
     recorded: Option<&[BootstrapPythonSkill]>,
     current: &[BootstrapPythonSkill],

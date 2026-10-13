@@ -1,0 +1,1 @@
+- Keep a submitted prompt draft consumed when the daemon connection closes before its reply, preventing an accidental duplicate submission after reconnect. Inspired by [Pi Durable](https://github.com/earendil-works/pi/tree/main/packages/durable) and [Pi Pocket's §05 “Exactly once” explanation](https://tannermidd.github.io/pi-pocket/durable.html#once).

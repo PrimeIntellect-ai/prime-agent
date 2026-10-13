@@ -1,5 +1,4 @@
 //! `SessionManager` part 2: queries, branches, labels, status entries.
-//! Port of the tail of core/session-manager.ts (getBranch/getTree/branch*).
 
 use pa_types::session::{
     AgentMessage, CustomMessageEntry, FileEntry, GitContext, GitStateEntry, LabelEntry,
@@ -52,11 +51,9 @@ impl SessionManager {
         content_entries.len() > start
     }
 
-    /// Append a `git_state` row; returns the new entry id.
-    ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the durable append fails.
+    /// The underlying I/O error when the durable append fails.
     pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -67,16 +64,11 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append git state when it changed on the active branch.
-    pub fn record_git_state_if_changed(&mut self) -> Option<String> {
-        if !self.is_persisted() {
+    /// Append `git` as a `git_state` row when it differs from the nearest
+    /// git context on the active branch (or the header); returns the new id.
+    pub fn record_git_state_if_changed(&mut self, git: GitContext) -> Option<String> {
+        if self.active_git_context().as_ref() == Some(&git) {
             return None;
-        }
-        let git = super::manager::capture_git_context(self.get_cwd())?;
-        if let Some(last) = self.active_git_context() {
-            if git_contexts_equal(&last, &git) {
-                return None;
-            }
         }
         self.append_git_state(git).ok()
     }
@@ -91,11 +83,9 @@ impl SessionManager {
         }
     }
 
-    /// Append a custom message entry; returns the new entry id.
-    ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the durable append fails.
+    /// The underlying I/O error when the durable append fails.
     pub fn append_custom_message_entry(
         &mut self,
         custom_type: &str,
@@ -118,11 +108,9 @@ impl SessionManager {
         Ok(id)
     }
 
-    /// Append a label change for a target entry.
-    ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the durable append fails.
+    /// The underlying I/O error when the durable append fails.
     ///
     /// # Panics
     ///
@@ -225,8 +213,7 @@ impl SessionManager {
     ///
     /// # Errors
     ///
-    /// Returns the underlying I/O error when the durable append of the
-    /// summary row fails; the leaf is restored to its previous position.
+    /// I/O error when the summary append fails; the leaf is restored.
     ///
     /// # Panics
     ///
@@ -298,10 +285,6 @@ fn entry_type(entry: &FileEntry) -> &'static str {
     }
 }
 
-fn git_contexts_equal(left: &GitContext, right: &GitContext) -> bool {
-    left.commit == right.commit && left.branch == right.branch && left.repo_url == right.repo_url
-}
-
 #[cfg(test)]
 mod tests {
     use crate::session::manager::SessionManager;
@@ -341,15 +324,12 @@ mod tests {
         let a = manager.append_message(user("first")).unwrap();
         let b = manager.append_message(assistant()).unwrap();
         assert_eq!(manager.get_branch(None).len(), 2);
-        // Branch from a: the path is just [a].
         manager.branch(&a);
         assert_eq!(manager.get_branch(None).len(), 1);
-        // Append after branching creates a sibling of b.
         let summary_id = manager
             .branch_with_summary(Some(&a), "went back", None, None, None)
             .unwrap();
         assert!(manager.get_entry_by_id(&summary_id).is_some());
-        // b still exists (sibling branch).
         assert!(manager.get_entry_by_id(&b).is_some());
     }
 
@@ -373,7 +353,6 @@ mod tests {
         let label_entry = manager.append_label_change(&a, Some("checkpoint")).unwrap();
         assert!(manager.get_entry_by_id(&label_entry).is_some());
         assert_eq!(manager.get_label(&a).as_deref(), Some("checkpoint"));
-        // Clear the label.
         manager.append_label_change(&a, None).unwrap();
         assert_eq!(manager.get_label(&a), None);
     }

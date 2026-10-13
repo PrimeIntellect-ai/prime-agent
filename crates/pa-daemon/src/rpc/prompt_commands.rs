@@ -1,8 +1,6 @@
-//! The RPC command surface, part two: the prompt-family handlers —
-//! `prompt` (with the session-command execution the admitted turn hands
-//! back), `steer`/`follow_up` queueing, and the queued-work pump that
-//! delivers the agent's queues turn by turn (TS `prompt`/`steer`/
-//! `followUp` over `_pumpSessionInputs`).
+//! The RPC prompt-family handlers: `prompt` (with the session-command
+//! execution the admitted turn hands back), `steer`/`follow_up`
+//! queueing, and the queued-work pump that delivers the agent's queues turn by turn.
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,18 +19,12 @@ use pa_types::session::CustomMessage;
 use super::commands::{compaction_frame, kick_queue_pump, resume_pump, RpcState};
 use super::protocol::{self, ResponseData};
 
-/// `prompt` (TS `connection.prompt(message, {images, streamingBehavior,
-/// source: "rpc"})`): admission-level success — the response fires once
-/// the admitted turn's run registers (TS `preflightResult` over
-/// `returnAfterAccepted: true`; the turn's events follow on the ordered
-/// stream, buffered behind the response). Session commands execute
-/// like the ACP prompt path (the pa-core executor persists the durable
-/// rows) and their result still rides the response.
+/// `prompt`: admission-level success — the response fires once the admitted turn's run registers;
+/// the events follow buffered behind it. Session commands execute like the ACP prompt path.
 ///
 /// # Errors
-///
-/// Returns the admission error (a missing message, a refused turn) and
-/// the admitted session command's own error.
+/// Returns the admission error (a missing message, a refused turn) and the admitted session
+/// command's own error.
 pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let message = payload
         .get("message")
@@ -57,45 +49,33 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .map_err(|error| format!("{error:#}"))?;
     resume_pump(state);
     let PromptOutcome::SessionCommand(command) = admission else {
-        // The admitted model turn parks the queued rows behind it
-        // (the pump delivers when the session idles): TS `connection.prompt`
-        // resumes admission and schedules the session-input pump at the
-        // admission.
+        // The admitted model turn parks the queued rows behind it (the
+        // pump delivers when the session idles).
         kick_queue_pump(state, &engine);
         return Ok(ResponseData::Absent);
     };
-    // The handle guard stays held through the admitted session command's
-    // execution: a concurrent whole-session replacement (whose swap
-    // waits on the write guard) can never dispose the kernel mid-command
-    // (TS runs the admitted command before the next queued line can
-    // start a replacement). The model and key pass THROUGH (no second
-    // handle acquisition): a read re-acquisition queued behind a waiting
-    // writer would deadlock the command against its own guard.
+    // The handle guard stays held through the command's execution: a
+    // replacement can never dispose the kernel mid-command. The model
+    // and key pass THROUGH: a re-acquisition behind a waiting writer
+    // would deadlock.
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let command_result =
         run_session_command(state.as_ref(), engine.clone(), &command, model, api_key).await;
     drop(handle);
-    // TS schedules the session-input pump only after the admitted
-    // session command settles (agent-session.ts: compact's finally
-    // calls `_notifySessionInputCheckpointChange` +
-    // `_scheduleSessionInputPump`): a kick before the command would let
-    // the pump deliver parked rows into the rebuild's window. The
-    // command's own error still answers; the pump re-arms either way.
+    // The pump is scheduled only after the command settles: an earlier
+    // kick would deliver parked rows into the rebuild's window.
     kick_queue_pump(state, &engine);
     command_result?;
     Ok(ResponseData::Absent)
 }
 
 /// One durable session-command row as its `message_start`/`message_end`
-/// pair (the loop's event shape for persisted rows; the daemon's ACP seam
-/// emits the same pair through its engine-event surface — the RPC stream
-/// forwards the frames verbatim through the connection-output seam).
+/// pair (the loop's event shape for persisted rows).
 async fn write_command_row(state: &RpcState, message: &CustomMessage) {
-    // The row's loop shape (TS messages.ts: the `custom` role carries
-    // the session-command rows — the role rides BESIDE the row's own
-    // fields, exactly this construction; a bare round-trip cannot
-    // recover it, the session row type carries no role).
+    // The row's loop shape: the `custom` role rides BESIDE the row's
+    // own fields (a bare round-trip cannot recover it, the session row
+    // type carries no role).
     let custom = pa_agent::types::CustomAgentMessage {
         role: "custom".to_string(),
         payload: serde_json::to_value(message).unwrap_or(serde_json::Value::Null),
@@ -114,10 +94,8 @@ async fn write_command_row(state: &RpcState, message: &CustomMessage) {
     }
 }
 
-/// Execute one session command the prompt admitted (the ACP prompt path's
-/// segment: the pa-core executor persists the echo/result rows, the
-/// compaction publishes its events, the goal publishes on change, and a
-/// goal start/resume continuation runs as the turn's model segment).
+/// Execute one session command the prompt admitted: the executor
+/// persists the echo/result rows; the goal publishes on change.
 async fn run_session_command(
     state: &RpcState,
     engine: Arc<pa_core::session_engine::engine::SessionEngine>,
@@ -127,32 +105,20 @@ async fn run_session_command(
 ) -> Result<(), String> {
     let is_compact = command.name == "compact";
     // The compact frames carry the command's arguments as the
-    // `customInstructions` they compact under (TS `session.compact`'s
-    // frames pass the same `customInstructions` the call received): an
-    // admitted `/compact focus on tests` reports its instructions, not
-    // an omitted field.
+    // `customInstructions` they compact under.
     let frame_instructions = if is_compact && !command.args.is_empty() {
         Some(command.args.as_str())
     } else {
         None
     };
     // The attempted command's durable echo row streams BEFORE the
-    // execution (TS `_executeSelectedSessionCommand` records the attempt
-    // first; the daemon's ACP seam emits the same pair) — the client
-    // sees the command it ran the moment it runs, as a message pair on
-    // the event stream.
+    // execution, as a message pair on the event stream.
     write_command_row(state, &session_command_echo_row(command)).await;
     if is_compact {
         state.compacting.fetch_add(1, Ordering::SeqCst);
-        // The direct compact command's contract (TS session.compact
-        // aborts the running turn before the snapshot,
-        // agent-session.ts): an admitted turn that started streaming
-        // behind the admission (a parked row the pump delivered, a
-        // steer queued in the same window) is aborted and drained
-        // BEFORE the start frame publishes — the frame means the
-        // transcript is settled, exactly as the direct command's order
-        // (and TS's) reads. The gate (armed above) holds the pump out
-        // of the rebuild's window either way.
+        // The direct compact command's contract: a turn streaming behind
+        // the admission is aborted and drained BEFORE the start frame
+        // publishes (the frame means the transcript is settled).
         engine.session.agent().abort();
         engine.session.agent().wait_for_idle().await;
         state
@@ -163,20 +129,13 @@ async fn run_session_command(
                 None,
             ))
             .await;
-        // NO flush here, by TS parity: a prompt-admitted command runs
-        // with the prompt-response buffer armed (TS rpc-mode's
-        // `promptResponsePending`), so this `compaction_start` rides
-        // the buffered seam and publishes AFTER the prompt's response —
-        // the TS wire order (`outputConnectionEvent` buffers connection
-        // events while a prompt is pending; `handleInputLine`'s finally
-        // disarms and flushes them). The direct `compact` command's
-        // early flush lives in its own handler, where no prompt buffer
-        // stands between the frame and the writer.
+        // NO flush here, by TS parity: the prompt-response buffer is armed,
+        // so this `compaction_start` publishes AFTER the prompt's response
+        // (the direct `compact` handler flushes early).
     }
     let execution = {
-        // The executor rebuilds session context on its compact branch
-        // (like the direct `compact`/`refine` commands): serialize the
-        // context rebuilders against one another.
+        // The executor rebuilds session context on its compact branch:
+        // serialize against the other context rebuilders.
         let _ops = state.session_ops.lock().await;
         let mut autonomous = state.autonomous.lock().await;
         let mut params = SessionCommandParams {
@@ -185,16 +144,13 @@ async fn run_session_command(
             global_harness_dir: state.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
-        // The executor never errors out of the call: failures ride the
-        // execution (`execution.error`), the durable rows, and the
-        // session events — the handler surfaces them below.
+        // The executor never errors out of the call: failures ride
+        // `execution.error` and the session events.
         execute_session_command(&engine, &mut params, command).await
     };
     if is_compact {
         // The post-compaction kernel notice rides between the start and
-        // the settled end (TS `_syncKernelStateAfterCompaction` runs
-        // inside `_performCompaction`, so the message pair precedes
-        // `compaction_end` on the wire — the ACP seam's order).
+        // the settled end (the ACP seam's order).
         if let Some(message) = execution
             .compaction
             .as_ref()
@@ -216,15 +172,12 @@ async fn run_session_command(
             .await;
     }
     // The executor's first row is the echo (emitted above); the rest of
-    // the durable rows stream in order — the command results
-    // (`/autonomous`, `/goal`, invalid-command failures, refinement
-    // notices) the ACP seam forwards the same way (its skip(1)).
+    // the durable rows stream in order.
     for message in execution.messages.iter().skip(1) {
         write_command_row(state, message).await;
     }
-    // The handle guard is still held here (the admitted command's
-    // guard-pass-through): publishing over the held engine's goal state
-    // avoids re-acquiring the handle behind any queued writer.
+    // The handle guard is still held here: publishing over the held
+    // engine's goal state avoids re-acquiring behind a queued writer.
     let goal = engine.goal_state().await;
     state.publish_goal_update_for(&goal).await;
     if let Some(error) = &execution.error {
@@ -241,8 +194,7 @@ async fn run_session_command(
     Ok(())
 }
 
-/// `steer` / `follow_up` (TS `connection.steer/followUp(message, images)`):
-/// queue onto the agent lane regardless of the busy state.
+/// `steer` / `follow_up`: queue onto the agent lane regardless of the busy state.
 ///
 /// # Errors
 ///
@@ -273,9 +225,7 @@ pub async fn steer_or_follow_up(
     Ok(ResponseData::Absent)
 }
 
-/// The user prompt message in the loop's normalized shape (text part
-/// first, image parts after), the same shape a directly admitted prompt
-/// carries (TS `AgentSession.steer`'s message build).
+/// The user prompt message in the loop's normalized shape (text part first, image parts after).
 fn user_prompt_message(text: &str, images: &[pa_agent::types::ImageContent]) -> AgentMessage {
     let mut parts = vec![pa_agent::types::UserPart::Text(
         pa_agent::types::TextContent {

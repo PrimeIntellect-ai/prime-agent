@@ -1,6 +1,5 @@
-//! Anthropic Messages streaming core: SSE iteration, event handling, and the
-//! provider stream function. Section of the port of
-//! `packages/ai/src/providers/anthropic.ts`.
+//! Anthropic Messages streaming core: SSE iteration, event handling, and the provider stream
+//! function.
 
 use serde_json::{json, Map, Value};
 
@@ -85,8 +84,8 @@ fn anthropic_sse_error(data: &str, request_id: Option<&str>) -> StreamFailureErr
 /// Marker error for an unhandled Anthropic stop reason.
 struct StopReasonError(String);
 
-/// Per-block streaming state kept outside the output: the wire index and
-/// the tool-JSON scratch, parallel to `output.content` by position.
+/// Per-block streaming state kept outside the output: the wire index and the tool-JSON scratch,
+/// parallel to `output.content` by position.
 struct IndexedBlocks {
     indices: Vec<u64>,
     partial_json: Vec<StreamingJsonAccumulator>,
@@ -104,8 +103,8 @@ impl IndexedBlocks {
         self.indices.iter().position(|existing| *existing == index)
     }
 
-    /// Port of the TS catch settle: finalize tool-call blocks whose parsed
-    /// preview may lag the accumulated text under the growth throttle.
+    /// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
+    /// accumulated text under the growth throttle.
     fn settle_partial_tool_calls(&mut self, content: &mut [AssistantContent]) {
         for (position, block) in content.iter_mut().enumerate() {
             let AssistantContent::ToolCall(tool_call) = block else {
@@ -123,7 +122,6 @@ impl IndexedBlocks {
     }
 }
 
-/// Port of `streamAnthropic`.
 pub fn stream_anthropic(
     model: &Model,
     context: &Context,
@@ -184,7 +182,7 @@ pub fn stream_anthropic(
     reader
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -250,9 +248,8 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
+                // Collected into the ordered map: the hook payload can serialize, and the HTTP
+                // header arrival order is not a stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -642,9 +639,8 @@ async fn run_stream(
         }};
     }
 
-    // The TS try/catch encloses this whole streaming section, including the
-    // abort and stop-reason checks; the catch settles partial tool calls
-    // before the error event carries the message (TS PR #2783).
+    // The TS try/catch encloses this whole streaming section, including the abort and stop-reason
+    // checks; the catch settles partial tool calls before the error event carries the message.
     let stream_result: Result<(), ProviderError> = async {
         loop {
             let Some(chunk) = response.next_text().await? else {
@@ -710,8 +706,8 @@ fn recalculate_cost(model: &Model, output: &mut AssistantMessage, cache_write_co
     calculate_cost(model, &mut output.usage, overrides.as_ref());
 }
 
-/// Handle one SSE event: error events become classified failures; message
-/// events are parsed and forwarded.
+/// Handle one SSE event: error events become classified failures; message events are parsed and
+/// forwarded.
 fn handle_sse<E>(
     sse: &ServerSentEvent,
     request_id: Option<&str>,

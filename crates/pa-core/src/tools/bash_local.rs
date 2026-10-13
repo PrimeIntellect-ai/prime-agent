@@ -1,9 +1,6 @@
-//! Local shell execution backend for the bash tool (TS:
-//! `createLocalBashOperations` from `packages/coding-agent/src/core/tools/bash.ts`).
-//!
-//! Spawns the shell in its own process group, streams stdout+stderr through
-//! one ordered channel, kills the whole group on timeout or abort, and
-//! resolves with the exit code (`None` when killed by a signal).
+//! Local shell execution backend for the bash tool: spawns the shell in its own process group,
+//! streams stdout+stderr through one ordered channel, kills the whole group on timeout or abort,
+//! and resolves with the exit code (`None` when killed by a signal).
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -14,7 +11,6 @@ use std::sync::atomic::Ordering;
 use crate::tools::bash::{BashOperations, ExecFuture, ExecOptions};
 use crate::tools::shell_utils::{get_shell_config, get_shell_env, kill_process_tree};
 
-/// Local shell execution backend (TS: `createLocalBashOperations`).
 #[derive(Default)]
 pub struct LocalBashOperations {
     pub shell_path: Option<String>,
@@ -59,12 +55,9 @@ impl BashOperations for LocalBashOperations {
             for (key, value) in env.unwrap_or_else(get_shell_env) {
                 process.env(key, value);
             }
-            // Detached process group on POSIX only, so kill_process_tree
-            // can reach descendants (TS: `detached:
-            // process.platform !== "win32"`) - on Windows the child stays
-            // in the parent's console group and tree kills go through
-            // `taskkill /T` instead. Hidden window everywhere (TS
-            // `spawnHidden`).
+            // Detached process group on POSIX only, so kill_process_tree can reach descendants
+            // (TS: `detached: process.platform !== "win32"`); on Windows tree kills go through
+            // `taskkill /T`. Hidden window everywhere.
             #[cfg(unix)]
             crate::platform::process::set_new_process_group(&mut process);
             crate::platform::process::set_no_window(&mut process);

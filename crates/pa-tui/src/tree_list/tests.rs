@@ -117,9 +117,7 @@ fn default_view_hides_settings_entries() {
         .iter()
         .map(|index| tree.flat[*index].data.entry.id().unwrap())
         .collect();
-    // The model change is hidden; the user and assistant rows stay.
     assert_eq!(visible, vec!["u1", "a1"]);
-    // The active leaf leads the initial selection.
     assert_eq!(tree.selected_id().as_deref(), Some("a1"));
 }
 
@@ -155,7 +153,6 @@ fn branch_move_selects_nearest_visible_ancestor() {
     ];
     let mut tree = list(flat, Some("u2"));
     assert_eq!(tree.selected_id().as_deref(), Some("u2"));
-    // Folding u1 hides its subtree; the cursor walks up to u1.
     tree.folded.insert("u1".to_string());
     tree.apply_filter();
     let visible: Vec<&str> = tree
@@ -165,7 +162,6 @@ fn branch_move_selects_nearest_visible_ancestor() {
         .collect();
     assert_eq!(visible, vec!["u1"], "descendants hidden: {visible:?}");
     assert_eq!(tree.selected_id().as_deref(), Some("u1"));
-    // Unfolding restores the rows and the cursor stays on u1.
     tree.folded.clear();
     tree.apply_filter();
     assert_eq!(tree.selected_id().as_deref(), Some("u1"));
@@ -203,7 +199,6 @@ fn search_filters_and_backspace_restores() {
     tree.handle_key(&kb, "escape");
     assert_eq!(tree.search_query(), "");
     assert_eq!(tree.filtered.len(), 3);
-    // Backspace pops one character.
     for ch in ["s", "e", "c", "o", "n", "d"] {
         tree.handle_key(&kb, ch);
     }
@@ -217,12 +212,91 @@ fn search_filters_and_backspace_restores() {
     assert_eq!(tree.search_query(), "secon");
 }
 
+/// One bracketed paste joins the search query: TS's raw-data gate drops
+/// the control bytes, the printable text joins, and the filter re-runs.
+#[test]
+fn a_paste_joins_the_search_query() {
+    let flat = vec![
+        message_node("u1", None, "2024-01-01T00:00:01.000Z", "fix the parser"),
+        assistant_text_node(
+            "a1",
+            Some("u1"),
+            "2024-01-01T00:00:02.000Z",
+            "parser answer",
+        ),
+        message_node("u2", Some("a1"), "2024-01-01T00:00:03.000Z", "second"),
+    ];
+    let mut tree = list(flat, Some("u2"));
+    tree.paste("parser");
+    assert_eq!(tree.search_query(), "parser");
+    let visible: Vec<&str> = tree
+        .filtered
+        .iter()
+        .map(|index| tree.flat[*index].data.entry.id().unwrap())
+        .collect();
+    assert_eq!(visible, vec!["u1", "a1"]);
+    // The control bytes drop; the printable text around them joins.
+    tree.paste("\u{1b}]8;;x\u{7}r");
+    assert_eq!(tree.search_query(), "parser]8;;xr");
+    // A control-only paste joins nothing.
+    tree.paste("\u{1b}\u{7}");
+    assert_eq!(tree.search_query(), "parser]8;;xr");
+}
+
+/// TS's final arm reads the RAW key data: only printable characters
+/// join the query, and every special key arrives as an escape sequence (a
+/// control character) and drops. This port receives parsed ids, so the
+/// same decode gates the append: the bare multi-character ids ("space",
+/// "delete", "home") must never join the query as their own names.
+#[test]
+fn named_key_ids_never_join_the_search_query() {
+    let flat = vec![
+        message_node("u1", None, "2024-01-01T00:00:01.000Z", "first"),
+        assistant_text_node("a1", Some("u1"), "2024-01-01T00:00:02.000Z", "second"),
+        message_node("u2", Some("a1"), "2024-01-01T00:00:03.000Z", "third"),
+    ];
+    let kb = KeybindingsManager::new();
+    let mut tree = list(flat, Some("u2"));
+    for key in ["s", "e"] {
+        tree.handle_key(&kb, key);
+    }
+    assert_eq!(tree.search_query(), "se");
+    // The named keys join nothing: delete/home drop, exactly as TS's
+    // control-character check drops their escape sequences.
+    tree.handle_key(&kb, "delete");
+    tree.handle_key(&kb, "home");
+    assert_eq!(tree.search_query(), "se");
+}
+
+/// The space key id types a space (TS appends the raw 0x20; the port
+/// receives the `space` id).
+#[test]
+fn the_space_key_id_types_a_space() {
+    let flat = vec![
+        message_node("u1", None, "2024-01-01T00:00:01.000Z", "first"),
+        assistant_text_node("a1", Some("u1"), "2024-01-01T00:00:02.000Z", "second"),
+        message_node("u2", Some("a1"), "2024-01-01T00:00:03.000Z", "third"),
+    ];
+    let kb = KeybindingsManager::new();
+    let mut tree = list(flat, Some("u2"));
+    for key in ["s", "e", "space", "c", "o", "n", "d"] {
+        tree.handle_key(&kb, key);
+    }
+    assert_eq!(tree.search_query(), "se cond");
+    // The query with the space still matches the text with the space.
+    let visible: Vec<&str> = tree
+        .filtered
+        .iter()
+        .map(|index| tree.flat[*index].data.entry.id().unwrap())
+        .collect();
+    assert_eq!(visible, vec!["a1"], "the space is part of the match");
+}
+
 #[test]
 fn user_only_filter_keeps_hidden_intermediates_out_of_the_visible_tree() {
     let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
-    // u1 -> a1 -> u2 (leaf): the user-only filter hides a1, and the
-    // hidden assistant must not join the visible tree (a stray child
-    // would branch u1 and give u2 a connector).
+    // u1 -> a1 -> u2 (leaf): the hidden assistant must not join the
+    // visible tree (a stray child would branch u1 and give u2 a connector).
     let flat = vec![
         message_node("u1", None, "2024-01-01T00:00:01.000Z", "first"),
         assistant_text_node("a1", Some("u1"), "2024-01-01T00:00:02.000Z", "answer"),
@@ -240,7 +314,6 @@ fn user_only_filter_keeps_hidden_intermediates_out_of_the_visible_tree() {
                 .collect::<String>()
         })
         .collect();
-    // Two user rows, both flat: no connector characters on either.
     assert!(
         joined.iter().any(|row| row.contains("user: first")),
         "{joined:?}"
@@ -267,12 +340,10 @@ fn fold_or_up_moves_to_branch_segment() {
     ];
     let kb = KeybindingsManager::new();
     let mut tree = list(flat, Some("u2"));
-    // From the leaf, fold-or-up walks the visible parent chain; u2 is
-    // already the segment start, so the walk continues to the root (TS
-    // findBranchSegmentStart "up").
+    // u2 is already the segment start, so fold-or-up continues to the
+    // root (TS findBranchSegmentStart "up").
     tree.handle_key(&kb, "ctrl+left");
     assert_eq!(tree.selected_id().as_deref(), Some("u1"));
-    // Unfold-or-down follows the single-child chain to the leaf.
     tree.handle_key(&kb, "ctrl+right");
     assert_eq!(tree.selected_id().as_deref(), Some("u2"));
 }
@@ -293,8 +364,6 @@ fn render_marks_active_path_and_connectors() {
         .iter()
         .map(|line| line.iter().map(|span| span.content.as_str()).collect())
         .collect();
-    // The active branch (u1, a1, u2) carries the path marker; the
-    // selected row is the leaf.
     assert!(text[0].starts_with("  •"), "path marker: {:?}", text[0]);
     let selected = text
         .iter()
@@ -309,7 +378,6 @@ fn render_marks_active_path_and_connectors() {
         sibling.contains("└─") && sibling.contains("user: sibling"),
         "connector: {sibling}"
     );
-    // The counter row closes the list.
     assert!(text.last().unwrap().starts_with("  ("));
 }
 
@@ -334,10 +402,8 @@ fn label_update_round_trips() {
 
 #[test]
 fn deep_chain_walks_and_renders() {
-    // A linear session nests one level per entry: the parent-chain
-    // walks (the active path, the nearest-visible selection) are
-    // id-indexed, so the full depth stays linear instead of scanning
-    // the list once per hop.
+    // The parent-chain walks are id-indexed, so the full depth stays
+    // linear instead of scanning the list once per hop.
     let depth = 5_000;
     let mut flat: Vec<TreeNodeData> = Vec::with_capacity(depth);
     let mut parent: Option<String> = None;

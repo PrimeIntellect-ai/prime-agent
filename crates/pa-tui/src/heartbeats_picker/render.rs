@@ -1,6 +1,5 @@
-//! The render concern (moved with its concern): the column geometry and its width
-//! caps, the list's header/hint/error chrome, the detail drill-in's pair block, the
-//! row's primary text, and the action rows the panes render with.
+//! The render concern: the column geometry, the list's chrome, the
+//! detail drill-in's pairs, and the action rows.
 
 use super::{
     default_heartbeat_name, fill_row, hug_row, human_schedule, next_run_label, plain_cell,
@@ -9,8 +8,8 @@ use super::{
 };
 
 /// The table's column width caps: the schedule expression and the label
-/// shrink to their content, the next-run column is the fixed natural
-/// language cell, and the status word keeps its own width.
+/// shrink to their content, the next-run column is the fixed cell, and
+/// the status word keeps its own width.
 const INTERVAL_CAP: usize = 18;
 const LABEL_CAP: usize = 32;
 /// The next-run column's fixed cell: wide enough for its header and every
@@ -27,9 +26,8 @@ fn delivery_label(entry: &HeartbeatEntry) -> &'static str {
     }
 }
 
-/// The detail drill-in's labeled pairs (the `/model` picker's
-/// detail-block idiom): who created the heartbeat and the structured
-/// schedule facts.
+/// The detail drill-in's labeled pairs (the `/model` picker's detail-block
+/// idiom): who created the heartbeat and the structured schedule facts.
 pub(super) fn detail_pairs(entry: &HeartbeatEntry, now_ms: u64) -> Vec<(&'static str, String)> {
     let mut pairs = vec![
         ("created", source_label(entry).to_string()),
@@ -114,9 +112,8 @@ fn row_primary(entry: &HeartbeatEntry) -> String {
 }
 
 /// The table's column geometry: the interval, label, next-run, and status
-/// cells sized over the rows and their header labels (the operator's
-/// columned-table directive), with the label column taking whatever width
-/// remains.
+/// cells sized over the rows and their header labels, with the label
+/// column taking whatever width remains.
 pub(super) struct Columns {
     interval: usize,
     label: usize,
@@ -170,11 +167,8 @@ impl Columns {
         truncate_line(&row, width, "")
     }
 
-    /// One columned row: the schedule expression (in its human-readable
-    /// form), the label, the next run, and the status word in its status
-    /// color. The selected row's wash spans the full frame width (the
-    /// operator's "table fills the width" ruling) while the columns keep
-    /// their content-hug geometry.
+    /// One columned row. The selected row's wash spans the full frame
+    /// width while the columns keep their content-hug geometry.
     pub(super) fn entry_row(
         &self,
         theme: &Theme,
@@ -217,10 +211,9 @@ impl Columns {
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&entry.job.status);
         row.push(theme.fg_span(status_color, format!("{dot} {}", entry.job.status)));
-        // The selected row paints the ONE shared selection style (the
-        // operator's 2026-09-28 consistency rule): the same one band
-        // color the hover paints, the same band the dock's groups and
-        // the agents view's rows carry.
+        // The selected row paints the ONE shared selection style (the operator's
+        // 2026-09-28 consistency rule): the same band the dock's groups and the
+        // agents view's rows carry.
         fill_row(&row, selected, width, theme.selection_row_style())
     }
 }
@@ -252,10 +245,9 @@ pub(super) fn action_row(
     )
 }
 
-/// The pane's header block: a muted separator rule, then the title row —
-/// the title in plain text (the `/model` picker carries no accent color),
-/// the status counts trailing flush right, an optional muted subtitle,
-/// and a blank line.
+/// The pane's header block: a muted separator rule, then the title row
+/// (plain text, the status counts trailing flush right), an optional muted
+/// subtitle, and a blank line.
 pub(super) fn pane_header_lines(
     theme: &Theme,
     width: usize,

@@ -1,6 +1,4 @@
-//! Bash/Python command preview extraction for tool-call rendering.
-//!
-//! Port of `packages/coding-agent/src/core/tools/code-preview.ts`. Regexes keep
+//! Bash/Python command preview extraction for tool-call rendering: regexes keep
 //! JavaScript semantics (whitespace/word classes, UTF-16 string indexing).
 
 use crate::tools::code_preview_python::preview_python_code;
@@ -376,8 +374,7 @@ pub(crate) fn preview_heredoc(lines: &[String]) -> Option<CodePreview> {
             }
             continue;
         }
-        // Match bash/sh as an interpreter word (incl. /bin/sh), not a path
-        // suffix like script.sh.
+        // Match bash/sh as an interpreter word (incl. /bin/sh), not a path suffix like script.sh.
         if re(r"(?<![\w.])(?:bash|sh)\b").is_match(&line) {
             let preview = preview_bash_command(&body);
             if !preview.text.is_empty() {

@@ -1,17 +1,12 @@
-//! http2 transport-failure classification for the bedrock h2 transports.
-//!
-//! The TS bedrock client's default transport is the AWS SDK's
-//! `NodeHttp2Handler` on bun's `node:http2`: HTTP/2 with h2c prior knowledge
-//! over cleartext (and h2-only ALPN over TLS). When the transport fails, the
-//! observable surface is bun's `node:http2` error text and codes — which the
-//! provider-error probe pinned byte-for-byte against the TS binary. This
-//! module turns `h2` crate errors (directly, or through a reqwest error
+//! http2 transport-failure classification for the bedrock h2 transports: the observable surface is
+//! bun's `node:http2` error text and codes, pinned byte-for-byte against the TS binary by the
+//! provider-error probe. This module turns `h2` crate errors (directly, or through a reqwest error
 //! chain) into the failure detail that composes those texts.
 
 use crate::utils_inner::stream_failure::H2Failure;
 
-/// The nghttp2 error-code name bun composes for a stream reset
-/// ("Stream closed with error code NGHTTP2_<NAME>").
+/// The nghttp2 error-code name bun composes for a stream reset ("Stream closed with error code
+/// NGHTTP2_<NAME>").
 pub(crate) fn nghttp2_code_name(reason: h2::Reason) -> String {
     match reason {
         h2::Reason::NO_ERROR => "NGHTTP2_NO_ERROR",
@@ -28,9 +23,8 @@ pub(crate) fn nghttp2_code_name(reason: h2::Reason) -> String {
         h2::Reason::ENHANCE_YOUR_CALM => "NGHTTP2_ENHANCE_YOUR_CALM",
         h2::Reason::INADEQUATE_SECURITY => "NGHTTP2_INADEQUATE_SECURITY",
         h2::Reason::HTTP_1_1_REQUIRED => "NGHTTP2_HTTP_1_1_REQUIRED",
-        // `h2::Reason` is an open u32 newtype; unknown codes have no nghttp2
-        // name, so fall back to the wire number like nghttp2's own
-        // `nghttp2_strerror` does for unknown codes.
+        // `h2::Reason` is an open u32 newtype; unknown codes have no nghttp2 name, so fall back to
+        // the wire number like nghttp2's own `nghttp2_strerror` does for unknown codes.
         other => return format!("NGHTTP2_UNKNOWN_{}", u32::from(other)),
     }
     .to_string()
@@ -43,9 +37,9 @@ pub(crate) enum H2ErrorShape {
     RemoteGoAway { code: u32 },
     /// A `RST_STREAM` frame received from the peer (stream-level failure).
     RemoteReset { reason: h2::Reason },
-    /// An h2 library-detected protocol violation (e.g. an HTTP/1.1 answer at
-    /// a prior-knowledge peer surfaces as a locally-initiated GOAWAY with the
-    /// frame-size reason); bun surfaces these as its generic protocol error.
+    /// An h2 library-detected protocol violation (e.g. an HTTP/1.1 answer at a prior-knowledge peer
+    /// surfaces as a locally-initiated GOAWAY with the frame-size reason); bun surfaces these as
+    /// its generic protocol error.
     LibraryViolation { reason: h2::Reason },
     /// A stream/socket failure (peer reset or close at the TCP layer).
     Io,
@@ -53,9 +47,8 @@ pub(crate) enum H2ErrorShape {
     Other,
 }
 
-/// The observable shape of an h2 error: what initiated it (remote frame vs
-/// local detection vs socket) and its reason code, which decides the
-/// TS-visible failure detail.
+/// The observable shape of an h2 error: what initiated it (remote frame vs local detection vs
+/// socket) and its reason code, which decides the TS-visible failure detail.
 pub(crate) fn h2_error_shape(error: &h2::Error) -> H2ErrorShape {
     if error.is_go_away() {
         if error.is_remote() {
@@ -87,8 +80,7 @@ pub(crate) fn h2_error_shape(error: &h2::Error) -> H2ErrorShape {
     H2ErrorShape::Other
 }
 
-/// The failure detail a shape composes (see the TS evidence in
-/// `stream_failure::h2_failure_text`).
+/// The failure detail a shape composes (see the TS evidence in `stream_failure::h2_failure_text`).
 pub(crate) fn classify_h2_shape(shape: &H2ErrorShape) -> H2Failure {
     match shape {
         H2ErrorShape::RemoteGoAway { code } => H2Failure::SessionClosed { code: *code },
@@ -105,8 +97,8 @@ pub(crate) fn classify_h2_error(error: &h2::Error) -> H2Failure {
     classify_h2_shape(&h2_error_shape(error))
 }
 
-/// Walk an error's source chain for the embedded `h2::Error` (reqwest wraps
-/// it in a `hyper::Error`, which the provider plumbing does not name).
+/// Walk an error's source chain for the embedded `h2::Error` (reqwest wraps it in a `hyper::Error`,
+/// which the provider plumbing does not name).
 pub(crate) fn h2_error_from_chain<'a>(
     mut error: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a h2::Error> {
@@ -118,9 +110,9 @@ pub(crate) fn h2_error_from_chain<'a>(
     }
 }
 
-/// The failure detail behind a reqwest transport error. When no h2 detail is
-/// reachable (raw TLS/socket failure), the stream failed at the socket: the
-/// TS h2 transport surfaces that as a canceled pending stream.
+/// The failure detail behind a reqwest transport error. When no h2 detail is reachable (raw
+/// TLS/socket failure), the stream failed at the socket: the TS h2 transport surfaces that as a
+/// canceled pending stream.
 pub(crate) fn classify_reqwest_error(error: &reqwest::Error) -> H2Failure {
     match h2_error_from_chain(error) {
         Some(h2_error) => classify_h2_error(h2_error),
@@ -163,8 +155,8 @@ mod tests {
                 nghttp2_code: "NGHTTP2_INTERNAL_ERROR".to_string()
             }
         );
-        // An h2 library violation (HTTP/1.1 answer at a prior-knowledge
-        // peer): bun's generic protocol error.
+        // An h2 library violation (HTTP/1.1 answer at a prior-knowledge peer): bun's generic
+        // protocol error.
         assert_eq!(
             classify_h2_shape(&H2ErrorShape::LibraryViolation {
                 reason: h2::Reason::FRAME_SIZE_ERROR
@@ -178,9 +170,8 @@ mod tests {
 
     #[test]
     fn reason_only_errors_classify_as_protocol() {
-        // A bare `Reason` error (the only constructible h2 shape in tests)
-        // is neither a remote frame nor an io failure: the generic protocol
-        // error, like the HTTP/1.1-answer case.
+        // A bare `Reason` error (the only constructible h2 shape in tests) is neither a remote
+        // frame nor an io failure: the generic protocol error, like the HTTP/1.1-answer case.
         let error = h2::Error::from(h2::Reason::INTERNAL_ERROR);
         assert_eq!(classify_h2_error(&error), H2Failure::Protocol);
     }

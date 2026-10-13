@@ -1,5 +1,5 @@
 //! `ModelRegistry`: composes built-in, custom (models.json), and Prime Inference
-//! catalogs; resolves request auth per provider/model. Port of model-registry.ts.
+//! catalogs; resolves request auth per provider/model.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,39 +26,36 @@ use super::private_auth::{
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRequestConfig {
     pub api_key: Option<String>,
-    /// Ordered (`BTreeMap`): these headers merge into request-header maps
-    /// that providers iterate deterministically.
+    /// Ordered (`BTreeMap`): merged into request-header maps that
+    /// providers iterate deterministically.
     pub headers: Option<BTreeMap<String, String>>,
     pub auth_header: Option<bool>,
 }
 
-/// The result of `getApiKeyAndHeaders`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedRequestAuth {
     pub ok: bool,
     pub api_key: Option<String>,
-    /// Ordered (`BTreeMap`): providers iterate this map when composing
-    /// request headers, and unordered iteration would order them randomly.
+    /// Ordered (`BTreeMap`): unordered iteration would order the
+    /// composed request headers randomly.
     pub headers: Option<BTreeMap<String, String>>,
     pub error: Option<String>,
 }
 
-/// Why a `set_model` selection failed to resolve (the daemon's
-/// `set_model` classification): the provider is not signed in (the
-/// client offers the sign-in flow and retries) or the model is genuinely
-/// not in the catalog (the TS refusal).
+/// Why a `set_model` selection failed to resolve: the provider is not
+/// signed in (the client offers the sign-in flow and retries) or the model
+/// is not in the catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetModelSelectionError {
-    /// The model exists in the catalog, but its provider has no
-    /// credential and none is stale: sign in, then retry the switch.
+    /// The model exists, but its provider has no credential and none is
+    /// stale: sign in, then retry the switch.
     ProviderUnauthenticated { provider: String },
-    /// No such model in the catalog (the TS `set_model` message).
+    /// No such model in the catalog.
     NotFound { provider: String, model_id: String },
 }
 
 impl SetModelSelectionError {
-    /// The refused provider of the sign-in variant (the daemon's typed
-    /// `errorInfo` payload); `None` on the not-found refusal.
+    /// The refused provider of the sign-in variant; `None` on not-found.
     #[must_use]
     pub fn unauthenticated_provider(&self) -> Option<&str> {
         match self {
@@ -96,22 +93,20 @@ pub struct ModelRegistry {
     authorized_private_ids: HashSet<String>,
     authorized_private_models: Vec<Model>,
     authorized_team_id: Option<String>,
-    /// The process-shared live catalog chain (`catalog_chain::catalog_for`):
+    /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
 }
 
-/// TS `getXaiSubscriptionModel`: the xAI provider's models switch onto
-/// the openai-responses API under a stored subscription — the TS
-/// thinking map per model id (the explicit maps for the models the TS
-/// flow knows, an all-null map otherwise) and the
+/// Under a stored xAI subscription the provider's models switch onto the
+/// openai-responses API with the subscription thinking maps and
 /// `supportsLongCacheRetention: false` compat.
 fn xai_subscription_model(model: &Model) -> Model {
     let mut adapted = model.clone();
     adapted.api = "openai-responses".to_string();
     adapted.base_url = "https://api.x.ai/v1".to_string();
-    // TS `getXaiSubscriptionModel` fills only an absent map: a model
-    // that already declares its levels keeps them.
+    // TS fills only an absent map: a model that already declares its
+    // levels keeps them.
     if adapted.thinking_level_map.is_none() {
         adapted.thinking_level_map = Some(xai_subscription_thinking_map(&model.id));
     }
@@ -124,14 +119,13 @@ fn xai_subscription_model(model: &Model) -> Model {
     adapted
 }
 
-/// The TS flow's thinking maps (`getXaiSubscriptionModel`'s switch): an
-/// explicit map for the grok models the TS flow names, and the
-/// all-levels-null default for every other xAI model (the reasoning
-/// output stays; unverified effort controls never send).
+/// The TS flow's explicit thinking maps for the grok models it names,
+/// and the all-levels-null default for every other xAI model (reasoning
+/// stays; unverified effort controls never send).
 fn xai_subscription_thinking_map(model_id: &str) -> ThinkingLevelMap {
-    // The map's value is the TS table's entry: `None` for the null
-    // mapping (unsupported), the wire string for a named level; an
-    // absent level keeps its default support.
+    // The value mirrors the TS table: `None` for the null mapping
+    // (unsupported), the wire string for a named level; an absent level
+    // keeps its default support.
     let null = || None;
     let value = |text: &str| Some(text.to_string());
     let mut map = ThinkingLevelMap::new();
@@ -195,7 +189,7 @@ impl ModelRegistry {
     }
 
     /// The Prime Inference credentials for the credentialed catalog layer
-    /// (the TS `refreshPrimeInferenceModels` headers: Bearer + team).
+    /// (Bearer + team headers, as the TS refresh sends).
     fn prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
         let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
         let team_id = self
@@ -205,7 +199,6 @@ impl ModelRegistry {
         Some(pa_models::PrimeCredentials { api_key, team_id })
     }
 
-    /// Error from loading models.json, if any.
     pub fn get_error(&self) -> Option<&str> {
         self.load_error.as_deref()
     }
@@ -216,12 +209,8 @@ impl ModelRegistry {
     }
 
     /// Models whose provider has configured auth, with unauthorized private
-    /// Prime Inference models gated out (TS `getAvailable`). The per-model
-    /// auth probe is answered once per provider (the port of TS #2479's
-    /// `getAvailable` memo): the catalog walks hundreds of models over a
-    /// few dozen providers and each probe rebuilds the provider's
-    /// auth-source candidates, while a same-registry probe is stable by
-    /// construction (`&self`, no mutation between models).
+    /// Prime Inference models gated out. The per-model auth probe is answered
+    /// once per provider: each probe rebuilds the auth-source candidates.
     pub fn get_available(&self) -> Vec<&Model> {
         let mut auth_by_provider: HashMap<&str, bool> = HashMap::new();
         self.models
@@ -237,10 +226,7 @@ impl ModelRegistry {
     }
 
     /// Models `rlm.find_models` may search: auth-configured, and not on a
-    /// stale or expired provider credential. The per-model status probe
-    /// is answered once per provider (the port of TS #2479's
-    /// `_authenticatedRlmModels` memo — same stability argument as
-    /// [`Self::get_available`]).
+    /// stale or expired provider credential (probe answered once per provider).
     pub fn get_rlm_searchable_models(&self) -> Vec<&Model> {
         let mut status_by_provider: HashMap<&str, bool> = HashMap::new();
         self.get_available()
@@ -262,33 +248,22 @@ impl ModelRegistry {
             || self.has_configured_provider_request_auth(&model.provider)
     }
 
-    /// The provider's auth status without credential values (TS
-    /// `getProviderAuthStatus`): callers that classify unauthenticated
-    /// vs stale providers (the daemon `set_model` resolution) read it
-    /// instead of probing for keys.
+    /// The provider's auth status without credential values: callers
+    /// classifying unauthenticated vs stale providers read this instead of
+    /// probing for keys.
     pub fn get_provider_auth_status(&self, provider: &str) -> crate::auth::types::AuthStatus {
         self.auth.get_auth_status(provider)
     }
 
-    /// `set_model`'s model resolution (the TS daemon's available-list
-    /// lookup with its stale fallback and the sign-in classification):
-    /// an available model resolves directly; a catalog model whose
-    /// provider has no credential at all (and none marked stale) is the
-    /// typed sign-in refusal — the client offers the provider's login
-    /// and retries the switch, instead of the old dead-end "Model not
-    /// found" — while everything else (an unauthorized private Prime
-    /// Inference model, an unknown id) keeps the TS refusal.
-    ///
-    /// Stale-auth providers keep the switch exactly like the TS daemon
-    /// (`session.modelRegistry.find`'s full-catalog fallback: the lookup
-    /// never mutates stale state, `session.setModel` owns the clear).
+    /// `set_model`'s model resolution: an available model resolves directly; a
+    /// model whose provider has no credential (none stale) is the typed sign-in
+    /// refusal; stale-auth providers keep the switch (the lookup never mutates
+    /// stale state).
     ///
     /// # Errors
     ///
-    /// Returns [`SetModelSelectionError::ProviderUnauthenticated`] when the
-    /// model exists but its provider has no credential (and none is
-    /// stale), or [`SetModelSelectionError::NotFound`] when no catalog
-    /// model matches.
+    /// `ProviderUnauthenticated` when the provider has no credential;
+    /// `NotFound` when no catalog model matches.
     pub fn resolve_set_model_selection(
         &self,
         provider: &str,
@@ -302,14 +277,10 @@ impl ModelRegistry {
         {
             return Ok(model);
         }
-        // The catalog lists every provider's models, so a model can exist
-        // while its provider is not signed in — the picker's discovery
-        // path. The stale fallback resolves from the full catalog (TS
-        // `find`); a provider without any credential is the sign-in
-        // refusal; a signed-in provider's exclusion is the unauthorized
-        // private Prime Inference model (the only `get_available` gate
-        // besides auth), which keeps the TS "Model not found" refusal —
-        // never a switch to a model the account is not entitled to.
+        // A model can exist while its provider is not signed in — the
+        // picker's discovery path. No credential at all is the sign-in refusal;
+        // the unauthorized private Prime Inference model keeps the not-found
+        // refusal — never a switch to an unentitled model.
         let Some(model) = self.get_all().iter().find(|model| matches(model)) else {
             return Err(SetModelSelectionError::NotFound {
                 provider: provider.to_string(),
@@ -344,12 +315,9 @@ impl ModelRegistry {
         })
     }
 
-    /// Reload built-in + custom models and provider request configs from disk.
-    /// Adopt the on-disk private Prime Inference authorization cache without
-    /// any network access. Sync callers that resolve models on a fresh
-    /// registry (daemon create-path, headless print) must call this before
-    /// `get_available`; a fresh registry otherwise gates every private model
-    /// out because only the async refresh populates the authorized set.
+    /// Reload built-in + custom models and provider request configs from disk,
+    /// adopting the on-disk private Prime Inference authorization cache without
+    /// network access. Sync callers must call this before `get_available`.
     pub fn load_private_authorization_from_cache(&mut self) {
         let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID);
         let team_headers = self.auth.get_provider_headers(PRIME_INFERENCE_PROVIDER_ID);
@@ -442,17 +410,10 @@ impl ModelRegistry {
         self.apply_subscription_model_adaptations();
     }
 
-    /// TS `loadModels`'s `modifyModels` loop plus
-    /// `getModelForCurrentAuth`'s xAI subscription switch, applied at
-    /// load: a stored Copilot credential rewrites its models' base URL
-    /// through the credential (the token's proxy endpoint, else the
-    /// enterprise domain, else the catalog default), and a stored xAI
-    /// subscription switches the provider's models onto the
-    /// openai-responses API with the TS thinking maps. The registry
-    /// reloads after every credential change, so the adaptations track
-    /// the store exactly like TS's per-read switch.
+    /// Per-model base-URL/API overrides plus the xAI subscription switch,
+    /// applied at load: stored credentials rewrite the affected models, and
+    /// the registry reloads after every credential change.
     fn apply_subscription_model_adaptations(&mut self) {
-        // TS `githubCopilotOAuthProvider.modifyModels`.
         let copilot_credential = self
             .auth
             .get_all()
@@ -471,9 +432,8 @@ impl ModelRegistry {
                 }
             }
         }
-        // TS `isUsingXaiSubscription`: the stored credential is OAuth
-        // and the store is the winning source (a stale credential does
-        // not serve the subscription API).
+        // The stored credential is OAuth and the store is the winning
+        // source (a stale credential does not serve it).
         let xai_stored = matches!(
             self.auth.get_all().credential(crate::auth::XAI_PROVIDER_ID),
             Some(AuthCredential::Oauth { .. })
@@ -581,8 +541,7 @@ impl ModelRegistry {
 
     /// Built-ins through the no-cold-start chain (validated disk snapshot |
     /// bundled asset | compiled fallback), merged with the credentialed
-    /// live Prime Inference snapshot for `credentials` — TS
-    /// `loadBuiltInModels` over the provider catalog + `livePrimeInferenceModels`.
+    /// live Prime Inference snapshot for `credentials`.
     fn load_built_in_models(
         &self,
         custom: &CustomModelsResult,
@@ -630,20 +589,15 @@ impl ModelRegistry {
     }
 
     /// Reload local state and refresh entitlements (live catalog + private
-    /// auth). The chain refresh (the gated provider-catalog fetch + the
-    /// credentialed Prime Inference fetch, TS `refreshProviderCatalog(false)`
-    /// plus `refreshPrimeInferenceModels`) is awaited so the resolved
-    /// catalog reflects it as soon as the call returns.
+    /// auth). Both fetches are awaited, so the resolved catalog reflects
+    /// them when the call returns.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
         self.refresh_available_models_forced(false).await
     }
 
-    /// [`ModelRegistry::refresh_available_models`] with the refresh
-    /// trigger's gating — the daemon's background catalog refresh (the
-    /// picker-open and auth-change triggers): forced triggers (startup,
-    /// auth change) skip the hourly catalog gate, the picker-open trigger
-    /// keeps it. The private-authorization refresh rides along with its
-    /// own fingerprint-and-TTL gating either way.
+    /// [`ModelRegistry::refresh_available_models`] with the refresh trigger's
+    /// gating: forced triggers (startup, auth change) skip the hourly catalog
+    /// gate, picker-open keeps it; private authorization keeps its own gating.
     pub async fn refresh_available_models_with_trigger(
         &mut self,
         trigger: pa_models::RefreshTrigger,
@@ -651,8 +605,7 @@ impl ModelRegistry {
         self.refresh_available_models_forced(trigger.forced()).await
     }
 
-    /// The awaited refresh body (TS `refreshModelCatalog`'s awaited chain):
-    /// reload, the gated-or-forced chain fetch, the model reload, the
+    /// The awaited refresh body: reload, the gated-or-forced chain fetch, the
     /// private-authorization refresh, then the auth-filtered catalog.
     async fn refresh_available_models_forced(&mut self, force: bool) -> Vec<Model> {
         let previous_ids = self.authorized_private_ids.clone();
@@ -800,9 +753,8 @@ impl ModelRegistry {
     }
 
     /// The public Prime Inference ids the resolved catalog serves (the
-    /// live-or-offline snapshot, TS `livePrimeInferenceModels ??
-    /// bundledPrimeInferenceModels`): the private-authorization fetch
-    /// skips these and reports only the account's private entitlements.
+    /// live-or-offline snapshot): the private-authorization fetch skips
+    /// these and reports only the account's private entitlements.
     fn public_prime_inference_ids(&self) -> HashSet<String> {
         self.models
             .iter()
@@ -918,7 +870,5 @@ fn now_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
-// The unit battery lives in the child module (registry::tests); its
-// use-super glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;

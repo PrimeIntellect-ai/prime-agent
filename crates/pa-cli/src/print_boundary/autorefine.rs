@@ -1,12 +1,9 @@
-//! The compact-trigger auto-refine machine: the TS
-//! `_compactAutoRefinePending` flow of the print runtime's turn
-//! boundary — the review gates, the durable-row surface, the
-//! requested-refinement streaming, and the disposal drain — the child
-//! cut of the `print_boundary` facade.
+//! The compact-trigger auto-refine machine: the review gates, the durable-row
+//! surface, the requested-refinement streaming, and the disposal drain.
 
 use super::{json, Model, PathBuf, SessionAgentMessage, SessionEngine, TurnBoundary};
 
-/// Wall-clock milliseconds (the review-cooldown stamps, TS `Date.now()`).
+/// Wall-clock milliseconds (the review-cooldown stamps).
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -14,23 +11,19 @@ fn now_millis() -> u64 {
         .unwrap_or_default()
 }
 
-/// Where the compact-trigger auto-refine surfaces (TS: the serialized
-/// checkpoint runs mid-run, so its events stream; the disposal drain runs
-/// after the print client tore its subscription down, so its events land
-/// nowhere — only the durable rows persist).
+/// Where the compact-trigger auto-refine surfaces: the serialized checkpoint runs
+/// mid-run; the disposal drain runs after the print client tore its subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RefineSurface {
-    /// The serialized checkpoint at a turn boundary (`shouldStopAfterTurn`).
+    /// The serialized checkpoint at a turn boundary.
     Checkpoint,
-    /// The session disposal drain (TS `dispose`: best-effort, silent).
+    /// The session disposal drain (best-effort, silent).
     Dispose,
 }
 
 impl TurnBoundary {
-    /// TS `_assistantTurnsSinceAutoRefine` (the `message_end` increments): the
-    /// settled non-error, non-aborted assistant turns appended since the
-    /// last boundary call, added to the counter the review prompt's trigger
-    /// line carries.
+    /// The settled non-error, non-aborted assistant turns appended since the last
+    /// boundary call, added to the review prompt's trigger counter.
     pub(super) async fn count_settled_turns(&mut self, engine: &SessionEngine) {
         let Some(baseline) = self.entry_baseline else {
             return;
@@ -54,12 +47,10 @@ impl TurnBoundary {
         self.entry_baseline = Some(entries.len());
     }
 
-    /// The disposal drain (TS `dispose`: "a serialized compaction can finish
-    /// without another model turn — drain its pending review here so
-    /// disposal does not silently lose the trigger"). The print client's
-    /// event subscription is already torn down at this point, so the
-    /// round's surface stays off the stream: only the durable rows and
-    /// the harness state persist. Best-effort, like the TS drain.
+    /// The disposal drain: a serialized compaction can finish without another model
+    /// turn — drain its pending review here so disposal does not lose the
+    /// trigger. The subscription is already torn down; only durable rows and
+    /// harness state persist. Best-effort.
     pub(crate) async fn drain_compact_auto_refine_at_disposal(
         &mut self,
         engine: &SessionEngine,
@@ -78,15 +69,11 @@ impl TurnBoundary {
             .await;
     }
 
-    /// The compact-trigger auto-refine consumption (TS
-    /// `_runSerializedRefineCheckpointAfterBackground`'s compact arm plus
-    /// `_runSerializedAutoRefineReview`): gates first — the session's
-    /// refine surface, the `enabled`/`compact` settings, and the review
-    /// cooldown — then the review, and only an approving review runs the
-    /// refinement. The checkpoint surface preserves the trigger while the
-    /// cooldown runs (TS keeps it for a later boundary); the disposal
-    /// surface clears it. Every review attempt — decline, success, or
-    /// failure — stamps the cooldown and resets the turn counter.
+    /// The compact-trigger auto-refine consumption: gates first — the refine
+    /// surface, the settings, the review cooldown — then the review, and only
+    /// an approving review runs the refinement. The checkpoint preserves the
+    /// trigger through the cooldown; disposal clears it; each attempt stamps
+    /// the cooldown and resets the counter.
     pub(super) async fn consume_compact_auto_refine(
         &mut self,
         engine: &SessionEngine,
@@ -98,8 +85,8 @@ impl TurnBoundary {
         if !self.compact_auto_refine_pending {
             return Ok(());
         }
-        // TS `_autoRefineAllowedForSession`: sessions without the refine
-        // surface drop the trigger outright.
+        // Sessions without the refine surface drop the trigger
+        // outright.
         if !engine.session.auto_refine_allowed() {
             self.compact_auto_refine_pending = false;
             return Ok(());
@@ -113,27 +100,26 @@ impl TurnBoundary {
             .last_auto_refine_review_at
             .is_some_and(|last| now_millis().saturating_sub(last) < gates.cooldown_ms);
         if under_cooldown && surface == RefineSurface::Checkpoint {
-            // Preserve the compact trigger for a later boundary (TS keeps
-            // the pending flag while the cooldown is active).
+            // Preserve the compact trigger for a later boundary while
+            // the cooldown is active.
             return Ok(());
         }
         self.compact_auto_refine_pending = false;
         if under_cooldown {
             // The disposal drain clears a cooled-down trigger without a
-            // review (TS dispose).
+            // review.
             return Ok(());
         }
         let entries_before = engine.session.entries().await.len();
         let turns = self.assistant_turns_since_review;
         let outcome = engine
             .session
-            // The headless print boundary never moves branches (the
-            // session is single-branch for the run), so the branch
-            // invalidation version stays at its initial 0.
+            // The headless print boundary never moves branches (single-branch for the
+            // run), so the branch invalidation version stays at its initial 0.
             .auto_refine_after_compaction(model, api_key, global_harness_dir, turns, 0)
             .await;
         // Every review attempt stamps the cooldown and resets the turn
-        // counter (TS stamps decline, success, and failure alike).
+        // counter.
         self.last_auto_refine_review_at = Some(now_millis());
         self.assistant_turns_since_review = 0;
         // The reviewer declined: no refinement, nothing surfaces.
@@ -153,11 +139,9 @@ impl TurnBoundary {
         Ok(())
     }
 
-    /// One refinement outcome's TS surface: the durable rows' message
-    /// pairs plus `refine_complete` on success, the `refine_failed` event
-    /// on failure. `emit` false (the disposal drain) keeps the stream
-    /// quiet — the rows still persist. Text mode prints the failure's
-    /// stderr diagnostic.
+    /// One refinement outcome's surface: the durable rows' message pairs plus
+    /// `refine_complete` on success, `refine_failed` on failure; `emit` false keeps
+    /// the stream quiet (the rows still persist).
     pub(super) async fn stream_refinement_outcome(
         &self,
         engine: &SessionEngine,
@@ -169,9 +153,8 @@ impl TurnBoundary {
         match outcome {
             Ok(result) => {
                 if emit && self.json_mode {
-                    // The refinement rows this run appended (TS
-                    // `_appendDurableRefineMessage`: the outcome row always,
-                    // the model-facing notice when edits applied).
+                    // The refinement rows this run appended: the outcome row always, the
+                    // model-facing notice when edits applied.
                     for row in Self::refinement_rows_since(engine, entries_before).await {
                         let value = crate::headless_autonomous::custom_row_wire_value(&row);
                         for event_type in ["message_start", "message_end"] {
@@ -200,10 +183,8 @@ impl TurnBoundary {
         }
     }
 
-    /// The durable refinement rows appended after an entry count (the
-    /// outcome row, then the model-facing notice when edits applied; both
-    /// land in that order, so the tail scan reads them in TS emission
-    /// order).
+    /// The durable refinement rows appended after an entry count: the outcome row,
+    /// then the model-facing notice when edits applied, in that order.
     pub(crate) async fn refinement_rows_since(
         engine: &SessionEngine,
         entries_before: usize,

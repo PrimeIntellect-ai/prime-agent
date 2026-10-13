@@ -1,7 +1,6 @@
 //! The RPC command surface, part one: the dispatch table plus the
 //! prompting, state, model, thinking, queue-mode, and compaction
-//! handlers (TS `rpc-mode.ts`'s `handleCommand` cases). Session-level and
-//! scheduling commands live in [`super::session_commands`].
+//! handlers. Session-level and scheduling commands live in [`super::session_commands`].
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -28,33 +27,25 @@ pub struct RpcState {
     pub writer: LineWriter,
     pub cwd: std::path::PathBuf,
     pub agent_dir: std::path::PathBuf,
-    /// The compact handler's in-flight flag (TS `session.isCompacting`):
-    /// `get_state` reports it while a compact command runs.
+    /// The compact handler's in-flight flag: `get_state` reports it while a compact command runs.
     pub compacting: Arc<AtomicUsize>,
-    /// The host-owned autonomous runtime state (`/autonomous` mutates it;
-    /// the CLI flags seed it, TS `createAgentSession` parity).
+    /// The host-owned autonomous runtime state (`/autonomous` mutates it; the CLI flags seed it).
     pub autonomous: Arc<tokio::sync::Mutex<AutonomousRuntimeState>>,
     /// The last `goal_update` event payload published (change-gated emits).
     pub last_goal: Arc<tokio::sync::Mutex<GoalState>>,
     /// The queued-work pump's serialization lane (one pump at a time).
     pub queue_pump: Arc<tokio::sync::Mutex<()>>,
-    /// TS `_sessionInputPumpSuspended`: an abort suspends queued-input
-    /// delivery; the next prompt/steer/follow-up resumes it.
+    /// An abort suspends queued-input delivery; the next prompt/steer/follow-up resumes it.
     pub pump_suspended: Arc<std::sync::atomic::AtomicBool>,
-    /// The model-selection commands' serialization lane (TS runs every
-    /// command on one loop: `set_model`/`cycle_model` and the thinking
-    /// switches serialize read-then-apply instead of racing).
+    /// The model-selection commands' serialization lane (read-then-apply switches must not race).
     pub model_ops: Arc<tokio::sync::Mutex<()>>,
     /// The context-rebuilding commands' serialization lane (`compact`,
-    /// `refine`, and the prompt-admitted session command executor: they
-    /// rebuild the session context and install the rebuilt transcript,
-    /// so they must not interleave).
+    /// `refine`): they must not interleave.
     pub session_ops: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RpcState {
-    /// Publish the current goal state as a `goal_update` session event
-    /// when it changed (TS `_emitGoalUpdate`).
+    /// Publish the current goal state as a `goal_update` session event when it changed.
     pub async fn publish_goal_update(&self) {
         let handle = self.session.handle().await;
         let goal = handle.engine.goal_state().await;
@@ -62,12 +53,8 @@ impl RpcState {
         self.publish_goal_update_for(&goal).await;
     }
 
-    /// The same publication over an already-held engine's goal state: the
-    /// prompt-admitted session-command path holds the handle guard
-    /// through its execution, and re-acquiring the handle there can
-    /// starve behind a queued writer (a `set_model` or replacement
-    /// waiting on the same guard) — the caller passes the state it
-    /// already holds.
+    /// The same publication over an already-held goal state:
+    /// re-acquiring the handle there can starve behind a queued writer.
     pub async fn publish_goal_update_for(&self, goal: &pa_core::goals::GoalState) {
         let goal = goal.clone();
         let changed = {
@@ -91,11 +78,8 @@ impl RpcState {
 }
 
 impl RpcState {
-    /// The live session's project directory (TS builds every session's
-    /// `SettingsManager` over the session's own cwd): the settings
-    /// writes follow it, so after a `switch_session`/`fork` adopts
-    /// another project the persisted defaults land there, not under the
-    /// CLI startup directory.
+    /// The live session's project directory: settings writes follow it
+    /// after a `switch_session`/`fork`, not the CLI startup directory.
     pub async fn settings_cwd(&self) -> std::path::PathBuf {
         let handle = self.session.handle().await;
         let persistence = handle.engine.session.shared_persistence();
@@ -104,23 +88,15 @@ impl RpcState {
     }
 }
 
-/// Resume queued-input delivery (TS `_resumeSessionInputAdmission`): the
-/// pump restarts with the next queued batch.
+/// Resume queued-input delivery: the pump restarts with the next queued batch.
 pub fn resume_pump(state: &Arc<RpcState>) {
     state
         .pump_suspended
         .store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Restart the queued-work pump on the LIVE session after a failed
-/// whole-session replacement: the pre-settle pump-epoch bump retired the
-/// old pump, and the still-serving session's parked steer/follow-up rows
-/// must keep delivering (a failed assembly never owned them — the
-/// success paths resume delivery the same way). A signal exit never
-/// rearms delivery: the parked rows stay parked for the exit's dispose
-/// (TS never resumes admission on a signal — the process exits), so a
-/// rearmed pump cannot race the exit's retire/abort and admit one last
-/// turn the exit's settle would then have to wait out.
+/// Restart the queued-work pump on the LIVE session after a failed replacement: parked rows must
+/// keep delivering. A signal exit never rearms delivery (a rearmed pump could admit one last turn).
 pub async fn restart_queue_pump(state: &Arc<RpcState>) {
     if state.session.shutdown_fired() {
         return;
@@ -130,19 +106,16 @@ pub async fn restart_queue_pump(state: &Arc<RpcState>) {
     kick_queue_pump(state, &engine);
 }
 
-/// Kick the queued-work pump (TS `_pumpSessionInputs`): deliver queued
-/// steering/follow-up batches as runs, one settled turn at a time, until
-/// nothing is queued or an abort suspends delivery. Serialized behind the
-/// pump lane so concurrent kicks never double-deliver.
+/// Kick the queued-work pump: deliver queued batches one settled turn
+/// at a time; serialized behind the pump lane so kicks never double-deliver.
 pub fn kick_queue_pump(
     state: &Arc<RpcState>,
     engine: &Arc<pa_core::session_engine::engine::SessionEngine>,
 ) {
     let state = Arc::clone(state);
     let engine = Arc::clone(engine);
-    // The generation this pump serves: a whole-session replacement
-    // (new_session/switch_session/fork) retires it — the pump must never
-    // deliver queued input to the disposed session it was spawned with.
+    // The generation this pump serves: a replacement retires it — the
+    // pump never delivers to the disposed session.
     let generation = state.session.pump_generation();
     tokio::spawn(async move {
         let _lane = state.queue_pump.lock().await;
@@ -166,27 +139,16 @@ pub fn kick_queue_pump(
             {
                 break;
             }
-            // TS's session-input pump holds its checkpoint while a
-            // compaction is in flight (`_compactionOperation` gates the
-            // pump; compact's finally re-schedules it): a parked row
-            // never delivers into the rebuild's window. The count (not
-            // a bool) keeps a second compact waiting on session_ops
-            // gated while the first clears its own increment.
+            // A compaction in flight gates the pump; the count (not a
+            // bool) keeps a second compact waiting on session_ops gated
+            // while the first clears its own increment.
             if state.compacting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
             agent.wait_for_idle().await;
-            // Re-check after the idle wait: a replacement that lands in
-            // the wait window must retire this pump before it delivers
-            // onto the disposed session. The identity check pairs with
-            // the generation check: a kick can sample the engine and the
-            // generation apart (a replace bumps the generation before it
-            // swaps the handle), so the passing-generation-with-old-engine
-            // window retires on the engine identity instead. A
-            // compaction that armed while this pump was parked on the
-            // idle wait parks it again (the count covers the whole
-            // abort-to-rebuild window; the rebuild re-kicks the pump
-            // once it settles).
+            // Re-check after the idle wait: a replacement landing in the
+            // window must retire this pump; the identity check pairs with
+            // the generation check (they can be sampled apart).
             if state.compacting.load(std::sync::atomic::Ordering::SeqCst) > 0 {
                 break;
             }
@@ -206,10 +168,8 @@ pub fn kick_queue_pump(
                 break;
             }
             // Deliver the next queued batch (`continue_run` drains the
-            // steering lane first, then follow-ups); a delivery failure
-            // ends the pump run (the error surfaced to the client through
-            // the aborting command's own channel in TS; here the queue
-            // stays and the next kick retries).
+            // steering lane first); a delivery failure ends the pump run —
+            // the queue stays and the next kick retries.
             if agent.continue_run().await.is_err() {
                 break;
             }
@@ -217,8 +177,7 @@ pub fn kick_queue_pump(
     });
 }
 
-/// Dispatch one command to its handler; the unknown-type error answers
-/// with no id (TS `handleCommand`'s default arm).
+/// Dispatch one command to its handler; the unknown-type error answers with no id.
 pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand) -> Value {
     let id = command.id.clone();
     let payload = command.payload.clone();
@@ -228,8 +187,6 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
         "steer" | "follow_up" => prompt_commands::steer_or_follow_up(state, &payload, name).await,
         "abort" => {
             state.session.handle().await.engine.session.agent().abort();
-            // TS `requestAbort` suspends queued-input delivery; the next
-            // prompt/steer/follow-up resumes it.
             state.pump_suspended.store(true, Ordering::SeqCst);
             Ok(ResponseData::Absent)
         }
@@ -247,8 +204,8 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
         "refine" => refine(state, &payload).await,
         "set_auto_compaction" => set_auto_compaction(state, &payload).await,
         "set_auto_retry" => set_auto_retry(state, &payload).await,
-        // TS `abortRetry` always answers success (it aborts only an
-        // in-flight retry; the in-process turn path has no parked retry).
+        // `abort_retry` always answers success (the in-process turn path
+        // has no parked retry).
         "abort_retry" => Ok(ResponseData::Absent),
         other => session_commands::handle(state, other, &payload).await,
     };
@@ -258,23 +215,18 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
     }
 }
 
-/// `new_session` (TS `runtimeHost.newSession`): a fresh session,
-/// optionally under a parent session.
+/// `new_session`: a fresh session, optionally under a parent session.
 async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let parent = payload
         .get("parentSession")
         .and_then(Value::as_str)
         .map(str::to_string);
-    // The fresh session builds over the ACTIVE session's project (TS
-    // `runtimeHost.newSession` over `this.cwd`), so a session adopted
-    // from another project does not seed the new one back into the CLI
-    // startup directory.
-    // Serialize the cwd sample with the replacement it seeds (the
-    // replacement lease, held across both): a `switch_session` landing
-    // between the sample and the replace would build the child over the
-    // retired session's stale project cwd — TS's synchronous `this.cwd`
-    // read has no such window. The sample's guards drop before
-    // `replace_locked` (the write guard is not re-entrant).
+    // The fresh session builds over the ACTIVE session's project, not the
+    // CLI startup directory.
+    //
+    // Serialize the cwd sample with the replacement it seeds (the lease
+    // held across both): a `switch_session` between them would build the
+    // child over the retired session's stale cwd.
     let lease = state.session.replacement_lease().await;
     let cwd = {
         let handle = state.session.handle().await;
@@ -298,7 +250,6 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
     Ok(ResponseData::Present(json!({ "cancelled": false })))
 }
 
-/// `get_state` (TS `RpcSessionState`).
 async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let handle = state.session.handle().await;
     let engine = &handle.engine;
@@ -348,8 +299,8 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
         session_actions_snapshot(agent.as_ref(), &agent_state),
     );
     // Release the persistence guard before the goal-driver read: goal
-    // mutations take the driver first and persistence second, so holding
-    // the persistence mutex across the driver wait inverts the lock order.
+    // mutations take the driver first, so holding the persistence mutex
+    // across the driver wait inverts the lock order.
     drop(manager);
     // The guard binding keeps the driver mutex alive across the read (a
     // chained temporary would free before the borrow ends).
@@ -361,7 +312,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     Ok(ResponseData::Present(Value::Object(object)))
 }
 
-/// The TS `SessionActionSnapshot` over the agent's queues: previews per
+/// The queued-action snapshot over the agent's queues: previews per
 /// queued batch, the total, and the running turn as the active action.
 fn session_actions_snapshot(
     agent: &pa_agent::agent::Agent,
@@ -380,7 +331,7 @@ fn session_actions_snapshot(
     snapshot
 }
 
-/// The wire names of the agent queue modes (TS `"all"`/`"one-at-a-time"`).
+/// The wire names of the agent queue modes.
 fn queue_mode_wire_name(mode: pa_agent::agent::QueueMode) -> &'static str {
     match mode {
         pa_agent::agent::QueueMode::All => "all",
@@ -388,43 +339,28 @@ fn queue_mode_wire_name(mode: pa_agent::agent::QueueMode) -> &'static str {
     }
 }
 
-/// `compact` (TS `session.compact(customInstructions)`): run the
-/// compaction, emit its session events, and answer with the
-/// `CompactionResult`; a skip answers the TS `CompactionSkippedError`
-/// message.
+/// `compact`: run the compaction, emit its session events, and answer
+/// with the `CompactionResult`; a skip answers the skip message.
 async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let instructions = payload
         .get("customInstructions")
         .and_then(Value::as_str)
         .map(str::to_string);
-    // The handle guard stays held through the compaction (the
-    // prompt-admitted path's guard-pass-through): a concurrent
-    // whole-session replacement (whose swap waits on the write guard)
-    // can never dispose the kernel mid-compaction or land a `set_model`
-    // between the snapshot and the summarization — the compaction's
-    // frames and file writes stay on the live session, under the model
-    // the session runs.
+    // The handle guard stays held through the compaction: a replacement
+    // cannot dispose the kernel or land a `set_model` mid-compaction.
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
-    // The compaction is in flight from the abort onward: the gate arms
-    // BEFORE the turn settles, so a pump woken by the abort's idle
-    // settle sees it and parks instead of admitting a queued row into
-    // the snapshot window. The gate is a COUNT: two overlapping compact
-    // commands (a second waiting on session_ops behind the first) each
-    // arm their own increment, and the first's clear leaves the
-    // second's window still gated.
+    // The gate arms BEFORE the turn settles, so a pump woken by the
+    // abort's idle settle parks instead of admitting into the snapshot
+    // window. The gate is a COUNT (overlaps arm their own increments).
     state.compacting.fetch_add(1, Ordering::SeqCst);
-    // TS `session.compact` aborts the running turn before the snapshot
-    // (`if (!options.skipAbort) await this.abort()`, agent-session.ts):
-    // the compaction summarizes a SETTLED transcript, never one a live
-    // turn is still appending — the abort settles the turn first.
+    // The compaction aborts the running turn before the snapshot: it
+    // summarizes a SETTLED transcript.
     engine.session.agent().abort();
     engine.session.agent().wait_for_idle().await;
-    // Compact rebuilds the session context (like refine): serialize the
-    // context-rebuilding commands so their rebuilds cannot interleave
-    // and install an older snapshot over a newer one.
+    // Compact rebuilds the session context (like refine): serialize the rebuilders.
     let _ops = state.session_ops.lock().await;
     state
         .session
@@ -434,34 +370,24 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
             None,
         ))
         .await;
-    // Flush the queued `compaction_start` BEFORE the compaction enters
-    // its pre-summarizer CPU span (digest capture, cut scan, token
-    // estimation, details extraction): that span runs to the
-    // summarizer's `await` without an executor yield, and the writer
-    // task would hold the frame until the span ends — at a large
-    // session the client sees the compaction start only tens of
-    // milliseconds after it was published, where TS (a synchronous
-    // stdout write at the emit) shows it immediately. The wait is
-    // budgeted (see `COMPACT_FRAME_FLUSH_BUDGET`): a stalled reader
-    // never wedges the compaction.
+    // Flush the queued `compaction_start` BEFORE the pre-summarizer CPU
+    // span: it runs without an executor yield, so the client would see
+    // the start only late; the wait is budgeted.
     state.writer.drain_within(COMPACT_FRAME_FLUSH_BUDGET).await;
     let outcome = engine
         .session
         .compact(instructions.as_deref(), &model, api_key, None)
         .await;
     state.compacting.fetch_sub(1, Ordering::SeqCst);
-    // TS compact's finally re-schedules the session-input pump
-    // (`_notifySessionInputCheckpointChange` + `_scheduleSessionInputPump`):
-    // the parked rows deliver after the rebuild settles, never into its
+    // The parked rows deliver after the rebuild settles, never into its
     // window (the pump's compacting gate holds them out mid-rebuild).
     resume_pump(state);
     kick_queue_pump(state, &engine);
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            // The failed compaction still publishes its end frame (TS
-            // writes `compaction_end` around every completed attempt —
-            // success, skip, and failure alike).
+            // The failed compaction still publishes its end frame (success,
+            // skip, and failure alike).
             state
                 .session
                 .write_connection_output(compaction_frame(
@@ -504,10 +430,9 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
 }
 
 /// One compaction frame in the TS key order, omitting the optional
-/// fields that are absent (TS `JSON.stringify`'s `undefined` handling):
-/// `compaction_start {type, reason, customInstructions?}` and
-/// `compaction_end {type, reason, result?, aborted, willRetry,
-/// customInstructions?}`.
+/// fields that are absent: `compaction_start {type, reason,
+/// customInstructions?}` and `compaction_end {type, reason, result?,
+/// aborted, willRetry, customInstructions?}`.
 #[must_use]
 pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&Value>) -> Value {
     if kind == "compaction_start" {
@@ -530,8 +455,7 @@ pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&
     }
 }
 
-/// `refine` (TS `session.refine`): run the refinement and answer with the
-/// `RefinementResult`.
+/// `refine`: run the refinement and answer with the `RefinementResult`.
 async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let options = pa_core::session_engine::refine::RefineOptions {
         global: payload
@@ -547,19 +471,15 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
             .and_then(Value::as_str)
             .map(str::to_string),
     };
-    // The handle guard stays held through the refinement (the compact
-    // handler's guard-pass-through): a concurrent whole-session
-    // replacement or `set_model` cannot interleave between the snapshot
-    // and the refinement's file writes.
+    // The handle guard stays held through the refinement: no replacement
+    // or `set_model` interleaves before the file writes.
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let api_key = handle.api_key.clone();
     let engine = handle.engine.clone();
     let global_harness_dir = pa_core::refinement::get_global_harness_state_dir(&state.agent_dir);
-    // Refine appends durable rows and pushes them into the live loop
-    // context (TS `_appendDurableRefineMessage`); it shares compact's
-    // one-command-at-a-time serialization (one session-context-mutating
-    // command at a time).
+    // Refine appends durable rows into the live loop context; it shares
+    // compact's one-command-at-a-time serialization.
     let _ops = state.session_ops.lock().await;
     let result = engine
         .session
@@ -577,8 +497,7 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
     ))
 }
 
-/// `set_auto_compaction` (TS `session.setAutoCompactionEnabled`): the
-/// live settings toggle plus the settings default TS persists.
+/// `set_auto_compaction`: the live settings toggle plus the settings default it persists.
 async fn set_auto_compaction(
     state: &Arc<RpcState>,
     payload: &Value,
@@ -588,8 +507,7 @@ async fn set_auto_compaction(
         .and_then(Value::as_bool)
         .ok_or_else(|| "set_auto_compaction requires enabled".to_string())?;
     // Persist the settings default first: a settings failure must leave
-    // the live toggle untouched (the session keeps its configured
-    // behavior instead of half-applying the request).
+    // the live toggle untouched.
     let mut settings =
         pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     settings
@@ -600,8 +518,7 @@ async fn set_auto_compaction(
     Ok(ResponseData::Absent)
 }
 
-/// `set_auto_retry` (TS `session.setAutoRetryEnabled`): the settings
-/// toggle the session retry policy reads.
+/// `set_auto_retry`: the settings toggle the session retry policy reads.
 async fn set_auto_retry(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let enabled = payload
         .get("enabled")

@@ -1,0 +1,1 @@
+- A request that a crashed session worker never answered now fails with "Daemon worker socket closed", the same error the TypeScript daemon reports.

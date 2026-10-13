@@ -1,8 +1,9 @@
-//! The `/tree` selector surface: the bordered pane over the tree list, with
-//! its label-edit input and the post-selection "Summarize branch?" choice
-//! (TS `TreeSelectorComponent` + interactive-mode's navigate flow).
+//! The `/tree` selector surface: the bordered pane over the tree list,
+//! its label-edit input, and the post-selection "Summarize branch?"
+//! choice (TS `TreeSelectorComponent`).
 
 use crate::keybindings::KeybindingsManager;
+use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::tree_list::{FilterMode, TreeList, TreeListAction};
 use crate::tree_nodes::{build_tree, TreeNode};
@@ -15,14 +16,12 @@ use serde_json::Value;
 pub enum TreeSelectorAction {
     /// Nothing emitted; the view re-renders from the component state.
     None,
-    /// Navigate to the entry (the daemon `navigate_tree` call), with the
-    /// summarize choice resolved.
+    /// Navigate to the entry (the daemon `navigate_tree` call).
     Navigate {
         target_id: String,
         summarize: bool,
         custom_instructions: Option<String>,
     },
-    /// The selector closed (Escape on the list).
     Cancel,
     /// A label was saved: persist it (`set_session_entry_label`).
     LabelChange {
@@ -35,31 +34,35 @@ pub enum TreeSelectorAction {
 enum Mode {
     /// The tree list.
     Tree,
-    /// The label input for one entry (TS `LabelInput`).
-    LabelInput { entry_id: String, input: String },
-    /// "Summarize branch?" (TS `showExtensionSelector` with the three
-    /// options).
+    /// The label input for one entry (TS `LabelInput`): the search
+    /// input holds the draft, so its full edit grammar (Backspace,
+    /// Delete, the word/line kills) owns the non-intercepted keys.
+    LabelInput {
+        entry_id: String,
+        input: SearchInput,
+    },
+    /// "Summarize branch?" (the TS three-option selector).
     Summarize { target_id: String, selected: usize },
-    /// Custom summarization instructions (TS `showExtensionEditor`).
-    CustomPrompt { target_id: String, input: String },
+    /// Custom summarization instructions (the TS inline editor).
+    CustomPrompt {
+        target_id: String,
+        input: SearchInput,
+    },
 }
 
-/// The summarize options, in order.
 const SUMMARIZE_OPTIONS: [&str; 3] = ["No summary", "Summarize", "Summarize with custom prompt"];
 
 /// The `/tree` selector.
 pub struct TreeSelector {
     list: TreeList,
     mode: Mode,
-    /// The `branchSummary.skipPrompt` setting: selecting a row navigates
+    /// The `branchSummary.skipPrompt` setting: select navigates
     /// directly with no summary instead of asking.
     skip_summarize_prompt: bool,
 }
 
 impl TreeSelector {
     /// Build the selector over the `get_session_tree` response data.
-    /// `skip_summarize_prompt` mirrors the `branchSummary.skipPrompt` setting
-    /// (the choice pass is skipped, defaulting to no summary).
     pub fn new(
         data: &Value,
         terminal_rows: u16,
@@ -87,23 +90,33 @@ impl TreeSelector {
         })
     }
 
-    /// The current leaf id (the caller needs it for the "already at this
-    /// point" no-op check).
+    /// The current leaf id (the caller's no-op check).
     #[must_use]
     pub fn current_leaf_id(&self) -> Option<&str> {
         self.list.current_leaf_id()
     }
 
-    /// Re-open helper (TS re-shows the selector with the same selection
-    /// after a cancelled branch summary): move the cursor to `entry_id`.
+    /// Re-open helper: after a cancelled branch summary, TS re-shows
+    /// the selector with the same selection.
     pub fn set_initial_selection(&mut self, entry_id: Option<&str>) {
         self.list.move_selection_to(entry_id);
     }
 
-    /// Apply a saved label locally (TS `updateNodeLabel`).
+    /// Apply a saved label locally.
     pub fn update_label(&mut self, entry_id: &str, label: Option<&str>) {
         self.list
             .update_node_label(entry_id, label.map(str::to_string), "");
+    }
+
+    /// One bracketed paste (TS routes the raw data to the open input):
+    /// the label and custom-prompt inputs take it, the tree search
+    /// appends it, and the summarize choice list consumes it.
+    pub fn paste(&mut self, text: &str) {
+        match &mut self.mode {
+            Mode::Tree => self.list.paste(text),
+            Mode::LabelInput { input, .. } | Mode::CustomPrompt { input, .. } => input.paste(text),
+            Mode::Summarize { .. } => {}
+        }
     }
 
     /// Handle one key id; the emitted action carries the caller's work.
@@ -112,7 +125,6 @@ impl TreeSelector {
             Mode::Tree => match self.list.handle_key(kb, id) {
                 TreeListAction::Select(target_id) => {
                     if self.skip_summarize_prompt {
-                        // The skip-prompt setting: navigate with no summary.
                         TreeSelectorAction::Navigate {
                             target_id,
                             summarize: false,
@@ -128,18 +140,20 @@ impl TreeSelector {
                 }
                 TreeListAction::Cancel => TreeSelectorAction::Cancel,
                 TreeListAction::EditLabel(entry_id) => {
+                    // TS `LabelInput` seeds the input with the current label
+                    // (`setValue`, which leaves the caret at 0); the port's
+                    // prefill puts it at the end.
                     let current = self.list.label_of(&entry_id).unwrap_or_default();
-                    self.mode = Mode::LabelInput {
-                        entry_id,
-                        input: current,
-                    };
+                    let mut input = SearchInput::new();
+                    input.prefill(&current);
+                    self.mode = Mode::LabelInput { entry_id, input };
                     TreeSelectorAction::None
                 }
                 TreeListAction::None => TreeSelectorAction::None,
             },
             Mode::LabelInput { entry_id, input } => {
                 if kb.matches(id, "tui.select.confirm") {
-                    let label = input.trim().to_string();
+                    let label = input.value().trim().to_string();
                     let label = (!label.is_empty()).then_some(label);
                     let action = TreeSelectorAction::LabelChange {
                         entry_id: entry_id.clone(),
@@ -150,13 +164,9 @@ impl TreeSelector {
                 } else if kb.matches(id, "tui.select.cancel") {
                     self.mode = Mode::Tree;
                     TreeSelectorAction::None
-                } else if kb.matches(id, "tui.editor.deleteCharBackward") {
-                    input.pop();
-                    TreeSelectorAction::None
-                } else if let Some(ch) = printable(id) {
-                    input.push(ch);
-                    TreeSelectorAction::None
                 } else {
+                    // TS `LabelInput.handleInput`: every other key id goes whole to the input.
+                    input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
             }
@@ -188,7 +198,7 @@ impl TreeSelector {
                             let target_id = target_id.clone();
                             self.mode = Mode::CustomPrompt {
                                 target_id,
-                                input: String::new(),
+                                input: SearchInput::new(),
                             };
                             TreeSelectorAction::None
                         }
@@ -209,7 +219,7 @@ impl TreeSelector {
             }
             Mode::CustomPrompt { target_id, input } => {
                 if kb.matches(id, "tui.select.confirm") {
-                    let instructions = input.trim().to_string();
+                    let instructions = input.value().trim().to_string();
                     let target_id = target_id.clone();
                     self.mode = Mode::Tree;
                     TreeSelectorAction::Navigate {
@@ -218,50 +228,37 @@ impl TreeSelector {
                         custom_instructions: (!instructions.is_empty()).then_some(instructions),
                     }
                 } else if kb.matches(id, "tui.select.cancel") {
-                    // A cancelled editor loops back to the choice (TS).
+                    // A cancelled editor loops back to the choice.
                     let target_id = target_id.clone();
                     self.mode = Mode::Summarize {
                         target_id,
                         selected: 2,
                     };
                     TreeSelectorAction::None
-                } else if kb.matches(id, "tui.editor.deleteCharBackward") {
-                    input.pop();
-                    TreeSelectorAction::None
-                } else if let Some(ch) = printable(id) {
-                    input.push(ch);
-                    TreeSelectorAction::None
                 } else {
+                    // TS's custom-prompt editor (`ExtensionEditorComponent`) takes
+                    // every other key id whole.
+                    input.handle_key(id, kb);
                     TreeSelectorAction::None
                 }
             }
         }
     }
 
-    /// The full pane (TS `TreeSelectorComponent.render`): spacers, borders,
-    /// title, hints, search line, the tree, and any active input.
+    /// The full pane.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());
         lines.push(border());
-        // TS `new Text("  Session Tree", 1, 0)`: the text plus its margin
-        // indent render as three leading spaces.
+        // The margin makes three leading spaces.
         lines.push(vec![crate::Span::raw("   Session Tree")]);
-        // TS composes the hints from `keyText` lookups: every key part is
-        // capitalized (`Shift+L`, `Ctrl+D`), and `TruncatedText` appends
-        // `...` when the line exceeds the pane width. The label, filter,
-        // cycle, and time keys render from the effective bindings, so a
-        // user `keybindings.json` override moves the hint with the
-        // handler; the move/page/fold arrows stay the literal glyphs TS
-        // renders (`^←/^→ or Alt+←/Alt+→`).
-        // Each derived cell keeps only its bound keys' labels (a
-        // multi-key binding names its first key, the crate's one-line
-        // grammar), an override that empties a binding drops that key,
-        // and a part whose every binding is empty drops its whole
-        // segment — the hint never shows a blank slot or an unlabelled
-        // action.
+        // The label, filter, cycle, and time keys render from the
+        // effective bindings (an override moves the hint with the
+        // handler); the arrows stay TS's literal glyphs. An emptied
+        // binding drops its key, and a part with every binding empty
+        // drops its whole segment.
         let first = |id: &str| {
             kb.first_key(id)
                 .map(|key| crate::keybindings::format_key_text(&key))
@@ -293,8 +290,7 @@ impl TreeSelector {
         if let Some(time) = first("app.tree.toggleLabelTimestamp") {
             parts.push(format!("{time}: label time"));
         }
-        // `TruncatedText` cuts the colored string and appends a plain
-        // `...` after the color reset.
+        // `TruncatedText` appends a plain `...` after the color reset.
         let hints_line = vec![theme.fg_span(ThemeColor::Muted, parts.join(" "))];
         if line_width(&hints_line) > width {
             let mut hints = truncate_line(&hints_line, width.saturating_sub(3), "");
@@ -303,8 +299,7 @@ impl TreeSelector {
         } else {
             lines.push(truncate_line(&hints_line, width, ""));
         }
-        // TS `SearchLine`: the two-space indent sits outside the muted
-        // escape.
+        // The two-space indent sits outside the muted escape.
         let query = self.list.search_query();
         let search: Line = if query.is_empty() {
             vec![
@@ -339,12 +334,7 @@ impl TreeSelector {
                             width,
                             "",
                         ));
-                        let row = if input.is_empty() {
-                            vec![crate::Span::raw("  ")]
-                        } else {
-                            vec![crate::Span::raw(format!("  {input}"))]
-                        };
-                        lines.push(truncate_line(&row, width, ""));
+                        lines.push(input_row(theme, width, input));
                         lines.push(truncate_line(
                             &vec![theme
                                 .fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
@@ -363,12 +353,7 @@ impl TreeSelector {
                     width,
                     "",
                 ));
-                let row = if input.is_empty() {
-                    vec![crate::Span::raw("  ")]
-                } else {
-                    vec![crate::Span::raw(format!("  {input}"))]
-                };
-                lines.push(truncate_line(&row, width, ""));
+                lines.push(input_row(theme, width, input));
                 lines.push(truncate_line(
                     &vec![theme.fg_span(ThemeColor::Muted, input_pane_hint(kb, "save", "cancel"))],
                     width,
@@ -382,14 +367,8 @@ impl TreeSelector {
     }
 }
 
-/// The key pair every inner pane's bottom hint renders (TS
-/// `ExtensionSelectorComponent`'s `keyHint` pair): each segment carries
-/// its binding's first effective key — `tui.select.cancel` defaults to
-/// two keys, and the one-line hint shows the primary, the crate's
-/// `key_hint` grammar — and a user override that empties a binding
-/// drops its segment, so the hint never advertises a default key the
-/// pane no longer takes. The action words name what the keys do on that
-/// pane.
+/// The key pair every inner pane's bottom hint renders: each segment
+/// carries its binding's first effective key.
 fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action: &str) -> String {
     let segments = [
         crate::menu_panel::key_hint(kb, &["tui.select.confirm"], confirm_action),
@@ -400,6 +379,20 @@ fn input_pane_hint(kb: &KeybindingsManager, confirm_action: &str, cancel_action:
     .collect::<Vec<String>>()
     .join("  ");
     format!("  {segments}")
+}
+
+/// The input panes' field row (TS `LabelInput.render`): the two-space
+/// indent, then `Input.render` at the remaining width with its caret.
+fn input_row(theme: &Theme, width: usize, input: &SearchInput) -> Line {
+    let mut row = vec![crate::Span::raw("  ")];
+    row.extend(crate::menu_panel::input_render(
+        theme,
+        width.saturating_sub(2),
+        input.value(),
+        input.cursor(),
+        /*focused*/ true,
+    ));
+    truncate_line(&row, width, "")
 }
 
 /// Render the summarize choice list (the three TS options; row one is
@@ -434,22 +427,14 @@ fn render_choice(
     lines
 }
 
-/// One key id's printable character, when it is one (search/input typing).
-fn printable(id: &str) -> Option<char> {
-    let mut chars = id.chars();
-    let c = chars.next()?;
-    (chars.next().is_none() && !c.is_control()).then_some(c)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::theme::{ColorMode, Theme};
     use serde_json::{json, Value};
 
-    /// A selector over one visible user-message node (the default tree
-    /// filter hides settings-class entries, so the pane's fixtures ride
-    /// the same `wire_chain` user-message shape as the deep-tree tests).
+    /// A selector over one visible user-message node (the default filter
+    /// hides settings-class entries, so the fixtures use `wire_chain`).
     fn selector() -> TreeSelector {
         TreeSelector::new(&wire_chain(1), 40, false, FilterMode::Default)
             .expect("a selector over one node")
@@ -467,11 +452,6 @@ mod tests {
             .join("\n")
     }
 
-    /// The tree hint's label, filter, cycle, and time keys render from
-    /// the effective bindings (TS composes them from `keyText`): the
-    /// defaults match TS's stock string byte for byte, and a user
-    /// override moves the hint with the handler instead of leaving the
-    /// stale default behind.
     #[test]
     fn tree_hint_renders_the_effective_bindings() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -499,13 +479,9 @@ mod tests {
         assert!(!text.contains("Shift+L: label"), "{text}");
     }
 
-    /// An override that empties a tree binding drops its key, and a
-    /// part whose every binding is empty drops its whole segment — the
-    /// hint never shows a blank slot or an unlabelled action.
     #[test]
     fn tree_hint_drops_unbound_keys_and_segments() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        // One emptied filter drops its key from the key run.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         cfg.insert("app.tree.filter.noTools".to_string(), Vec::new());
         let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -515,7 +491,6 @@ mod tests {
             "the emptied filter leaves no blank slot: {text}"
         );
         assert!(!text.contains("//"), "no empty key slot: {text}");
-        // Both cycle keys emptied drops the cycle suffix.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         for id in [
             "app.tree.filter.cycleForward",
@@ -530,8 +505,6 @@ mod tests {
             "the cycle suffix drops with its keys: {text}"
         );
         assert!(!text.contains("cycle"), "{text}");
-        // Every filter plus the label key emptied drops the whole
-        // filter and label segments; the time part stays.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         for id in [
             "app.tree.filter.default",
@@ -550,12 +523,6 @@ mod tests {
         assert!(text.contains("Shift+T: label time"), "{text}");
     }
 
-    /// The summarize pane's select/back pair and the input panes'
-    /// save/cancel pair render from the effective bindings: each
-    /// segment carries its binding's FIRST key (tui.select.cancel
-    /// defaults to escape and ctrl+c; the one-line hint names the
-    /// primary), and an override that empties a binding drops its
-    /// segment instead of advertising the default key.
     #[test]
     fn inner_pane_hints_render_the_effective_bindings() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -571,8 +538,6 @@ mod tests {
         sel.handle_key(&kb, "ctrl+m");
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Ctrl+M select  Esc back"), "{text}");
-        // An emptied cancel binding drops the back segment: the hint
-        // keeps the confirm segment alone, never the default Esc.
         let mut cfg = crate::keybindings::KeybindingsConfig::new();
         cfg.insert("tui.select.cancel".to_string(), Vec::new());
         let kb = KeybindingsManager::with_user_bindings(cfg);
@@ -581,6 +546,169 @@ mod tests {
         let text = frame_text(&sel.render(&theme, 120, &kb));
         assert!(text.contains("  Enter select\n"), "{text}");
         assert!(!text.contains("Esc back"), "{text}");
+    }
+
+    /// Every non-intercepted key reaches the label input: the typed
+    /// space lands, ctrl+w deletes the trailing word, ctrl+u clears the
+    /// draft.
+    #[test]
+    fn label_input_edits_through_the_full_key_grammar() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        for key in ["a", "b", "space", "c", "d"] {
+            sel.handle_key(&kb, key);
+        }
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("ab cd"), "the typed space lands: {text}");
+        sel.handle_key(&kb, "ctrl+w");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(
+            text.contains("ab "),
+            "ctrl+w deletes the trailing word: {text}"
+        );
+        // The cleared draft saves as the label's removal (TS
+        // `onSubmit`'s empty-label arm — the frame's hint rows would
+        // swallow a plain substring check, so the action carries the
+        // proof).
+        sel.handle_key(&kb, "ctrl+u");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::LabelChange {
+                entry_id: "n0".to_string(),
+                label: None,
+            },
+            "ctrl+u clears the label"
+        );
+        // The save hands a typed draft out (TS `onSubmit`).
+        sel.handle_key(&kb, "shift+l");
+        sel.handle_key(&kb, "x");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::LabelChange {
+                entry_id: "n0".to_string(),
+                label: Some("x".to_string()),
+            }
+        );
+    }
+
+    /// TS's custom-prompt editor (the `ExtensionEditorComponent`) hands
+    /// every non-intercepted key to the full editor grammar.
+    #[test]
+    fn custom_prompt_edits_through_the_full_key_grammar() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        // Enter opens the summarize choice; its third option opens the
+        // custom-prompt editor.
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "enter");
+        for key in ["s", "u", "m", "space", "i", "t"] {
+            sel.handle_key(&kb, key);
+        }
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(text.contains("sum it"), "the typed space lands: {text}");
+        sel.handle_key(&kb, "ctrl+w");
+        let text = frame_text(&sel.render(&theme, 120, &kb));
+        assert!(
+            text.contains("sum "),
+            "ctrl+w deletes the trailing word: {text}"
+        );
+        // Enter submits the trimmed instructions (TS `onSubmit`).
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::Navigate {
+                target_id: "n0".to_string(),
+                summarize: true,
+                custom_instructions: Some("sum".to_string()),
+            }
+        );
+        // The cancel arm keeps its ladder: escape returns to the choice,
+        // and Enter on the choice re-opens the editor with an empty draft
+        // (TS's cancelled editor loops back to the choice — the frame's
+        // hint rows would swallow a plain substring check, so the
+        // submitted instructions carry the proof).
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "down");
+        sel.handle_key(&kb, "enter");
+        for key in ["o", "l", "d"] {
+            sel.handle_key(&kb, key);
+        }
+        sel.handle_key(&kb, "escape");
+        sel.handle_key(&kb, "enter");
+        sel.handle_key(&kb, "b");
+        let action = sel.handle_key(&kb, "enter");
+        assert_eq!(
+            action,
+            TreeSelectorAction::Navigate {
+                target_id: "n0".to_string(),
+                summarize: true,
+                custom_instructions: Some("b".to_string()),
+            },
+            "the reopened editor starts empty, so the draft is exactly the new keystroke"
+        );
+    }
+
+    /// A paste lands in the active input (TS routes the raw data to the
+    /// open `Input`): the label editor takes it, the tree search appends
+    /// it, and the summarize choice list consumes it.
+    #[test]
+    fn a_paste_reaches_the_open_input() {
+        let kb = KeybindingsManager::new();
+        // The label input.
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        sel.paste("renamed");
+        let value = match &sel.mode {
+            Mode::LabelInput { input, .. } => input.value().to_string(),
+            _ => panic!("the label input stays open"),
+        };
+        assert_eq!(value, "renamed");
+        sel.handle_key(&kb, "escape");
+        // The tree search appends it.
+        sel.paste("chain");
+        assert_eq!(sel.list.search_query(), "chain");
+        // The summarize choice list consumes it (a fresh selector, the
+        // search-filtered list above has no confirm target).
+        let mut sel = selector();
+        sel.handle_key(&kb, "enter");
+        assert!(matches!(sel.mode, Mode::Summarize { .. }));
+        sel.paste("ignored");
+        assert_eq!(sel.list.search_query(), "");
+    }
+
+    /// The label pane draws its caret at the cursor (TS `Input.render`'s
+    /// reversed cell): two lefts after "abc" put it on the "b".
+    #[test]
+    fn label_input_draws_the_caret_at_the_cursor() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let mut sel = selector();
+        sel.handle_key(&kb, "shift+l");
+        for key in ["a", "b", "c", "left", "left"] {
+            sel.handle_key(&kb, key);
+        }
+        let frame = sel.render(&theme, 120, &kb);
+        let is_caret = |span: &crate::Span| {
+            span.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        };
+        let row = frame
+            .iter()
+            .find(|line| line.iter().any(is_caret))
+            .expect("the label row draws a caret");
+        let at = row.iter().position(is_caret).expect("the caret cell");
+        let before: String = row[..at].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!((before.as_str(), row[at].content.as_str()), ("  a", "b"));
     }
 
     /// The `get_session_tree` wire payload of a linear chain of user
@@ -611,7 +739,7 @@ mod tests {
         })
     }
 
-    /// One cycle-only or cycle-plus-clean-roots payload, with `leaf` as
+    /// A cycle-only or cycle-plus-clean-roots payload, with `leaf` as
     /// the reported leaf.
     fn wire_parents(leaf: &str) -> Value {
         json!({
@@ -659,8 +787,6 @@ mod tests {
 
     #[test]
     fn empty_wire_tree_returns_none() {
-        // Empty data never opens the pane: the caller shows its
-        // "No entries in session" note instead.
         let empty = json!({ "flatNodes": [], "leafId": null });
         assert!(
             TreeSelector::new(&empty, 40, false, FilterMode::Default).is_none(),
@@ -676,8 +802,8 @@ mod tests {
     #[test]
     fn deep_wire_chain_opens_and_renders() {
         // The operator's crash input: a linear session tens of thousands
-        // of entries deep. Build, walk, and render all stay off the call
-        // stack, and the leaf stays selected through the whole depth.
+        // of entries deep — build, walk, and render stay off the call
+        // stack.
         let data = wire_chain(30_000);
         let selector =
             TreeSelector::new(&data, 24, false, FilterMode::Default).expect("deep chain opens");
@@ -708,8 +834,6 @@ mod tests {
 
     #[test]
     fn zero_terminal_rows_and_zero_width_render() {
-        // A zero-size terminal geometry must render, not panic: the pane
-        // clamps its border and truncates every row to the budget.
         let data = wire_chain(2);
         let selector = TreeSelector::new(&data, 0, false, FilterMode::Default)
             .expect("selector opens at zero terminal rows");
@@ -722,10 +846,6 @@ mod tests {
 
     #[test]
     fn parent_cycles_terminate() {
-        // A cycle with no root yields an empty tree (the caller's empty
-        // note); with a clean root present the pane opens, and a leaf
-        // inside the cycle ends the parent-chain walks instead of
-        // spinning.
         let cycle_only = json!({
             "flatNodes": [
                 {

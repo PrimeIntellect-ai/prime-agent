@@ -1,7 +1,6 @@
 //! Terminal column width measurement, wrapping, and truncation.
-//!
-//! Mirrors `packages/tui/src/utils.ts`: grapheme-aware widths, emoji counted
-//! as 2 columns, tabs expand to 3 spaces when measuring rendered output.
+//! Mirrors TS `utils.ts`: grapheme-aware widths, emoji as 2 columns,
+//! tabs expand to 3 spaces.
 
 use crate::{Line, Span};
 use unicode_properties::{
@@ -13,10 +12,8 @@ mod wrapping;
 #[cfg(test)]
 mod wrapping_tests;
 
-/// Truncate to a display-width budget and pad with spaces to exactly
-/// `width` columns — grapheme-aware (multi-codepoint clusters such as
-/// `\u{1f468}\u{200d}\u{1f469}...` measure as one cell through
-/// [`grapheme_width`], never per scalar): the table cells stay aligned.
+/// Truncate to a display-width budget and pad to exactly `width`
+/// columns — grapheme-aware, so table cells stay aligned.
 #[must_use]
 pub fn pad_cell(text: &str, width: usize) -> String {
     use unicode_segmentation::UnicodeSegmentation;
@@ -35,10 +32,7 @@ pub fn pad_cell(text: &str, width: usize) -> String {
 }
 
 /// Truncate a plain string to a display-width budget, ellipsis included
-/// (TS `truncateToWidth(text, maxWidth, ellipsis)` over sanitized text:
-/// no ANSI and no pad). The kept grapheme prefix leaves room for the
-/// ellipsis; a budget too small for the ellipsis clips the ellipsis
-/// instead of emitting one past the budget.
+/// (no ANSI, no pad); a budget too small for the ellipsis clips it.
 #[must_use]
 pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
@@ -82,17 +76,9 @@ pub fn truncate_to_width(text: &str, max_width: usize, ellipsis: &str) -> String
 pub fn char_width(c: char) -> usize {
     match c {
         '\t' => 3,
-        // Conjoining jamo + a few letters that EastAsianWidth rates 1 but
-        // unicode-width rates 0 (its Grapheme_Extend view of the jamo
-        // vowels/trails). TS measures the EAW value (an exhaustive
-        // unicode-width vs get-east-asian-width scan found exactly this
-        // set plus the FF9E/FF9F halves below; verified against the TS
-        // dist).
-        // TS `graphemeWidth` counts the halfwidth katakana sound marks
-        // (EastAsianWidth H) as one column each, both standalone and as
-        // the trailing half of a cluster; `unicode-width` counts them zero
-        // as Grapheme_Extend. The prompt-token mask pads its placeholders
-        // with `FF9E` per extra column, so the layout wrap must count it.
+        // Chars EastAsianWidth rates 1 but unicode-width rates 0; TS measures the EAW value,
+        // and an exhaustive scan found exactly this set. The halfwidth katakana sound marks
+        // count one column (the prompt-token mask pads placeholders with `FF9E`).
         '\u{1161}'..='\u{11ff}'
         | '\u{d7b0}'..='\u{d7c6}'
         | '\u{d7cb}'..='\u{d7fb}'
@@ -112,10 +98,8 @@ pub fn char_width(c: char) -> usize {
     }
 }
 
-/// Length of a complete ANSI escape sequence at the start of `s`, if any
-/// (TS `createAnsiCodeExtractor`): CSI parameter/intermediate/final bytes,
-/// OSC and APC strings ending at BEL or ST, and DCS/PM/SOS ending at ST.
-/// A malformed or unterminated sequence returns `None` and stays visible.
+/// Length of a complete ANSI escape sequence at the start of `s`, if any: CSI, OSC/APC ending
+/// at BEL or ST, DCS/PM/SOS ending at ST. A malformed sequence returns `None` and stays visible.
 pub(crate) fn escape_len(s: &str) -> Option<usize> {
     let mut chars = s.char_indices();
     let (_, first) = chars.next()?;
@@ -164,30 +148,26 @@ pub(crate) fn escape_len(s: &str) -> Option<usize> {
     }
 }
 
-/// The visible width of a string (grapheme clusters, escape sequences at
-/// zero width, tabs expanded to three spaces).
+/// The visible width of a string (grapheme clusters, escape sequences at zero width, tabs
+/// expanded to three spaces).
 ///
 /// # Panics
 ///
-/// Panics when the width-cache mutex is poisoned (a thread panicked
-/// while holding it); the `expect` guards the loop condition and
-/// cannot fire.
+/// Panics when the width-cache mutex is poisoned; the `expect` cannot fire.
 #[must_use]
 pub fn str_width(s: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     if s.is_empty() {
         return 0;
     }
-    // TS `isPrintableAscii` fast path: a pure printable-ASCII string is as
-    // wide as it is long, no grapheme segmentation needed.
+    // TS `isPrintableAscii` fast path: no grapheme segmentation needed.
     if s.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
         return s.len();
     }
     if let Some(width) = width_cache().lock().unwrap().get(s) {
         return *width;
     }
-    // TS `visibleWidth` expands tabs to three spaces BEFORE measuring (a
-    // tab is 3 columns everywhere the editor renders one).
+    // TS `visibleWidth` expands tabs to three spaces BEFORE measuring.
     let expanded;
     let measured = if s.contains('\t') {
         expanded = s.replace('\t', "   ");
@@ -227,23 +207,19 @@ fn width_cache() -> &'static std::sync::Mutex<std::collections::HashMap<Box<str>
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// A char that renders nothing on its own: controls and zero-width chars
-/// (unicode-width reports marks, joiners, and variation selectors as `None`).
+/// A char that renders nothing on its own: controls and zero-width chars.
 fn is_invisible(c: char) -> bool {
     c.is_control() || (c.width().unwrap_or(0) == 0 && !is_eaw_one_wide_zero(c))
 }
 
-/// TS `\p{Mark}` (Mn|Mc|Me). unicode-width only zeroes Mn/Me, so spacing
-/// marks (Devanagari U+0903, Bengali U+0983, …) need the category lookup to
-/// measure zero like TS's zeroWidthRegex.
+/// TS `\p{Mark}` (Mn|Mc|Me). unicode-width only zeroes Mn/Me, so
+/// spacing marks need the category lookup.
 fn is_mark(c: char) -> bool {
     c.general_category_group() == GeneralCategoryGroup::Mark
 }
 
-/// True for a char that unicode-width reports zero but TS measures 1 (its
-/// EastAsianWidth): the conjoining jamo, the halfwidth voicing marks, and
-/// a few letters (the exhaustive unicode-width vs get-east-asian-width
-/// scan; the `char_width` match carries the same set).
+/// True for a char that unicode-width reports zero but TS measures 1
+/// (its `EastAsianWidth`).
 fn is_eaw_one_wide_zero(c: char) -> bool {
     matches!(
         c,
@@ -265,26 +241,22 @@ fn is_eaw_one_wide_zero(c: char) -> bool {
 
 /// Char classes of the TS `zeroWidthRegex` alternation:
 /// `\p{Control}|\p{Mark}|\p{Default_Ignorable_Code_Point}|\p{Surrogate}`
-/// (surrogates cannot appear in a Rust `str`). `is_invisible` covers the
-/// controls, Mn/Me marks and every default-ignorable; spacing marks are the
-/// only width-1 additions.
+/// (surrogates cannot appear in a `str`).
 fn is_zero_class_char(c: char) -> bool {
     // U+115F (Hangul choseong filler) is the one Default_Ignorable char
-    // unicode-width rates nonzero (2): TS's zeroWidthRegex zeroes it and
-    // the leading strip removes it inside clusters.
+    // unicode-width rates nonzero; TS zeroes it.
     is_invisible(c) || is_mark(c) || c == '\u{115f}'
 }
 
 /// Char classes of the TS `leadingNonPrintingRegex` strip set:
 /// `\p{DIC}|\p{Control}|\p{Format}|\p{Mark}|\p{Surrogate}`. The Format
-/// term contributes the prepended concatenation marks (U+0600, …), the only
-/// width-1 format chars unicode-width reports.
+/// term contributes the prepended concatenation marks (U+0600, …).
 fn is_leading_nonprinting(c: char) -> bool {
     is_zero_class_char(c) || c.general_category() == GeneralCategory::Format
 }
 
-/// Single-codepoint RGI emoji: TS `\p{RGI_Emoji}` matches a bare codepoint
-/// exactly when `Emoji_Presentation=Yes` (`⭐`, `⌚`, `🀄`, the flag RIs, …).
+/// Single-codepoint RGI emoji: TS `\p{RGI_Emoji}` matches a bare
+/// codepoint exactly when `Emoji_Presentation=Yes`.
 fn is_emoji_presentation(c: char) -> bool {
     matches!(
         c.emoji_status(),
@@ -296,8 +268,8 @@ fn is_emoji_presentation(c: char) -> bool {
 }
 
 pub(crate) fn grapheme_width(g: &str) -> usize {
-    // TS `visibleWidth` replaces tabs with three spaces before segmenting,
-    // so a tab cluster measures 3 columns (GB5 keeps it its own cluster).
+    // A tab cluster measures 3 columns (TS replaces tabs before
+    // segmenting).
     if g == "\t" {
         return 3;
     }
@@ -306,7 +278,6 @@ pub(crate) fn grapheme_width(g: &str) -> usize {
         return 0;
     };
     if chars.all(is_zero_class_char) && is_zero_class_char(first) {
-        // TS zeroWidthRegex: control / mark / default-ignorable cluster.
         return 0;
     }
     // Regional indicators render as flag emoji even when isolated (the
@@ -315,31 +286,17 @@ pub(crate) fn grapheme_width(g: &str) -> usize {
         return 2;
     }
     if g.chars().count() > 1 && is_rgi_emoji_cluster(first, g) {
-        // Approximation of the TS RGI_Emoji test: an emoji-led multi-char
-        // cluster (ZWJ family, skin tone, VS16 presentation, keycap) is
-        // one 2-column cell.
         return 2;
     }
     if is_emoji_presentation(first) {
-        // Single-codepoint RGI emoji carry Emoji_Presentation=Yes (the
-        // star U+2B50, watch U+231A, mahjong U+1F004, ...) and render two
-        // columns even though EastAsianWidth is Neutral; unicode-width
-        // would say 1.
+        // Single-codepoint RGI emoji render two columns even though
+        // EastAsianWidth is Neutral.
         return 2;
     }
-    // TS strips a leading non-printing run, then measures the base code
-    // point: a prepended-concatenation-mark cluster (U+0600 + "1") measures
-    // the digit, a cluster whose leading run ate everything is zero, and a
-    // single visible char passes through with base = the char itself.
     let base = g.trim_start_matches(is_leading_nonprinting);
     let Some(base_c) = base.chars().next() else {
         return 0;
     };
-    // Base visible char plus the trailing forms TS counts: halfwidth/
-    // fullwidth forms and the Thai/Lao AM vowels; marks add nothing. The
-    // loop walks the raw cluster after the first char, exactly like TS's
-    // `segment.slice(1)` (an astral base leaves a low surrogate there,
-    // which never matches).
     let mut w = char_width(base_c);
     for c in g.chars().skip(1) {
         if ('\u{ff00}'..='\u{ffef}').contains(&c) {
@@ -351,11 +308,8 @@ pub(crate) fn grapheme_width(g: &str) -> usize {
     w
 }
 
-/// Approximation of the TS `rgiEmojiRegex` decisive test for multi-char
-/// clusters. In TS `couldBeEmoji` is only a pre-filter; a cluster renders 2
-/// columns only when the whole sequence is an RGI emoji: a ZWJ sequence of
-/// emoji parts, an emoji (or keycap base) with VS16, or an emoji with a
-/// skin-tone modifier. A letter plus combining marks must fall through here.
+/// Approximation of the TS `rgiEmojiRegex` decisive test: a cluster
+/// renders 2 columns only when the whole sequence is an RGI emoji.
 fn is_rgi_emoji_cluster(first: char, g: &str) -> bool {
     let skin_tone = |c: char| ('\u{1f3fb}'..='\u{1f3ff}').contains(&c);
     let keycap_base = |c: char| c.is_ascii_digit() || c == '#' || c == '*';
@@ -369,9 +323,8 @@ fn is_rgi_emoji_cluster(first: char, g: &str) -> bool {
         });
     }
     if g.contains('\u{fe0f}') {
-        // VS16 presentation / keycap sequence (`™️`, `©️`, `#️⃣`, `😀️`):
-        // RGI contains base+VS16 exactly for Emoji=YES bases. Non-emoji
-        // bases with a stray VS16 (`☐️`) fall through to the base width.
+        // VS16 presentation / keycap sequence: RGI contains base+VS16 exactly for Emoji=YES
+        // bases; a stray VS16 on a non-emoji base falls through to the base width.
         return first.is_emoji_char() || keycap_base(first);
     }
     // Emoji + skin tone modifier (no VS16, no ZWJ).
@@ -389,10 +342,8 @@ pub fn line_width(line: &[Span]) -> usize {
 
 #[must_use]
 pub fn is_whitespace_char(c: char) -> bool {
-    // TS `isWhitespaceChar` tests JS /\s/: same set as Unicode White_Space
-    // except the BOM (U+FEFF) counts as whitespace and NEL (U+0085) does
-    // not — the wrap-opportunity logic in wordWrapLine depends on the
-    // distinction (a FEFF cluster records a break opportunity).
+    // TS `isWhitespaceChar` tests JS /\s/: same set as Unicode White_Space except the BOM
+    // (U+FEFF) counts and NEL (U+0085) does not — the wrap logic depends on it.
     c == '\u{feff}' || (c != '\u{0085}' && c.is_whitespace())
 }
 
@@ -403,11 +354,8 @@ pub fn is_punctuation_char(c: char) -> bool {
     PUNCTUATION.contains(c)
 }
 
-/// Normalize text for terminal output without changing logical content (TS
-/// `normalizeTerminalOutput`): some terminals render precomposed Thai/Lao
-/// AM vowels inconsistently during differential repaint, and their
-/// compatibility decompositions have the same cell width but avoid
-/// stale-cell artifacts; tabs expand to three spaces at paint.
+/// Normalize text for terminal output without changing logical content: Thai/Lao AM vowels
+/// decompose to compatibility forms (same width, no stale cells); tabs expand to three spaces.
 #[must_use]
 pub fn normalize_terminal_output(s: &str) -> String {
     let has_thai_lao_am = s.contains('\u{0e33}') || s.contains('\u{0eb3}');
@@ -426,8 +374,6 @@ pub fn normalize_terminal_output(s: &str) -> String {
     out
 }
 
-/// Strip a leading run of zero-width/format chars (approximation of the TS
-/// leading-non-printing trim).
 fn base_char_width(c: char) -> usize {
     match c {
         '\u{200b}'..='\u{200f}'
@@ -448,13 +394,12 @@ pub fn pad_line(mut line: Line, width: usize) -> Line {
     line
 }
 
-/// Truncate a line to `max_width` visible columns, appending `ellipsis` (also
-/// measured) when content was cut.
+/// Truncate a line to `max_width` visible columns, appending `ellipsis` (also measured) when
+/// content was cut.
 ///
 /// # Panics
 ///
-/// Cannot panic: the `expect` guards the loop condition (`rest` is
-/// non-empty exactly when checked).
+/// Cannot panic: the `expect` guards the loop condition (`rest` is non-empty when checked).
 #[must_use]
 pub fn truncate_line(line: &Line, max_width: usize, ellipsis: &str) -> Line {
     if line_width(line) <= max_width {
@@ -508,10 +453,8 @@ fn push_char(out: &mut Line, style: ratatui::style::Style, c: char) {
     out.push(Span::styled(c.to_string(), style));
 }
 
-/// Split a line into wrapped lines at word boundaries, mirroring
-/// `wrapSingleLine` in utils.ts: break long tokens at char level, trim
-/// trailing whitespace on each wrapped line, never start a line with
-/// whitespace.
+/// Split a line into wrapped lines at word boundaries, mirroring TS `wrapSingleLine`: break
+/// long tokens at char level, never start a line with whitespace.
 #[must_use]
 pub fn wrap_line(line: &Line, width: usize) -> Vec<Line> {
     wrapping::render(line, width)
@@ -551,22 +494,18 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<Line> {
 }
 
 /// Slice a line by visible columns `[start, start+length)` (the TS
-/// `sliceByColumn` default): whole grapheme clusters in or out — a cluster
-/// whose start column is in range is included even when it straddles the
-/// end boundary.
+/// `sliceByColumn` default): whole grapheme clusters in or out.
 #[must_use]
 pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
     slice_line_by_column_strict(line, start, length, false)
 }
 
-/// The `strict` form of TS `sliceByColumn` (sliceWithWidth): clip a wide
-/// cluster whose end crosses the slice boundary (the overlay-compositing
-/// form) instead of including it whole.
+/// The `strict` form of TS `sliceByColumn`: clip a wide cluster crossing the slice boundary
+/// instead of including it.
 ///
 /// # Panics
 ///
-/// Cannot panic: the `expect` guards the loop condition (`rest` is
-/// non-empty exactly when checked).
+/// Cannot panic: the `expect` guards the loop condition (`rest` is non-empty when checked).
 #[must_use]
 pub fn slice_line_by_column_strict(line: &Line, start: usize, length: usize, strict: bool) -> Line {
     use unicode_segmentation::UnicodeSegmentation;
@@ -610,7 +549,7 @@ pub fn trim_trailing_empty(lines: &mut Vec<Line>) {
     }
 }
 
-/// First char width of `s` for overflow checks.
+/// Char width for overflow checks.
 #[must_use]
 pub fn base_char_w(c: char) -> usize {
     base_char_width(c)
@@ -622,9 +561,8 @@ mod tests {
 
     #[test]
     fn halfwidth_sound_marks_count_one_column() {
-        // TS `graphemeWidth` counts U+FF9E/U+FF9F (EastAsianWidth H) as
-        // one column each — the prompt-token mask pads its placeholders
-        // with FF9E per extra column, so the layout wrap must count it.
+        // The prompt-token mask pads its placeholders with FF9E per extra
+        // column.
         assert_eq!(char_width('\u{FF9E}'), 1);
         assert_eq!(char_width('\u{FF9F}'), 1);
         assert_eq!(str_width("a\u{FF9E}b"), 3);
@@ -632,7 +570,6 @@ mod tests {
 
     #[test]
     fn multi_code_point_clusters_measure_one_cell() {
-        // Port of TS `graphemeWidth`: clusters measure whole, not per char.
         assert_eq!(str_width("👨‍👩‍👧‍👦"), 2); // ZWJ family: one 2-col cell
         assert_eq!(str_width("🇯🇵"), 2); // flag pair
         assert_eq!(str_width("🇯"), 2); // isolated regional indicator
@@ -647,7 +584,6 @@ mod tests {
 
     #[test]
     fn truncate_to_width_keeps_the_ellipsis_inside_the_budget() {
-        // Fits: unchanged.
         assert_eq!(truncate_to_width("hello", 8, "…"), "hello");
         assert_eq!(truncate_to_width("", 8, "…"), "");
         assert_eq!(truncate_to_width("x", 0, "…"), "");
@@ -665,16 +601,12 @@ mod tests {
         // A budget too small for the ellipsis clips the ellipsis.
         assert_eq!(truncate_to_width("abcdef", 1, "…"), "\u{2026}");
         assert_eq!(truncate_to_width("abcdef", 2, "..."), "..");
-        // An empty ellipsis is a hard truncate at the budget.
         assert_eq!(truncate_to_width("abcdef", 4, ""), "abcd");
     }
 }
 
-/// Golden widths from the TS `visibleWidth` (utils.ts:196, the installed
-/// parity ground truth) over the lane's Unicode corpus: CJK, emoji +
-/// ZWJ families, flags, keycaps, skin tones, combining marks, Thai/Lao
-/// AM, zero-width, wide box-drawing, halfwidth/fullwidth forms, east-
-/// asian ambiguous, jamo, and tabs (3 columns, TS-measured).
+/// Golden widths captured from the TS `visibleWidth` over the lane's
+/// Unicode corpus.
 #[test]
 // deliberate decomposed/non-NFC fixtures: the width engine must measure the raw sequences
 #[allow(clippy::unicode_not_nfc)]
@@ -708,8 +640,7 @@ fn str_width_matches_ts_golden_corpus() {
     }
 }
 
-/// `normalize_terminal_output` goldens (TS utils.ts:313): the Thai/Lao
-/// AM decomposition and tab expansion, unchanged when neither appears.
+/// `normalize_terminal_output` goldens (captured from the TS binary).
 #[test]
 fn normalize_terminal_output_matches_ts_goldens() {
     let cases: Vec<(&str, &str)> = vec![
@@ -726,13 +657,11 @@ fn normalize_terminal_output_matches_ts_goldens() {
             "normalize mismatch for {input:?}"
         );
     }
-    // No AM, no tab: the fast path returns the input unchanged.
     assert_eq!(normalize_terminal_output("plain ascii"), "plain ascii");
 }
 
-/// `slice_line_by_column` goldens (TS `sliceByColumn` semantics):
-/// whole clusters in or out; the strict form clips a wide cluster at
-/// the boundary, the default includes it whole.
+/// `slice_line_by_column` goldens (TS `sliceByColumn` semantics): whole
+/// clusters in or out; the strict form clips.
 #[test]
 fn slice_line_by_column_is_grapheme_level() {
     let line: Line = vec![Span::raw("a你b👨‍👩‍👧‍👦c".to_string())];
@@ -786,10 +715,8 @@ mod uni4_probe_tests {
         assert_eq!(str_width("a\tb"), 5); // tab measures like TS's 3-space swap
         assert_eq!(str_width("\u{FEFF}"), 0);
         assert_eq!(str_width("a\u{200d}b"), 2);
-        // The Hangul choseong filler is Default_Ignorable (TS zeroes the
-        // lone char and strips it inside clusters) and conjoining jamo
-        // measure 1 (EAW), not unicode-width's 0 (unicode-wrap-981's
-        // oracle pair, TS-verified).
+        // The Hangul choseong filler is Default_Ignorable (TS zeroes
+        // it); conjoining jamo measure 1 (EAW).
         assert_eq!(str_width("\u{115f}"), 0);
         assert_eq!(str_width("\u{115f}\u{1161}"), 1);
         assert_eq!(str_width("\u{1161}"), 1);

@@ -1,37 +1,8 @@
-//! Boot sweep + roster restore + the dormant scheduled-jobs report (spec
-//! §6, update flow slice 5; the takeover field fix supersedes its wake
-//! half).
+//! Boot sweep + roster restore + the dormant scheduled-jobs report (spec §6):
+//! the durable truth rehydrates from recovery journals and session files.
 //!
-//! The new supervisor owns the whole boot side of the update (spec §3):
-//! the scratch-dir sweep (invariant I2 by construction), the roster-via-env
-//! restore (the Rust redesign of the TS coordinator-driven restore — the
-//! TS coordinator replays its manifest over the client wire; here the
-//! durable truth rehydrates from the workers' recovery journals and the
-//! sessions' durable files, and the supervisor creates or adopts each
-//! roster row in place).
-//!
-//! THE NO-AUTO-RESUME CONTRACT (the takeover field fix): a daemon boot
-//! never creates a worker for a session the user did not ask for. The
-//! spec §6 step-3 "scheduled-work re-arm" that woke the sessions of
-//! due scheduled jobs is gone — it booted saved sessions on every
-//! normal boot (not just update boots), and its ungated artifacts scan
-//! (no session-state check, no session-file liveness check, no
-//! parent-coverage walk — the TS `scanPassiveScheduledJobs` gates TS
-//! itself applies) read a TS-era `scheduled-jobs.json` heartbeat row
-//! whose `nextRunAt` had gone stale as DUE, so a fresh install over a
-//! shared store booted a random old session the operator's friend had
-//! not had running. The new contract: a session that was not running
-//! when the daemon stopped stays down after the daemon restarts; a
-//! schedule fires only while its session is live (the worker's own
-//! in-process scheduler claims due jobs once the user resumes it);
-//! due heartbeats on not-running sessions stay dormant, surfaced by
-//! the agents-view heartbeat catalog (`heartbeats_list`'s passive
-//! rows) instead of firing. The boot only reports how many are
-//! dormant.
-//!
-//! Restore never fails the boot (spec §9): a row that cannot come up is
-//! recorded as a per-session failure and its session stays on disk for
-//! manual resume.
+//! THE NO-AUTO-RESUME CONTRACT: a boot never creates a worker the user did
+//! not ask for; due heartbeats stay dormant (restore never fails the boot).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -51,47 +22,34 @@ use crate::backpressure::RouteAdmission;
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
 
-/// The client id the supervisor uses for roster-row creates (the Rust
-/// design's counterpart of the TS coordinator's restore client).
+/// The client id the supervisor uses for roster-row creates.
 pub(crate) const UPDATE_RESTORE_CLIENT_ID: &str = "update-restore";
 
-/// TS `UPDATE_RESTART_CONTINUATION_PROMPT`, verbatim (spec §10.5: the
-/// restored session gets the TS-parity continuation treatment).
+/// TS `UPDATE_RESTART_CONTINUATION_PROMPT`, verbatim (spec §10.5).
 pub(crate) const UPDATE_RESTART_CONTINUATION_PROMPT: &str = "Prime Agent restarted after an update. Continue the interrupted task from the saved transcript and restored tool/kernel state. Inspect current state before retrying commands when needed.";
 
-/// How long a client attach queues behind an in-flight restore pass
-/// (spec §10.4) before it resolves against the settled restore state.
+/// How long a client attach queues behind an in-flight restore pass (spec §10.4).
 const RESTORE_ATTACH_WAIT_MS: u64 = 120_000;
 
-// ---------------------------------------------------------------------------
 // Shared restore state (hello contract, status RPC, queued attaches)
-// ---------------------------------------------------------------------------
 
 /// One roster row's settle outcome, for attach queuing (spec §10.4).
 #[derive(Debug, Clone)]
 struct RestoreTarget {
     active_session_id: String,
     session_file: String,
-    /// The row's session name: `SessionRegistry::resolve` accepts name
-    /// selectors, so the restore queue must own them too (the waiter
-    /// settles by the same row the registry will resolve once it is up).
+    /// The row's session name: `SessionRegistry::resolve` accepts name selectors.
     name: Option<String>,
-    /// The row needs the TS-parity continuation treatment (§10.5):
-    /// an early settle (adoption or a live re-registration) must not
-    /// wake this row's waiters ahead of the pass routing the
-    /// restart-continuation prompt - the pass settles it right before.
+    /// The row needs the TS-parity continuation treatment (§10.5): an
+    /// early settle must not wake its waiters ahead of the prompt.
     needs_continuation: bool,
-    /// Set the moment the pass finishes this row (or the adoption pass
-    /// brings the worker up): the per-target waiters wake immediately
-    /// instead of queueing behind the rest of the recovery.
+    /// Set the moment the pass finishes this row (or adoption brings the worker up).
     settled: bool,
     failure: Option<String>,
 }
 
-/// The supervisor's restore pass state: read by the hello contract
-/// (`update_resume`), the `update_restore_status` RPC, and the attach
-/// queue. Held under a brief `std` mutex (no awaits inside); waiters park
-/// on the notify.
+/// The supervisor's restore pass state (hello contract, `update_restore_status` RPC, attach queue):
+/// a brief `std` mutex, no awaits inside; waiters park on the notify.
 #[derive(Debug, Default)]
 pub(crate) struct RestoreProgress {
     update_id: Mutex<Option<UpdateId>>,
@@ -103,8 +61,7 @@ pub(crate) struct RestoreProgress {
 struct RestoreInner {
     done: bool,
     /// Bumped on every row settle: the per-row waiters' budget re-arms
-    /// while the pass keeps making progress, so a large capped recovery
-    /// cannot starve a healthy late row's waiter out of its queue.
+    /// while the pass keeps making progress.
     settled_generation: u64,
     targets: BTreeMap<String, RestoreTarget>,
     counts: UpdateStatusCounts,
@@ -116,12 +73,8 @@ impl RestoreProgress {
         Self::default()
     }
 
-    /// Record the boot's update identity (spec §6 step 2) before serving,
-    /// so hellos report the resume contract from the first connection,
-    /// and register the roster rows: a client that reconnects while the
-    /// recovery is still working queues behind its own session's row
-    /// (spec §10.4) instead of failing with the plain unknown-session
-    /// error, from the first adoption onward.
+    /// Record the boot's update identity before serving, and register
+    /// the roster rows: a mid-recovery reconnect queues behind its row (spec §10.4).
     pub(crate) fn begin(&self, roster: Option<&UpdateRoster>) {
         *self.update_id.lock().unwrap() = roster.map(|roster| roster.update_id.clone());
         if let Some(roster) = roster {
@@ -142,8 +95,7 @@ impl RestoreProgress {
         }
     }
 
-    /// Register the roster rows the restore pass will settle (attach
-    /// queuing matches selectors against these).
+    /// Register the roster rows the restore pass will settle.
     fn register_targets(&self, roster: &UpdateRoster) {
         let mut state = self.state.lock().unwrap();
         for row in &roster.sessions {
@@ -153,7 +105,12 @@ impl RestoreProgress {
                     active_session_id: row.active_session_id.clone(),
                     session_file: row.session_file.clone(),
                     name: row.name.clone(),
-                    needs_continuation: row.should_resume && row.in_flight.streaming,
+                    needs_continuation: roster
+                        .rest
+                        .get("legacy_ts_restart")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                        || (row.should_resume && row.in_flight.streaming),
                     settled: false,
                     failure: None,
                 },
@@ -162,11 +119,7 @@ impl RestoreProgress {
     }
 
     /// Record one row's settle outcome the moment the recovery finishes
-    /// it (the restore pass's per-row outcome, or a descriptor adoption
-    /// that brought the worker up): the row's waiters wake immediately
-    /// instead of queueing behind the rest of the recovery (spec §10.4:
-    /// the attach streams "once the session comes up"). Idempotent; a
-    /// no-op for a selector no in-flight pass owns.
+    /// it: the row's waiters wake immediately. Idempotent.
     pub(crate) fn settle_target(&self, selector: &str, failure: Option<String>) {
         {
             let mut state = self.state.lock().unwrap();
@@ -183,16 +136,9 @@ impl RestoreProgress {
         self.notify.notify_waiters();
     }
 
-    /// Settle a row an adoption or a live (re-)registration brought up,
-    /// not the restore pass itself. A row still pending its TS-parity
-    /// continuation treatment (§10.5) stays queued: the pass settles it
-    /// right before it routes the restart-continuation prompt, so a woken
-    /// client's prompt cannot land ahead of the required continuation.
-    /// The skip is still settle progress — the generation bump keeps the
-    /// other waiters' quiet budgets re-armed (a healthy adoption of
-    /// streaming rows must not look idle) — but the row's own waiters
-    /// stay parked until the pass reaches it. Idempotent; a no-op for a
-    /// selector no in-flight pass owns.
+    /// Settle a row an adoption or live (re-)registration brought up, not
+    /// the pass itself; a row pending its continuation treatment (§10.5)
+    /// stays queued — the skip still bumps the generation.
     pub(crate) fn settle_adopted(&self, selector: &str) {
         {
             let mut state = self.state.lock().unwrap();
@@ -212,8 +158,7 @@ impl RestoreProgress {
         self.notify.notify_waiters();
     }
 
-    /// Mark the pass settled: per-row outcomes, counts, and the waiters'
-    /// wakeup. Idempotent.
+    /// Mark the pass settled: per-row outcomes, counts, and the waiters' wakeup. Idempotent.
     fn settle(&self, counts: UpdateStatusCounts, failures: Vec<UpdateStatusFailure>) {
         {
             let mut state = self.state.lock().unwrap();
@@ -238,8 +183,7 @@ impl RestoreProgress {
         self.notify.notify_waiters();
     }
 
-    /// One row's failure message once settled (spec §10.4's typed attach
-    /// error), if any.
+    /// One row's failure message once settled, if any (spec §10.4).
     fn settled_failure(&self, selector: &str) -> Option<(String, String)> {
         let state = self.state.lock().unwrap();
         let target = restore_target(&state.targets, selector)?;
@@ -250,22 +194,15 @@ impl RestoreProgress {
     }
 
     /// Whether an in-flight pass owns the selector: any roster row the
-    /// registry-shaped selector resolves to (durable id, transient active
-    /// id, session-file stem or its normalized suffix, session name), so
-    /// a command that will resolve once the row is up queues behind that
-    /// row instead of failing fast.
+    /// registry-shaped selector resolves to.
     fn owns_target(&self, selector: &str) -> bool {
         let state = self.state.lock().unwrap();
         !state.done && restore_target(&state.targets, selector).is_some()
     }
 
     /// Wait for one target's settle outcome, not the whole pass (spec
-    /// §10.4: the attach queues server-side and streams "once the session
-    /// comes up" — a slow recovery of unrelated sessions must not hold
-    /// this request). The §10.4 deadline bounds the queue's quiet time:
-    /// every settle progress re-arms it, so a large capped adoption holds
-    /// its waiters only while rows keep coming up, while a pass wedged
-    /// with no progress for the budget cannot hold a client longer.
+    /// §10.4). The deadline bounds the queue's quiet time: every settle
+    /// progress re-arms it, so a wedged pass cannot hold a client.
     async fn wait_for_settle_target(&self, selector: &str) {
         let quiet = std::time::Duration::from_millis(RESTORE_ATTACH_WAIT_MS.max(1));
         let (mut last_generation, mut deadline) = {
@@ -289,8 +226,6 @@ impl RestoreProgress {
                 )
             };
             if settled {
-                // This row settled (or the whole pass did): the caller
-                // re-resolves.
                 return;
             }
             if generation != last_generation {
@@ -308,12 +243,8 @@ impl RestoreProgress {
     }
 }
 
-/// Whether one target answers the registry-shaped selector (the durable id
-/// is the map key, checked first by the key resolver): the transient
-/// active id, the session-file stem (both exact or a normalized suffix,
-/// `SessionRegistry`'s `selector_matches`), or the session name (exact) —
-/// the same shapes `SessionRegistry::resolve` accepts, so a command the
-/// registry will resolve once the row is up queues behind that row now.
+/// Whether one target answers the registry-shaped selector (the durable
+/// id is the map key, checked first) — the same shapes `SessionRegistry::resolve` accepts.
 fn matches_selector(target: &RestoreTarget, selector: &str) -> bool {
     if target.active_session_id == selector {
         return true;
@@ -333,10 +264,8 @@ fn matches_selector(target: &RestoreTarget, selector: &str) -> bool {
         .is_some_and(|name| !name.is_empty() && name == selector)
 }
 
-/// The map key a selector addresses: the exact durable id, or the key of
-/// the single row the registry-shaped selector matches — an ambiguous
-/// suffix or name matches nothing, the same way the registry errors an
-/// ambiguous selector instead of picking one row to serve it.
+/// The map key a selector addresses: the exact durable id, or the key
+/// of the single row the selector matches (ambiguous matches nothing).
 fn restore_target_key(targets: &BTreeMap<String, RestoreTarget>, selector: &str) -> Option<String> {
     if targets.contains_key(selector) {
         return Some(selector.to_string());
@@ -357,8 +286,7 @@ fn restore_target<'a>(
     restore_target_key(targets, selector).and_then(|key| targets.get(&key))
 }
 
-/// The mutable counterpart of [`restore_target`]: resolve the key, then
-/// borrow it mutably.
+/// The mutable counterpart of [`restore_target`].
 fn restore_target_mut<'a>(
     targets: &'a mut BTreeMap<String, RestoreTarget>,
     selector: &str,
@@ -366,31 +294,90 @@ fn restore_target_mut<'a>(
     restore_target_key(targets, selector).and_then(|key| targets.get_mut(&key))
 }
 
-// ---------------------------------------------------------------------------
-// Spec §6 step 1: the unconditional boot sweep
-// ---------------------------------------------------------------------------
+// Spec §6 step 1: the boot sweep
 
-/// Delete this socket's update scratch directory plus the legacy TS-era
-/// names (spec §6 step 1): no liveness checks, no exceptions — everything
-/// there is per-update scratch state. The roster is consumed from the
-/// spawn env before this runs, so the sweep can safely delete the file the
-/// env pointed at. Failures are logged by the caller's posture: a missing
-/// entry is a clean sweep.
+/// Delete this socket's scratch directory and stale legacy names after consuming
+/// the roster env. Keep a TS manifest while its socket-bound prepare attempt is
+/// pending: an ordinary boot after a lost reply must not destroy recovery input.
+/// Flat TS status records remain available to callers waiting for their result.
 pub(crate) fn boot_sweep(agent_dir: &Path, socket_path: &Path) {
     let socket_hash = crate::paths::hash_key(&socket_path.to_string_lossy(), 64);
     let _ = std::fs::remove_dir_all(socket_update_dir(agent_dir, &socket_hash));
-    let _ = std::fs::remove_dir_all(legacy_update_restarts_dir(agent_dir));
+    let legacy_dir = legacy_update_restarts_dir(agent_dir);
+    if legacy_dir.is_symlink() {
+        // Never walk a symlink while deleting scratch entries.
+        let _ = std::fs::remove_file(&legacy_dir);
+    } else if let Ok(entries) = std::fs::read_dir(&legacy_dir) {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    eprintln!("pa-daemon: could not inspect legacy update scratch: {error}");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let pending = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|key| {
+                    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                        return false;
+                    }
+                    let attempt_path = agent_dir
+                        .join("legacy-update-recovery")
+                        .join(format!("{key}.attempt.json"));
+                    let attempt = std::fs::read(attempt_path)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                    let Some(attempt) = attempt else {
+                        return false;
+                    };
+                    let Some(socket) = attempt["socket"]
+                        .as_str()
+                        .filter(|socket| !socket.is_empty())
+                    else {
+                        return false;
+                    };
+                    // Retain attempts for every socket, including older target versions.
+                    // The CLI owns full predecessor/freshness validation and removes the
+                    // attempt only after confirmed restoration or a safe prepare refusal.
+                    crate::paths::hash_key(socket, 64) == key
+                        && attempt["version"]
+                            .as_str()
+                            .is_some_and(|version| !version.is_empty())
+                        && attempt["updateId"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                        && attempt["startedAt"].as_u64().is_some()
+                        && attempt["hello"]["supervisorPid"]
+                            .as_u64()
+                            .is_some_and(|pid| pid > 0)
+                        && attempt["hello"]["supervisorProcessStartId"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                        && attempt["hello"]["supervisorGeneration"]
+                            .as_str()
+                            .is_some_and(|generation| !generation.is_empty())
+                });
+            if !pending {
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                } else {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        // Only remove an empty directory; pending sources keep their original paths.
+        let _ = std::fs::remove_dir(&legacy_dir);
+    }
     let _ = std::fs::remove_file(legacy_update_restart_status(agent_dir));
 }
 
-// ---------------------------------------------------------------------------
 // Spec §6 step 2: consume the roster from the spawn env
-// ---------------------------------------------------------------------------
 
-/// Read `PRIME_AGENT_UPDATE_ROSTER` (spec §6 step 2): a path the
-/// coordinator passed, never a discovered file. Returns `None` on a normal
-/// boot. A malformed roster never fails the boot (spec §9): it restores
-/// nothing and the sessions stay on disk for manual resume.
+/// Read `PRIME_AGENT_UPDATE_ROSTER`: a coordinator-passed path, never
+/// discovered. `None` on a normal boot; a malformed roster never fails the boot (spec §9).
 pub(crate) fn consume_roster_env() -> Option<UpdateRoster> {
     let path = std::env::var(UPDATE_ROSTER_ENV).ok()?;
     let path = Path::new(&path);
@@ -416,13 +403,10 @@ pub(crate) fn consume_roster_env() -> Option<UpdateRoster> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Spec §6 steps 2-3: the restore pass + the re-arm
-// ---------------------------------------------------------------------------
 
-/// Order roster rows bottom-up (spec §8): deepest first so parents attach
-/// to existing children; subagents before top-level rows of equal depth;
-/// stable by session id otherwise.
+/// Order roster rows bottom-up (spec §8): deepest first so parents attach to existing children;
+/// subagents before top-level rows of equal depth; stable by session id otherwise.
 fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
     rows.sort_by(|a, b| {
         b.rlm_depth.cmp(&a.rlm_depth).then_with(|| {
@@ -434,20 +418,10 @@ fn sort_rows_bottom_up(rows: &mut [&UpdateRosterSession]) {
     });
 }
 
-/// The boot restore driver: run after the descriptor-adoption task settles
-/// (kept workers relaunch from their descriptors), then walk the roster
-/// session rows bottom-up — deepest first (spec §8: parents attach to
-/// existing children) — creating or adopting each row. The no-auto-resume
-/// contract ends the old scheduled-work re-arm: NOT-RUNNING sessions stay
-/// down at every boot (normal and update alike), so this pass never
-/// creates a worker for a due scheduled job — it only reports how many
-/// are dormant. THE REPORT'S ORDER (the bots' finding): on an update boot
-/// it runs AFTER the roster replay, so a due job on a session the user
-/// asked to restore is NOT reported dormant right before its own
-/// scheduler arms with the restored worker — only sessions that stay
-/// down after the replay are dormant. Finally the pass settles the
-/// shared state, waking the queued attaches and unblocking the
-/// `update_restore_status` poll.
+/// The boot restore driver: run after the descriptor-adoption task
+/// settles, then walk Rust rows bottom-up (spec §8), or TS rows parent-first
+/// so their fresh active handles can be remapped. NOT-RUNNING
+/// sessions stay down; the dormant report runs AFTER the replay.
 pub(crate) async fn restore_pass(
     supervisor: &std::sync::Arc<Supervisor>,
     adoption: tokio::task::JoinHandle<()>,
@@ -462,69 +436,254 @@ pub(crate) async fn restore_pass(
         return;
     };
     let mut rows: Vec<&UpdateRosterSession> = roster.sessions.iter().collect();
-    sort_rows_bottom_up(&mut rows);
+    let legacy = roster
+        .rest
+        .get("legacy_ts_restart")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if legacy {
+        rows.sort_by_key(|row| row.rlm_depth);
+    } else {
+        sort_rows_bottom_up(&mut rows);
+    }
+    let mut restored_ids = BTreeMap::new();
     let mut counts = UpdateStatusCounts::default();
     let mut failures: Vec<UpdateStatusFailure> = Vec::new();
     for row in rows {
         counts.total += 1;
-        match supervisor
+        let restored = match supervisor
             .registry
             .find_by_session_file(&row.session_file)
             .await
         {
-            // The adoption pass (or a still-alive abandoned worker)
-            // already brought the session up.
-            Some(resident) => {
-                counts.restored += 1;
-                // Settle the row before the continuation treatment: the
-                // waiters attach to the live worker now, while the
-                // continuation prompt is this session's own stream.
+            Some(resident) => Ok(resident),
+            None => restore_session(supervisor, row, legacy.then_some(&restored_ids)).await,
+        };
+        let restored = match restored {
+            Ok(resident) if legacy => {
+                restored_ids.insert(
+                    row.active_session_id.clone(),
+                    resident
+                        .descriptor
+                        .lock()
+                        .await
+                        .root_active_session_id
+                        .clone(),
+                );
+                let origin = roster
+                    .rest
+                    .get("restart_origin_active_session_id")
+                    .and_then(serde_json::Value::as_str);
+                match restore_legacy_session(
+                    row,
+                    origin,
+                    &roster.binary.to_version,
+                    |command, payload| {
+                        supervisor.route_command_typed(
+                            &resident,
+                            command,
+                            payload,
+                            crate::supervisor::ROUTE_TIMEOUT_MS,
+                            RouteAdmission::SupervisorInternal,
+                        )
+                    },
+                )
+                .await
+                {
+                    Ok(resumed) => {
+                        counts.resumed += u64::from(resumed);
+                        Ok(resident)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(resident) => {
                 supervisor.restore.settle_target(&row.session_id, None);
                 continuation_treatment(supervisor, &resident, row, &mut counts).await;
+                Ok(resident)
             }
-            None => match restore_session(supervisor, row).await {
-                Ok(resident) => {
-                    counts.restored += 1;
-                    supervisor.restore.settle_target(&row.session_id, None);
-                    continuation_treatment(supervisor, &resident, row, &mut counts).await;
-                }
-                Err(error) => {
-                    // Restore never fails the boot (spec §9): record the
-                    // row and leave the session on disk. The row's waiters
-                    // get the typed failure now, not behind the rest of
-                    // the pass.
-                    let message = format!("{error:#}");
-                    supervisor.log_line(&format!(
-                        "update restore: could not restore {}: {message}",
-                        row.session_file
-                    ));
-                    supervisor
-                        .restore
-                        .settle_target(&row.session_id, Some(message.clone()));
-                    failures.push(UpdateStatusFailure {
-                        session_file: row.session_file.clone(),
-                        message,
-                    });
-                    counts.failed += 1;
-                }
-            },
+            Err(error) => Err(error),
+        };
+        match restored {
+            Ok(_) => {
+                counts.restored += 1;
+                supervisor.restore.settle_target(&row.session_id, None);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                supervisor.log_line(&format!(
+                    "update restore: could not restore {}: {message}",
+                    row.session_file
+                ));
+                supervisor
+                    .restore
+                    .settle_target(&row.session_id, Some(message.clone()));
+                failures.push(UpdateStatusFailure {
+                    session_file: row.session_file.clone(),
+                    message,
+                });
+                counts.failed += 1;
+            }
         }
     }
-    // The update boot's dormant report runs here, AFTER the replay: the
-    // roster's restored sessions are live now, so a due job they own is
-    // NOT dormant (its scheduler armed with the worker); only the
-    // sessions that stayed down count.
+    // The dormant report runs here, AFTER the replay: only the sessions that stayed down count.
     report_dormant_scheduled_jobs(supervisor).await;
     supervisor.restore.settle(counts, failures);
 }
 
-/// Re-create one roster row's session from the durable create command the
-/// roster captured (spec §8 `runtime_config`): the supervisor's own create
-/// path — the same launch, ledger admission, and roster publication a
-/// client create gets — under the restore client id.
+/// Replay the TS manifest, whose queues have no Rust recovery journal. The
+/// command boundary is injectable so regression tests exercise the same ordering
+/// and acknowledgement handling as the live supervisor route.
+async fn restore_legacy_session<F, Fut>(
+    row: &UpdateRosterSession,
+    origin: Option<&str>,
+    version: &str,
+    mut route: F,
+) -> Result<bool>
+where
+    F: FnMut(&'static str, serde_json::Value) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::protocol::DaemonResponse>>,
+{
+    let actions = row
+        .queue
+        .actions
+        .get("actions")
+        .and_then(serde_json::Value::as_array);
+    let has_actions = actions.is_some_and(|actions| !actions.is_empty());
+    // restore_actions wakes Rust's runner immediately. Hold its existing input
+    // pause across queue replay and continuation admission, including unrelated
+    // wakeups, so a follow-up cannot overtake the interrupted turn.
+    let pause = if row.should_resume && has_actions {
+        let response = route(
+            "acquire_session_input_pause",
+            json!({
+                "leaseKey": "legacy-update-restore", "clientId": UPDATE_RESTORE_CLIENT_ID,
+            }),
+        )
+        .await?;
+        anyhow::ensure!(
+            response.success,
+            "legacy update acquire_session_input_pause: {}",
+            response.error.unwrap_or_default()
+        );
+        Some(
+            response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("pauseId"))
+                .and_then(serde_json::Value::as_str)
+                .context("legacy update input pause returned no pause id")?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let outcome: Result<bool> = async {
+        let mut commands = Vec::new();
+        if origin == Some(row.active_session_id.as_str()) {
+            commands.push(("append_custom_message", json!({ "message": {
+                "customType": "prime-agent.update_complete",
+                "content": format!("[update-complete]\n\nPrime Agent updated to v{version}. This daemon session was restored after the update."),
+                "display": true,
+                "details": { "version": version },
+            }})));
+        }
+        if !row.queue.next_turn.is_empty() {
+            commands.push((
+                "restore_next_turn",
+                json!({ "messages": row.queue.next_turn }),
+            ));
+        }
+        if row.should_resume && has_actions {
+            commands.push(("restore_actions", json!({ "snapshot": row.queue.actions })));
+        }
+        for (command, payload) in commands {
+            let response = route(command, payload)
+                .await
+                .with_context(|| format!("legacy update {command}"))?;
+            anyhow::ensure!(
+                response.success,
+                "legacy update {command}: {}",
+                response.error.unwrap_or_default()
+            );
+        }
+        if !row.should_resume {
+            return Ok(false);
+        }
+        let accepted_turn = actions.is_some_and(|actions| {
+            actions.iter().any(|action| {
+                let payload = &action["payload"];
+                payload["kind"] == "turn"
+                    && payload["queueVisible"] == false
+                    && payload["acceptedBeforeCompletion"] == true
+            })
+        });
+        let in_flight = row.in_flight;
+        let interrupted = in_flight.streaming
+            || in_flight.compacting
+            || in_flight.bash_running
+            || in_flight.rlm_children
+            || in_flight.retrying
+            || in_flight.prompt_in_flight;
+        let mut resumed = false;
+        if interrupted && !accepted_turn {
+            let response = route(
+                "prompt",
+                json!({
+                    "message": UPDATE_RESTART_CONTINUATION_PROMPT, "expandPromptTemplates": false,
+                }),
+            )
+            .await?;
+            resumed = response.success;
+            if !resumed {
+                anyhow::bail!(
+                    "legacy update continuation: {}",
+                    response.error.unwrap_or_default()
+                );
+            }
+        }
+        Ok(resumed || has_actions)
+    }
+    .await;
+    if let Some(pause_id) = pause {
+        // A partial restore remains parked on failure, but release the temporary
+        // lease so the ordinary user resume action can recover the session.
+        if outcome.is_err() {
+            // Best-effort abort: its failure must not skip the release below
+            // and leave the input pause held.
+            match route("abort", json!({})).await {
+                Ok(response) if response.success => {}
+                Ok(response) => eprintln!(
+                    "pa-daemon: legacy update abort after failed restore also failed: {}",
+                    response.error.unwrap_or_default()
+                ),
+                Err(error) => eprintln!(
+                    "pa-daemon: legacy update abort after failed restore also failed: {error:#}"
+                ),
+            }
+        }
+        let response = route(
+            "release_session_input_pause",
+            json!({
+                "pauseId": pause_id, "clientId": UPDATE_RESTORE_CLIENT_ID,
+            }),
+        )
+        .await?;
+        anyhow::ensure!(
+            response.success,
+            "legacy update release_session_input_pause: {}",
+            response.error.unwrap_or_default()
+        );
+    }
+    outcome
+}
+
+/// Re-create one roster row's session from the durable create command the roster captured (spec §8
+/// `runtime_config`): the supervisor's own create path, under the restore client id.
 async fn restore_session(
     supervisor: &std::sync::Arc<Supervisor>,
     row: &UpdateRosterSession,
+    restored_ids: Option<&BTreeMap<String, String>>,
 ) -> Result<std::sync::Arc<ResidentWorker>> {
     let durable = row
         .runtime_config
@@ -533,7 +692,10 @@ async fn restore_session(
         .context("the roster row carries no create command")?;
     let durable: pa_types::daemon::DurableDaemonCreateCommand =
         serde_json::from_value(durable).context("parse the roster row's create command")?;
-    let payload = crate::descriptor::create_command_payload(&durable);
+    let mut payload = crate::descriptor::create_command_payload(&durable);
+    if let Some(restored_ids) = restored_ids {
+        remap_legacy_parent(&mut payload, restored_ids);
+    }
     let command: DaemonCommand =
         serde_json::from_value(payload).context("rebuild the create command")?;
     let summary = supervisor
@@ -550,11 +712,28 @@ async fn restore_session(
         .context("the restored session did not register")
 }
 
-/// The TS-parity continuation treatment (spec §10.5): a row that was
-/// mid-turn when the snapshot was taken gets the TS continuation prompt
-/// routed to the restored worker (a queued-work row already resumed via
-/// the relaunch/create replay of its recovery journal). A failed prompt is
-/// a resume failure, not a restore failure (TS parity: warn, don't fail).
+/// TS restores parent sessions first and substitutes their new active handles;
+/// omit an unavailable parent handle instead of retaining a dead TS handle.
+fn remap_legacy_parent(payload: &mut serde_json::Value, restored_ids: &BTreeMap<String, String>) {
+    let Some(metadata) = payload
+        .get_mut("runtimeMetadata")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    if metadata.get("kind").and_then(serde_json::Value::as_str) != Some("subagent") {
+        return;
+    }
+    let Some(old_parent) = metadata.remove("parentActiveSessionId") else {
+        return;
+    };
+    if let Some(new_parent) = old_parent.as_str().and_then(|id| restored_ids.get(id)) {
+        metadata.insert("parentActiveSessionId".into(), json!(new_parent));
+    }
+}
+
+/// The TS-parity continuation treatment (spec §10.5): a row mid-turn when the snapshot was taken
+/// gets the continuation prompt; a failed prompt is a resume failure, not a restore failure.
 async fn continuation_treatment(
     supervisor: &std::sync::Arc<Supervisor>,
     resident: &std::sync::Arc<ResidentWorker>,
@@ -574,7 +753,7 @@ async fn continuation_treatment(
             resident,
             "prompt",
             json!({ "message": UPDATE_RESTART_CONTINUATION_PROMPT }),
-            crate::supervisor::LONG_ROUTE_TIMEOUT_MS,
+            crate::supervisor::ROUTE_TIMEOUT_MS,
             RouteAdmission::SupervisorInternal,
         )
         .await;
@@ -592,18 +771,8 @@ async fn continuation_treatment(
     }
 }
 
-/// The boot's dormant-scheduled-jobs report (the no-auto-resume contract
-/// that replaces spec §6 step 3's wake): scan `scheduled-jobs.json` (the
-/// only write path, spec §8) for ACTIVE jobs that read as DUE and whose
-/// session has no live worker — and report them, never wake them. A due
-/// job on a not-running session stays dormant: a schedule fires only
-/// while its session is live (the worker's own in-process scheduler
-/// claims due jobs once the user resumes the session), and the dormant
-/// rows stay surfaced by the agents-view heartbeat catalog
-/// (`heartbeats_list`'s passive rows) instead of auto-firing. This is
-/// what the old re-arm got wrong in the field: a TS-era heartbeat row
-/// whose `next_run_at` had gone stale read as DUE and the boot created a
-/// worker for a session the user had not had running.
+/// The boot's dormant-scheduled-jobs report (the no-auto-resume contract): report ACTIVE, DUE jobs
+/// whose session has no live worker — never wake them.
 async fn report_dormant_scheduled_jobs(supervisor: &std::sync::Arc<Supervisor>) {
     let jobs = crate::update_roster::scan_scheduled_jobs(&supervisor.options.agent_dir);
     let now = crate::util::now_ms();
@@ -624,9 +793,7 @@ async fn report_dormant_scheduled_jobs(supervisor: &std::sync::Arc<Supervisor>) 
     if dormant.is_empty() {
         return;
     }
-    // One log line per dormant job keeps the daemon log greppable for the
-    // field shape (the job id + the session file), without ever creating
-    // a worker for it.
+    // One log line per dormant job keeps the log greppable (job id + session file).
     for job in &dormant {
         supervisor.log_line(&format!(
             "scheduled job {} on {} is due but stays dormant: no session auto-boots on daemon start (resume the session to arm its schedule; the heartbeat catalog surfaces it)",
@@ -639,32 +806,23 @@ async fn report_dormant_scheduled_jobs(supervisor: &std::sync::Arc<Supervisor>) 
     ));
 }
 
-// ---------------------------------------------------------------------------
 // Supervisor integration helpers
-// ---------------------------------------------------------------------------
 
 impl Supervisor {
-    /// Spec §10.4: a client command addressed a session the registry cannot
-    /// resolve. If a restore pass is in flight and the roster owns the
-    /// selector, queue behind the pass (server-side; no client-visible
-    /// retry), then let the caller re-resolve or fail typed against the
-    /// settled outcome.
+    /// Spec §10.4: queue behind an in-flight restore pass that owns the
+    /// selector, then re-resolve or fail typed against the settled outcome.
     pub(crate) async fn await_restore_target(&self, selector: &str) {
         if !self.restore.owns_target(selector) {
-            // A pass is not in flight, or the selector is not a roster row:
-            // no queuing (a fresh attach to an unrelated dead session must
-            // fail immediately, not wait out the restore).
+            // No pass is in flight, or the selector is not a roster row:
+            // an unrelated dead session must fail immediately.
             return;
         }
-        // Queue behind this session's own row only, never behind the
-        // whole recovery (spec §10.4): an unrelated slow restore must not
-        // hold a control-plane request.
+        // Queue behind this session's own row only (spec §10.4).
         self.restore.wait_for_settle_target(selector).await;
     }
 
-    /// Spec §10.4: the settled per-row failure for one selector, as the
-    /// typed attach error with the session file path and the manual-resume
-    /// hint.
+    /// Spec §10.4: the settled per-row failure, as the typed attach
+    /// error with the session file path and the manual-resume hint.
     pub(crate) fn restore_failure_for(&self, selector: &str) -> Option<String> {
         self.restore
             .settled_failure(selector)
@@ -676,8 +834,7 @@ impl Supervisor {
             })
     }
 
-    /// The `update_restore_status` RPC body: the restore pass's live
-    /// snapshot for the coordinator's `Restoring` report (spec §9).
+    /// The `update_restore_status` RPC body (the coordinator's `Restoring` report, spec §9).
     pub(crate) fn restore_status_body(&self) -> serde_json::Value {
         let state = self.restore.state.lock().unwrap();
         json!({
@@ -702,8 +859,7 @@ mod tests {
     use serde_json::Map;
 
     /// A two-row roster (update `u-1`): row `a-1`, and row `durable-b`
-    /// whose session-file stem (`b-2`) differs from its durable id (the
-    /// selector shapes the attach queue and the adoption settle both use).
+    /// whose session-file stem (`b-2`) differs from its durable id.
     fn two_row_roster() -> UpdateRoster {
         serde_json::from_value(serde_json::json!({
             "format_version": 1,
@@ -749,6 +905,372 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn legacy_restore_replays_context_and_actions_before_continuing_each_interrupted_kind() {
+        for flag in [
+            "streaming",
+            "compacting",
+            "bash_running",
+            "rlm_children",
+            "retrying",
+            "prompt_in_flight",
+        ] {
+            let mut row = two_row_roster().sessions.remove(0);
+            row.should_resume = true;
+            let mut in_flight = serde_json::to_value(row.in_flight).unwrap();
+            in_flight[flag] = json!(true);
+            row.in_flight = serde_json::from_value(in_flight).unwrap();
+            row.queue.next_turn = serde_json::from_value(json!([{
+                "customType": "saved-context", "content": "keep this", "display": false,
+                "timestamp": 1
+            }]))
+            .unwrap();
+            row.queue.actions = json!({ "formatVersion": 1, "actions": [{
+                "id": "queued", "payload": { "kind": "turn", "text": "next task", "queueVisible": true }
+            }] });
+            let mut calls = Vec::new();
+            let resumed =
+                restore_legacy_session(&row, Some("active-a"), "1.0.0", |command, payload| {
+                    calls.push((command, payload));
+                    std::future::ready(Ok(crate::protocol::response_success(
+                        None,
+                        command,
+                        Some(json!({ "pauseId": "test-pause" })),
+                    )))
+                })
+                .await
+                .unwrap();
+            assert!(resumed, "{flag}");
+            assert_eq!(
+                calls,
+                vec![
+                    (
+                        "acquire_session_input_pause",
+                        json!({ "leaseKey": "legacy-update-restore", "clientId": UPDATE_RESTORE_CLIENT_ID })
+                    ),
+                    (
+                        "append_custom_message",
+                        json!({ "message": {
+                            "customType": "prime-agent.update_complete",
+                            "content": "[update-complete]\n\nPrime Agent updated to v1.0.0. This daemon session was restored after the update.",
+                            "display": true, "details": { "version": "1.0.0" }
+                        }})
+                    ),
+                    (
+                        "restore_next_turn",
+                        json!({ "messages": row.queue.next_turn })
+                    ),
+                    ("restore_actions", json!({ "snapshot": row.queue.actions })),
+                    (
+                        "prompt",
+                        json!({ "message": UPDATE_RESTART_CONTINUATION_PROMPT, "expandPromptTemplates": false })
+                    ),
+                    (
+                        "release_session_input_pause",
+                        json!({ "pauseId": "test-pause", "clientId": UPDATE_RESTORE_CLIENT_ID })
+                    ),
+                ],
+                "{flag}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_resumes_an_accepted_turn_without_duplicating_its_prompt() {
+        let mut row = two_row_roster().sessions.remove(0);
+        row.should_resume = true;
+        row.in_flight.prompt_in_flight = true;
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [{
+            "id": "accepted", "payload": { "kind": "turn", "text": "already admitted",
+                "queueVisible": false, "acceptedBeforeCompletion": true }
+        }] });
+        let mut calls = Vec::new();
+        assert!(
+            restore_legacy_session(&row, None, "1.0.0", |command, payload| {
+                calls.push((command, payload));
+                std::future::ready(Ok(crate::protocol::response_success(
+                    None,
+                    command,
+                    Some(json!({ "pauseId": "test-pause" })),
+                )))
+            })
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "acquire_session_input_pause",
+                    json!({ "leaseKey": "legacy-update-restore", "clientId": UPDATE_RESTORE_CLIENT_ID })
+                ),
+                ("restore_actions", json!({ "snapshot": row.queue.actions })),
+                (
+                    "release_session_input_pause",
+                    json!({ "pauseId": "test-pause", "clientId": UPDATE_RESTORE_CLIENT_ID })
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_does_not_resume_idle_sessions_and_reports_failed_queue_restore() {
+        let mut row = two_row_roster().sessions.remove(0);
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [{"id": "queued"}] });
+        let mut calls = Vec::new();
+        assert!(!restore_legacy_session(&row, None, "1.0.0", |command, _| {
+            calls.push(command);
+            std::future::ready(Ok(crate::protocol::response_success(
+                None,
+                command,
+                Some(json!({ "pauseId": "test-pause" })),
+            )))
+        })
+        .await
+        .unwrap());
+        assert!(calls.is_empty());
+        row.should_resume = true;
+        let mut failed_calls = Vec::new();
+        let error = restore_legacy_session(&row, None, "1.0.0", |command, _| {
+            failed_calls.push(command);
+            let response = if command == "restore_actions" {
+                crate::protocol::response_failure(None, command, "invalid action", None)
+            } else {
+                crate::protocol::response_success(
+                    None,
+                    command,
+                    Some(json!({ "pauseId": "test-pause" })),
+                )
+            };
+            std::future::ready(Ok(response))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(
+            failed_calls,
+            [
+                "acquire_session_input_pause",
+                "restore_actions",
+                "abort",
+                "release_session_input_pause"
+            ]
+        );
+        assert_eq!(
+            error.to_string(),
+            "legacy update restore_actions: invalid action"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_restore_releases_input_pause_when_abort_fails() {
+        let mut row = two_row_roster().sessions.remove(0);
+        row.should_resume = true;
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [{"id": "queued"}] });
+        let mut calls = Vec::new();
+        let error = restore_legacy_session(&row, None, "1.0.0", |command, _| {
+            calls.push(command);
+            let response = match command {
+                "restore_actions" => {
+                    crate::protocol::response_failure(None, command, "invalid action", None)
+                }
+                "abort" => crate::protocol::response_failure(None, command, "abort refused", None),
+                _ => crate::protocol::response_success(
+                    None,
+                    command,
+                    Some(json!({ "pauseId": "test-pause" })),
+                ),
+            };
+            std::future::ready(Ok(response))
+        })
+        .await
+        .unwrap_err();
+        // A failed abort must not skip the release: a leaked pause would leave
+        // the session unable to accept input.
+        assert_eq!(
+            calls,
+            [
+                "acquire_session_input_pause",
+                "restore_actions",
+                "abort",
+                "release_session_input_pause"
+            ]
+        );
+        assert_eq!(
+            error.to_string(),
+            "legacy update restore_actions: invalid action"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_manifest_restores_real_worker_context_and_both_queue_lanes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worker = crate::worker::Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".into(),
+                worker_instance_id: String::new(),
+                active_session_id: "active-a".into(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: Some(json!({ "responses": ["ack"] })),
+            },
+            None,
+        );
+        assert!(
+            worker
+                .dispatch("create", &json!({ "noSession": true, "cwd": dir.path() }))
+                .await
+                .success
+        );
+        let mut row = two_row_roster().sessions.remove(0);
+        row.should_resume = true;
+        row.queue.next_turn = serde_json::from_value(json!([{
+            "customType": "saved-context", "content": "pending context", "display": false,
+            "timestamp": 1
+        }]))
+        .unwrap();
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [
+            { "id": "steer", "delivery": "next_turn_boundary", "payload": { "kind": "turn", "text": "steering task" } },
+            { "id": "follow", "delivery": "when_run_idle", "payload": { "kind": "turn", "text": "follow-up task" } }
+        ] });
+        let resumed = restore_legacy_session(&row, None, "1.0.0", |command, payload| {
+            let worker = &worker;
+            async move { Ok(worker.dispatch(command, &payload).await) }
+        })
+        .await
+        .unwrap();
+        assert!(resumed);
+        let core = worker.core.lock().unwrap();
+        assert_eq!(
+            (
+                core.pending_next_turn[0]["content"].clone(),
+                core.steering
+                    .iter()
+                    .map(|item| item.message.clone())
+                    .collect::<Vec<_>>(),
+                core.follow_up
+                    .iter()
+                    .map(|item| item.message.clone())
+                    .collect::<Vec<_>>()
+            ),
+            (
+                json!("pending context"),
+                vec!["steering task".to_string()],
+                vec!["follow-up task".to_string()]
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_busy_restore_keeps_follow_up_behind_continuation_with_a_running_worker() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worker = crate::worker::Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".into(),
+                worker_instance_id: String::new(),
+                active_session_id: "active-a".into(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                telemetry_disabled: Some(true),
+                script: Some(json!({ "responses": ["ack", "done"] })),
+            },
+            None,
+        );
+        assert!(
+            worker
+                .dispatch("create", &json!({ "noSession": true, "cwd": dir.path() }))
+                .await
+                .success
+        );
+        let mut events = worker.events.subscribe();
+        let mut row = two_row_roster().sessions.remove(0);
+        row.should_resume = true;
+        row.in_flight.streaming = true;
+        row.queue.actions = json!({ "formatVersion": 1, "actions": [{
+            "id": "follow", "delivery": "when_run_idle", "source": "interactive",
+            "payload": { "kind": "turn", "text": "queued follow-up", "queueVisible": true }
+        }] });
+        assert!(
+            restore_legacy_session(&row, None, "1.0.0", |command, payload| {
+                let worker = &worker;
+                async move {
+                    // Observe the real runner handling the restore wake before the
+                    // coordinator can admit its continuation. No sleeps or retries.
+                    let parked = worker.idle_notify.notified();
+                    tokio::pin!(parked);
+                    parked.as_mut().enable();
+                    let response = worker.dispatch(command, &payload).await;
+                    if command == "restore_actions" {
+                        worker.work_notify.notify_one();
+                        tokio::time::timeout(std::time::Duration::from_secs(5), parked)
+                            .await
+                            .unwrap();
+                        let core = worker.core.lock().unwrap();
+                        assert_eq!(
+                            (core.busy, core.follow_up.len()),
+                            (false, 1),
+                            "restored follow-up ran before continuation admission"
+                        );
+                    }
+                    Ok(response)
+                }
+            })
+            .await
+            .unwrap()
+        );
+        let delivered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut delivered = Vec::new();
+            while delivered.len() < 2 {
+                let frame = events.recv().await.unwrap();
+                let frame: serde_json::Value = serde_json::from_slice(&frame.payload).unwrap();
+                let event = &frame["event"];
+                if event["type"] == "message_end" && event["message"]["role"] == "user" {
+                    let content = &event["message"]["content"];
+                    let text = content
+                        .as_str()
+                        .or_else(|| content[0]["text"].as_str())
+                        .unwrap();
+                    delivered.push(text.to_string());
+                }
+            }
+            delivered
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            delivered,
+            [UPDATE_RESTART_CONTINUATION_PROMPT, "queued follow-up"]
+        );
+        worker.core.lock().unwrap().shutdown_requested = true;
+        worker.work_notify.notify_one();
+    }
+
+    #[test]
+    fn legacy_child_metadata_replaces_only_the_old_parent_handle() {
+        let mut payload = json!({ "runtimeMetadata": {
+            "kind": "subagent", "parentActiveSessionId": "old-parent", "rlmChildId": "child"
+        }});
+        remap_legacy_parent(
+            &mut payload,
+            &BTreeMap::from([("old-parent".into(), "new-parent".into())]),
+        );
+        assert_eq!(
+            payload,
+            json!({ "runtimeMetadata": {
+                "kind": "subagent", "parentActiveSessionId": "new-parent", "rlmChildId": "child"
+            }})
+        );
+        remap_legacy_parent(&mut payload, &BTreeMap::new());
+        assert_eq!(
+            payload,
+            json!({ "runtimeMetadata": { "kind": "subagent", "rlmChildId": "child" }})
+        );
+    }
+
     #[test]
     fn hello_resume_reports_progress_before_and_after_settle() {
         let progress = RestoreProgress::new();
@@ -789,18 +1311,14 @@ mod tests {
         };
         let mut queued_a = waiter(&progress, "a-1");
         let mut queued_b = waiter(&progress, "durable-b");
-        // Neither row settled: both waiters queue behind their own rows
-        // (the deadline, not this test's ticks, bounds the queue).
+        // Neither row settled (the deadline, not this test's ticks, bounds the queue).
         let tick = std::time::Duration::from_millis(1);
         assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
         assert!(tokio::time::timeout(tick, &mut queued_b).await.is_err());
-        // One row settles (an adoption brought `durable-b` up; a client
-        // may address it by stem): only that row's waiter wakes, while
-        // the other row's keeps queueing behind the rest of the pass.
+        // One row settles by its stem selector `b-2`: only that row's waiter wakes.
         progress.settle_target("b-2", None);
         assert!(tokio::time::timeout(tick, queued_b).await.is_ok());
         assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
-        // The whole pass settling unblocks the remaining row's waiter.
         progress.settle(UpdateStatusCounts::default(), Vec::new());
         assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
     }
@@ -810,9 +1328,7 @@ mod tests {
         let progress = RestoreProgress::new();
         progress.begin(Some(&two_row_roster()));
         progress.settle_target("durable-b", Some("worker create failed".to_string()));
-        // Every selector shape for the failed row resolves the failure;
-        // the still-queued row has none yet (its attach waits, it does
-        // not fail early).
+        // Every selector shape for the failed row resolves the failure.
         for selector in ["durable-b", "active-b", "b-2"] {
             let (file, message) = progress.settled_failure(selector).unwrap();
             assert_eq!(file, "/sessions/b-2.jsonl");
@@ -826,19 +1342,15 @@ mod tests {
     fn registry_shaped_selectors_own_their_row_and_ambiguous_ones_own_nothing() {
         let progress = RestoreProgress::new();
         progress.begin(Some(&two_row_roster()));
-        // Every selector shape SessionRegistry::resolve accepts owns the
-        // row: the durable id (the registry's exact-key lookup), the
-        // transient active id, the session-file stem, the session name,
-        // and normalized suffixes of the active id and stem (the durable
-        // id is exact-key only, exactly like the registry's map lookup).
+        // Every selector shape `SessionRegistry::resolve` accepts owns the
+        // row; the durable id is exact-key only.
         for selector in ["a-1", "active-a", "alpha", "ve-a", "IVEA", "b-2", "e-b"] {
             assert!(progress.owns_target(selector), "owns {selector}");
         }
         assert!(!progress.owns_target("unknown"));
         assert!(!progress.owns_target(""));
 
-        // An ambiguous selector owns nothing: like the registry, the
-        // queue refuses to pick one of several matching rows.
+        // An ambiguous selector owns nothing, like the registry.
         let mut roster = two_row_roster();
         roster.sessions[1].active_session_id = "xx-active-a".to_string();
         let ambiguous = RestoreProgress::new();
@@ -846,7 +1358,6 @@ mod tests {
         assert!(!ambiguous.owns_target("active-a"));
         ambiguous.settle_target("active-a", Some("never lands".to_string()));
         assert!(ambiguous.settled_failure("active-a").is_none());
-        // The rows settle by their own selectors all the same.
         ambiguous.settle_target("alpha", None);
         assert!(ambiguous.settled_failure("alpha").is_none());
         assert!(ambiguous.hello_resume().update_id.is_some());
@@ -867,17 +1378,26 @@ mod tests {
         let tick = std::time::Duration::from_millis(1);
         let mut queued_a = waiter(&progress, "a-1");
         let queued_b = waiter(&progress, "durable-b");
-        // The adoption settles skip the continuation row but settle the
-        // ordinary one: only the ordinary row's waiter wakes.
+        // The adoption settles skip the continuation row but settle the ordinary one.
         progress.settle_adopted("a-1");
         progress.settle_adopted("durable-b");
         assert!(tokio::time::timeout(tick, queued_b).await.is_ok());
         assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
-        // The pass's own settle is unconditional: it wakes the
-        // continuation row's waiters the moment the pass reaches it,
-        // right before it routes the restart-continuation prompt.
+        // The pass's own settle is unconditional.
         progress.settle_target("a-1", None);
         assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
+    }
+
+    #[test]
+    fn legacy_adoption_waits_for_manifest_queue_replay_even_when_idle() {
+        let mut roster = two_row_roster();
+        roster.rest.insert("legacy_ts_restart".into(), json!(true));
+        let progress = RestoreProgress::new();
+        progress.begin(Some(&roster));
+        progress.settle_adopted("a-1");
+        assert!(!progress.state.lock().unwrap().targets["a-1"].settled);
+        progress.settle_target("a-1", None);
+        assert!(progress.state.lock().unwrap().targets["a-1"].settled);
     }
 
     #[tokio::test(start_paused = true)]
@@ -898,20 +1418,15 @@ mod tests {
         let tick = std::time::Duration::from_millis(1);
         assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
         // Quiet for 110s, then an adoption brings a continuation row up:
-        // that row's settle is skipped (its waiters stay parked for the
-        // pass's continuation) but still counts as progress, re-arming
-        // this waiter's quiet budget.
+        // the skipped settle still counts as progress (re-arms the budget).
         tokio::time::advance(std::time::Duration::from_secs(110)).await;
         progress.settle_adopted("durable-b");
-        // Past the original absolute deadline: only the re-arm keeps the
-        // waiter queued, and its own row is still owned (still pending
-        // its continuation prompt).
+        // Past the original deadline: only the re-arm keeps the waiter queued.
         tokio::time::advance(std::time::Duration::from_secs(30)).await;
         assert!(
             tokio::time::timeout(tick, &mut queued_a).await.is_err(),
             "the skipped settle did not re-arm the other waiters"
         );
-        // The pass settles the row itself: the waiter wakes.
         progress.settle_target("a-1", None);
         assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
     }
@@ -928,19 +1443,15 @@ mod tests {
         let mut queued_a = waiter(&progress, "a-1");
         let tick = std::time::Duration::from_millis(1);
         assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
-        // Quiet for 110s (the budget is 120s), then one unrelated settle:
-        // the pass is healthy and making progress, so the waiter's budget
-        // re-arms instead of expiring on the original absolute deadline.
+        // Quiet for 110s (budget 120s), then one unrelated settle:
+        // the budget re-arms instead of expiring.
         tokio::time::advance(std::time::Duration::from_secs(110)).await;
         progress.settle_target("b-2", None);
-        // Past the original absolute deadline: only the re-arm keeps the
-        // waiter queued.
         tokio::time::advance(std::time::Duration::from_secs(30)).await;
         assert!(
             tokio::time::timeout(tick, &mut queued_a).await.is_err(),
             "the waiter expired on the original deadline instead of the re-armed one"
         );
-        // Its own row settles well past that deadline: the waiter wakes.
         tokio::time::advance(std::time::Duration::from_secs(40)).await;
         progress.settle_target("alpha", None);
         assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
@@ -949,8 +1460,7 @@ mod tests {
     #[test]
     fn settle_target_without_a_registered_pass_is_a_no_op() {
         let progress = RestoreProgress::new();
-        // No pass began: the adoption settle on a normal boot (no
-        // roster) must be a silent no-op.
+        // No pass began: the settle must be a silent no-op.
         progress.settle_target("a-1", None);
         progress.settle_target("a-1", Some("never happens".to_string()));
         assert!(progress.settled_failure("a-1").is_none());
@@ -1048,17 +1558,97 @@ mod tests {
         std::fs::create_dir_all(scratch.join("prepared/u-1")).unwrap();
         std::fs::create_dir_all(legacy_update_restarts_dir(&agent_dir)).unwrap();
         std::fs::write(legacy_update_restart_status(&agent_dir), "{}").unwrap();
+        let ts_record = pa_types::daemon::update_flow::update_restarts_dir(&agent_dir)
+            .join("3c5dcf39f81bbe22-4e3a8d9e-1f2b-4c5d-9a0b-c1d2e3f4a5b6.json");
+        std::fs::write(&ts_record, "{}").unwrap();
+        let other_socket_dir =
+            pa_types::daemon::update_flow::update_restarts_dir(&agent_dir).join("0f".repeat(32));
+        std::fs::create_dir_all(other_socket_dir.join("prepared")).unwrap();
         boot_sweep(&agent_dir, &socket);
         assert!(!scratch.exists());
         assert!(!legacy_update_restarts_dir(&agent_dir).exists());
         assert!(!legacy_update_restart_status(&agent_dir).exists());
+        assert_eq!(std::fs::read_to_string(&ts_record).unwrap(), "{}");
+        assert!(other_socket_dir.exists());
+    }
+
+    #[test]
+    fn boot_sweep_preserves_socket_bound_lost_reply_sources_until_attempts_finish() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let socket = dir.path().join("daemon.sock");
+        let other_socket = dir.path().join("other.sock");
+        let sources = legacy_update_restarts_dir(&agent_dir);
+        let recovery = agent_dir.join("legacy-update-recovery");
+        std::fs::create_dir_all(&sources).unwrap();
+        std::fs::create_dir_all(&recovery).unwrap();
+        let mut attempts = Vec::new();
+        let mut manifests = Vec::new();
+        for pending_socket in [&socket, &other_socket] {
+            let key = crate::paths::hash_key(&pending_socket.to_string_lossy(), 64);
+            let attempt = recovery.join(format!("{key}.attempt.json"));
+            let manifest = sources.join(format!("{key}.json"));
+            std::fs::write(&attempt, serde_json::to_vec(&json!({
+                "socket": pending_socket, "version": "older-target-version", "updateId": "pending",
+                "startedAt": 123, "previousDigest": null, "origin": null,
+                "hello": { "supervisorPid": 42, "supervisorProcessStartId": "start",
+                    "supervisorGeneration": "generation" }
+            })).unwrap()).unwrap();
+            std::fs::write(&manifest, "prepared TS session and queue snapshot").unwrap();
+            attempts.push(attempt);
+            manifests.push(manifest);
+        }
+        let checkpoint = recovery.join("retained-checkpoint.json");
+        std::fs::write(&checkpoint, "converted roster").unwrap();
+        let stale = sources.join("unrelated.json");
+        std::fs::write(&stale, "stale snapshot").unwrap();
+        // A marker at the wrong key cannot preserve an unrelated source.
+        std::fs::copy(&attempts[0], recovery.join("unrelated.attempt.json")).unwrap();
+        let malformed = sources.join("malformed.json");
+        std::fs::write(&malformed, "stale snapshot").unwrap();
+        std::fs::write(recovery.join("malformed.attempt.json"), "not JSON").unwrap();
+        boot_sweep(&agent_dir, &socket);
+        assert_eq!(
+            manifests
+                .iter()
+                .map(std::fs::read_to_string)
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap(),
+            [
+                "prepared TS session and queue snapshot",
+                "prepared TS session and queue snapshot"
+            ]
+        );
+        assert!(!stale.exists());
+        assert!(!malformed.exists());
+        assert!(attempts.iter().all(|path| path.exists()));
+        assert_eq!(
+            std::fs::read_to_string(&checkpoint).unwrap(),
+            "converted roster"
+        );
+
+        // Successful coordinator adoption removes its attempt. A later boot can
+        // sweep that source without destroying another socket's pending recovery.
+        std::fs::remove_file(&attempts[0]).unwrap();
+        boot_sweep(&agent_dir, &socket);
+        assert!(!manifests[0].exists());
+        assert_eq!(
+            std::fs::read_to_string(&manifests[1]).unwrap(),
+            "prepared TS session and queue snapshot"
+        );
+        std::fs::remove_file(&attempts[1]).unwrap();
+        boot_sweep(&agent_dir, &socket);
+        assert!(!sources.exists());
+        assert_eq!(
+            std::fs::read_to_string(checkpoint).unwrap(),
+            "converted roster"
+        );
     }
 
     #[test]
     fn consume_roster_env_none_without_the_env() {
-        // NOTE: process env is global; this test documents the None path
-        // only when no other test set the var (the env is absent in the
-        // test harness).
+        // NOTE: process env is global; this documents the None path only when no
+        // other test set the var.
         if std::env::var(UPDATE_ROSTER_ENV).is_err() {
             assert!(consume_roster_env().is_none());
         }

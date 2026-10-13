@@ -1,9 +1,8 @@
 //! The `/update` command's runner seam: the TUI confirms, then the
-//! download+install runs OUT-OF-BAND (a background task — the TUI stays
-//! mounted and the daemon keeps running; the update replaces only the
-//! on-disk binary, so the new build takes effect on restart), and the
-//! outcome lands as a note row. The old TS-parity child + relaunch flow
-//! is gone: a successful update never tears this process down.
+//! download+install runs OUT-OF-BAND (the TUI stays mounted; the update
+//! replaces only the on-disk binary, so the new build takes effect on
+//! restart), and the outcome lands as a note row — a successful update
+//! never tears this process down.
 
 use std::pin::Pin;
 
@@ -15,13 +14,11 @@ pub type UpdateOutcome = std::result::Result<String, String>;
 pub type UpdateRunFuture = Pin<Box<dyn std::future::Future<Output = UpdateOutcome> + Send>>;
 
 /// The update funnel the composition root owns: the same body
-/// `prime-agent update` runs (the installer script download + exec with
-/// the output captured — the live frame stays intact), so the two
-/// surfaces cannot diverge.
+/// `prime-agent update` runs, so the two surfaces cannot diverge.
 pub trait UpdateCommands: Send + Sync {
     /// Run the download+install and report the new build's version (or
-    /// the failure message). The caller spawns this; the run may take
-    /// minutes (the installer downloads its own artifacts).
+    /// the failure message); the caller spawns this, and the run may
+    /// take minutes.
     fn run_update(&self) -> UpdateRunFuture;
 }
 
@@ -39,8 +36,7 @@ impl std::fmt::Debug for UpdateCommandsHandle {
 mod tests {
     use super::*;
 
-    /// A scripted runner: records the call, answers a fixed outcome (the
-    /// headless verifier's seam — no network, no installer).
+    /// A scripted runner: records the call, answers a fixed outcome.
     struct ScriptedUpdate {
         calls: std::sync::atomic::AtomicUsize,
         outcome: UpdateOutcome,

@@ -20,11 +20,8 @@ fn empty_queue_renders_no_rows() {
     assert!(render_queue(&theme(), &QueuedMessages::default(), "alt+up", 80).is_empty());
 }
 
-/// TS #2063 (RES-1306): a picked-up prompt leaves its lane at
-/// delivery, so while its turn is still preparing the strip is the
-/// only place it is visible — it renders as the "Starting" row, the
-/// first row of the strip, and never carries the browse hint (nothing
-/// is parked to browse).
+/// A picked-up prompt leaves its lane at delivery (RES-1306): while its turn prepares the strip is
+/// the only place it is visible — the "Starting" row, never with the browse hint.
 #[test]
 fn a_preparing_turn_renders_the_starting_row_alone() {
     let queue = QueuedMessages {
@@ -40,8 +37,7 @@ fn a_preparing_turn_renders_the_starting_row_alone() {
     assert_eq!(text.trim(), "Starting: queued before compaction");
 }
 
-/// The "Starting" row renders above the parked lanes, and the hint
-/// follows the parked lanes as before.
+/// The "Starting" row renders above the parked lanes; the hint follows the parked lanes as before.
 #[test]
 fn the_starting_row_renders_above_the_parked_lanes() {
     let queue = QueuedMessages {
@@ -60,8 +56,7 @@ fn the_starting_row_renders_above_the_parked_lanes() {
     assert!(crate::ansi::line_to_ansi(&rows[3]).contains("to browse and edit queued messages"));
 }
 
-/// The strip drops the "Starting" row the moment the projection no
-/// longer reports a preparing turn (the phase left `preparing`).
+/// The strip drops the "Starting" row the moment the projection no longer reports a preparing turn.
 #[test]
 fn the_starting_row_drops_with_the_projection() {
     let rows = render_queue(
@@ -163,8 +158,8 @@ fn long_previews_truncate_with_ellipsis() {
     let rows = render_queue(&theme(), &queue, "alt+up", 30);
     assert_eq!(rows.len(), 3);
     let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
-    // The row pads to the width like TS (a trailing pad column follows
-    // the ellipsis), so the check strips the pad.
+    // The row pads to the width like TS (a trailing pad column follows the
+    // ellipsis), so the check strips the pad.
     assert!(
         text.trim_end().ends_with("..."),
         "truncated with ellipsis: {text}"
@@ -199,9 +194,7 @@ fn labeled_internal_prompts_keep_their_own_label() {
         format_queued_message_preview("run tests", FOLLOW_UP_LABEL),
         "Follow-up: run tests"
     );
-    // The strip itself no longer renders internal prompts as their
-    // own rows (the sanctioned divergence): the condensation tests
-    // below own that behavior.
+    // Internal prompts never render as preview rows (the condensation tests own it).
 }
 
 #[test]
@@ -366,9 +359,8 @@ fn internal_prompts_stay_browseable_when_condensed() {
         injected_prompts: QueueLaneIndices::default(),
     };
     let mut selection = QueueSelection::default();
-    // Browsing still walks every queued item newest-first, the
-    // condensed internal prompt included (only the strip rows
-    // condense): draft -> follow-up -> steering, newest to oldest.
+    // Browsing still walks every queued item newest-first, the condensed
+    // internal prompt included: draft -> follow-up -> steering, newest to oldest.
     let text = selection.browse(&queue, "draft", QueueBrowseDirection::Older);
     assert_eq!(text.as_deref(), Some("then summarize"));
     let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
@@ -380,12 +372,10 @@ fn internal_prompts_stay_browseable_when_condensed() {
 #[test]
 fn browse_walks_newest_first_and_ends_on_the_draft() {
     let mut selection = QueueSelection::default();
-    // Leaving the draft stashes it.
     let text = selection.browse(&queue(), "current draft", QueueBrowseDirection::Older);
     assert_eq!(text.as_deref(), Some("then summarize"));
     assert!(selection.is_browsing());
     assert_eq!(selection.selected().map(|item| item.text.clone()), text);
-    // Older walks toward the steering lane.
     let text = selection.browse(&queue(), "", QueueBrowseDirection::Older);
     assert_eq!(text.as_deref(), Some("turn right"));
     let text = selection.browse(&queue(), "", QueueBrowseDirection::Older);
@@ -393,7 +383,6 @@ fn browse_walks_newest_first_and_ends_on_the_draft() {
         text, None,
         "older than the oldest steering message is a noop"
     );
-    // Newer walks back to the draft and restores it.
     let text = selection.browse(&queue(), "", QueueBrowseDirection::Newer);
     assert_eq!(text.as_deref(), Some("then summarize"));
     let text = selection.browse(&queue(), "", QueueBrowseDirection::Newer);
@@ -408,17 +397,14 @@ fn browse_stashes_the_draft_once_and_reset_returns_it() {
     let mut selection = QueueSelection::default();
     selection.browse(&queue(), "draft one", QueueBrowseDirection::Older);
     assert!(selection.has_draft());
-    // A deeper browse ignores the editor text: the stash keeps the
-    // draft the browse left.
+    // A deeper browse ignores the editor text: the stash keeps the draft the browse left.
     selection.browse(&queue(), "", QueueBrowseDirection::Older);
-    // Walking back to the draft restores the stashed draft and clears
-    // the stash.
+    // Walking back to the draft restores the stashed draft and clears the stash.
     selection.browse(&queue(), "", QueueBrowseDirection::Newer);
     let restored = selection.browse(&queue(), "", QueueBrowseDirection::Newer);
     assert_eq!(restored.as_deref(), Some("draft one"));
     assert!(!selection.is_browsing());
     assert!(!selection.has_draft());
-    // Reset on a fresh browse returns the newly stashed draft.
     selection.browse(&queue(), "fresh draft", QueueBrowseDirection::Older);
     assert_eq!(selection.reset(), "fresh draft");
     assert!(!selection.has_draft());
@@ -432,14 +418,12 @@ fn refresh_keeps_a_matching_selection_and_drops_a_stale_one() {
         selection.selected().map(|i| (i.lane, i.index)),
         Some((QueueLane::FollowUp, 0))
     );
-    // Unchanged queue + item keeps the cursor.
     assert_eq!(
         selection.refresh_at(&queue(), QueueLane::FollowUp, 0, "then summarize"),
         None
     );
     assert_eq!(selection.selected().map(|item| item.index), Some(0));
-    // A moved item (queue changed) drops the selection and returns the
-    // stashed draft.
+    // A moved item (queue changed) drops the selection and returns the stashed draft.
     let changed = QueuedMessages {
         steering: vec!["turn right".to_string()],
         follow_ups: vec!["edited".to_string()],
@@ -484,10 +468,8 @@ fn mirror_lane_move_swaps_within_the_lane_only() {
     );
 }
 
-/// A reorder through the local mirror keeps the typed provenance on
-/// the item it marks (the swap rides the index), so the folded row
-/// never misclassifies in the window before the daemon's action
-/// update lands.
+/// A reorder through the local mirror keeps the typed provenance on the item it marks, so the
+/// folded row never misclassifies before the daemon's action update lands.
 #[test]
 fn mirror_lane_move_rides_the_marked_indices() {
     let mut queue = QueuedMessages {
@@ -547,9 +529,8 @@ fn browse_header_quotes_lane_index_and_keys() {
     );
 }
 
-/// The read-only header (the operator's edit-scope directive): an
-/// internal item browses, but the header never offers the edit
-/// affordances — no reorder, no steer, no queue, no delete.
+/// The read-only header (the operator's edit-scope directive): an internal
+/// item browses, but the header never offers the edit affordances.
 #[test]
 fn an_internal_item_headers_read_only() {
     let internal_notice = QueueSelectionItem {
@@ -571,11 +552,9 @@ fn an_internal_item_headers_read_only() {
     );
 }
 
-/// The queue-fold bug (operator 2026-09-25): many child exits parked
-/// behind one busy turn rendered as that many user-like rows. The
-/// wire-typed provenance marks them, so they fold into the counted
-/// row instead — one row however many notices queue, with the
-/// human-typed previews untouched.
+/// The queue-fold bug (operator 2026-09-25): many child exits parked behind one busy turn rendered
+/// as that many user-like rows. The wire-typed provenance folds them into the counted row — one row
+/// however many notices queue, with the human previews untouched.
 #[test]
 fn child_status_notices_condense_by_wire_provenance() {
     let queue = QueuedMessages {
@@ -615,8 +594,8 @@ fn child_status_notices_condense_by_wire_provenance() {
     );
 }
 
-/// A marked steering-lane notice folds too (the daemon may park the
-/// notice behind the steering lane's delivery window).
+/// A marked steering-lane notice folds too (the daemon may park the notice
+/// behind the steering lane's delivery window).
 #[test]
 fn a_steering_lane_notice_condenses_too() {
     let queue = QueuedMessages {
@@ -650,11 +629,8 @@ fn a_steering_lane_notice_condenses_too() {
     assert_eq!(texts[2].trim(), "1 child status notice queued");
 }
 
-/// The spoof regression the operator's plan demands: provenance is
-/// the ONLY classifier for child status. A user-typed message that
-/// merely looks like a notice — the raw notice text, a string
-/// starting with the notice family's own header, or any internal-
-/// looking label — stays a human preview row and never counts.
+/// The spoof regression the operator's plan demands: provenance is the ONLY classifier for child
+/// status — a user-typed message that merely looks like a notice stays a human preview row.
 #[test]
 fn user_typed_rows_that_look_like_notices_stay_human() {
     let queue = QueuedMessages {
@@ -696,8 +672,8 @@ fn user_typed_rows_that_look_like_notices_stay_human() {
     );
 }
 
-/// The counted row names each origin in the fixed agent-message,
-/// heartbeat, child-status, other order with plural-correct counts.
+/// The counted row names each origin in the fixed agent-message, heartbeat, child-status, other
+/// order with plural-correct counts.
 #[test]
 fn mixed_origins_count_child_status_in_the_fixed_order() {
     let queue = QueuedMessages {
@@ -719,11 +695,10 @@ fn mixed_origins_count_child_status_in_the_fixed_order() {
         },
         injected_prompts: QueueLaneIndices::default(),
     };
-    // Width 120 so the four-origin row reads untruncated (the row
-    // text is 88 chars; at 80 the strip's ellipsis cut it).
+    // Width 120 so the four-origin row reads untruncated (the row text is 88
+    // chars; at 80 the strip's ellipsis cut it).
     let rows = render_queue(&theme(), &queue, "alt+up", 120);
-    // spacer + the one human preview (the follow-up lane's "edit
-    // this") + the condensed row + the hint.
+    // spacer + the one human preview + the condensed row + the hint.
     assert_eq!(rows.len(), 4);
     let texts: Vec<String> = rows
         .iter()
@@ -760,10 +735,8 @@ fn mixed_origins_count_child_status_in_the_fixed_order() {
     );
 }
 
-/// The browse affordance still walks the parked notices — the queue
-/// stays inspectable with the child/status detail (the operator's
-/// requirement): the selection walks every item, internal prompts
-/// and notices included, oldest-first down the follow-up lane.
+/// The browse affordance still walks the parked notices (the operator's inspectability
+/// requirement): the selection walks every item, oldest-first down the follow-up lane.
 #[test]
 fn browse_still_walks_the_parked_notices() {
     let queue = QueuedMessages {
@@ -794,10 +767,9 @@ fn browse_still_walks_the_parked_notices() {
     );
 }
 
-/// The operator's mission case (2026-09-28), stated exactly: seven
-/// child-exited follow-ups parked behind one busy turn plus one user
-/// steering message render as the user message's row plus the one
-/// summary row — NO child-exit item rows.
+/// The operator's mission case (2026-09-28), stated exactly: seven child-exited follow-ups parked
+/// behind one busy turn plus one user steering message render as the user message's row plus the
+/// one summary row — NO child-exit item rows.
 #[test]
 fn seven_child_exits_render_as_one_counted_row() {
     let mut follow_ups = Vec::new();
@@ -852,12 +824,9 @@ fn seven_child_exits_render_as_one_counted_row() {
     );
 }
 
-/// The engine-minted continuations (goal continuations and
-/// threshold-compaction continuations) park preview-less: without the
-/// rider they rendered as user-like rows (TS's projection filters them
-/// out entirely). The `injectedPrompts` wire-typed provenance folds
-/// them into the counted row's "other internal prompt" bucket — they
-/// never render their own rows.
+/// The engine-minted continuations (goal and threshold-compaction) park preview-less: TS's
+/// projection filters them out entirely, and the `injectedPrompts` wire-typed provenance folds them
+/// into the counted row's "other internal prompt" bucket — they never render their own rows.
 #[test]
 fn injected_continuations_condense_into_the_counted_row() {
     let queue = QueuedMessages {
@@ -904,9 +873,6 @@ fn injected_continuations_condense_into_the_counted_row() {
     );
 }
 
-/// A queue of ONLY internal items renders just the summary row (no
-/// item rows at all) — the strip never shows an internal prompt as a
-/// preview row.
 #[test]
 fn an_only_internal_queue_renders_just_the_summary_row() {
     let queue = QueuedMessages {
@@ -932,10 +898,8 @@ fn an_only_internal_queue_renders_just_the_summary_row() {
     );
 }
 
-/// The spoof regression for the second rider (the child-status
-/// precedent's contract): provenance is the ONLY classifier. A
-/// user-typed prompt with a continuation's exact text — without the
-/// wire mark — stays the human preview row it is.
+/// The spoof regression for the second rider: provenance is the ONLY classifier — a user-typed
+/// prompt with a continuation's exact text, no wire mark, stays the human preview row.
 #[test]
 fn a_same_text_user_row_never_rides_the_injected_rider() {
     let queue = QueuedMessages {
@@ -959,8 +923,6 @@ fn a_same_text_user_row_never_rides_the_injected_rider() {
     );
 }
 
-/// The counted row keeps its fixed origin order with the injected
-/// continuations folded into the other-internal bucket's count.
 #[test]
 fn mixed_origins_count_the_injected_continuations_as_other() {
     let queue = QueuedMessages {
@@ -1006,9 +968,8 @@ fn mixed_origins_count_the_injected_continuations_as_other() {
     );
 }
 
-/// The browse keeps walking internal items (read-only inspection of
-/// the full queue) while its edit affordances apply to the user
-/// items: every walked item carries its origin for the gates.
+/// The browse keeps walking internal items while its edit affordances apply
+/// to the user items: every walked item carries its origin for the gates.
 #[test]
 fn browse_items_carry_their_origin_for_the_edit_gate() {
     let queue = QueuedMessages {
@@ -1032,7 +993,6 @@ fn browse_items_carry_their_origin_for_the_edit_gate() {
         },
     };
     let mut selection = QueueSelection::default();
-    // Newest-first: draft -> follow-ups -> steering, oldest last.
     assert_eq!(
         selection
             .browse(&queue, "draft", QueueBrowseDirection::Older)
@@ -1085,10 +1045,9 @@ fn browse_items_carry_their_origin_for_the_edit_gate() {
     );
 }
 
-/// A user row's reorder can swap it across an injected continuation:
-/// the injected rider rides the swap like the child-status rider, so
-/// the folded classification never misreads in the window before
-/// the daemon's action update lands.
+/// A user row's reorder can swap it across an injected continuation: the injected rider rides the
+/// swap like the child-status rider, so the folded classification never misreads before the
+/// daemon's action update lands.
 #[test]
 fn mirror_lane_move_rides_the_injected_rider_too() {
     let mut queue = QueuedMessages {

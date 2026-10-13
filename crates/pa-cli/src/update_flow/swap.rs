@@ -1,18 +1,17 @@
-//! The staged activation (spec §4 `Activating`, TS `native-update.ts` probe
-//! parity): the `.activation-state` rollback pointer, the `bin/previous`
-//! symlink, and the atomic `bin/prime-agent` repoint.
+//! The staged activation (spec §4 `Activating`): the `.activation-state`
+//! rollback pointer, the `bin/previous` symlink, and the atomic
+//! `bin/prime-agent` repoint.
 
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 
-/// The `--version`/`--help` probe timeout (TS `native-update.ts` runs both
-/// probes with a 10 s timeout).
+/// The `--version`/`--help` probe timeout (both probes, 10 s).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The `.activation-state` contents (spec §7: both link targets plus the
-/// `update_id`; written at `Activating`, deleted on `Complete`).
+/// The `.activation-state` contents (spec §7: both link targets plus the `update_id`; written at
+/// `Activating`, deleted on `Complete`).
 pub struct ActivationState {
     pub current_target: String,
     pub previous_target: String,
@@ -29,16 +28,14 @@ impl ActivationState {
     }
 }
 
-/// Repoint the launcher symlinks for one activation (spec §4 `Stopped ->
-/// Activating`): record the recovery state, move the old current target to
-/// `bin/previous`, then atomically point `bin/prime-agent` at the
-/// candidate. Every symlink write is create-tmp + rename, so a reader
-/// never observes a missing launcher.
+/// Repoint the launcher symlinks for one activation (spec §4): record the
+/// recovery state, move the old target to `bin/previous`, then atomically
+/// point `bin/prime-agent` at the candidate. Every symlink write is
+/// create-tmp + rename (a reader never observes a missing launcher).
 ///
 /// # Errors
-/// Returns an error when the `.activation-state` recovery record cannot be
-/// written or made durable, or when the `previous` or current launcher
-/// repoint fails.
+/// Returns an error when the `.activation-state` record cannot be written,
+/// made durable, or a launcher repoint fails.
 pub fn activate(
     root: &Path,
     current_target: &str,
@@ -53,10 +50,9 @@ pub fn activate(
     let state_path = root.join(".activation-state");
     std::fs::write(&state_path, state.render())
         .with_context(|| format!("write {}", state_path.display()))?;
-    // The rollback record must be durable BEFORE any launcher moves: a
-    // crash between the write and the repoint would otherwise leave a
-    // truncated state file that `read_rollback_installation` trusts over
-    // the (still-valid) `bin/previous` link.
+    // The rollback record must be durable BEFORE any launcher moves: a crash between
+    // the write and the repoint would leave a truncated state file that
+    // `read_rollback_installation` trusts over the valid `bin/previous`.
     std::fs::File::open(&state_path)?.sync_all()?;
     pa_core::update::install::sync_directory(root)?;
     write_launcher(
@@ -73,8 +69,7 @@ pub fn activate(
 }
 
 /// Repoint the launcher back at the previous release (spec §4 `Rollback`):
-/// the previous target is already recorded; the swap is the same atomic
-/// write.
+/// the previous target is already recorded; the same atomic write.
 ///
 /// # Errors
 /// Returns an error when the current launcher repoint fails.
@@ -87,7 +82,7 @@ pub fn restore_previous(root: &Path, previous_target: &str) -> Result<()> {
 }
 
 /// Delete the activation state on `Complete` (spec §7: deleted after the new
-/// supervisor's hello; a leftover file is only a recovery hint).
+/// supervisor's hello; a leftover is only a recovery hint).
 ///
 /// # Errors
 /// Returns an error when the `.activation-state` file cannot be removed.
@@ -126,8 +121,7 @@ fn write_launcher(root: &Path, link: &str, target: &str) -> Result<()> {
 /// The launcher's current link target (the `../releases/...` text).
 ///
 /// # Errors
-/// Returns an error when the launcher symlink cannot be read or its
-/// target is not valid UTF-8.
+/// Returns an error when the launcher symlink cannot be read or is not UTF-8.
 pub fn launcher_target(root: &Path, link: &str) -> Result<String> {
     let launcher = root.join("bin").join(link);
     let target =
@@ -138,18 +132,15 @@ pub fn launcher_target(root: &Path, link: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("the {link} launcher target is not valid UTF-8"))
 }
 
-/// The validation probes of the candidate executable (TS `native-update.ts`
-/// parity): `--version` must print exactly `version`, `--help` must exit
-/// cleanly. Both run detached with a hard timeout.
+/// The validation probes of the candidate executable: `--version` must print
+/// exactly `version`, `--help` must exit cleanly (both detached, hard timeout).
 ///
 /// # Errors
-/// Returns an error when the candidate binary's reported version cannot
-/// be obtained, when it differs from `version`, or when the `--help` probe
-/// fails, times out, or exits nonzero.
+/// Returns an error when the reported version differs from `version`, or the
+/// `--help` probe fails, times out, or exits nonzero.
 pub async fn validate_candidate(exe: &Path, version: &str) -> Result<()> {
-    // The release name and the binary it holds must agree: a directory
-    // claiming a version its binary does not report is an inconsistent
-    // release, never a candidate.
+    // The release name and the binary it holds must agree: a directory claiming
+    // a version its binary does not report is never a candidate.
     let reported = pa_core::update::download::binary_reported_version(exe).await?;
     if reported != version {
         anyhow::bail!("the staged binary reports version {reported:?}, expected {version:?}");
@@ -219,13 +210,11 @@ mod tests {
         let state = std::fs::read_to_string(root.join(".activation-state")).unwrap();
         assert!(state.starts_with("../releases/0.1.0-linux-x64-0/prime-agent\n"));
         assert!(state.ends_with("u1\n"));
-        // Rollback repoints the current launcher at the previous target.
         restore_previous(&root, "../releases/0.1.0-linux-x64-0/prime-agent").unwrap();
         assert_eq!(
             launcher_target(&root, "prime-agent").unwrap(),
             "../releases/0.1.0-linux-x64-0/prime-agent"
         );
-        // Complete clears the recovery hint.
         clear_activation_state(&root).unwrap();
         assert!(!root.join(".activation-state").exists());
     }

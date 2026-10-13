@@ -1,36 +1,7 @@
-//! Provider failover: the resilience loop that keeps a turn alive across
-//! configured providers serving the same model.
-//!
-//! The TS quick-retry loop (`provider-retry.ts`, ported in
-//! [`super::auto_retry`]) re-issues a failed turn on the SAME provider and
-//! gives up when the retries run out. When the model is served by more than
-//! one configured provider, that give-up is premature: a whole provider
-//! outage (the "GLM went down and everything broke" failure mode) kills
-//! sessions a sibling provider could have finished. This module generalizes
-//! the TS backup-model retry (`agent-session.ts`
-//! `_handleBackupModelRetry`/`_restorePrimaryModelAfterBackup`): after the
-//! per-provider retry budget is spent, the turn re-routes to the next
-//! configured provider serving the same model id and retries there, walking
-//! the candidate chain in catalog order. The event vocabulary is the TS
-//! wire (`auto_retry_start` with `reason: "backup"` and `backupModel`, and
-//! `auto_retry_end` with `restoredModel` on success), so the interactive
-//! surface renders the progression without new event types.
-//!
-//! The decision logic is pure and clock-free; the caller owns the actual
-//! sleep/attempt cycle and the model switch (the session loop re-binds the
-//! agent's model, thinking level, and session-log row).
-//!
-//! Divergences from TS (operator ruling 2026-09-23, documented per the #289
-//! precedent): (1) the whole episode is capped at
-//! [`MAX_TOTAL_PROVIDER_RETRIES`] retries (TS has no failover chain at all;
-//! its provider-wait loop's 30-attempt class is the "30 retries" the
-//! operator ruled too many — this port's chain gives up inside the
-//! operator's 5-8 band, anchored like TS's own wait `maxParks: 8`);
-//! (2) the default per-provider budget is the TS quick-retry `maxRetries`
-//! (3), down from 5; (3) the retry waits carry ±20% jitter
-//! (TS `providerRetryDelay` has none) so a fleet of retried sessions
-//! spreads off the same exponential-ladder ticks; the jittered value is
-//! both waited and reported, keeping the countdown honest.
+//! Provider failover: keeps a turn alive across configured providers serving the same model — a
+//! spent per-provider retry budget re-routes to the next provider in catalog order; the decision
+//! logic is pure, the caller owns the sleep/switch. Divergence (operator ruling 2026-09-23): retry
+//! waits carry ±20% jitter (TS has none).
 
 use std::future::Future;
 
@@ -48,32 +19,21 @@ use super::provider_retry::{
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
-/// The provider-failover policy: per-provider retry budget and backoff
-/// schedule for the failover loop (settings `retry.failover`).
-///
-/// When the current provider's quick-retry budget is spent and another
-/// configured provider serves the same model, the failover schedule takes
-/// over: exponential backoff starting at `base_delay_ms`, doubling each
-/// retry, capped at `max_delay_ms`, with up to `max_retries` retries per
-/// provider before switching to the next one. With no failover candidate
-/// the TS quick-retry policy alone governs the turn (byte-identical
-/// surfacing).
+/// Per-provider retry budget and backoff schedule (settings
+/// `retry.failover`). With no failover candidate the TS quick-retry
+/// policy alone governs the turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderFailoverPolicy {
     pub enabled: bool,
-    /// Retries per provider before switching to the next provider.
     pub max_retries: u32,
     /// First backoff delay (doubles each retry).
     pub base_delay_ms: u64,
-    /// Backoff ceiling per retry.
     pub max_delay_ms: u64,
 }
 
-/// Default failover schedule: 3 retries per provider (the TS quick-retry
-/// `maxRetries` default), 1s doubling backoff capped at 30s, before switching
-/// to the next provider serving the model. (SANCTIONED DIVERGENCE, operator
-/// ruling 2026-09-23 "30 retries is a lot for provider failures": this was 5,
-/// which walked a multi-provider chain into ~30 attempts.)
+/// 3 retries per provider, 1s doubling backoff capped at 30s.
+/// (SANCTIONED DIVERGENCE, operator ruling 2026-09-23 "30 retries is a
+/// lot for provider failures": this was 5.)
 pub const DEFAULT_PROVIDER_FAILOVER_POLICY: ProviderFailoverPolicy = ProviderFailoverPolicy {
     enabled: true,
     max_retries: 3,
@@ -81,16 +41,12 @@ pub const DEFAULT_PROVIDER_FAILOVER_POLICY: ProviderFailoverPolicy = ProviderFai
     max_delay_ms: 30000,
 };
 
-/// The whole-episode retry ceiling (SANCTIONED DIVERGENCE, operator ruling
-/// 2026-09-23): the per-provider budget alone let a chain of N candidate
-/// providers stack 5xN retries (the observed "Retry failed after 30
-/// attempts"). The operator's standard band tops at 8 — the same anchor as
-/// TS's own provider-wait `maxParks: 8` — so the chain gives up after 8
-/// retries no matter how many candidates it could walk.
+/// The whole-episode retry ceiling (SANCTIONED DIVERGENCE, operator
+/// ruling 2026-09-23): the band tops at 8, the same anchor as TS's own
+/// provider-wait `maxParks: 8` — the chain gives up after 8 retries no
+/// matter how many candidates remain.
 pub const MAX_TOTAL_PROVIDER_RETRIES: u32 = 8;
 
-/// The per-provider retry policy the failover loop derives from the
-/// failover schedule plus the TS server-requested-wait cap.
 fn per_provider_policy(
     failover: &ProviderFailoverPolicy,
     server_wait_cap_ms: u64,
@@ -104,10 +60,8 @@ fn per_provider_policy(
     }
 }
 
-/// Backoff delay before retry `attempt` (1-based) on one provider:
-/// `base_delay_ms` doubling each retry, capped at `max_delay_ms`, honoring
-/// a server-requested wait (`Retry-After`) the same way the TS quick-retry
-/// delay does.
+/// Backoff delay before retry `attempt` (1-based) on one provider; a server-requested wait
+/// (`Retry-After`) is honored like the TS quick-retry delay.
 #[must_use]
 pub fn failover_retry_delay(
     attempt: u32,
@@ -122,27 +76,17 @@ pub fn failover_retry_delay(
     )
 }
 
-/// Drive one turn through the provider-failover chain.
-///
-/// With failover disabled or no candidate providers, this is exactly
-/// [`run_turn_with_auto_retry`] under `quick_policy` (the TS quick-retry
-/// loop, unchanged surfacing). Otherwise each provider gets up to
-/// `failover.max_retries` quick retries on the failover schedule; when the
-/// budget is spent the next candidate takes over immediately (the TS
-/// backup-model retry re-issues with `delayMs: 0`). `switch` re-binds the
-/// session to a provider (agent model + clamped thinking + session-log
-/// row); `restore` hands the primary back and returns its
-/// `"provider/model-id"`. Success after a switch restores the primary and
-/// reports it; every provider exhausting its budget surfaces the final
-/// failure like the single-provider loop does.
+/// Drive one turn through the provider-failover chain. With failover disabled or no candidates this
+/// is exactly [`run_turn_with_auto_retry`] under `quick_policy`; otherwise each provider gets
+/// `failover.max_retries` quick retries, and a spent budget switches to the next candidate
+/// immediately. `switch` re-binds the session to a provider; `restore` hands the primary back and
+/// returns its `"provider/model-id"`.
 ///
 /// # Errors
 ///
-/// Returns the final attempt's error when every candidate provider exhausts
-/// its retry budget, or the `emit`/`switch`/`restore` callbacks' errors as
-/// they surface. An `attempt` that errors outright (instead of returning an
-/// error-stop message) propagates immediately, without spending any retry
-/// budget or invoking a callback.
+/// Returns the final attempt's error when every candidate exhausts its
+/// budget, or a callback's error as it surfaces. An `attempt` that
+/// errors outright propagates immediately, without spending budget.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     quick_policy: &ProviderRetryPolicy,
@@ -170,8 +114,8 @@ where
     RF: Future<Output = anyhow::Result<Option<String>>>,
 {
     if !failover.enabled || candidates.is_empty() {
-        // The pass-through moves the park seam: the branch returns, so
-        // the loop below cannot reach (and must not reborrow) it.
+        // The pass-through moves the park seam: the loop below cannot
+        // reach (and must not reborrow) it.
         return run_turn_with_auto_retry(
             quick_policy,
             context_window,
@@ -217,12 +161,11 @@ where
             return Ok(with_stop_reason_aborted(message));
         }
         // Permanent and deterministic failures never walk the chain: a
-        // rejected request fails the same way on every provider, and
-        // lifecycle/faux failures are not provider failures at all.
+        // rejected request fails the same way on every provider.
         let non_retryable = is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
             // A context overflow fails identically on every provider (TS
-            // `_isRetryableError`): the compact-and-retry recovery owns it.
+            // `_isRetryableError`): the recovery owns it.
             || is_context_overflow_failure(&message, context_window)
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
@@ -235,11 +178,9 @@ where
                 let _ = restore().await?;
             }
             // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling):
-            // the outcome row is FAILURE-scoped — a first-attempt
-            // provider failure (no candidate switch, no retry) still
-            // discloses at attempt 0; the self-managed arms (overflow
-            // recovery, lifecycle, faux) stay silent. The twin arm of
-            // `run_turn_with_auto_retry`'s zero-retry disclosure.
+            // a first-attempt provider failure still discloses at
+            // attempt 0; the self-managed arms (overflow recovery,
+            // lifecycle, faux) stay silent.
             if total_retries > 0
                 || (has_provider_stream_failure(&message)
                     && !is_context_overflow_failure(&message, context_window))
@@ -256,10 +197,8 @@ where
         }
         total_retries += 1;
         retries_on_provider += 1;
-        // The whole-episode ceiling binds first (the operator's 5-8 band):
-        // a long candidate chain gives up here instead of stacking one
-        // per-provider budget after another into the ~30 attempts the
-        // operator ruled too many.
+        // The whole-episode ceiling binds first: a long candidate chain
+        // gives up here instead of stacking per-provider budgets.
         if total_retries > MAX_TOTAL_PROVIDER_RETRIES {
             if switched {
                 let _ = restore().await?;
@@ -274,8 +213,6 @@ where
             return Ok(message);
         }
         if retries_on_provider > failover.max_retries {
-            // This provider's budget is spent: walk to the next provider
-            // serving the same model, or surface the failure.
             let Some(next) = candidates.get(candidate_index) else {
                 if switched {
                     let _ = restore().await?;
@@ -294,8 +231,7 @@ where
             let backup_model = format!("{}/{}", next.provider, next.id);
             switch(next).await?;
             switched = true;
-            // The TS backup-model retry re-issues immediately on the
-            // backup (`delayMs: 0`): no wait, no countdown.
+            // The TS backup-model retry re-issues immediately (`delayMs: 0`).
             emit(AutoRetryEvent::Start {
                 attempt: total_retries,
                 max_attempts: failover.max_retries,
@@ -313,10 +249,9 @@ where
             quick_policy.max_retry_delay_ms,
         );
         let delay_ms = match delay {
-            // Jittered (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
-            // the jittered value is both waited and reported, so the
-            // interactive countdown stays honest while retried sessions
-            // spread off the same ladder ticks.
+            // Jittered (SANCTIONED DIVERGENCE, operator ruling
+            // 2026-09-23): the jittered value is both waited and
+            // reported.
             ProviderRetryDelay::Wait { delay_ms } => {
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
@@ -324,15 +259,14 @@ where
                 if switched {
                     let _ = restore().await?;
                 }
-                // The give-up sentence of this arm is the park's abort
-                // message (the TS wait loop's `reset-too-far` analogue).
+                // The give-up sentence here is the park's abort message
+                // (TS `reset-too-far`).
                 let abort = format!(
                     "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
                     retry_after_ms.div_ceil(1000),
                     quick_policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam (TS parks only
-                // from the wait path's `usage` arm): other
+                // The park seam is a quota-failure seam: other
                 // server-requested waits keep the give-up.
                 let parked = if is_quota_block_failure(&message) {
                     match park.as_deref_mut() {
@@ -343,8 +277,7 @@ where
                     None
                 };
                 let final_error = match parked {
-                    // The turn settles as the park's pause, not its death:
-                    // the parked status replaces the give-up (TS
+                    // The parked status replaces the give-up (TS
                     // `_finishQuotaParkedTurn`'s `finalError`).
                     Some(outcome) => outcome.status_message,
                     None => format!(
@@ -386,7 +319,7 @@ where
     }
 }
 
-/// The user-visible error text of a failed turn (TS `errorMessage || "Unknown error"`).
+/// The user-visible error text of a failed turn.
 fn final_error_of(message: &AssistantMessage) -> String {
     message
         .error_message
@@ -493,8 +426,8 @@ mod tests {
         events: Vec<AutoRetryEvent>,
     }
 
-    /// Run the driver over a scripted attempt sequence. Each entry is the
-    /// assistant message one attempt returns.
+    /// Run the driver over a scripted attempt sequence (one assistant
+    /// message per attempt).
     async fn drive(
         failover: &ProviderFailoverPolicy,
         candidates: &[Model],
@@ -605,14 +538,11 @@ mod tests {
                 },
             )
             .collect();
-        // 1s doubling: 1, 2, 4, 8, 16, then the 30s ceiling.
         assert_eq!(schedule, vec![1000, 2000, 4000, 8000, 16000, 30000, 30000]);
-        // A larger server-requested wait wins over the exponential value.
         assert_eq!(
             failover_retry_delay(1, Some(5000), &failover, 60000),
             ProviderRetryDelay::Wait { delay_ms: 5000 }
         );
-        // The TS server-wait cap still refuses absurd waits.
         assert_eq!(
             failover_retry_delay(1, Some(60001), &failover, 60000),
             ProviderRetryDelay::ExceedsCap {
@@ -632,23 +562,16 @@ mod tests {
             ok_message("recovered on backup"),
         ];
         let harness = drive(&fast_failover(), &candidates, script).await;
-        // Initial attempt + 2 retries on the primary, then one attempt on
-        // the first backup succeeds.
         assert_eq!(harness.attempts, 4);
         assert_eq!(harness.switches, vec!["backup-a/glm-5.3"]);
         assert_eq!(harness.restores, vec![Some("primary/glm-5.3".to_string())]);
-        // Two quick waits on the primary (jittered around the 5ms/10ms
-        // ladder steps: [4, 7] and [8, 14]), then the immediate backup
-        // re-issue (no wait between the switch and the next attempt).
+        // Two jittered quick waits on the primary, then the immediate backup re-issue.
         assert_eq!(harness.waits.len(), 2, "waits: {:?}", harness.waits);
         assert!(
             (4..=7).contains(&harness.waits[0]) && (8..=14).contains(&harness.waits[1]),
             "jittered waits {:?} outside the [4,7]/[8,14] bands",
             harness.waits
         );
-        // The progression: two quick starts, the backup switch, the
-        // restored-success end. The quick-start delays carry the same
-        // jittered values the loop waited.
         let delays: Vec<u64> = harness
             .events
             .iter()
@@ -707,16 +630,12 @@ mod tests {
         assert!(shape_matches, "events: {:?}", harness.events);
     }
 
-    /// The whole-episode ceiling (operator ruling 2026-09-23: "30 retries
-    /// is a lot for provider failures"): a long candidate chain never
-    /// stacks one per-provider budget after another — the episode gives up
-    /// at [`MAX_TOTAL_PROVIDER_RETRIES`] retries, inside the operator's
-    /// 5-8 band, instead of walking every candidate to exhaustion.
+    /// Operator ruling 2026-09-23: the chain gives up at
+    /// [`MAX_TOTAL_PROVIDER_RETRIES`] retries.
     #[tokio::test]
     async fn a_long_candidate_chain_gives_up_at_the_episode_cap() {
         // Six backup candidates: without the cap the walk would consume
-        // (1 + candidates) * (1 + per-provider budget) attempts (28 with
-        // the old 5/provider default, the ~30 the operator ruled out).
+        // (1 + candidates) * (1 + budget) attempts (the ~30 the operator ruled out).
         let candidates: Vec<Model> = (1..=6)
             .map(|index| model(&format!("backup-{index}")))
             .collect();
@@ -724,11 +643,8 @@ mod tests {
             .map(|index| error_message(Some("server_error"), Some(500), &format!("down {index}")))
             .collect();
         let harness = drive(&fast_failover(), &candidates, script).await;
-        // 1 initial attempt + MAX_TOTAL_PROVIDER_RETRIES retries: the cap
-        // binds before the chain ever reaches its later candidates.
         assert_eq!(harness.attempts, 1 + MAX_TOTAL_PROVIDER_RETRIES as usize);
-        // The walk switched once per spent provider budget inside the cap:
-        // with the 2-retry budget, providers spend at retries 3 and 6.
+        // With the 2-retry budget, providers spend at retries 3 and 6.
         assert_eq!(
             harness.switches.len(),
             2,
@@ -758,8 +674,6 @@ mod tests {
     #[tokio::test]
     async fn all_providers_failing_surfaces_the_final_error() {
         let candidates = vec![model("backup-a"), model("backup-b")];
-        // Exhaust the primary (3 attempts), backup-a (3), backup-b (3):
-        // 9 scripted failures.
         let script: Vec<AssistantMessage> = (0..9)
             .map(|index| error_message(Some("server_error"), Some(500), &format!("down {index}")))
             .collect();
@@ -769,15 +683,12 @@ mod tests {
             harness.switches,
             vec!["backup-a/glm-5.3", "backup-b/glm-5.3"]
         );
-        // Every provider restored the primary before the final failure.
         assert_eq!(
             harness.restores,
             vec![Some("primary/glm-5.3".to_string()); 1]
         );
         let end = harness.events.last().expect("end event");
-        // The whole-episode ceiling (8 retries, the operator's 5-8 band)
-        // ends the chain after the 9th attempt instead of walking every
-        // candidate's budget.
+        // The episode cap ends the chain after the 9th attempt.
         assert_eq!(
             end,
             &AutoRetryEvent::End {
@@ -787,7 +698,6 @@ mod tests {
                 restored_model: None,
             }
         );
-        // Six quick retries happened across the chain: two per provider.
         let quick_starts = harness
             .events
             .iter()
@@ -804,9 +714,7 @@ mod tests {
         assert_eq!(quick_starts, 6);
     }
 
-    /// A permanent failure never walks the chain, but the failure-scoped
-    /// disclosure still emits at attempt 0 (the 402 diagnosis: no provider
-    /// failure settles silently).
+    /// The 402 diagnosis: no provider failure settles silently.
     #[tokio::test]
     async fn permanent_failures_never_walk_the_chain_but_disclose() {
         let candidates = vec![model("backup-a")];
@@ -830,9 +738,7 @@ mod tests {
     }
 
     /// The router's tool-use 404 is permanent even though a plain 404 is
-    /// the documented transient exception: every provider serving the
-    /// model rejects tools identically, so walking the chain only stacks
-    /// ~16 minutes of doomed retries (the dogfood incident).
+    /// transient (the dogfood incident): every provider rejects tools identically.
     #[tokio::test]
     async fn unsupported_tool_failures_never_walk_the_chain_but_disclose() {
         let candidates = vec![model("backup-a")];
@@ -844,7 +750,6 @@ mod tests {
         let harness = drive(&fast_failover(), &candidates, script).await;
         assert_eq!(harness.attempts, 1);
         assert!(harness.switches.is_empty());
-        // The capability mismatch still discloses at attempt 0.
         assert_eq!(
             harness.events.as_slice(),
             &[AutoRetryEvent::End {
@@ -893,8 +798,7 @@ mod tests {
             }
         );
 
-        // No candidates: identical quick-loop behavior (the quick policy's
-        // own schedule — three retries at its 2000ms base).
+        // No candidates: identical quick-loop behavior.
         let script: Vec<AssistantMessage> = (0..4)
             .map(|index| error_message(Some("server_error"), None, &format!("down {index}")))
             .collect();
@@ -923,9 +827,7 @@ mod tests {
         assert!(harness.restores.is_empty());
     }
 
-    /// A context overflow fails identically on every provider (TS
-    /// `_isRetryableError`'s overflow guard): the failure surfaces without
-    /// walking the chain, leaving the compact-and-retry recovery to own it.
+    /// The compact-and-retry recovery owns it (TS `_isRetryableError`).
     #[tokio::test]
     async fn context_overflow_never_walks_the_provider_chain() {
         let candidates = vec![model("backup-a"), model("backup-b")];

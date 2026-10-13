@@ -1,6 +1,6 @@
-//! The schedule interpreter (moved with its concern): the small cron-field
-//! vocabulary and the human-readable schedule forms the interval column and the
-//! drill-in render from (the storage format stays the raw cron).
+//! The schedule interpreter: the small cron-field vocabulary and the
+//! human-readable schedule forms the interval column and the drill-in
+//! render from (the storage format stays the raw cron).
 
 /// The interpreted form of one cron field: `*`, `*/n`, a single value,
 /// or anything else the small interpreter below does not cover (lists,
@@ -43,15 +43,12 @@ fn cron_day_name(value: u32) -> Option<&'static str> {
 
 /// The human-readable form of one schedule expression for the interval
 /// column (the operator's 2026-09-24 ruling: "cron format is not human
-/// readable"). The storage format stays the raw cron — this is
-/// render-side only, and the drill-in keeps the raw expression beside
-/// the interpretation. The natural-language schedules (`every 10m`,
-/// `in 2h`, `at <date>`) pass through unchanged, the five-field cron
-/// forms interpret into their plain-English meaning (`*/2 * * * *` is
-/// "every 2 minutes", `0 9 * * 1` is "Mondays 09:00", the stored
-/// `@hourly`/`@daily` aliases expand at creation into the five-field
-/// forms they mean), and anything the interpreter cannot cover falls
-/// back to the raw expression.
+/// readable"). The storage format stays the raw cron — render-side only.
+/// The natural-language schedules (`every 10m`, `in 2h`, `at <date>`)
+/// pass through unchanged, the five-field cron forms interpret into
+/// plain English (the stored `@hourly`/`@daily` aliases expand at
+/// creation into the five-field forms), and anything the interpreter
+/// cannot cover falls back to the raw expression.
 #[must_use]
 pub fn human_schedule(expression: &str) -> String {
     let trimmed = expression.trim();
@@ -65,10 +62,9 @@ pub fn human_schedule(expression: &str) -> String {
     }
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     if fields.len() != 5 {
-        // The passthrough stays the expression itself (a natural-language
-        // schedule already reads), trimmed: a whitespace-padded wire value
-        // must never render its padding into the column (or twice, via
-        // the pair's raw-append fallback).
+        // The passthrough stays the expression itself, trimmed: a
+        // whitespace-padded wire value must never render its padding into the
+        // column (or twice, via the pair's raw-append fallback).
         return trimmed.to_string();
     }
     let minute = parse_cron_field(fields[0]);

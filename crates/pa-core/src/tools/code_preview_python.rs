@@ -1,9 +1,5 @@
-//! Python-side preview analysis: the python half of
-//! `packages/coding-agent/src/core/tools/code-preview.ts`.
-//!
-//! Covers `previewPythonCode`/`previewIpythonCode` and their statement
-//! scanner. Split from the bash-side preview module for module-size
-//! hygiene; behavior matches the TS source.
+//! Python-side preview analysis: `previewPythonCode`/`previewIpythonCode`
+//! and their statement scanner.
 
 use crate::tools::code_preview::{
     descriptor, is_comment_line, js_trim, js_trim_end, path_tail, preview_bash_command, re,
@@ -277,9 +273,8 @@ fn is_unsupported_escape_char(ch: char) -> bool {
     )
 }
 
-/// Walk a python string-literal body from just after the opening delimiter,
-/// following python's escape rules (in raw strings backslash-quote never
-/// closes). Offsets index bytes into `code`.
+/// Walk a python string-literal body from just after the opening delimiter, following python's
+/// escape rules (in raw strings backslash-quote never closes). Offsets index bytes into `code`.
 fn scan_python_string_literal(
     code: &str,
     start: usize,
@@ -416,8 +411,7 @@ fn extract_bash_skill_command(code: &str) -> Option<String> {
         return None;
     }
     let rest = code[scan.end..].trim_start();
-    // Require a plain literal first argument; concatenation or other
-    // expressions fall back.
+    // Require a plain literal first argument; concatenation or other expressions fall back.
     if !rest.starts_with(',') && !rest.starts_with(')') {
         return None;
     }

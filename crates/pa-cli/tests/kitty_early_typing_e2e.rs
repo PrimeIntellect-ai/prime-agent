@@ -1,8 +1,5 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures by
-// design on hot paths; 64-bit targets - the narrowing sits at OS/protocol
-// boundaries where the values are bounded (pid syscalls, epoch/elapsed
-// milliseconds), and checked conversions would add panic paths where silent
-// wrap was deliberate.
+// large_futures: stack futures on hot paths by design. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::cast_possible_truncation,
@@ -12,31 +9,11 @@
     clippy::too_many_lines
 )]
 
-//! Real-pty e2e for the kitty-probe window's early-typing contract: on a
-//! silent (never-answering) terminal the probe holds the process-global
-//! event-reader lock for its answer window, and keys typed inside the
-//! window park until the probe settles. The vendored crossterm patch
-//! (`read_supports_keyboard_enhancement_raw`) holds that window in short
-//! poll slices, so the app reader interleaves and early typing delivers
-//! while the probe listens. This e2e is the differential oracle with
-//! served-path assertions on every class:
-//! - the probe's query bytes must appear on the wire (the probe path was
-//!   taken — an env-hint short-circuit would make the timing vacuous),
-//! - the early key must RENDER inside the window (the delivery path was
-//!   taken — a key that never renders proves nothing), and
-//! - the answered classes must keep their contracts (the kitty answer
-//!   upgrades with the flags push; a DA1-only answer settles no-kitty
-//!   with NO flags push — the early-exit path).
-//!
-//! The once-per-process contract is asserted on the whole byte stream
-//! (exactly one query per child process). The exit classes (the standdown,
-//! the pop ordering, the release filtering) are covered by the exit-routes
-//! and release-handoff e2es and are deliberately not duplicated here.
-//! The pre-slice base delivers in-window keys at the ~250ms settle
-//! (VM jzcnfbdb4mjtig1e5atyaeur, b5bf28f1d: a key at query+10/50/120/200ms
-//! renders at 241.8/201.6/131.8/51.8ms p50 — the settle-coupled signature)
-//! so the 150ms bound is the red/green line, not a flake: a regression to
-//! the single-hold window fails it on every trial.
+//! Real-pty e2e for the kitty-probe window's early-typing contract: the
+//! vendored crossterm patch holds the probe's answer window in short poll
+//! slices, so keys typed inside the window deliver while the probe listens.
+//! The 150ms bound is the red/green line: the pre-slice base delivers at the
+//! ~250ms settle.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -54,43 +31,32 @@ use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 
-/// The probe's capability query (the flags query, the leading half of the
-/// flags+DA1 pair the check writes).
+/// The probe's capability query (the leading half of the flags+DA1 pair).
 const KITTY_QUERY: &[u8] = b"\x1b[?u";
-/// The flags push when the probe answers true (the served-path proof of
-/// the upgrade class).
+/// The flags push when the probe answers true (the served-path proof).
 const KITTY_FLAGS_PUSH: &[u8] = b"\x1b[>7u";
 /// A DA1-only answer (a non-kitty terminal that answers device attributes).
 const DA1_ANSWER: &[u8] = b"\x1b[?62;c";
-/// A kitty answer: flags reply then DA1 (both — a harness answering only the
-/// flags query wedges crossterm's DA1 flush read; see the release-handoff
-/// e2e's notes).
+/// A kitty answer: flags reply then DA1 (both — answering only the flags
+/// query wedges crossterm's DA1 flush read).
 const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
-/// The early key: `Q` appears nowhere in the harness chrome (the session
-/// name below is Q-free), so the painted cell is an unambiguous render
-/// proof.
+/// The early key: `Q` appears nowhere in the harness chrome (unambiguous render proof).
 const EARLY_KEY: &[u8] = b"Q";
-/// The differential bound: the sliced window delivers in ~3-15ms (measured
-/// p50 3.2-4.5ms); the single-hold window delivers at the ~250ms settle
-/// (a key sent at +30ms renders at ~222ms). CI load headroom keeps the
-/// green side an order of magnitude below the red side.
+/// The differential bound: the sliced window delivers in ~3-15ms; the single-hold
+/// window at the ~250ms settle (an order of magnitude of headroom).
 const EARLY_KEY_BOUND: Duration = Duration::from_millis(150);
-/// The child-mode socket: set (with the socket path) only when this very
-/// binary is re-executed as the product-under-test.
+/// Set (with the socket path) only when re-executed as the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_EARLY_TYPING_CHILD_SOCKET";
 
-/// The child half of the e2e: runs the real chat surface in terminal mode
-/// against the harness's mock supervisor. A plain `cargo test` run (no
-/// `CHILD_SOCKET_ENV`) passes trivially — only the parent test drives the
-/// real path.
+/// The child half of the e2e: runs the real chat surface against the harness's
+/// mock supervisor (a plain `cargo test` run passes trivially).
 #[test]
 fn early_typing_child_mode() {
     let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
         return;
     };
     let options = child_options(PathBuf::from(socket));
-    // A current-thread runtime keeps the child's thread count down (the
-    // suspend e2e's observation).
+    // A current-thread runtime keeps the child's thread count down.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -102,8 +68,7 @@ fn early_typing_child_mode() {
     });
 }
 
-/// The pty harnesses serialize: each drives process-group signals and a
-/// raw pty; concurrent byte-level waits flake on the shared sandbox CPUs.
+/// The pty harnesses serialize: concurrent process-group signals and raw ptys flake on shared CPUs.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
@@ -114,17 +79,15 @@ fn early_typing_inside_the_probe_window_renders_before_the_settle() {
     };
     let mut harness = EarlyTypingHarness::start();
 
-    // Served-path assertion #1: the probe ran. A terminal classified by the
-    // env hints (kitty/ghostty/wezterm/dumb) skips the query, and the timing
-    // below would be vacuously fast.
+    // Served-path assertion #1: the probe ran (an env-hinted class skips the
+    // query, and the timing below would be vacuously fast).
     let t_query = harness
         .chunk_time_of(KITTY_QUERY)
         .expect("the kitty capability query is on the wire");
     harness.assert_query_count(1);
 
-    // The in-window key: 30ms after the query bytes, the single-hold window
-    // still parks it (the settle is 250ms out); the sliced window delivers
-    // it within a slice.
+    // The in-window key: 30ms after the query, the single-hold window still
+    // parks it; the sliced window delivers it within a slice.
     EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(30));
     harness.write(EARLY_KEY);
     let latency = harness
@@ -137,7 +100,7 @@ fn early_typing_inside_the_probe_window_renders_before_the_settle() {
     );
 
     // The post-window control: the same key path with no probe in flight —
-    // the surface stays interactive and the query count holds at one.
+    // the query count holds at one.
     harness.drain_until_quiet(10);
     let mark = harness.mark();
     harness.write(b"R");
@@ -153,8 +116,8 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    // The kitty class: the answered probe upgrades (served-path: the flags
-    // push is on the wire) and early keys deliver.
+    // The kitty class: the answered probe upgrades (the flags push is on the
+    // wire) and early keys deliver.
     let mut kitty = EarlyTypingHarness::start();
     let t_query = kitty
         .chunk_time_of(KITTY_QUERY)
@@ -163,8 +126,8 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     kitty.write(KITTY_ANSWER);
     let mark = kitty.mark();
     kitty.wait_from(mark, KITTY_FLAGS_PUSH, "the kitty flags push");
-    // An answered terminal settles at the answer, so a key after it
-    // renders immediately on either side of the probe implementation.
+    // An answered terminal settles at the answer, so a key after it renders
+    // immediately on either side of the probe implementation.
     EarlyTypingHarness::sleep_until(t_query + Duration::from_millis(80));
     kitty.write(EARLY_KEY);
     let latency = kitty
@@ -178,10 +141,8 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     kitty.assert_query_count(1);
     kitty.finish();
 
-    // The DA1 class: a non-kitty terminal that answers device attributes
-    // proves liveness — the probe settles no-kitty at the answer (the
-    // early-exit path) and NEVER pushes the flags. Served-path: the DA1
-    // answer is written and the stream is audited for the absent push.
+    // The DA1 class: the probe settles no-kitty at the answer (the early-exit
+    // path) and NEVER pushes the flags (the stream is audited for the absent push).
     let mut da1 = EarlyTypingHarness::start();
     let t_query = da1
         .chunk_time_of(KITTY_QUERY)
@@ -208,12 +169,11 @@ fn a_kitty_terminal_upgrades_and_a_da1_terminal_settles_without_flags() {
     da1.finish();
 }
 
-/// One pty-backed product child plus the mock supervisor it attaches to,
-/// with a chunk-accurate timing ledger over the raw byte stream.
+/// One pty-backed product child plus its mock supervisor, with a
+/// chunk-accurate timing ledger over the raw byte stream.
 struct EarlyTypingHarness {
     child: Child,
-    /// The mock-supervisor server thread's join handle (it exits with the
-    /// child's connection).
+    /// The mock-supervisor server thread's join handle (exits with the child's connection).
     _server: std::thread::JoinHandle<()>,
     master: LedgerReader,
 }
@@ -237,9 +197,8 @@ impl EarlyTypingHarness {
         .expect("open pty");
 
         let child = spawn_child(&socket, &pty.slave);
-        // Leak the temp dir's socket path on purpose: the child needs the
-        // socket for the lifetime of the test, and the whole tree dies with
-        // the child at teardown.
+        // Leak the temp dir's socket path on purpose: the child needs it, and
+        // the whole tree dies with the child at teardown.
         std::mem::forget(dir);
         EarlyTypingHarness {
             child,
@@ -268,10 +227,8 @@ impl EarlyTypingHarness {
         self.master.wait_from(mark, needle, what);
     }
 
-    /// The chunk time of the first occurrence of `needle` in the stream,
-    /// waited for (the child's mount takes a moment to reach the probe):
-    /// the ledger is chunk-accurate, so the query's own read chunk is the
-    /// probe's start signal.
+    /// The chunk time of the first occurrence of `needle`, waited for (the
+    /// ledger is chunk-accurate: the query's read chunk is the probe's start).
     fn chunk_time_of(&mut self, needle: &[u8]) -> Option<Instant> {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -286,11 +243,9 @@ impl EarlyTypingHarness {
         }
     }
 
-    /// How long after the CURRENT moment the needle next paints (scanned
-    /// from a fresh mark): the early key's render latency.
+    /// How long after the CURRENT moment the needle next paints (fresh mark).
     fn time_until_painted_since(&mut self, needle: &[u8], bound: Duration) -> Option<Duration> {
-        // The needle may already be on the wire from the harness chrome;
-        // start the scan past everything collected so far.
+        // The needle may already be on the wire from the chrome; scan past everything so far.
         let pre = self.master.output.len();
         let start = Instant::now();
         let deadline = start + bound;
@@ -324,8 +279,7 @@ impl EarlyTypingHarness {
         }
     }
 
-    /// The once-per-process contract: exactly one capability query in the
-    /// whole byte stream of this child.
+    /// The once-per-process contract: exactly one capability query in the stream.
     fn assert_query_count(&mut self, expected: usize) {
         self.master.drain_once();
         let count = find_subsequence_all(&self.master.output, KITTY_QUERY).len();
@@ -350,13 +304,11 @@ impl Drop for EarlyTypingHarness {
     }
 }
 
-/// Non-blocking reader over the pty master, collecting the raw byte stream
-/// with a per-chunk timing ledger.
+/// Non-blocking reader over the pty master with a per-chunk timing ledger.
 struct LedgerReader {
     file: std::fs::File,
     output: Vec<u8>,
-    /// (chunk arrival, cumulative end offset) — the chunk-accurate timing
-    /// ledger, the same shape the bench harness's pty driver uses.
+    /// (chunk arrival, cumulative end offset) — the chunk-accurate timing ledger.
     chunks: Vec<(Instant, usize)>,
 }
 
@@ -392,8 +344,7 @@ impl LedgerReader {
         }
     }
 
-    /// Drain the master until it goes quiet for `quiet_polls` consecutive
-    /// passes (25ms apart).
+    /// Drain until quiet for `quiet_polls` consecutive passes (25ms apart).
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         let mut quiet = 0;
         while quiet < quiet_polls {
@@ -417,8 +368,7 @@ impl LedgerReader {
             .map(|(at_chunk, _)| *at_chunk)
     }
 
-    /// Drain until the needle appears since the mark (bounded by a generous
-    /// deadline).
+    /// Drain until the needle appears since the mark (bounded by a generous deadline).
     fn wait_from(&mut self, mark: usize, needle: &[u8], what: &str) {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
@@ -436,8 +386,7 @@ impl LedgerReader {
 }
 
 fn spawn_child(socket: &Path, slave: &OwnedFd) -> Child {
-    // Runs between fork and exec in the child: become a session leader
-    // and claim the pty slave as the controlling terminal.
+    // Runs between fork and exec: become a session leader and claim the pty slave.
     fn claim_controlling_tty(fd: i32) -> std::io::Result<()> {
         nix::unistd::setsid()?;
         let rc = unsafe { libc::ioctl(fd, libc::TIOCSCTTY as libc::c_ulong, 0) };
@@ -507,8 +456,7 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// One attached session behind a mock supervisor socket (the same frame
-/// contract the other pty e2e harnesses serve).
+/// One attached session behind a mock supervisor socket (the family's frame contract).
 struct MockSupervisor {
     listener: std::os::unix::net::UnixListener,
 }

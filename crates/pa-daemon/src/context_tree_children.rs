@@ -1,36 +1,7 @@
-//! The persisted RLM child nodes of the /context tree: the daemon-side
-//! port of the TS `core/context-tree.ts` disk walk
-//! (`loadContextTreeChildFromDisk` / `loadContextTreeChildrenFromDisk`).
-//! The worker's live child registry covers only children THIS worker
-//! spawned; every other child — idle, settled, or orphaned by a worker
-//! restart — is read from its persisted session dir, so the tree survives
-//! child disposal and session resume exactly like the TS session's tree.
-//!
-//! Layout (the port's own writer, `rlm_children.rs`:
-//! `SupervisorChildSessions::child_session_dir`): children of a session
-//! live under `<agent-dir>/session-artifacts/<parent-session-id>/sub-<id>/`,
-//! and GRANDCHILDREN under the sibling tree
-//! `<agent-dir>/session-artifacts/<child-session-id>/sub-<id>/`. The TS
-//! nests grandchildren inside `sub-<id>/sub-<id>/`, but nothing in this
-//! port writes that layout, so the walk follows the writer, one level per
-//! session id.
-//!
-//! Deliberate deltas against the TS: the TS prefers a resident child's
-//! live in-process session over its file (daemon children live in
-//! separate worker processes, so the file is always the source here —
-//! the same rows at settle boundaries, TS's own
-//! `loadContextTreeChildFromDisk` fallback); and user-deleted subagents
-//! stay hidden — the TS re-surfaces them after a restart because its
-//! deletion guard is in-memory only, while this port consults the
-//! durable RLM ledger tombstones at every level of the walk (the caller
-//! resolves this session's deletions into skip ids and hands the whole
-//! record down, so each recursion level skips its own).
-//!
-//! Caller cadence: the walk is a pure function of the artifact tree, so
-//! it runs from the worker's background context-tree cache
-//! (`context_tree_cache.rs`) as a refresh, not per `/context` call —
-//! `handle_get_context_tree` serves the cached snapshot with the live
-//! roster overlaid.
+//! The persisted RLM child nodes of the /context tree: the live registry covers only children THIS
+//! worker spawned; every other child is read from its persisted session dir. Deliberate TS
+//! divergences: grandchildren live under the sibling tree (TS nests them inside `sub-<id>/`);
+//! deleted subagents stay hidden via durable ledger tombstones at every level (TS: memory only).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -47,8 +18,7 @@ const LABEL_MAX_CHARS: usize = 80;
 const ELLIPSIS: &str = "...";
 
 /// User-deleted child ids keyed by the deleted child's parent session
-/// file path (the RLM ledger's durable tombstones, canonicalized): every
-/// level of the walk consults its own session's deletions.
+/// file path (the RLM ledger's durable tombstones, canonicalized).
 pub type TombstonedChildren = HashMap<PathBuf, HashSet<String>>;
 
 /// The artifact tree root every session's children live under
@@ -60,16 +30,9 @@ pub fn session_artifacts_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join(RLM_SESSION_ARTIFACTS_DIR)
 }
 
-/// Build one child node from its persisted session dir (TS
-/// `loadContextTreeChildFromDisk`): the newest valid session file's usage
-/// totals over the gap-bridged branch, the label from the first user
-/// message, the terminal status from the last assistant turn, the model
-/// from its `model_change` entries, the context utilization against the
-/// registry's window, and the recursive grandchild nodes from the
-/// child's own session id's tree. The child's own deleted subagents stay
-/// hidden at the next level: `tombstones` carries the ledger's deletion
-/// record keyed by the deleted child's parent session file. `None` when
-/// the dir holds no readable session (TS `findSessionFile` miss).
+/// Build one child node from its persisted session dir (TS `loadContextTreeChildFromDisk`):
+/// usage totals over the gap-bridged branch, the label, status, model, and the recursive
+/// grandchild nodes. `None` when the dir holds no readable session.
 pub fn load_context_tree_child(
     artifacts_root: &Path,
     child_dir: &Path,
@@ -77,22 +40,18 @@ pub fn load_context_tree_child(
     tombstones: &TombstonedChildren,
 ) -> Option<Value> {
     // The newest VALID session file: artifact dirs carry sibling `.jsonl`
-    // files (`semantic-edges.jsonl`, harness state) that are not sessions,
-    // so candidates are tried newest-first until one opens.
+    // files that are not sessions, so candidates are tried newest-first.
     let store = newest_session_files(child_dir)
         .iter()
         .find_map(|file| SessionFile::open(file).ok())?;
     // Label, status, and model follow the same gap-bridged branch as the
-    // usage totals: a ghost-parent gap must not strip a child of its
-    // identity either. The context estimate below stays strict — it
-    // mirrors the model-facing truth.
+    // usage totals: a ghost-parent gap must not strip a child of its identity.
     let branch = store.branch_bridged();
     let all_entries = store.entries();
     let (own_usage, total_usage) =
         crate::state_getters::compute_own_and_total_usage(&branch, all_entries);
-    // The per-model own-usage breakdown rides the child node too (a
-    // subagent on another model — or a child that itself switched —
-    // shows which model billed its spend).
+    // The per-model own-usage breakdown rides the child node too (a child
+    // that itself switched models shows which model billed its spend).
     let own_usage_by_model = crate::state_getters::compute_own_usage_by_model(
         &branch,
         all_entries,
@@ -126,8 +85,7 @@ pub fn load_context_tree_child(
         node["ownUsageByModel"] = json!(by_model);
     }
     // The child's own deleted subagents stay hidden one level down: the
-    // tombstones key by the deleted child's parent session file, and the
-    // grandchild edges' parent is this child's session file.
+    // tombstones key by the deleted child's parent session file.
     let deleted_ids = tombstones
         .get(&crate::lease::canonical_session_path(&store.path))
         .cloned()
@@ -144,10 +102,7 @@ pub fn load_context_tree_child(
 
 /// Build the nodes for every persisted child dir of one session (TS
 /// `loadContextTreeChildrenFromDisk`): the `sub-*` dirs under
-/// `<artifacts_root>/<session_id>/`, skipping the ids already represented
-/// live or tombstoned in the RLM ledger (the caller resolves this
-/// session's deletions into `skip_ids`; `tombstones` carries every
-/// session's record so each recursion level resolves its own).
+/// `<artifacts_root>/<session_id>/`, skipping already-represented ids.
 pub fn load_context_tree_children(
     artifacts_root: &Path,
     session_id: &str,
@@ -188,9 +143,8 @@ fn child_session_dirs(dir: &Path) -> Vec<PathBuf> {
     dirs.into_iter().map(|(_, path)| path).collect()
 }
 
-/// The `.jsonl` files in a dir, newest first (TS `findSessionFile`
-/// considers every `.jsonl`; this port opens them newest-first and keeps
-/// the first that is a readable session, skipping non-session siblings).
+/// The `.jsonl` files in a dir, newest first: opens keep the first
+/// readable session, skipping non-session siblings.
 fn newest_session_files(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -362,9 +316,6 @@ mod tests {
         child_dir
     }
 
-    /// A settled child loads from its session dir with real usage, the
-    /// prompt label, the terminal status, and the model (TS
-    /// `loadContextTreeChildFromDisk`).
     #[test]
     fn disk_children_carry_usage_label_status_and_model() {
         let root = dir();
@@ -410,15 +361,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A subagent's node carries its spend attributed to ITS model (the
-    /// operator's cost question: each subagent's row bills at the model
-    /// that served it): the child ran on claude-opus-4-6 while its file
-    /// also folds a grandchild's attributed usage onto its assistant row
-    /// — the load-time fold gives the row the aggregate (its own spend +
-    /// the grandchild's), and the by-model bucket subtracts the
-    /// attribution exactly like `ownUsage`, so the opus bucket holds only
-    /// the child's own spend ($0.065 = $0.088 aggregate - $0.023
-    /// grandchild).
+    /// A subagent's node attributes its spend to ITS model: the by-model bucket
+    /// subtracts the grandchild's attribution exactly like `ownUsage`
+    /// ($0.065 = $0.088 aggregate - $0.023 grandchild).
     #[test]
     fn disk_child_attributes_its_own_spend_to_its_model() {
         let root = dir();
@@ -501,8 +446,6 @@ mod tests {
             node["ownUsage"]["cost"]["total"].as_f64(),
             Some(0.088 - 0.023)
         );
-        // The by-model breakdown attributes the child's own spend to the
-        // model that served it, with the grandchild's attribution removed.
         let buckets = node["ownUsageByModel"]
             .as_array()
             .expect("the by-model breakdown is present");
@@ -556,8 +499,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The walk lists one session's `sub-*` dirs and skips the ids handed
-    /// in (TS `loadContextTreeChildrenFromDisk`'s `skipIds`).
     #[test]
     fn walk_lists_sub_dirs_and_skips_ids() {
         let root = dir();
@@ -589,9 +530,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Grandchildren load from the CHILD's own session id's tree (the port's
-    /// writer puts them in the sibling artifact tree, not nested inside the
-    /// child dir), and dirs without a readable session drop out.
     #[test]
     fn grandchildren_load_from_the_childs_sibling_tree() {
         let root = dir();
@@ -625,10 +563,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A deleted grandchild stays hidden: the tombstone record keys by
-    /// the grandchild's parent session file (the child's own file), so
-    /// the recursion into the child's tree skips its deleted ids while
-    /// live grandchildren still load.
     #[test]
     fn deleted_grandchildren_stay_hidden() {
         let root = dir();
@@ -670,9 +604,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A child file with a ghost-parent gap still reports its real usage
-    /// and identity (the bridged accounting walk) — the corrupted files
-    /// real daemon sessions carry.
     #[test]
     fn ghost_gapped_child_files_still_report_usage() {
         let root = dir();
@@ -711,8 +642,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The artifact tree root follows the agent dir (the writer's own
-    /// addressing).
     #[test]
     fn session_artifacts_dir_follows_the_agent_dir() {
         assert_eq!(

@@ -1,5 +1,4 @@
 //! Prompt templates: slash-command expandable markdown templates.
-//! Port of core/prompt-templates.ts.
 
 use std::path::{Path, PathBuf};
 

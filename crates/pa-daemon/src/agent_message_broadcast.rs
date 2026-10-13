@@ -1,16 +1,6 @@
-//! Supervisor arms for the agent-message ingestion surface (protocol
-//! breadth wave b7): the selector-less forms of `agent_messages_status`,
-//! `agent_messages_pause`, and `agent_messages_resume` (TS
-//! daemon-supervisor `case "agent_messages_status"` and the shared
-//! pause/resume case). A command that addresses one session routes through
-//! the generic worker path; these arms cover the TS broadcast forms:
-//!
-//! - `status` without a selector forwards to the first live worker, or
-//!   answers the TS empty-status object `{ paused: false, limits: {} }`
-//!   when no worker is live;
-//! - `pause`/`resume` without a selector broadcast to every live worker:
-//!   the first failure answers with its error, otherwise the first
-//!   success's data (an empty roster answers success with `data: null`).
+//! Supervisor arms for the agent-message ingestion surface: the
+//! selector-less `agent_messages_status`, `_pause`, and `_resume` broadcast
+//! forms.
 
 use std::sync::Arc;
 
@@ -26,8 +16,7 @@ use crate::registry::ResidentWorker;
 use crate::supervisor::{client_command_payload, Supervisor, ROUTE_TIMEOUT_MS};
 
 impl Supervisor {
-    /// A live, connected, non-stopping resident (TS `isLiveWorker(worker)
-    /// && worker.client`).
+    /// A live, connected, non-stopping resident (TS `isLiveWorker`).
     pub(crate) async fn is_live_connected_worker(&self, resident: &Arc<ResidentWorker>) -> bool {
         if self.is_stopping(resident) {
             return false;
@@ -36,8 +25,7 @@ impl Supervisor {
         lifecycle == DaemonWorkerLifecycle::Ready && resident.cmd_tx.lock().await.is_some()
     }
 
-    /// The live connected residents in creation order (TS walks its
-    /// insertion-ordered worker map).
+    /// The live connected residents in creation order (TS walks its insertion-ordered map).
     pub(crate) async fn live_workers_in_creation_order(&self) -> Vec<Arc<ResidentWorker>> {
         let mut residents = Vec::new();
         for resident in self.registry.list().await {
@@ -45,8 +33,7 @@ impl Supervisor {
                 residents.push(resident);
             }
         }
-        // Creation order (TS walks its insertion-ordered worker map);
-        // the descriptors are read before the sort so the closure stays
+        // The descriptors are read before the sort so the closure stays
         // sync.
         let mut ordered: Vec<(String, Arc<ResidentWorker>)> = Vec::new();
         for resident in residents {
@@ -58,8 +45,7 @@ impl Supervisor {
     }
 
     /// Forward one client command to a specific resident (the generic
-    /// route path minus the selector resolution): the worker payload with
-    /// the client id stamped, TS timeout.
+    /// route path minus the selector resolution).
     async fn forward_client_command(
         &self,
         resident: &Arc<ResidentWorker>,
@@ -88,8 +74,8 @@ impl Supervisor {
         }
     }
 
-    /// Selector-less `agent_messages_status`: the first live worker's
-    /// safety status, or the TS empty-status object when none is live.
+    /// Selector-less `agent_messages_status`: the first live worker's status, or the TS
+    /// empty-status object.
     pub(crate) async fn handle_agent_messages_status_broadcast(
         &self,
         command: &pa_types::daemon::DaemonCommand,
@@ -113,9 +99,9 @@ impl Supervisor {
         )
     }
 
-    /// Selector-less `agent_messages_pause` / `agent_messages_resume`:
-    /// broadcast to every live worker, answer the first failure, else the
-    /// first success's data (`data: null` when no worker answered).
+    /// Selector-less `agent_messages_pause` / `_resume`: broadcast to
+    /// every live worker, answer the first failure, else the first
+    /// success's data (`data: null` when none answered).
     pub(crate) async fn handle_agent_messages_pause_resume_broadcast(
         &self,
         command: &pa_types::daemon::DaemonCommand,

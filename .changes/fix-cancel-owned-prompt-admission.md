@@ -1,0 +1,1 @@
+- Cancelling a running prompt by its admission id now reports it as `owned` instead of `cancelled`, and with `cancelOwned` the cancel now stops the turn.

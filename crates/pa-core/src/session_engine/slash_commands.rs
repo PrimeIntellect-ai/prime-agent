@@ -1,7 +1,7 @@
-//! Session-side slash-command handling: which commands execute in the session
-//! engine and how their arguments parse. The command table itself is shared
-//! vocabulary living in `pa_types::slash_commands` (the TUI cannot import
-//! pa-core, and one table serves every surface).
+//! Session-side slash-command handling: which commands execute in the
+//! session engine and how their arguments parse; the command table itself
+//! is shared vocabulary in `pa_types::slash_commands` (one table serves
+//! every surface).
 
 pub use pa_types::slash_commands::{
     find_slash_command_suggestion, is_session_slash_command_name, parse_slash_command,
@@ -46,8 +46,7 @@ pub struct RefineCommandOptions {
 ///
 /// # Errors
 ///
-/// Returns a usage-error string when `rollback` is given without a
-/// refinement id.
+/// Returns a usage-error string when `rollback` is given without a refinement id.
 pub fn parse_refine_command_options(args: &str) -> Result<RefineCommandOptions, String> {
     let mut rest = args.trim();
     let mut global = false;
@@ -140,7 +139,6 @@ mod tests {
         let command = parse_session_command(&registry, "/compact focus on tests").unwrap();
         assert_eq!(command.name, "compact");
         assert_eq!(command.args, "focus on tests");
-        // Non-session commands are not session commands.
         assert!(parse_session_command(&registry, "/model").is_none());
         assert!(parse_session_command(&registry, "/unknown x").is_none());
     }

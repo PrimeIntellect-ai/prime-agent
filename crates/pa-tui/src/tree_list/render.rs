@@ -39,10 +39,9 @@ impl TreeList {
             let node = &self.flat[index];
             let entry_id = node.data.entry.id().unwrap_or_default();
             let is_selected = position == self.selected;
-            // TS renders the selected row's cursor and path markers inside
-            // the selection background with no accent foreground: the the TS TUI
-            // row writer drops those interior colors, and the capture shows
-            // only the background escape before `› `.
+            // TS drops the selected row's interior colors: the row writer
+            // re-emits only the background escape, so the cursor and
+            // path markers render unstyled.
             let cursor = if is_selected {
                 Span::raw("› ".to_string())
             } else {
@@ -131,10 +130,9 @@ impl TreeList {
             };
             let mut content = tree_display::entry_display_text(theme, &node.data, &self.tool_calls);
             if is_selected {
-                // TS `theme.bold(getEntryDisplayText(...))` wraps the whole
-                // display text; the the TS TUI writer then re-emits the inner
-                // fg reset between the role label and the content, so the
-                // capture shows only the role run bold.
+                // TS `theme.bold(...)` wraps the whole display text, but
+                // the writer re-emits the inner fg reset, so only the
+                // role run shows bold.
                 if let Some(first) = content.first_mut() {
                     first.style = first.style.add_modifier(Modifier::BOLD);
                 }
@@ -147,10 +145,8 @@ impl TreeList {
             row.extend(content);
             if is_selected {
                 // The selected row keeps only the bold modifier over the
-                // selection background: the the TS TUI writer drops interior
-                // foreground colors under the selection wrap, so the
-                // capture shows `› • ` and the bold role without their
-                // accent escapes.
+                // selection background: TS drops interior colors under
+                // the selection wrap.
                 for span in &mut row {
                     let bold = span.style.add_modifier.contains(Modifier::BOLD);
                     span.style = Style::default();
@@ -218,8 +214,7 @@ fn format_label_timestamp(timestamp: &str) -> String {
         return String::new();
     };
     let time = format!("{hour:02}:{minute:02}");
-    // "Today" needs the current date; sessions are recent, so a same-day
-    // match compares against the current UTC date.
+    // "Today" compares against the current UTC date (sessions are recent).
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

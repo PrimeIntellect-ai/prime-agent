@@ -1,8 +1,6 @@
-//! Azure `OpenAI` Responses API streaming provider.
-//! Port of `packages/ai/src/providers/azure-openai-responses.ts`: deployment
-//! name resolution (options/env map), base-URL normalization with the
-//! /openai/v1 path, api-version query parameter, and the shared Responses
-//! stream processor.
+//! Azure `OpenAI` Responses API streaming provider: deployment name resolution (options/env map),
+//! base-URL normalization with the /openai/v1 path, api-version query parameter, and the shared
+//! Responses stream processor.
 
 use std::collections::HashMap;
 
@@ -73,7 +71,7 @@ fn resolve_deployment_name(model: &Model, options: Option<&AzureOpenAIResponsesO
     mapped.unwrap_or_else(|| model.id.clone())
 }
 
-/// Provider-native options (`AzureOpenAIResponsesOptions` in the TS reference).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct AzureOpenAIResponsesOptions {
     pub base: StreamOptions,
@@ -108,8 +106,8 @@ fn normalize_azure_base_url(base_url: &str) -> Result<String, String> {
         host.ends_with(".openai.azure.com") || host.ends_with(".cognitiveservices.azure.com");
     let normalized_path = url.path().trim_end_matches('/');
 
-    // Ensure Azure hosts have /openai/v1 as base path so the deployment URL
-    // resolves as <base>/deployments/<name>/responses?api-version=<v>.
+    // Ensure Azure hosts have /openai/v1 as base path so the deployment URL resolves as
+    // <base>/deployments/<name>/responses?api-version=<v>.
     if is_azure_host && (normalized_path.is_empty() || normalized_path == "/openai") {
         let mut normalized = url.clone();
         normalized.set_path("/openai/v1");
@@ -182,10 +180,8 @@ fn build_params(
     params.insert("model".into(), json!(deployment_name));
     params.insert("input".into(), json!(messages));
     params.insert("stream".into(), json!(true));
-    // TS #2948: Azure stores responses server-side by default — pin
-    // `store: false` (the d1fce2ba1 fix the OpenAI Responses provider got and
-    // this Azure copy never did), and drop `prompt_cache_key` when the caller
-    // pinned cacheRetention to none. Azure does not send
+    // TS #2948: Azure stores responses server-side by default — pin `store: false`, and drop
+    // `prompt_cache_key` when the caller pinned cacheRetention to none; Azure does not send
     // `prompt_cache_retention` (support unclear) — that stays as-is.
     if options.base.cache_retention != Some(CacheRetention::None) {
         if let Some(session_id) = &options.base.session_id {
@@ -244,7 +240,6 @@ fn build_params(
     Value::Object(params)
 }
 
-/// Port of `streamAzureOpenAIResponses`.
 pub fn stream_azure_openai_responses(
     model: &Model,
     context: &Context,
@@ -305,7 +300,7 @@ pub fn stream_azure_openai_responses(
     reader
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -365,9 +360,6 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -395,9 +387,8 @@ async fn run_stream(
             crate::providers::openai_responses_shared::ResponsesStreamProcessor::new(
                 model, output, writer, hooks,
             );
-        // The TS try/catch encloses the streaming section and the abort and
-        // stop-reason checks; the catch settles partial tool calls before the
-        // error event carries the message (TS PR #2783).
+        // The TS try/catch encloses the streaming section and the abort and stop-reason checks; the
+        // catch settles partial tool calls before the error event carries the message.
         stream_result = async {
             let mut decoder = SseDecoder::new();
             loop {
@@ -457,7 +448,6 @@ async fn run_stream(
     Ok(())
 }
 
-/// Port of `streamSimpleAzureOpenAIResponses`.
 pub fn stream_simple_azure_openai_responses(
     model: &Model,
     context: &Context,
@@ -539,10 +529,10 @@ impl Provider for AzureOpenAIResponsesProvider {
 mod tests {
     use super::*;
 
-    /// A `reasoning: false` model whose map addresses levels (the live
-    /// catalog's `gpt-5.3-chat-latest` azure shape) is thinking-capable:
-    /// the requested effort reaches the request with the map's value. The
-    /// flag alone must not veto a route that declares addressable levels.
+    /// A `reasoning: false` model whose map addresses levels (the live catalog's
+    /// `gpt-5.3-chat-latest` azure shape) is thinking-capable: the requested effort reaches the
+    /// request with the map's value. The flag alone must not veto a route that declares addressable
+    /// levels.
     #[test]
     fn a_map_addressable_model_sends_the_reasoning_effort_without_the_flag() {
         let model = serde_json::from_value::<Model>(json!({
@@ -563,9 +553,9 @@ mod tests {
         );
     }
 
-    /// TS #2948: the request pins `store: false` (Azure stores responses
-    /// server-side by default) and drops `prompt_cache_key` when the caller
-    /// set cacheRetention to none; the key still ships by default.
+    /// The request pins `store: false` (Azure stores responses server-side by default) and drops
+    /// `prompt_cache_key` when the caller set cacheRetention to none; the key still ships by
+    /// default.
     #[test]
     fn pins_store_false_and_gates_prompt_cache_key_on_cache_retention() {
         let model = serde_json::from_value::<Model>(json!({

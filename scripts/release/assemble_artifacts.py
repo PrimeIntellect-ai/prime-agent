@@ -21,13 +21,16 @@ hard-fails without VALIDATED assets (version gates + >= 42 transport tuples +
 no-cold-start layer 2). CI generates them from the live catalog repo; offline
 builds use `bundle_catalog.py generate --fixture`.
 
-`--binary` defaults to `<repo>/target/<target>/release/prime-agent` (cross builds)
-and falls back to `<repo>/target/release/prime-agent` (host builds).
+`--binary` defaults to `<repo>/target/<target>/release/<binary-name>` (cross
+builds) and falls back to `<repo>/target/release/<binary-name>` (host builds),
+where the binary name is `prime-agent.exe` for the Windows MSVC target and
+`prime-agent` everywhere else (`binary_name_for_target`).
 `--runtime-dir` defaults to `<repo>/prime-agent-runtime` (the vendored sidecar
 from the kernel-packaging lane).
+Every archive includes a `package.json` version manifest beside the binary
+(TS installer parity: it is one of NATIVE_RELEASE_ASSETS).
 `--sha` (the continuous-build stamp): a full 40-char git commit SHA. When
-given, a `package.json` version manifest is staged beside the binary (TS
-installer parity: it is one of NATIVE_RELEASE_ASSETS) whose `version` is
+given, that manifest's `version` is
 `<version>-continuous.<sha>`, so the shipped binary reports the exact commit it
 was built from via `--version`; the manifest records the commit too. The
 archive name keeps the bare `<version>` so rolling releases overwrite assets.
@@ -58,11 +61,16 @@ from pathlib import Path
 
 # The bundled-catalog validation gate (same release-scripts directory).
 from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir
+from native_compat import stage_native_compat
 
 # Tarball-root payload order mirrors the TS `binaryAssets` list so the
-# installer lane can extract both distributions identically.
+# installer lane can extract both distributions identically. The binary
+# entry name is platform-dependent (`binary_name_for_target`: the MSVC
+# build ships `prime-agent.exe`), so the list names the binary slot via
+# the placeholder resolved in `main`/`stage_tree`.
+BINARY_PLACEHOLDER = "prime-agent"
 STAGED_ENTRIES = [
-    "prime-agent",
+    BINARY_PLACEHOLDER,
     "prime-agent-runtime",
     "skills",
     "LICENSE",
@@ -74,13 +82,24 @@ STAGED_ENTRIES = [
     "mcp-services.bundled.json",
 ]
 
+
+def binary_name_for_target(target: str) -> str:
+    """The staged binary name for `target`: `prime-agent.exe` on the MSVC
+    Windows target (the name Cargo's linker emits and the installer's
+    `.exe`-aware layout expects), `prime-agent` everywhere else.
+    """
+    if "-windows-" in target:
+        return "prime-agent.exe"
+    return "prime-agent"
+
 # Shipped-content policy: what the installed tree carries beyond the binary.
 #
 # The runtime sidecar ships only what the kernel consumes. The venv
 # bootstrap installs it with `uv pip install <payload>/prime-agent-runtime`
 # (uv's pip interface builds the hatchling wheel, whose target packages
-# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` +
-# `pyproject.toml` — so the pytest suite (`test/`) and the development
+# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` + the
+# packaged machine library under `src/rlm/machines` + `pyproject.toml` — so
+# the pytest suite (`test/`) and the development
 # `uv.lock` (the pip interface never reads the project lockfile) are dead
 # weight in every installed tree, and dropping them changes neither the
 # built wheel nor the bootstrap-version identity. The cache names and
@@ -196,17 +215,18 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_binary(args: argparse.Namespace) -> Path:
+    name = binary_name_for_target(args.target)
     candidates = []
     if args.binary is not None:
         candidates.append(args.binary)
     else:
-        candidates.append(args.repo_root / "target" / args.target / "release" / "prime-agent")
-        candidates.append(args.repo_root / "target" / "release" / "prime-agent")
+        candidates.append(args.repo_root / "target" / args.target / "release" / name)
+        candidates.append(args.repo_root / "target" / "release" / name)
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     listed = ", ".join(str(candidate) for candidate in candidates)
-    fail(f"no executable prime-agent binary found (looked at: {listed}); build first")
+    fail(f"no executable {name} binary found (looked at: {listed}); build first")
 
 
 def validate_version(version: str) -> None:
@@ -253,19 +273,19 @@ def copy_runtime_tree(source: Path, target: Path) -> None:
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
 
-    `stamped_version` is the continuous-build version stamp (None for plain
-    releases); when set, a `package.json` manifest is staged beside the binary
-    so `--version` reports it at runtime (the same exe-adjacent manifest the
-    TS binaryAssets carry — the Rust binary resolves it from `current_exe()`).
+    `stamped_version` overrides the plain release version in the always-staged
+    `package.json`. The binary reports it at runtime (the same exe-adjacent
+    manifest TS binaryAssets carry; Rust resolves it from `current_exe()`).
 
     The runtime entry ships the curated content (see
     RUNTIME_EXCLUDED_*); every other entry is a
     verbatim copy.
     """
+    binary_name = binary_name_for_target(args.target)
     binary = resolve_binary(args)
     runtime_dir = args.runtime_dir or (args.repo_root / "prime-agent-runtime")
     sources = {
-        "prime-agent": binary,
+        binary_name: binary,
         "prime-agent-runtime": runtime_dir,
         "skills": args.repo_root / "skills",
         "LICENSE": args.repo_root / "LICENSE",
@@ -294,7 +314,10 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
                 shutil.copytree(source, target_path)
         else:
             shutil.copy2(source, target_path)
-    os.chmod(staging / "prime-agent", 0o755)
+    # `chmod` is a no-op beyond the read-only bit on Windows hosts (the
+    # exec bit the tar member filter re-pins below); on POSIX it makes the
+    # staged binary executable for the `--version` probes.
+    os.chmod(staging / binary_name, 0o755)
     # The bundled catalog assets gate (spec §3.9): the release packer FAILS
     # without validated assets — generate them first (network for CI, a local
     # catalog checkout, or the offline --fixture snapshot) via
@@ -310,23 +333,27 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     catalog_facts = validate_bundled_catalog_dir(catalog_assets)
     for name in BUNDLED_CATALOG_FILES:
         shutil.copyfile(catalog_assets / name, staging / name)
-    payload = list(STAGED_ENTRIES)
+    payload = [binary_name if entry == BINARY_PLACEHOLDER else entry
+               for entry in STAGED_ENTRIES]
+    manifest = {
+        "name": "prime-agent",
+        "version": stamped_version or args.version,
+        "description": "Prime Agent: the RLM coding agent (Rust build)",
+        "bin": {"prime-agent": binary_name},
+        "piConfig": {"name": "prime-agent", "configDir": ".prime/agent"},
+    }
     if stamped_version is not None:
-        manifest = {
-            "name": "prime-agent",
-            "version": stamped_version,
-            "description": "Prime Agent: the RLM coding agent (Rust build)",
-            "bin": {"prime-agent": "prime-agent"},
-            "piConfig": {"name": "prime-agent", "configDir": ".prime/agent"},
-            "commit": args.sha,
-        }
-        (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
-        payload.append("package.json")
+        manifest["commit"] = args.sha
+    (staging / "package.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    payload.append("package.json")
+    if "-windows-" not in args.target:
+        payload.extend(stage_native_compat(staging))
     # The payload guard runs on the staged tree BEFORE packing: a decoder
     # sidecar staged by a later change fails here, not in the field.
     fail_if_decoder_in_tree(staging)
     return {
-        "executable_sha256": sha256_file(staging / "prime-agent"),
+        "binary_name": binary_name,
+        "executable_sha256": sha256_file(staging / binary_name),
         "payload": payload,
         "catalog_assets": catalog_facts,
     }
@@ -350,7 +377,7 @@ def _deterministic_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
     member.mtime = 0
     if member.isdir():
         member.mode = 0o755
-    elif member.name == "prime-agent":
+    elif member.name == "prime-agent" or member.name == "prime-agent.exe":
         member.mode = 0o755
     else:
         member.mode = 0o644

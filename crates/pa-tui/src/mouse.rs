@@ -1,27 +1,18 @@
-//! SGR mouse-report decoding (TS `tui/src/mouse.ts`).
-//!
-//! Terminals with SGR mouse tracking active report clicks, wheel turns, and
-//! drags as `ESC [ < cb ; cx ; cy (M|m)`: `M` for a press (wheel turns and
-//! drag motion included), `m` for a release. The low bits of `cb` carry
-//! modifiers and a motion flag, so the base button code is the report with
-//! those bits cleared. Everything downstream (the transcript scroll
-//! dispatch) reasons about the base code only.
+//! SGR mouse-report decoding. Terminals with SGR tracking report clicks, wheel turns, and drags as
+//! `ESC [ < cb ; cx ; cy (M|m)` (`M` press, `m` release). The low bits of `cb` carry modifiers and
+//! a motion flag, so the base button code is the report with those bits cleared; everything
+//! downstream reasons about the base code only.
 
 /// A decoded SGR mouse report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MouseEvent {
-    /// Base SGR button code with modifier and motion bits removed; wheel
-    /// up/down are 64/65.
+    /// Base SGR button code with modifier and motion bits removed; wheel up/down are 64/65.
     pub button: u8,
-    /// One-based terminal column.
     pub x: u16,
-    /// One-based terminal row.
     pub y: u16,
     /// True for SGR `M` reports (press, wheel, or drag), false for release `m`.
     pub press: bool,
-    /// Whether the SGR motion bit is set.
     pub motion: bool,
-    /// Modifier bits carried by the SGR report.
     pub shift: bool,
     pub alt: bool,
     pub ctrl: bool,
@@ -33,9 +24,8 @@ pub(crate) const WHEEL_UP: u8 = 64;
 pub(crate) const WHEEL_DOWN: u8 = 65;
 /// SGR left-button code.
 pub(crate) const BUTTON_LEFT: u8 = 0;
-/// SGR buttonless-motion button code (`?1003` any-event tracking reports
-/// the mouse's position as base code 3 with the motion bit and no
-/// button): the hover affordance's report.
+/// SGR buttonless-motion code (`?1003` any-event tracking reports the mouse's position as base code
+/// 3 with the motion bit and no button): the hover affordance's report.
 pub(crate) const BUTTON_NONE: u8 = 3;
 
 const MODIFIER_SHIFT: u32 = 4;
@@ -43,15 +33,14 @@ const MODIFIER_ALT: u32 = 8;
 const MODIFIER_CTRL: u32 = 16;
 const MOTION_BIT: u32 = 32;
 
-/// Whether `sequence` is a mouse report: an SGR report (`ESC [ <`) or a
-/// legacy X10 report (`ESC [ M`). Both are terminal noise downstream, so
-/// callers consume them even when tracking is disabled.
+/// Whether `sequence` is a mouse report (SGR `ESC [ <` or legacy X10 `ESC [ M`): both are terminal
+/// noise downstream, so callers consume them even when tracking is disabled.
 pub(crate) fn is_mouse_sequence(sequence: &str) -> bool {
     sequence.starts_with("\x1b[<") || sequence.starts_with("\x1b[M")
 }
 
-/// Decode an SGR mouse report. Returns `None` for anything that is not a
-/// complete `ESC [ < cb ; cx ; cy (M|m)` sequence.
+/// Decode an SGR mouse report; `None` for anything that is not a complete
+/// `ESC [ < cb ; cx ; cy (M|m)` sequence.
 pub(crate) fn parse_sgr_mouse_event(sequence: &str) -> Option<MouseEvent> {
     let rest = sequence.strip_prefix("\x1b[<")?;
     let final_byte = rest.as_bytes().last()?;
@@ -81,18 +70,15 @@ pub(crate) fn parse_sgr_mouse_event(sequence: &str) -> Option<MouseEvent> {
     })
 }
 
-/// Whether the event is a wheel-up turn (a press with the wheel-up code).
 pub(crate) fn is_wheel_up(event: &MouseEvent) -> bool {
     event.press && event.button == WHEEL_UP
 }
 
-/// Whether the event is a wheel-down turn (a press with the wheel-down code).
 pub(crate) fn is_wheel_down(event: &MouseEvent) -> bool {
     event.press && event.button == WHEEL_DOWN
 }
 
-/// The wheel-scroll dispatch (TS `WHEEL_SCROLL_LINES`): the transcript
-/// delta for a wheel turn, or `None` when the event is not a wheel press.
+/// The transcript delta for a wheel turn, `None` for other presses.
 pub(crate) fn wheel_scroll_delta(event: &MouseEvent) -> Option<isize> {
     if is_wheel_up(event) {
         Some(-WHEEL_SCROLL_LINES)
@@ -103,16 +89,12 @@ pub(crate) fn wheel_scroll_delta(event: &MouseEvent) -> Option<isize> {
     }
 }
 
-/// Lines the transcript scrolls per wheel turn (TS `TUI.WHEEL_SCROLL_LINES`).
 const WHEEL_SCROLL_LINES: isize = 3;
 
-/// A report read back from a crossterm mouse event: wheel turns,
-/// left-button presses, drags, and releases, and the buttonless motion
-/// of `?1003` any-event tracking (crossterm's `Moved`, the hover
-/// affordance's report — operator directive 2026-09-26) — the report
-/// classes the TS dispatch and the hover branch reason about. `None`
-/// for other buttons: those reports are consumed at the source without a
-/// dispatch.
+/// A report read back from a crossterm mouse event: wheel turns, left-button presses, drags,
+/// releases, and the buttonless motion of `?1003` tracking (crossterm's `Moved` — operator
+/// directive 2026-09-26). `None` for other buttons: those reports are consumed at the source
+/// without a dispatch.
 pub(crate) fn from_crossterm(event: crossterm::event::MouseEvent) -> Option<MouseEvent> {
     let (button, press, motion) = match event.kind {
         crossterm::event::MouseEventKind::ScrollUp => (WHEEL_UP, true, false),
@@ -152,11 +134,9 @@ pub(crate) fn from_crossterm(event: crossterm::event::MouseEvent) -> Option<Mous
 mod tests {
     use super::*;
 
-    /// The production path the headless driver bypasses (the review
-    /// bots' finding): crossterm parses `?1003` buttonless motion as
-    /// `Moved`, and the live terminal path flows through
-    /// `from_crossterm` — the hover affordance's report must map
-    /// through it, not drop.
+    /// The production path the headless driver bypasses: crossterm parses `?1003` buttonless motion
+    /// as `Moved`, and the live path flows through `from_crossterm` — the hover affordance's report
+    /// must map through it, not drop.
     #[test]
     fn crossterm_moved_maps_to_the_buttonless_motion_report() {
         let event = crossterm::event::MouseEvent {
@@ -210,8 +190,8 @@ mod tests {
 
     #[test]
     fn strips_modifier_and_motion_bits_from_the_button_code() {
-        // 32 (motion) + 4 (shift) + 64 (wheel up): a shift-dragged wheel
-        // turn still reports the base wheel-up code.
+        // 32 (motion) + 4 (shift) + 64 (wheel up): a shift-dragged wheel turn
+        // still reports the base wheel-up code.
         let event = parse_sgr_mouse_event("\x1b[<100;7;9M").expect("valid SGR report");
         assert_eq!(event.button, WHEEL_UP);
         assert!(event.motion);
@@ -246,8 +226,7 @@ mod tests {
         assert_eq!(parse_sgr_mouse_event("\x1b[<64;20;0M"), None, "zero row");
         assert_eq!(parse_sgr_mouse_event("\x1b[<64;20;5X"), None);
         assert_eq!(parse_sgr_mouse_event("hello"), None);
-        // A legacy X10 report is recognized as a mouse sequence but has no
-        // SGR body to decode.
+
         assert!(is_mouse_sequence("\x1b[M abc"));
         assert_eq!(parse_sgr_mouse_event("\x1b[M abc"), None);
     }

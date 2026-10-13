@@ -1,6 +1,4 @@
-//! `OpenAI` Responses stream hooks, reasoning-summary options, and service-tier
-//! pricing. Section of the port of
-//! `packages/ai/src/providers/openai-responses.ts`.
+//! `OpenAI` Responses stream hooks, reasoning-summary options, and service-tier pricing.
 
 use crate::types::Usage;
 

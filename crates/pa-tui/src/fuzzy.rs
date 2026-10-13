@@ -1,6 +1,6 @@
-//! Fuzzy matching for autocomplete (port of `packages/tui/src/fuzzy.ts`):
-//! a query matches when all its characters appear in order; lower scores
-//! rank better. Space-separated query tokens must all match.
+//! Fuzzy matching for autocomplete: a query matches when all its
+//! characters appear in order; lower scores rank better. Space-separated
+//! query tokens must all match.
 
 /// One fuzzy match: `Some(score)` when the query matches (lower is better).
 #[must_use]
@@ -131,7 +131,6 @@ mod tests {
 
     #[test]
     fn swapped_digit_letter_groups_match() {
-        // `compact2` style queries: letters+digits swapped retry.
         assert!(fuzzy_match("model1", "model1").is_some());
         assert!(fuzzy_match("m1", "1m-model").is_some());
     }
@@ -141,12 +140,9 @@ mod tests {
         let items = vec!["settings", "session", "model"];
         let out = fuzzy_filter(&items, "sess", ToString::to_string);
         assert_eq!(out.first().copied(), Some("session"));
-        // Ties keep input order (stable sort).
         let tied = fuzzy_filter(&items, "se", ToString::to_string);
         assert_eq!(tied.first().copied(), Some("settings"));
-        // No query: all items in order.
         assert_eq!(fuzzy_filter(&items, "", ToString::to_string), items);
-        // Multi-token queries need every token to match.
         assert!(fuzzy_filter(&items, "se zz", ToString::to_string).is_empty());
     }
 

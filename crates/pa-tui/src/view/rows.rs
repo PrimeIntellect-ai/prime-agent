@@ -1,7 +1,7 @@
-//! The per-entry transcript row builders: the assistant message spacing
-//! classification (TS `getSpacingContent`), the leading-space scan (TS
-//! `shouldAddLeadingSpace`), and `render_entry` — the one producer of a
-//! chat entry's cached layout rows.
+//! The per-entry transcript row builders: the spacing classification
+//! (TS `getSpacingContent`), the leading-space scan (TS
+//! `shouldAddLeadingSpace`), and `render_entry` — the one producer of
+//! a chat entry's cached layout rows.
 
 use super::AgentView;
 use crate::chat::{render_assistant, render_text_rows, render_user_block, ChatEntry};
@@ -20,12 +20,8 @@ enum SpacingContent {
 }
 
 impl AgentView {
-    /// TS `createConversationSpacing.shouldAddLeadingSpace` for one
-    /// spacing-driven custom row (agent message, shell completion): scan
-    /// back over entries that contribute no rows at this detail level
-    /// (hidden thinking-only and tool-only assistant messages), then apply
-    /// the trailing-space and compact-neighbor rules. `expanded` follows
-    /// the TS `shouldAddLeadingSpace(expanded)` call shape.
+    /// TS `createConversationSpacing.shouldAddLeadingSpace` for one spacing-driven custom row:
+    /// scan back over entries that contribute no rows at this detail level, then apply the rules.
     pub(super) fn conversation_leading(&self, index: usize, expanded: bool) -> bool {
         let mut idx = index;
         let mut tool_separator = false;
@@ -39,10 +35,8 @@ impl AgentView {
                             tool_separator = true;
                         }
                         SpacingContent::Visible => {
-                            // TS `hasTrailingSpace` on the visible body
-                            // (`precededByToolActivity` is the full compact
-                            // set: a tool call, agent message, bash
-                            // execution, or shell completion).
+                            // TS `hasTrailingSpace` on the visible body (`precededByToolActivity`
+                            // is the full compact set).
                             let preceded_by_tool =
                                 idx > 0 && Self::is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
@@ -50,9 +44,8 @@ impl AgentView {
                             {
                                 return false;
                             }
-                            // An assistant message is never a compact
-                            // neighbor; the collapsed and expanded rules
-                            // both add the leading blank here.
+                            // An assistant message is never a compact neighbor; both rules add
+                            // the leading blank here.
                             return true;
                         }
                     }
@@ -68,20 +61,14 @@ impl AgentView {
                 }
             }
         }
-        // The scan exhausted the transcript (only hidden or tool-only
-        // assistant rows): TS keeps the tool separator with a trailing
-        // space (no leading blank); with nothing preceding at all, the
-        // expanded form sits flush against the top of the chat while the
-        // collapsed form still leads with a blank
-        // (`!isCompactAgentMessageNeighbor(undefined)`).
+        // The scan exhausted the transcript: TS keeps the tool separator with a trailing space;
+        // with nothing preceding, the expanded form sits flush.
         if tool_separator {
             return false;
         }
         !expanded
     }
 
-    /// TS `getSpacingContent`: an assistant message's contribution to
-    /// conversation spacing at the current detail level.
     fn assistant_spacing_content(&self, message: &crate::chat::AssistantMessage) -> SpacingContent {
         let visible_body = message.blocks.iter().any(|block| match block {
             crate::chat::MessageBlock::Thinking(text) => {
@@ -126,10 +113,8 @@ impl AgentView {
             }
             ChatEntry::User { text } => {
                 let mut rows = Vec::new();
-                // TS `addMessageToChat` separates a user submission from
-                // the components above it with `Spacer(1)` — EXCEPT the
-                // skill invocation's own argument text, which joins the
-                // card below it without a spacer.
+                // TS `addMessageToChat`: a user submission leads with `Spacer(1)` EXCEPT the
+                // skill invocation's argument text, which joins the card below.
                 let follows_skill_card =
                     index > 0 && matches!(self.chat[index - 1], ChatEntry::SkillInvocation(_));
                 if !first && !follows_skill_card {
@@ -145,7 +130,7 @@ impl AgentView {
             }
             ChatEntry::SlashCommand { text } => {
                 // The echo row leads with a spacer when the chat is not
-                // empty (TS adds `Spacer(1)` before the component).
+                // empty (TS `Spacer(1)`).
                 let mut rows = Vec::new();
                 if !first {
                     rows.push(Vec::new());
@@ -162,10 +147,8 @@ impl AgentView {
                 tokens_before,
                 custom_instructions,
             } => {
-                // TS `addMessageToChat` conversation spacing: the summary
-                // follows the previous component with `Spacer(1)` when not
-                // first (in the rebuilt transcript it trails the kept
-                // tail's echo row).
+                // TS `addMessageToChat`: the summary follows the previous
+                // component with `Spacer(1)` when not first.
                 let mut rows = Vec::new();
                 if !first {
                     rows.push(Vec::new());
@@ -174,11 +157,9 @@ impl AgentView {
                     summary,
                     *tokens_before,
                     custom_instructions.as_deref(),
-                    // TS `applyChatExpansion` fans `toolOutputExpanded`
-                    // out to every `ExpandableEventMessage` in the chat;
-                    // `CompactionSummaryMessageComponent` renders the
-                    // collapsed `EventSummary` until the Ctrl+O cycle
-                    // reaches detail `all`.
+                    // TS `applyChatExpansion` fans `toolOutputExpanded` out to every
+                    // `ExpandableEventMessage`; the summary stays collapsed until the cycle
+                    // reaches `all`.
                     detail.tool_output_expanded(),
                     &self.theme,
                     width,
@@ -186,16 +167,8 @@ impl AgentView {
                 rows
             }
             ChatEntry::Assistant(message) => {
-                // The per-entry block cache (TS's per-component
-                // `blockCache`): settled blocks of the streaming message
-                // replay instead of re-rendering on every frame — the
-                // cache exists for the streaming case. A settled
-                // message's blocks are final, so its rendered rows live
-                // once in the entry layout and the block-cache copy is
-                // dropped (a resumed large session's duplicate copy was
-                // the TUI's biggest single retained allocation in the
-                // tui-memory census); any later re-render rebuilds the
-                // same rows from the message's own text.
+                // The per-entry block cache (TS's per-component `blockCache`): a streaming
+                // message's settled blocks replay per frame; a settled message drops the copy.
                 if message.streaming {
                     let mut caches = self.md_caches.borrow_mut();
                     let cache = caches.entry(index).or_default();
@@ -223,10 +196,8 @@ impl AgentView {
                 }
             }
             ChatEntry::Tool(card) => {
-                // TS `ToolExecutionComponent`: the leading spacer rides on
-                // `createConversationSpacing(...).shouldAddLeadingSpace`
-                // (the same spacing the assistant and agent-message rows
-                // use; consecutive tool cards stay flush).
+                // TS `ToolExecutionComponent`: the leading spacer rides on `shouldAddLeadingSpace`
+                // (consecutive cards stay flush).
                 let mut rows: Vec<Line> = Vec::new();
                 if self.conversation_leading(index, detail.tool_output_expanded()) {
                     rows.push(Vec::new());
@@ -242,9 +213,8 @@ impl AgentView {
                 rows
             }
             ChatEntry::BashExecution(card) => {
-                // TS `BashExecutionComponent` mounts with `Spacer(1)`
-                // unless it follows an agent-message component
-                // (`suppressLeadingSpace`, decided at mount time).
+                // TS `BashExecutionComponent` mounts with `Spacer(1)` unless it follows an
+                // agent-message component (`suppressLeadingSpace`).
                 let mut rows: Vec<Line> = Vec::new();
                 if !card.suppress_leading_space {
                     rows.push(Vec::new());
@@ -269,10 +239,8 @@ impl AgentView {
                 width,
                 self.conversation_leading(index, detail.tool_output_expanded()),
             ),
-            // TS `addMessageToChat`'s user case: `Spacer(1)` when the chat
-            // is non-empty, then the card (the conversation-spacing scan the
-            // agent-message rows use does not apply — the TS user case is
-            // the plain children-count check).
+            // TS `addMessageToChat`'s user case: `Spacer(1)` when the chat is non-empty, then the
+            // card.
             ChatEntry::SkillInvocation(row) => {
                 crate::custom_message::skill_invocation::render_skill_invocation(
                     row,

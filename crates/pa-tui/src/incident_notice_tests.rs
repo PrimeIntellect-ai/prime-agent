@@ -1,6 +1,5 @@
-//! Incident notice tests (the TS
-//! `agents-view-incident-notice.test.ts` pure suites: derivation,
-//! dismissal horizons, and rotation-safe incremental reads).
+//! Incident notice tests: derivation, dismissal horizons, and
+//! rotation-safe incremental reads.
 
 use super::*;
 
@@ -147,8 +146,8 @@ fn derives_an_update_restart_only_from_repeated_successful_starts() {
     );
 
     // A first-ever start is routine; a failed startup (lock held) never
-    // counts toward a replacement, or two failed spawns on one socket
-    // would read as an update restart.
+    // counts toward a replacement, or two failed spawns would read as an
+    // update restart.
     assert!(
         derive_incident_notices(&[supervisor_start_line(BASE_MS, 60, "e14de15c")], BASE_MS)
             .is_empty()
@@ -165,19 +164,16 @@ fn derives_an_update_restart_only_from_repeated_successful_starts() {
 
 #[test]
 fn the_notice_time_formats_like_the_ts_label_style() {
-    // Same UTC calendar day: the bare time.
     assert_eq!(
         format_incident_notice_time(BASE_MS - 120_000, BASE_MS),
         "22:28"
     );
-    // Another day in the same year: M/D HH:MM.
     let yesterday =
         pa_types::incident::timestamp_to_ms("2026-09-15T22:30:00.000Z").expect("the fixture date");
     assert_eq!(
         format_incident_notice_time(yesterday, BASE_MS),
         "9/15 22:30"
     );
-    // Across a year boundary: YY/M/D HH:MM.
     let last_year =
         pa_types::incident::timestamp_to_ms("2025-03-05T01:02:03.000Z").expect("the fixture date");
     assert_eq!(
@@ -230,9 +226,7 @@ fn re_shows_a_dismissed_timeout_burst_when_a_later_timeout_extends_it() {
         &mut state, &log_path, BASE_MS
     ));
     assert!(dismiss_incident_notice_state(&mut state));
-    // A later timeout extends the burst past the dismissed horizon: the
-    // notice reappears instead of staying hidden until the first timeout
-    // ages out.
+    // A later timeout extends the burst past the dismissed horizon: the notice reappears.
     append_log(&log_path, &[line(5)]);
     assert!(refresh_incident_notice_state(
         &mut state, &log_path, BASE_MS
@@ -277,8 +271,7 @@ fn surfaces_a_crash_at_the_end_of_agent_jsonl_old_without_a_trailing_newline() {
         "msg": "Session worker 5b1d3aeb91ee stderr: uncaught exception: Error: write EPIPE",
     })
     .to_string();
-    // The rotated .old's final line has no trailing newline (a frozen
-    // file): the bridge still reads it whole.
+    // The rotated .old's final line has no trailing newline: the bridge still reads it whole.
     std::fs::write(logs.join("agent.jsonl.old"), &crash).expect("write old log");
     std::fs::write(&log_path, "").expect("write empty log");
     let mut state = IncidentNoticeState::new();
@@ -301,8 +294,7 @@ fn skips_the_old_bridge_when_a_rotation_makes_it_the_live_logs_own_generation() 
     .to_string();
     write_log(&log_path, &[start]);
     // A rename rotation landed between the live read and the .old read:
-    // the .old path names the very file the live read consumed, and
-    // bridging it would double the supervisor start.
+    // bridging the same file would double the supervisor start.
     std::fs::hard_link(&log_path, logs.join("agent.jsonl.old")).expect("hard link");
     let mut state = IncidentNoticeState::new();
     refresh_incident_notice_state(&mut state, &log_path, BASE_MS);
@@ -326,8 +318,7 @@ fn completes_the_un_consumed_tail_of_a_generation_that_rotates_out_mid_session()
     refresh_incident_notice_state(&mut state, &log_path, BASE_MS);
     append_log(&log_path, &[crash("9f2c7a44b021", 30)]);
     // The log rotates out from under the consumed offset: the un-consumed
-    // tail (the newer crash) must still surface through the offset
-    // continuation from .old.
+    // tail must still surface through the offset continuation from .old.
     std::fs::rename(&log_path, logs.join("agent.jsonl.old")).expect("rotate log");
     std::fs::write(&log_path, "").expect("fresh log");
     refresh_incident_notice_state(&mut state, &log_path, BASE_MS);
@@ -351,18 +342,17 @@ fn a_missing_log_keeps_the_offsets_and_ages_the_notice_out() {
         &mut state, &log_path, BASE_MS
     ));
     let (offset, file_id) = (state.log_offset, state.log_file_id.clone());
-    // The log disappears (an unreadable log): the poll keeps the consumed
-    // offset and file id — a re-tail would fabricate a second supervisor
-    // start — and still re-derives, so the notice ages out with its
-    // window.
+    // The log disappears: the poll keeps the consumed offset and file id
+    // (a re-tail would fabricate a second supervisor start) and still
+    // re-derives, so the notice ages out.
     std::fs::remove_file(&log_path).expect("remove log");
     assert!(!refresh_incident_notice_state(
         &mut state, &log_path, BASE_MS
     ));
     assert_eq!(state.log_offset, offset);
     assert_eq!(state.log_file_id, file_id);
-    // The notice expires with its window (entries older than 24h drop) —
-    // Some -> None IS a changed line, so the poll reports it for re-render.
+    // The notice expires with its window; Some -> None IS a changed line, so the poll reports it
+    // for re-render.
     let later = BASE_MS + INCIDENT_NOTICE_WINDOW_MS + 1_000;
     assert!(refresh_incident_notice_state(&mut state, &log_path, later));
     assert!(state.notice.is_none());
@@ -381,8 +371,7 @@ fn the_initial_read_drops_a_torn_leading_line_but_keeps_a_boundary_line() {
         .to_string()
     };
     // A log larger than the tail bound: the bounded tail starts mid-line
-    // (the cut splits a filler record — the torn leading fragment drops)
-    // and the newest record, the crash, still surfaces.
+    // (the torn leading fragment drops) and the newest record still surfaces.
     let filler = serde_json::json!({
         "ts": ts_ago(BASE_MS, 600 * 60_000),
         "component": "coding-agent.daemon-supervisor",
@@ -400,7 +389,6 @@ fn the_initial_read_drops_a_torn_leading_line_but_keeps_a_boundary_line() {
     refresh_incident_notice_state(&mut state, &log_path, BASE_MS);
     let notice = state.notice.as_ref().expect("the crash notice");
     assert_eq!(notice.subject, "worker 5b1d3aeb91ee");
-    // The bounded read consumed exactly the tail window of bytes.
     assert_eq!(
         state.log_offset,
         Some(payload.len() as u64),

@@ -45,11 +45,8 @@ impl Output {
         }
     }
 
-    /// One expanded-content row set on the branch grammar: the first row
-    /// carries the dim `╰─ ` gutter hanging off the event's header, every
-    /// continuation row the three-space indent — both after the
-    /// one-column chat margin (the same geometry the expanded ipython
-    /// cell code and the agent-message body use).
+    /// One expanded-content row set on the branch grammar: the first row carries the dim
+    /// `╰─ ` gutter, every continuation row the three-space indent.
     fn branch_text<'a>(
         &mut self,
         parts: impl IntoIterator<Item = (&'a str, Option<ThemeColor>)>,
@@ -79,9 +76,7 @@ impl Output {
     }
 
     /// One continuation row set on the branch depth: every row starts
-    /// four plain spaces (the chat margin plus the gutter's width) and
-    /// wraps at the branch content width — the expanded block's non-head
-    /// rows (the meta annotation, the edit-section interiors).
+    /// four plain spaces and wraps at the branch content width.
     fn continuation_text<'a>(
         &mut self,
         parts: impl IntoIterator<Item = (&'a str, Option<ThemeColor>)>,
@@ -184,9 +179,8 @@ fn traverse(
     );
     if detail.tool_output_expanded() {
         out.blank();
-        // The expanded block hangs on the branch (the continuation
-        // indent): the meta row, every edit section, and their field rows
-        // all read as content of this one refinement event.
+        // The expanded block hangs on the branch: the meta row, every edit section, and
+        // their field rows all read as content of this one refinement event.
         out.continuation_text([(row.meta.as_str(), Some(ThemeColor::Dim))], theme, width);
         for edit in &row.edits {
             out.blank();
@@ -195,12 +189,9 @@ fn traverse(
     }
 }
 
-/// The summary row set: collapsed (TS `EventSummary`) keeps the TS shape —
-/// whitespace-collapsed, wrapped at `width - 1` with the one-column inset
-/// (the inset space colored inside the summary span), clamped to two
-/// lines. Expanded hangs the raw summary on the branch grammar instead
-/// (the product improvement beyond TS): first row `╰─ `, continuation rows
-/// the matching indent.
+/// The summary row set: collapsed keeps whitespace-collapsed text with the one-column
+/// inset (colored inside the summary span), clamped to two lines. Expanded hangs the raw
+/// summary on the branch grammar instead (a product improvement beyond TS).
 fn event_summary_rows(
     summary: &str,
     expanded: bool,
@@ -243,9 +234,8 @@ fn event_summary_rows(
     let rows = lines
         .into_iter()
         .map(|line| {
-            // TS `EventSummary` colors the inset space with the summary
-            // color (`theme.fg(color, \` ${line}\`)`), so the first span
-            // carries the leading space.
+            // The inset space carries the summary color, so the first
+            // span carries the leading space.
             let mut row: Line = Vec::new();
             for (index, span) in line.into_iter().enumerate() {
                 let content = if index == 0 {
@@ -263,10 +253,9 @@ fn event_summary_rows(
     }
 }
 
-/// One edit section (TS `RefinementEditSection`): the label row hangs off
-/// the event's branch (`╰─ ` head), then one muted field-label row per
-/// field with plain value rows or -/+ change rows on the continuation
-/// indent.
+/// One edit section: the label row hangs off the event's branch (`╰─ ` head), then one
+/// muted field-label row per field with plain value rows or -/+ change rows on the
+/// continuation indent.
 fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out: &mut Output) {
     out.branch_text(
         edit.label
@@ -284,9 +273,8 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
         match &field.change {
             None => out.continuation_text([(field.value.join("\n").as_str(), None)], theme, width),
             Some((removed, added)) => {
-                // The diff block keeps its own row width at the branch
-                // depth: the four-column continuation prefix plus the
-                // block's internal width make the full width.
+                // The four-column continuation prefix plus the block's
+                // internal width make the full width.
                 rich_change_rows(removed, added, theme, width, out);
             }
         }
@@ -303,13 +291,9 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
     }
 }
 
-/// Full-context line diff rows in the rich-diff row shape (TS
-/// `buildRichDiffLine` over `generateDiffString` with infinite context):
-/// a ` <num> <prefix> ` gutter on the diff backgrounds, wrapped content in
-/// `mdCodeBlock`, continuation rows keep a blank gutter. The whole block
-/// sits on the branch continuation indent: the four-column prefix plus
-/// the block's internal width make the caller's full `width`, and at tiny
-/// widths the prefixed row is clipped to the viewport before paint.
+/// Full-context line diff rows in the rich-diff row shape: a ` <num> <prefix> ` gutter on
+/// the diff backgrounds, wrapped content in `mdCodeBlock`, continuation rows keep a blank
+/// gutter; at tiny widths the prefixed row is clipped to the viewport before paint.
 fn rich_change_rows(
     removed: &[String],
     added: &[String],
@@ -324,9 +308,8 @@ fn rich_change_rows(
     for op in line_diff(removed, added) {
         let (prefix, num, line) = match op {
             DiffOp::Context(line) => {
-                // TS `generateDiffString` advances both counters on
-                // context lines, so added rows after a change keep the
-                // new-file numbering.
+                // Both counters advance on context lines, so added rows
+                // after a change keep the new-file numbering.
                 let num = old_num;
                 old_num += 1;
                 new_num += 1;
@@ -407,15 +390,12 @@ fn rich_change_rows(
                     theme.fg_style(content_color).patch(theme.bg_style(bg)),
                 ));
             }
-            // TS `theme.bg` covers the row's trailing padding too: the
-            // background block reaches the row's full internal width; the
-            // branch continuation prefix (chat margin + gutter depth)
-            // carries the whole block at the branch depth.
+            // The background block reaches the row's full internal width; the branch
+            // continuation prefix carries the whole block at the branch depth.
             let mut inset = vec![Span::raw(crate::branch::BRANCH_INDENT)];
             inset.extend(pad_with(row, block_width, theme.bg_style(bg)));
             // At tiny widths the branch prefix alone outgrows the
-            // viewport, so clip before paint: `pad_with` only pads, never
-            // truncates.
+            // viewport: `pad_with` only pads, never truncates.
             let inset = crate::width::truncate_line(&inset, width, "");
             if let Output::Paint(rows) = out {
                 rows.push(inset);
@@ -451,9 +431,8 @@ mod tests {
                     .to_string()
             })
             .collect();
-        // Gutter ` <num> <prefix> ` (TS `buildRichDiffLine`) on the branch
-        // continuation indent, removed rows on the removed background,
-        // added rows on the added one.
+        // Removed rows on the removed background, added rows on the
+        // added one.
         assert_eq!(
             text,
             vec![
@@ -463,8 +442,7 @@ mod tests {
             ],
             "{text:?}"
         );
-        // The row layout is [branch indent, diff gutter, content, ...]:
-        // the gutter spans carry the diff foregrounds on the diff
+        // The gutter spans carry the diff foregrounds on the diff
         // backgrounds.
         assert_eq!(
             rows[1][1].style,

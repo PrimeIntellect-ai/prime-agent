@@ -1,44 +1,22 @@
-//! Headless e2e for the loader's anchor (the operator's 2026-09-28
-//! report: "the waiting/executing timer resets on every agents-view
-//! round trip — it should always count time since last human prompt").
-//!
-//! A mock supervisor serves an attach snapshot whose newest USER
-//! message carries a wall-clock `timestamp` and whose state reports
-//! `isStreaming` — the mid-turn frame an agents-view round trip
-//! re-attaches into. The contract: the re-mounted loader anchors at
-//! the LAST HUMAN PROMPT's time, so the elapsed readout picks up where
-//! the turn left it (never the re-attach instant's ~0s), and a NEWER
-//! prompt re-anchors the clock onto itself.
-//!
-//! The round trip itself is the second attach: the client that returns
-//! from the agents view is a fresh process re-attaching to the same
-//! mid-turn session, so each `run_plan` below IS one leg of the round
-//! trip. The TS fork's loader tracker starts at its own mount (TS
-//! `agent_start` resets `speedStats` per attach) — the
-//! prompt-anchored rebuild is this port's own contract.
+//! Headless e2e for the loader's anchor (operator report 2026-09-28: "the waiting/executing timer
+//! resets on every agents-view round trip"): the re-mounted loader anchors at the LAST HUMAN
+//! PROMPT's time, never the re-attach instant (TS anchors at the mount — deliberate divergence).
+//! Each `run_plan` below is one leg of the round trip: the returning client is a fresh process.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -52,8 +30,8 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// One mock daemon: serves one client connection, answering the attach
-/// with a mid-turn snapshot whose user message is `prompt_age_ms` old.
+/// One mock daemon: serves one client connection, answering the attach with a mid-turn snapshot
+/// whose user message is `prompt_age_ms` old.
 struct MockSupervisor {
     listener: UnixListener,
     prompt_age_ms: u64,
@@ -67,8 +45,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one client connection until it goes quiet (bounded, so the
-    /// plan teardown join always finishes).
+    /// Serve one client connection until it goes quiet (bounded, so the plan teardown join always
+    /// finishes).
     fn serve(self) {
         self.listener
             .set_nonblocking(true)
@@ -135,12 +113,9 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id, self.prompt_age_ms));
-                    // The turn settles 2.5s later from a side thread (the
-                    // reader loop keeps answering the client's post-attach
-                    // requests, so the loader's anchored frame always
-                    // renders before the end clears it) and the headless
-                    // run's settle completes instead of waiting on a turn
-                    // that never ends.
+                    // The turn settles 2.5s later from a side thread (the reader loop keeps
+                    // answering, so the loader's anchored frame always renders before the end
+                    // clears it), and the run's settle completes instead of waiting forever.
                     let mut event_writer = writer.try_clone().expect("clone event socket");
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(2500));
@@ -178,9 +153,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The attach result: a mid-turn snapshot whose LAST HUMAN PROMPT is
-/// `prompt_age_ms` old and whose state is streaming (the frame the
-/// agents-view round trip returns into).
+/// The attach result: a mid-turn snapshot whose LAST HUMAN PROMPT is `prompt_age_ms` old and whose
+/// state is streaming (the frame the agents-view round trip returns into).
 fn attach_data(id: &str, prompt_age_ms: u64) -> Value {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -262,12 +236,11 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run one headless leg against a fresh mock whose prompt is
-/// `prompt_age_ms` old, and return the loader's rendered elapsed
-/// seconds (the `Waiting · {elapsed}` readout).
+/// Run one headless leg against a fresh mock whose prompt is `prompt_age_ms` old, and return the
+/// loader's rendered elapsed seconds (the `Waiting · {elapsed}` readout).
 fn loader_elapsed_secs(prompt_age_ms: u64) -> u64 {
-    // The ambient TMUX variable adds a startup notice to the
-    // transcript; scrub it so the run is the same inside tmux and out.
+    // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
+    // and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -278,9 +251,8 @@ fn loader_elapsed_secs(prompt_age_ms: u64) -> u64 {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    // The headless renderer paints on the event cadence: one harmless
-    // editor keystroke after the attach lands forces the frame that
-    // carries the re-anchored loader's readout.
+    // The headless renderer paints on the event cadence: one harmless editor keystroke after the
+    // attach lands forces the frame that carries the re-anchored loader's readout.
     let plan = HeadlessPlan {
         steps: vec![
             HeadlessStep::WaitMs(700),
@@ -317,32 +289,25 @@ fn loader_elapsed_secs(prompt_age_ms: u64) -> u64 {
     elapsed
 }
 
-/// The operator's contract (2026-09-28): the waiting/executing timer
-/// counts since the LAST HUMAN PROMPT and NEVER resets on a view
-/// transition. The agents-view round trip is a fresh attach into the
-/// same mid-turn session: the re-mounted loader keeps the prompt's
-/// anchor (the elapsed continues, not ~0s), and a NEWER prompt
-/// re-anchors the clock onto itself.
+/// The operator's contract (2026-09-28): the waiting/executing timer counts since the LAST HUMAN
+/// PROMPT and NEVER resets on a view transition; a NEWER prompt re-anchors the clock onto itself.
 #[test]
 fn the_loader_anchor_survives_the_agents_view_round_trip() {
-    // The turn's prompt landed 25s ago. First attach (the turn running):
-    // the loader already counts ~25s.
+    // The turn's prompt landed 25s ago. First attach (the turn running): the loader already counts
+    // ~25s.
     let first = loader_elapsed_secs(25_000);
     assert!(
         first >= 20,
         "the loader counts since the prompt on the first attach: {first}s"
     );
-    // The round trip: the client leaves for the agents view and a fresh
-    // process re-attaches to the SAME mid-turn session. The anchor
-    // holds — the clock continues from the prompt, never the
-    // re-attach instant (the reported bug restarted it at ~0s).
+    // The round trip: a fresh process re-attaches to the SAME mid-turn session. The anchor holds —
+    // the clock continues from the prompt, never the re-attach instant.
     let returned = loader_elapsed_secs(25_000);
     assert!(
         returned >= 20,
         "the round trip keeps the prompt's anchor (the timer continues, not ~0s): {returned}s"
     );
-    // A NEWER human prompt re-anchors: the clock follows the newest
-    // prompt, not the old one.
+    // A NEWER human prompt re-anchors: the clock follows the newest prompt.
     let reanchored = loader_elapsed_secs(3_000);
     assert!(
         reanchored <= 15,

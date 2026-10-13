@@ -1,4 +1,4 @@
-//! Queue lane priority, snapshot, and arming tests (moved with their concerns).
+//! Queue lane priority, snapshot, and arming tests.
 use super::*;
 
 fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
@@ -293,6 +293,7 @@ fn legacy_queue_record_priority_defaults_by_row_and_keeps_order() {
     journal
         .record_queue_snapshot("legacy", &[machine, human, future], &[])
         .unwrap();
+    drop(journal);
     let reopened = WorkerRecoveryJournal::open(&path).unwrap();
     let (lane, _) = restore_queue_snapshot(&reopened, "legacy");
     assert_eq!(
@@ -313,10 +314,8 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     std::fs::create_dir_all(&dir).unwrap();
     let journal_path = dir.join("recovery.jsonl");
     let mut journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
-    // A parked heartbeat rides the journal with its full delivery row
-    // (labeled preview, injected custom row, queue key), so a respawned
-    // worker restores the heartbeat component instead of a plain user
-    // message.
+    // A parked heartbeat rides the journal with its full delivery row, so a
+    // respawned worker restores the heartbeat component, not a plain user row.
     let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
     let labeled_preview = format!(
         "{}: {content}",
@@ -354,6 +353,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
         )
         .unwrap();
     // A reopen (respawned worker) reads the latest snapshot per session.
+    drop(journal);
     let reloaded = WorkerRecoveryJournal::open(&journal_path).unwrap();
     let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-a");
     assert_eq!(steering.len(), 1);
@@ -368,10 +368,12 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     assert_eq!(follow_up[0].priority, QueuePriority::Human);
     // Compaction (triggered by an all-idle record) keeps the snapshot
     // with its full rows.
+    drop(reloaded);
     let mut compacting = WorkerRecoveryJournal::open(&journal_path).unwrap();
     compacting
         .record("session-a", "s1", None, false, "idle")
         .unwrap();
+    drop(compacting);
     let compacted = WorkerRecoveryJournal::open(&journal_path).unwrap();
     let (steering, _) = restore_queue_snapshot(&compacted, "session-a");
     assert_eq!(steering.len(), 1);
@@ -379,8 +381,7 @@ fn queue_snapshot_round_trips_through_the_recovery_journal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A version-1 queue snapshot (the pre-item text lanes a prior binary
-/// wrote) still restores as plain rows.
+/// A version-1 queue snapshot (pre-item text lanes a prior binary wrote).
 #[test]
 fn a_version_one_queue_snapshot_restores_as_plain_rows() {
     let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
@@ -404,11 +405,8 @@ fn a_version_one_queue_snapshot_restores_as_plain_rows() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The forced-batch arming classification (TS `abortAndSendQueued`'s
-/// `queuedSteering` filter): only the visible plain-user steering items
-/// arm — queue-visible rows whose delivery record is a user message;
-/// agent-message deliveries and injected custom rows never join, and an
-/// empty (or all-injected) lane arms nothing.
+/// Only the visible plain-user steering items arm; agent-message deliveries
+/// and injected custom rows never join, and an empty lane arms nothing.
 #[tokio::test]
 async fn forced_batch_arming_classifies_the_visible_plain_rows() {
     let worker = created_dispatch_worker().await;
@@ -486,9 +484,7 @@ async fn forced_batch_arming_classifies_the_visible_plain_rows() {
         );
     }
     // A lane with nothing armable arms nothing new — the armed state
-    // itself persists (TS's armed set survives until a pump selection
-    // consumes or disarms it; a later abort with an empty lane runs
-    // the plain `requestAbort` arm and touches nothing).
+    // itself persists until a pump selection consumes or disarms it.
     worker.core.lock().unwrap().steering.clear();
     assert!(
         !worker.arm_forced_all_steering(),

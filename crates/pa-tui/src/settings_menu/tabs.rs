@@ -1,32 +1,19 @@
-//! The `/settings` menu's tabs: the grouping of the settings rows and
-//! the tab strip that navigates them. Claude Code's `/config` groups
-//! its settings into categories (Model & Reasoning, Editor &
-//! Interaction, Output & Display, …); ours adapts the same grouping to
-//! our own settings rows, rendered inline through the shared
-//! menu-panel grammar — one `N Name` strip row under the search field,
-//! the active tab white bold (the settings page's own selection styling,
-//! the operator's 2026-09-28 ruling), the rest muted.
-//!
-//! The layout is the single source of the grouping: every settings row
-//! id rides exactly one tab (pinned by the tests here and in
-//! `settings_menu`), and the menu resolves it to row indices once at
-//! construction.
+//! The `/settings` menu's tabs: the grouping of the settings rows and the tab strip that navigates
+//! them — one `N Name` strip row under the search field, the active tab white bold (the operator's
+//! 2026-09-28 selection ruling).
 
 use super::SettingsMenuRow;
 use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::{Line, Span};
 
-/// One tab of the settings menu: its label and the ids of the settings
-/// rows it groups.
 struct TabLayout {
     name: &'static str,
     ids: &'static [&'static str],
 }
 
-/// The settings tabs: General (session behavior), Models (model-side
-/// choices), Display (what the UI renders), Editor (the input editor),
-/// Agents (the agent tree and its services).
+/// The settings tabs: General (session behavior), Models (model-side choices), Display (what the UI
+/// renders), Editor (the input editor), Agents (the agent tree and its services).
 const TAB_LAYOUT: &[TabLayout] = &[
     TabLayout {
         name: "General",
@@ -73,13 +60,9 @@ const TAB_LAYOUT: &[TabLayout] = &[
     },
 ];
 
-/// Resolve the layout against the menu's rows: each tab keeps the
-/// indices of its rows, in the layout's order. The layout is the single
-/// source of the grouping, so a non-empty row set must be covered
-/// exactly once both ways — a layout id the rows do not carry, or a row
-/// that rides no tab, is a programming error that panics here rather
-/// than silently hiding a setting; an empty row set carries no tabs, so
-/// the menu keeps its "No settings available" empty state.
+/// Resolve the layout against the menu's rows: each tab keeps the indices of its rows. The layout
+/// is the single source of the grouping, so a non-empty row set must be covered exactly once both
+/// ways — a mismatch is a programming error that panics here; an empty row set carries no tabs.
 pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<usize>)> {
     if rows.is_empty() {
         return Vec::new();
@@ -112,14 +95,9 @@ pub(crate) fn row_indices(rows: &[SettingsMenuRow]) -> Vec<(&'static str, Vec<us
     tabs
 }
 
-/// The tab strip (one row under the search field, aligned with the rows'
-/// inner column): one `N Name` per tab — the number dim, the name muted,
-/// the active tab white bold (the operator's 2026-09-28 selection
-/// ruling: the settings page's own selected-section styling renders the
-/// theme's text color, not the dock's background band)
-/// — four spaces between tabs (the operator's 2026-09-28 spacing pass),
-/// truncated to the frame width like every status row. The numbers are
-/// the digit keys that jump straight to the tab.
+/// The tab strip: one `N Name` per tab — the number dim, the name muted, the active tab white bold
+/// (the theme's text color, not the dock's background band — the operator's 2026-09-28 selection
+/// ruling). The numbers are the digit keys that jump straight to the tab.
 pub(crate) fn strip_row(
     theme: &Theme,
     width: usize,
@@ -166,11 +144,7 @@ mod tabs_tests {
     fn the_strip_lists_the_tabs_and_marks_the_active_one() {
         let line = strip_row(&theme(), 80, &["General", "Models"], 1);
         let text: String = line.iter().map(|span| span.content.as_str()).collect();
-        // Four spaces between tabs (the operator's 2026-09-28 spacing
-        // pass; two before).
         assert_eq!(text, "  1 General    2 Models");
-        // The active tab renders white bold — the theme's text color,
-        // never the dock's background band (the selection ruling).
         let active = line
             .iter()
             .find(|span| span.content == "Models")

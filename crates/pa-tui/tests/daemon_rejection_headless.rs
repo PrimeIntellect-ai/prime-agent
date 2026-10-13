@@ -1,38 +1,22 @@
-//! Headless e2e for daemon request rejections in the interactive loop: a
-//! mock supervisor answers with `success: false` for chosen commands, and
-//! the TUI must render the TS `showError` row and keep running — a daemon
-//! refusal (empty prompt, suspended admission, queue capacity, unknown
-//! session) never exits the client. Only transport failures (a dead
-//! connection) stay fatal.
-//!
-//! TS parity anchors (packages/coding-agent/src/modes/interactive):
-//! `handleFollowUp` guards `if (!text || !this.editor.onSubmit) return;`
-//! before dispatching — an empty alt+enter never reaches the daemon — and
-//! `onSubmit`'s prompt catch restores the draft and calls `showError`
-//! instead of exiting.
+//! Headless e2e for daemon request rejections: a mock supervisor answers
+//! `success: false` for chosen commands, and the TUI must render the TS
+//! `showError` row and keep running — a daemon refusal never exits the
+//! client; only transport failures stay fatal (TS `handleFollowUp`).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -47,49 +31,41 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The real worker admission refusal (worker.rs `QUEUED_INPUT_SUSPENDED`),
-/// the stand-in for every daemon-side "alive but refusing THIS request".
+/// The real worker admission refusal (`QUEUED_INPUT_SUSPENDED`), the stand-in for every daemon-side
+/// "alive but refusing THIS request".
 const SUSPENDED_ADMISSION: &str =
     "Cannot admit a session action while queued session input is suspended.";
 
-/// How long the first turn stays open so the rejected follow-up is provably
-/// mid-turn (the steer-rejection window).
+/// How long the first turn stays open so the rejected follow-up is provably mid-turn.
 const HOLD_TURN_OPEN_MS: u64 = 700;
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// Every recorded `prompt` request payload.
     prompt_requests: Arc<Mutex<Vec<Value>>>,
-    /// Every recorded `create` request payload (the update-restart wait's
-    /// retry count reads its length).
+    /// Every recorded `create` request (the update-restart retry count reads its length).
     create_requests: Arc<Mutex<Vec<Value>>>,
-    /// Reject the prompt at this 0-based dispatch index with
-    /// [`SUSPENDED_ADMISSION`] instead of streaming a turn.
+    /// Reject the prompt at this 0-based dispatch index with [`SUSPENDED_ADMISSION`] instead of
+    /// streaming a turn.
     reject_prompt_index: Option<usize>,
-    /// Hold each accepted turn open this long before its `turn_end`.
     hold_turn_ms: u64,
-    /// Drop the connection when the next prompt arrives (the dead-daemon
-    /// transport case: the request gets no answer at all).
+    /// Drop the connection when the next prompt arrives (the dead-daemon transport case).
     close_on_prompt: bool,
-    /// Reject the `create` command with this message (the saved-session
-    /// open refusal: "session worker create failed: Session is already
-    /// active in <id>: <file>").
+    /// Rebind to s2 before closing, so the pending prompt outcome outlives its active id.
+    rebind_before_close: bool,
+    /// Reject the `create` command with this message (the saved-session open refusal: "session
+    /// worker create failed: Session is already active in <id>: <file>").
     reject_create: Option<String>,
-    /// Per-create answers, one popped per create (the update-restart
-    /// window's scripted sequence): `None` accepts, `Some((message,
-    /// error_info))` refuses with the message and the typed info. An
-    /// empty queue falls through to `reject_create` (then accept).
+    /// Per-create answers, one popped per create; an empty queue falls through to `reject_create`
+    /// (then accept).
     create_answers: Vec<CreateAnswer>,
 }
 
-/// One scripted create answer: `None` accepts, `Some((message,
-/// error_info))` refuses with the message and the typed info.
+/// One scripted create answer: `None` accepts, `Some((message, error_info))` refuses with the
+/// message and the typed info.
 type CreateAnswer = Option<(String, Option<Value>)>;
 
-/// The answers every connection thread serves concurrently: the recorded
-/// request logs, the scripted create-answer queue, and the read-only
-/// refusal knobs. The update-restart wait retries its open over a SECOND
-/// connection while the first still holds — the mock serves both.
+/// The shared answers for the scripted create-answer queue and refusal knobs. The update-restart
+/// wait retries its open over a SECOND connection while the first still holds.
 struct SharedAnswers {
     prompt_requests: Arc<Mutex<Vec<Value>>>,
     create_requests: Arc<Mutex<Vec<Value>>>,
@@ -97,6 +73,8 @@ struct SharedAnswers {
     reject_prompt_index: Option<usize>,
     hold_turn_ms: u64,
     close_on_prompt: bool,
+    /// Rebind to s2 before closing, so the pending prompt outcome outlives its active id.
+    rebind_before_close: bool,
     reject_create: Option<String>,
 }
 
@@ -109,16 +87,14 @@ impl MockSupervisor {
             reject_prompt_index: None,
             hold_turn_ms: 0,
             close_on_prompt: false,
+            rebind_before_close: false,
             reject_create: None,
             create_answers: Vec::new(),
         }
     }
 
-    /// Serve client connections until the accept window goes quiet
-    /// (bounded, so the plan teardown join always finishes). The
-    /// update-restart wait RETRIES its open over a fresh connection —
-    /// every accepted connection serves on its own thread over the same
-    /// shared answers.
+    /// Serve client connections until the accept window goes quiet (bounded); every accepted
+    /// connection serves on its own thread over the same shared answers.
     fn serve(mut self) {
         self.listener
             .set_nonblocking(true)
@@ -132,6 +108,7 @@ impl MockSupervisor {
             reject_prompt_index: self.reject_prompt_index,
             hold_turn_ms: self.hold_turn_ms,
             close_on_prompt: self.close_on_prompt,
+            rebind_before_close: self.rebind_before_close,
             reject_create: self.reject_create,
         });
         let mut connections = Vec::new();
@@ -195,12 +172,8 @@ impl SharedAnswers {
                         let mut requests = self.create_requests.lock().unwrap();
                         requests.push(command.clone());
                     }
-                    // The scripted answer queue first (one entry per
-                    // create): the update-restart window's refusal
-                    // sequence. The head entry serves this create, then
-                    // pops for the next (a single trailing entry serves
-                    // every later create). An exhausted queue falls
-                    // through.
+                    // The scripted answer queue first: the head entry serves this create, then pops
+                    // for the next; exhausted falls through.
                     let queued = {
                         let mut answers = self.create_answers.lock().unwrap();
                         if answers.is_empty() {
@@ -276,7 +249,23 @@ impl SharedAnswers {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    let mut data = attach_data(id);
+                    if self.rebind_before_close && !self.prompt_requests.lock().unwrap().is_empty()
+                    {
+                        data["data"]["activeSessionId"] = json!("s2");
+                        data["data"]["snapshot"]["activeSessionId"] = json!("s2");
+                        data["data"]["snapshot"]["summary"]["id"] = json!("s2");
+                        data["data"]["snapshot"]["state"]["activeSessionId"] = json!("s2");
+                    }
+                    write_json(&mut writer, &data);
+                }
+                "detach"
+                    if self.rebind_before_close
+                        && !self.prompt_requests.lock().unwrap().is_empty() =>
+                {
+                    // attach_session has adopted s2 before detaching s1. Resolve the pending
+                    // prompt only now, after the mounted id has observably changed.
+                    break;
                 }
                 "prompt" => {
                     let index = {
@@ -284,9 +273,19 @@ impl SharedAnswers {
                         requests.push(command.clone());
                         requests.len() - 1
                     };
+                    if self.close_on_prompt && self.rebind_before_close {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "session_binding",
+                                "previousActiveSessionId": "s1",
+                                "activeSessionId": "s2",
+                            }),
+                        );
+                        continue;
+                    }
                     if self.close_on_prompt {
-                        // The dead-daemon case: no answer, dead socket —
-                        // dropping both halves fails the in-flight request
+                        // The dead-daemon case: dropping both halves fails the in-flight request
                         // with the transport error.
                         break;
                     }
@@ -312,8 +311,7 @@ impl SharedAnswers {
                             "success": true,
                         }),
                     );
-                    // One model turn held open: the client streams the
-                    // message until the delayed `turn_end` settles it.
+                    // The client streams the message until the delayed `turn_end` settles it.
                     let question = command
                         .get("message")
                         .and_then(Value::as_str)
@@ -503,7 +501,6 @@ fn alt_enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
 }
 
-/// One plain Enter key event.
 fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
 }
@@ -533,8 +530,8 @@ fn run_plan_with_selection(
     run_plan(steps, selection, false, configure)
 }
 
-/// The agents-view open route (TS `openAgentsViewSession`, TS #2391): the
-/// same harness through `run_interactive_agents_view_open`.
+/// The agents-view open route (TS `openAgentsViewSession`, TS #2391): the same harness through
+/// `run_interactive_agents_view_open`.
 fn run_agents_view_plan_with_selection(
     steps: Vec<HeadlessStep>,
     selection: SessionSelection,
@@ -549,8 +546,8 @@ fn run_plan(
     agents_view_open: bool,
     configure: impl FnOnce(&mut MockSupervisor),
 ) -> anyhow::Result<RunOutcome> {
-    // The ambient TMUX variable adds a startup notice to the transcript;
-    // scrub it so the run is the same inside tmux and out.
+    // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
+    // and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -594,9 +591,7 @@ fn run_plan(
     })
 }
 
-/// An empty follow-up submission (alt+enter on the empty editor) is TS
-/// `handleFollowUp`'s silent no-op: nothing is dispatched, no error row
-/// renders, and the client stays alive — the next turn still runs.
+/// An empty follow-up submission is TS `handleFollowUp`'s silent no-op.
 #[test]
 fn empty_follow_up_is_a_silent_noop_and_the_client_stays_alive() {
     let steps = vec![
@@ -615,8 +610,7 @@ fn empty_follow_up_is_a_silent_noop_and_the_client_stays_alive() {
         !all.contains("\u{26a0} Error"),
         "the silent no-op renders no error row:\n{all}"
     );
-    // The no-op consumed nothing: the next submit is dispatch 0 and its
-    // turn streams normally (the client provably kept running).
+    // The no-op consumed nothing: the next submit is dispatch 0 (the client kept running).
     assert_eq!(run.prompt_requests.len(), 1, "one prompt dispatched");
     assert_eq!(
         run.prompt_requests[0]
@@ -630,9 +624,6 @@ fn empty_follow_up_is_a_silent_noop_and_the_client_stays_alive() {
     );
 }
 
-/// A daemon refusal on a mid-turn follow-up submission renders the TS
-/// error row and keeps the client mounted: the draft returns to the
-/// editor, the open turn keeps streaming, and the run finishes normally.
 #[test]
 fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
     let steps = vec![
@@ -650,9 +641,7 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
     .expect("interactive run stays mounted through the refusal");
     let all = run.frames.join("\n");
     assert_eq!(run.prompt_requests.len(), 2, "both prompts dispatched");
-    // The TS `showError` row with the daemon's refusal message. The row
-    // wraps at the render width, so compare the whitespace-flattened
-    // frames.
+    // The `showError` row wraps at the render width, so compare the whitespace-flattened frames.
     let flat = all.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains(&format!(
@@ -660,28 +649,32 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
         )),
         "the refusal renders as the error row:\n{all}"
     );
-    // The refused draft returns to the editor (TS restores the input).
     assert!(
         all.contains("steer me"),
         "the refused draft returned to the editor:\n{all}"
     );
-    // The open turn kept streaming while the refusal surfaced.
     assert!(
         all.contains("the streamed answer"),
         "the held turn still rendered:\n{all}"
     );
 }
 
-/// A genuinely dead connection on the prompt is handled, not fatal: the
-/// transport failure surfaces as the TS error row with the draft
-/// restored, the reader-death watch arms the bounded reconnect driver,
-/// and the pane stays mounted (the operator directive: the user never
-/// loses their TUI to a daemon hiccup). The loss is surfaced twice, so
-/// it can never be silently swallowed.
+/// Handled, not fatal (operator directive: the user never loses their TUI to a daemon hiccup);
+/// the loss is surfaced twice, and the close-after-send draft stays consumed so the natural
+/// resubmit never runs the prompt twice.
 #[test]
-fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
+fn dead_connection_on_prompt_keeps_the_draft_consumed_and_arms_the_reconnect() {
     let steps = vec![
         HeadlessStep::Type("hello".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "the daemon connection closed — reconnecting".to_string(),
+            timeout_ms: 2000,
+        },
+        HeadlessStep::WaitRender {
+            needle: "Daemon reconnected".to_string(),
+            timeout_ms: 4000,
+        },
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitMs(300),
     ];
@@ -689,32 +682,58 @@ fn dead_connection_on_prompt_keeps_the_run_mounted_and_arms_the_reconnect() {
         supervisor.close_on_prompt = true;
     })
     .expect("a dead connection keeps the run mounted");
-    let all = run.frames.join(
-        "
-",
-    );
-    // The TS `showError` row with the transport failure.
+    let all = run.frames.join("\n");
     assert!(
         all.contains("\u{26a0} Error: the daemon connection closed"),
         "the dead connection surfaces as the error row:\n{all}"
     );
-    // The reconnect driver owns the recovery (the reader-death watch
-    // armed it); the note rides the chat.
     assert!(
         all.contains("the daemon connection closed — reconnecting"),
         "the reconnect driver is armed for the loss:\n{all}"
     );
-    // The draft returns to the editor (TS restores the input).
+    assert_eq!(
+        run.prompt_requests.len(),
+        1,
+        "the close-after-send prompt never dispatches twice"
+    );
+    let last = run.frames.last().map(String::as_str).unwrap_or_default();
     assert!(
-        all.contains("hello"),
-        "the dead-connection draft returned to the editor:\n{all}"
+        !last.contains("hello"),
+        "the draft stays consumed after the close:\n{last}"
     );
 }
 
-/// A slash-prefixed follow-up keeps the follow-up lane (TS `onSubmit`
-/// passes its captured `streamingBehavior` to the fallthrough prompt, so
-/// alt+enter on unknown slash text parks on the follow-up lane, not the
-/// steering lane — Bugbot's lost-lane finding on the submit-ladder reroute).
+/// TS `onSubmit` passes its captured `streamingBehavior` to the fallthrough prompt, so alt+enter
+/// on unknown slash text parks on the follow-up lane, not the steering lane.
+/// A queued prompt remains consumed even if a session-binding event wins the outcome race.
+#[test]
+fn close_after_rebind_keeps_the_outlived_prompt_consumed() {
+    let steps = vec![
+        HeadlessStep::Type("hello".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitRender {
+            needle: "Daemon reconnected".to_string(),
+            timeout_ms: 4000,
+        },
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(300),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.close_on_prompt = true;
+        supervisor.rebind_before_close = true;
+    })
+    .expect("the rebind and connection loss keep the run mounted");
+    assert_eq!(
+        run.prompt_requests.len(),
+        1,
+        "the outlived draft never replays"
+    );
+    let all = run.frames.join("\n");
+    assert!(all.contains("Daemon reconnected"), "reconnected: {all}");
+    let last = run.frames.last().map(String::as_str).unwrap_or_default();
+    assert!(!last.contains("hello"), "the draft stays consumed: {last}");
+}
+
 #[test]
 fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
     let steps = vec![
@@ -736,8 +755,6 @@ fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
             .and_then(Value::as_str)
             .map(str::to_string)
     };
-    // Enter stays the steer lane; the alt+enter slash fallthrough rides
-    // the follow-up lane to the daemon.
     assert_eq!(lane(0).as_deref(), Some("steer"));
     assert_eq!(
         lane(1).as_deref(),
@@ -753,11 +770,8 @@ fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
     );
 }
 
-/// Opening a saved session whose create the daemon refuses — "session
-/// worker create failed: Session is already active in <id>", another
-/// instance holding the session file — must not exit the client (Kevin's
-/// second reproducer): the run hands off to the agents view with the
-/// refusal as its status line, the session-picker fallback.
+/// A refused saved-session create ("Session is already active in <id>", another instance
+/// holding the file; Kevin's second reproducer) must not exit the client.
 #[test]
 fn refused_saved_session_create_falls_back_to_the_agents_view() {
     let run = run_plan_with(vec![HeadlessStep::WaitMs(100)], |supervisor| {
@@ -784,9 +798,7 @@ fn refused_saved_session_create_falls_back_to_the_agents_view() {
     );
 }
 
-/// A refused create for a RESUMED session file (the agents-view open
-/// path) surfaces the descriptive refusal: the TS-identical first line
-/// plus the holder guidance and next steps, never the bare lease text.
+/// The TS-identical first line plus the holder guidance, never the bare lease text.
 #[test]
 fn refused_saved_session_create_names_the_holder_and_next_steps() {
     let run = run_plan_with_selection(
@@ -805,9 +817,7 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
         "the refused create falls back to the agents view, not exit"
     );
     let notice = run.agents_view_notice.as_deref().unwrap_or_default();
-    // The refusal stays a TYPED `RequestRejected` (the run hands off to
-    // the agents view instead of exiting) and carries the decorated
-    // SINGLE-LINE text: the agents-view status strip would hide a
+    // The refusal carries the decorated SINGLE-LINE text: the agents-view status strip would hide a
     // multiline notice behind its first paragraph.
     assert!(
         notice
@@ -842,17 +852,13 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
     );
 }
 
-/// TS #2391 "agents view open during a daemon update restart": a create
-/// rejected during the preparing-restart window is retried, the session
-/// opens, and the wait notice surfaces — the session's status row and the
-/// view's status line — never a bare failure.
+/// TS #2391: a create rejected in the preparing-restart window is retried, never a bare failure.
 #[test]
 fn an_agents_view_open_waits_through_the_update_restart_window() {
     let run = run_agents_view_plan_with_selection(
         vec![
-            // The wait's retry cadence is 500ms: let the retry land before
-            // the agents-back key (the default `left` on an empty editor)
-            // exits the run.
+            // The wait's retry cadence is 500ms: let the retry land before the agents-back key (the
+            // default `left` on an empty editor) exits.
             HeadlessStep::WaitMs(1500),
             HeadlessStep::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
         ],
@@ -868,9 +874,7 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
         },
     )
     .expect("the wait opens the session");
-    // The refused create was retried: exactly two creates.
     assert_eq!(run.create_requests.len(), 2, "one refusal, one retry");
-    // The session OPENED and shows the wait row (the TS startup notice).
     let frames = run.frames.join("\n");
     assert!(
         frames.contains(
@@ -878,8 +882,8 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
         ),
         "the session shows the wait row: {frames}"
     );
-    // The agents-back handoff carries the notice for the view's status
-    // line (TS `persistentState.statusMessage`).
+    // The agents-back handoff carries the notice for the view's status line (TS
+    // `persistentState.statusMessage`).
     assert!(run.return_to_agents_view);
     assert_eq!(
         run.agents_view_notice.as_deref(),
@@ -889,10 +893,7 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
     );
 }
 
-/// TS #2391's unmasked permanent failure: a create refused permanently
-/// after the preparing-restart refusal surfaces with the refusal itself —
-/// exactly two wire creates, no third attempt through the window, and no
-/// wait notice for an open that never completed.
+/// TS #2391: the permanent refusal surfaces itself — no third attempt through the window.
 #[test]
 fn a_permanent_create_failure_after_the_window_surfaces_unmasked() {
     let run = run_agents_view_plan_with_selection(

@@ -1,16 +1,7 @@
-//! Reading an image from the system clipboard for editor paste.
-//!
-//! The contract is the TS `utils/clipboard-image.ts`: enumerate the
-//! clipboard's available types, prefer a supported image type (PNG, JPEG,
-//! GIF, WebP), read its bytes, and hand back the payload plus its mime
-//! type. On WSL the Windows clipboard is reached through PowerShell and a
-//! temp PNG file (the temp-file write); on macOS the pasteboard is read
-//! through a JavaScript-for-Automation script.
-//!
-//! Every reader is best-effort: a missing tool, an empty clipboard, or an
-//! unsupported type returns `None` and the paste is a no-op (the TS
-//! behavior when its native module or Photon converter is unavailable -
-//! an unsupported type is dropped rather than sent).
+//! Reading an image from the system clipboard for editor paste: prefer a supported
+//! image type (PNG, JPEG, GIF, WebP) and hand back the payload plus its mime type.
+//! Every reader is best-effort: a missing tool, an empty clipboard, or an unsupported
+//! type returns `None` (dropped, never sent).
 
 use std::time::Duration;
 
@@ -23,8 +14,7 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_POWERSHELL_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
-/// One clipboard image: the base64 payload plus its sniffed mime type
-/// (the same attachment type disk-loaded images produce).
+/// One clipboard image: the base64 payload plus its sniffed mime type.
 pub type ClipboardImage = LoadedImage;
 
 /// Strip parameters from a mime type (`image/png; charset=...`).
@@ -37,9 +27,8 @@ fn base_mime_type(mime_type: &str) -> String {
         .to_lowercase()
 }
 
-/// The supported image type among `types`, preferring the
-/// `SUPPORTED_IMAGE_MIME_TYPES` order; any other `image/*` type loses to
-/// `None` (the converter is unavailable, so it cannot be sent).
+/// The supported image type among `types`, in the `SUPPORTED_IMAGE_MIME_TYPES` order;
+/// any other `image/*` type loses to `None` (it cannot be sent without a converter).
 fn select_supported_image_mime_type(types: &[String]) -> Option<String> {
     let normalized: Vec<String> = types
         .iter()
@@ -55,14 +44,13 @@ fn select_supported_image_mime_type(types: &[String]) -> Option<String> {
     None
 }
 
-/// Run one command with a hard timeout and capture stdout. `None` on
-/// spawn failure, nonzero exit, or timeout.
+/// Run one command with a hard timeout; `None` on spawn failure, nonzero
+/// exit, or timeout.
 async fn run_command(program: &str, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
     let child = Command::new(program)
         .args(args)
-        // The timeout arm drops the child mid-wait: without the drop-kill
-        // a hung converter (a kitten/magick that never answers) keeps
-        // running past the deadline — an orphaned direct child of the TUI.
+        // Without the drop-kill, a hung converter keeps running past the
+        // deadline — an orphaned direct child of the TUI.
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -81,7 +69,7 @@ async fn run_command(program: &str, args: &[&str], timeout: Duration) -> Option<
     Some(output.stdout)
 }
 
-/// Whether this is a WSL session (TS `isWSL`).
+/// Whether this is a WSL session.
 fn is_wsl() -> bool {
     if std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSLENV").is_some() {
         return true;
@@ -91,7 +79,7 @@ fn is_wsl() -> bool {
     })
 }
 
-/// Whether this is a Wayland session (TS `isWaylandSession`).
+/// Whether this is a Wayland session.
 fn is_wayland_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
         || std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("wayland")
@@ -152,13 +140,9 @@ async fn read_via_xclip() -> Option<ClipboardImage> {
     None
 }
 
-/// Validate clipboard bytes against the supported formats by content (the
-/// clipboard-reported type may be missing or wrong, and there is no image
-/// converter to fall back on - the TS product converts unsupported types
-/// to PNG through Photon and drops the image when it is unavailable;
-/// content sniffing is this port's equivalent check). Returns the payload
-/// with the sniffed mime type, or `None` when the bytes are not a
-/// supported image.
+/// Validate clipboard bytes by content (the clipboard-reported type may be wrong and
+/// there is no converter to fall back on — content sniffing is this port's equivalent of
+/// TS's Photon conversion). Returns the payload with the sniffed mime type, or `None`.
 fn clipboard_image_from_bytes(bytes: Vec<u8>) -> Option<ClipboardImage> {
     use base64::Engine;
     if bytes.is_empty() {
@@ -171,9 +155,8 @@ fn clipboard_image_from_bytes(bytes: Vec<u8>) -> Option<ClipboardImage> {
     })
 }
 
-/// WSL (TS `readClipboardImageViaPowerShell`): PowerShell reads the
-/// Windows clipboard and saves it as a PNG next to a temp path, which
-/// WSL reads back and removes.
+/// WSL: PowerShell reads the Windows clipboard and saves it as a PNG at a
+/// temp path, which WSL reads back and removes.
 async fn read_via_powershell() -> Option<ClipboardImage> {
     let temp_dir = std::env::temp_dir();
     std::fs::create_dir_all(&temp_dir).ok()?;
@@ -231,10 +214,8 @@ fn unique_suffix() -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// macOS (the TS native clipboard module's role): a
-/// JavaScript-for-Automation script reads the pasteboard's PNG data and
-/// writes it to a temp file, which we read back and remove. PNG is the
-/// screenshot format; non-PNG pasteboard image flavors are not read.
+/// macOS: a JavaScript-for-Automation script reads the pasteboard's PNG data and
+/// writes it to a temp file, which we read back and remove. Non-PNG flavors are not read.
 async fn read_via_osascript() -> Option<ClipboardImage> {
     let temp_dir = std::env::temp_dir();
     std::fs::create_dir_all(&temp_dir).ok()?;
@@ -269,20 +250,13 @@ if (!types.containsObject($.NSPasteboardTypePNG)) {{
     image
 }
 
-/// Read an image from the system clipboard, if one of the supported types
-/// is present. Termux exposes no clipboard image path (TS guard). The
-/// reader order matches the TS `readClipboardImage`: Wayland sessions
-/// try `wl-paste` then `xclip`; WSL additionally falls through to
-/// PowerShell (which sees the Windows clipboard directly); X11 sessions
-/// use `xclip`; macOS reads the pasteboard through osascript. The TS
-/// native-module readers that need a bundled binary are replaced by the
-/// command-line equivalents.
+/// Read an image from the system clipboard, if one of the supported types is present.
+/// Wayland tries `wl-paste` then `xclip`; WSL additionally falls through to PowerShell;
+/// X11 uses `xclip`; macOS reads through osascript. Termux exposes no clipboard image path.
 pub async fn read_clipboard_image() -> Option<ClipboardImage> {
-    // Verification seam (the `script_path` pattern — the product never sets
-    // it): a harness without a display server cannot drive the real
-    // clipboard readers, so a fixture file stands in for the clipboard.
-    // Only `read_clipboard_image` honors it; the image travels the exact
-    // paste path (marker insertion, registry, wire attach) from there.
+    // Verification seam (never set by the product): a harness without a display server
+    // cannot drive the real clipboard readers, so a fixture file stands in for the
+    // clipboard and travels the exact paste path from there.
     if let Some(path) = std::env::var_os("PRIME_AGENT_TEST_CLIPBOARD_IMAGE") {
         return std::fs::read(path)
             .ok()
@@ -340,8 +314,7 @@ mod tests {
             select_supported_image_mime_type(&mixed),
             Some("image/png".to_string())
         );
-        // An unsupported image type is never selected: it cannot be sent
-        // without the converter.
+        // An unsupported image type is never selected.
         assert_eq!(
             select_supported_image_mime_type(&["image/bmp".to_string()]),
             None

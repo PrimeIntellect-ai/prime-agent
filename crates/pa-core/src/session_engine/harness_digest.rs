@@ -1,10 +1,7 @@
 //! Harness digest delivery: compose the continual-harness state into the
 //! model-facing `[harness-digest]` context message and deliver it at cold
-//! context boundaries (session start, resume, compaction head). The
-//! deferred first-turn row rides the turn's prompt messages, so the loop
-//! carries it on `agent_end` and persists it through its `message_end`
-//! (TS commit-time injection). Port of the `_harnessDigest` half of
-//! core/agent-session.ts over `format_harness_state_for_prompt`.
+//! context boundaries (session start, resume, compaction head); the
+//! deferred first-turn row rides the turn's prompt messages.
 
 use std::path::PathBuf;
 
@@ -19,9 +16,6 @@ use crate::refinement::{load_harness_state, merge_harness_states, HarnessScope};
 
 use super::messages::{COMPACTION_SUMMARY_PREFIX, HARNESS_DIGEST_PREFIX, HARNESS_DIGEST_SUFFIX};
 
-// The window-direction oracles (TS `_buildHarnessDigestQueryTerms`
-// `.slice(-4).reverse()`) live in the child module at the same tree
-// position, mirroring compact_session::tests.
 #[cfg(test)]
 mod direction;
 
@@ -34,11 +28,8 @@ pub struct HarnessDigestContext {
     /// Session-local harness state directory (session artifact dir), when the
     /// session persists artifacts.
     pub local_dir: Option<PathBuf>,
-    /// The session exposes the Python REPL (`ipython` tool active).
     pub include_ipython: bool,
-    /// The session exposes `bash` as a model tool.
     pub include_shell_examples: bool,
-    /// The `refine` skill is visible to the model.
     pub include_refine: bool,
 }
 
@@ -68,10 +59,7 @@ pub fn digest_query_terms(
 }
 
 /// One digest render: the body plus the fingerprint of the harness state
-/// that produced it (TS `_harnessDigestWithFingerprint`). One merged-state
-/// read feeds both, so the fingerprint always matches the rendered
-/// digest's material; relevance query terms drive the render but stay out
-/// of the fingerprint (the digest is frozen per delivery).
+/// that produced it; query terms drive the render but stay out of the fingerprint.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HarnessDigestRender {
     pub digest: String,
@@ -89,7 +77,7 @@ pub fn harness_digest_text(
 }
 
 /// Render the digest body and its state fingerprint from one merged-state
-/// read (TS `_harnessDigestMaterial` + `harnessDigestFingerprint`).
+/// read.
 fn render_digest_with_fingerprint(
     context: &HarnessDigestContext,
     query_terms: HarnessQueryTerms,
@@ -103,7 +91,6 @@ fn render_digest_with_fingerprint(
     let render_flags = HarnessDigestRenderFlags {
         include_ipython_examples: context.include_ipython,
         include_shell_examples: context.include_shell_examples,
-        // TS: includeRefineExamples = hasIpython && hasRefineSkill.
         include_refine_examples: context.include_ipython && context.include_refine,
     };
     let digest = format_harness_state_for_prompt(
@@ -123,11 +110,8 @@ fn render_digest_with_fingerprint(
     }
 }
 
-/// Digest inputs captured from the live session (interface flags plus
-/// relevance terms); the merged harness-state disk read happens when the
-/// digest is rendered, so a render at the compaction commit is a fresh
-/// read of harness state written mid-run (TS `_harnessDigest` at the
-/// `appendCompaction` call site).
+/// Digest inputs captured from the live session; the disk read happens at
+/// render time, so a render at the compaction commit reads mid-run state.
 #[derive(Debug, Clone)]
 pub struct HarnessDigestInputs {
     pub context: HarnessDigestContext,
@@ -135,34 +119,26 @@ pub struct HarnessDigestInputs {
 }
 
 impl HarnessDigestInputs {
-    /// Render the digest body (the `<harness_state>` content).
     #[must_use]
     pub fn render(&self) -> String {
         self.render_with_fingerprint().digest
     }
 
-    /// Render the digest body plus the fingerprint of the harness state
-    /// behind it (TS `_harnessDigestWithFingerprint`): one state read
-    /// feeds both, and the relevance terms drive the render only.
+    /// Render the body plus the fingerprint of the state behind it (one
+    /// state read feeds both).
     #[must_use]
     pub fn render_with_fingerprint(&self) -> HarnessDigestRender {
         render_digest_with_fingerprint(&self.context, self.terms.clone())
     }
 }
 
-/// Full digest message text (prefix + state + suffix).
 #[must_use]
 pub fn harness_digest_message_text(digest: &str) -> String {
     format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}")
 }
 
-/// The digest as the loop's custom prompt row (TS `createHarnessDigestMessage`
-/// riding the turn's prompt messages): role `custom`, the `harness_digest`
-/// tag, framed text content, `display: false`, and the raw digest plus its
-/// state fingerprint in `details` (TS `HarnessDigestDetails`). The row rides
-/// the run's prompt messages (so it appears in `agent_end.messages` and
-/// persists through its `message_end`) and converts to a user turn at the
-/// loop's LLM boundary.
+/// The digest as the loop's custom prompt row: it rides the run's prompt
+/// messages and converts to a user turn at the loop's LLM boundary.
 ///
 /// # Panics
 ///
@@ -191,9 +167,8 @@ pub fn harness_digest_prompt_row(
     })
 }
 
-/// The digest as a session message payload for persistence
-/// (`append_custom_message` with `display: false` and the digest plus its
-/// state fingerprint in details).
+/// The digest as a session message payload for persistence (display:
+/// false, the digest plus its fingerprint in details).
 ///
 /// # Errors
 ///
@@ -215,8 +190,7 @@ pub fn persist_digest(
 }
 
 /// The raw digest carried by one loop-context user row, when it carries the
-/// digest frame (standalone digest rows and the digest block that leads a
-/// compaction-summary row).
+/// digest frame (standalone digest rows, the block leading a summary row).
 fn digest_from_frame(text: &str) -> Option<&str> {
     let after_prefix = text
         .strip_prefix(super::messages::HARNESS_DIGEST_PREFIX)
@@ -231,11 +205,8 @@ fn digest_from_frame(text: &str) -> Option<&str> {
 }
 
 /// Whether one loop-context row is a delivered digest row: the custom wire
-/// shape (TS custom rows), or the user turn a context rebuild converted the
-/// newest in-context digest into — matched byte-exactly against that
-/// digest's frame. A converted row is the whole frame and nothing else, so
-/// a user turn that merely quotes the digest (or prefixes/suffixes anything
-/// around it) is never mistaken for bookkeeping and survives the refresh.
+/// shape, or the user turn a rebuild converted — matched byte-exactly against
+/// the digest's frame, so a quoting user turn survives the refresh.
 fn is_digest_row(message: &AgentMessage, latest_digest: Option<&str>) -> bool {
     match message {
         AgentMessage::Custom(custom) => {
@@ -252,11 +223,8 @@ fn is_digest_row(message: &AgentMessage, latest_digest: Option<&str>) -> bool {
     }
 }
 
-/// Strip a live compaction-summary row's superseded digest block (TS #2394
-/// clears `harnessDigest` on the in-context summary): the summary text
-/// stays, byte-identical with a summary that never carried a snapshot.
-/// The block must be the newest in-context digest's frame — the row a
-/// rebuild produced — never a user turn that quotes the digest prefix.
+/// Strip a live compaction-summary row's superseded digest block: the summary text
+/// stays. The block must be the newest in-context digest's frame, never a quoting user turn.
 fn strip_compaction_digest_block(
     message: AgentMessage,
     latest_digest: Option<&str>,
@@ -292,16 +260,9 @@ fn strip_compaction_digest_block(
     stripped
 }
 
-/// The newest in-context digest and the state fingerprint it carries (TS
-/// `_latestContextHarnessDigestDetails`). A delivered digest row rides the
-/// loop as its custom wire shape (details digest + `stateFingerprint`, TS
-/// custom rows) or as the user turn it converts to at a context rebuild
-/// (the digest frame, plus the digest block that leads a compaction-summary
-/// row) — the converted shapes carry no fingerprint, so a fingerprint-less
-/// latest falls back to rendered-text comparison (TS
-/// `_harnessDigestIsFresh`). Recency is by timestamp, not position -
-/// retained pre-compaction rows follow the compaction head, and
-/// out-of-context file entries must never suppress a cold-boundary delivery.
+/// The newest in-context digest and its state fingerprint: a fingerprint-less
+/// latest (a converted user turn) falls back to rendered-text comparison, and
+/// recency is by timestamp — out-of-context entries must not suppress delivery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LatestContextDigest {
     pub timestamp: i64,
@@ -380,13 +341,8 @@ pub fn latest_context_digest_details(messages: &[AgentMessage]) -> Option<Latest
     latest
 }
 
-/// The newest digest recorded in the session's typed context rows (TS
-/// `_latestContextHarnessDigestDetails` over typed messages): digest custom
-/// rows carry `details.digest` + `details.stateFingerprint`, and a
-/// compaction summary carries `harnessDigest` + `harnessStateFingerprint`.
-/// The live loop context holds the LLM-shaped rows a rebuild produced, which
-/// dropped those payloads; this typed view is where a fingerprint-less
-/// latest recovers its fingerprint from.
+/// The newest digest recorded in the session's typed context rows; this typed
+/// view is where a fingerprint-less latest recovers its fingerprint.
 fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<LatestContextDigest> {
     fn consider(
         latest: &mut Option<LatestContextDigest>,
@@ -445,9 +401,7 @@ fn latest_typed_digest_details(messages: &[SessionAgentMessage]) -> Option<Lates
 }
 
 /// Session artifact directory implied by a conversation-log path
-/// (`dirname(dirname(file))/session-artifacts/<id>`, TS
-/// `getSessionArtifactPathForFile`); used when the caller owns persistence
-/// outside the session manager (the daemon worker's in-memory session).
+/// (`dirname(dirname(file))/session-artifacts/<id>`).
 #[must_use]
 pub fn session_artifact_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
     let id = log.file_stem()?.to_string_lossy().to_string();
@@ -456,8 +410,7 @@ pub fn session_artifact_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Session-local harness state directory implied by a conversation-log path
-/// (the artifact dir plus the harness subdir); used when the caller owns
-/// persistence.
+/// (the artifact dir plus the harness subdir).
 #[must_use]
 pub fn local_harness_dir_for_log(log: &std::path::Path) -> Option<PathBuf> {
     session_artifact_dir_for_log(log).map(|dir| dir.join(crate::refinement::HARNESS_STATE_DIR_NAME))
@@ -484,15 +437,11 @@ pub fn digest_session_message(entry: &FileEntry) -> Option<SessionAgentMessage> 
     ))
 }
 
-// Delivery mechanics live with the digest composition (cold-boundary
-// delivery is one invariant, TS `_ensureHarnessDigestContext` /
-// `_appendHarnessDigestIfStale`): the `AgentSession` methods that drive
-// it. Private `AgentSession` fields are reachable from this child module.
+// Delivery mechanics: the `AgentSession` methods that drive the
+// cold-boundary delivery invariant (private fields reachable here).
 impl super::AgentSession {
-    /// Cold-boundary digest delivery (session start / resume): empty contexts
-    /// defer to the first committed turn; non-empty contexts append only when
-    /// the newest in-context digest is stale against disk. The row lands
-    /// silently (TS `_appendHarnessDigestIfStale` pushes without events).
+    /// Cold-boundary digest delivery: empty contexts defer to the first committed
+    /// turn; non-empty contexts append when the newest digest is stale, without events.
     pub(crate) async fn ensure_harness_digest_context(&self) -> anyhow::Result<()> {
         let state = self.agent.state().await;
         let empty = state.messages.is_empty();
@@ -507,15 +456,7 @@ impl super::AgentSession {
     }
 
     /// The deferred first-turn digest as the prompt row that rides the turn's
-    /// admission (TS commit-time injection): the caller prepends it to the
-    /// turn's prompt messages, so the loop streams its `message_start` /
-    /// `message_end` pair ahead of the user prompt, carries it into the
-    /// context and the run's `agent_end` message list, and persists it
-    /// through its `message_end`. The row carries the digest's state
-    /// fingerprint (TS `createHarnessDigestMessage` details). `None` when
-    /// nothing was pending or the digest is current against the live
-    /// context; the pending flag is consumed either way (TS clears
-    /// `_harnessDigestPending` before the staleness check).
+    /// admission; the pending flag is consumed either way.
     pub(crate) async fn pending_digest_prompt_row(&self) -> anyhow::Result<Option<AgentMessage>> {
         if !self
             .digest_pending
@@ -532,13 +473,9 @@ impl super::AgentSession {
         }))
     }
 
-    /// The digest inputs captured from the live session (TS `_harnessDigest`
-    /// sources): the interface flags plus relevance terms from the goal
-    /// objective and the last few user/assistant texts. `None` when the
-    /// session carries no harness state. The harness-state disk read is
-    /// deferred to render time so a snapshot taken before a long-running
-    /// operation (the compaction summarizer) still reads fresh state at
-    /// its commit.
+    /// The digest inputs captured from the live session: interface flags plus
+    /// relevance terms. `None` when the session carries no harness state; the
+    /// disk read stays deferred to render time, so a snapshot reads fresh state.
     pub(crate) async fn harness_digest_inputs(&self) -> Option<HarnessDigestInputs> {
         let context = self.harness_digest.clone()?;
         let recent_texts = self.recent_message_texts_newest_first().await;
@@ -553,25 +490,17 @@ impl super::AgentSession {
         Some(HarnessDigestInputs { context, terms })
     }
 
-    /// The digest to deliver at this boundary, when the newest in-context
-    /// digest is stale against it (TS `_appendHarnessDigestIfStale`'s
-    /// staleness check over `_harnessDigestIsFresh`): a fingerprint match
-    /// is fresh regardless of the rendered text, so query-term drift no
-    /// longer re-delivers an unchanged state (TS #2400); a latest without
-    /// a fingerprint compares rendered text instead (TS fallback). The
-    /// comparison is against the live loop context only — pruned file
-    /// entries are not in-context digests and must not suppress delivery.
+    /// The digest to deliver at this boundary, when the newest in-context digest
+    /// is stale against it: a fingerprint match is fresh regardless of the
+    /// rendered text. The comparison is against the live loop context only.
     async fn fresh_digest(&self) -> Option<HarnessDigestRender> {
         let fresh = self
             .harness_digest_inputs()
             .await?
             .render_with_fingerprint();
         let mut latest = latest_context_digest_details(&self.agent.state().await.messages);
-        // Fingerprint recovery for converted rows (TS keeps typed loop
-        // contexts; this port converts at rebuild boundaries, which drops
-        // the typed payload): the session's built context holds the same
-        // rows with their fingerprints, so a fingerprint-less latest borrows
-        // the typed row's fingerprint when it is the same digest.
+        // Fingerprint recovery for converted rows (a rebuild drops the typed payload):
+        // a fingerprint-less latest borrows the typed row's fingerprint when it is the same digest.
         if latest
             .as_ref()
             .is_some_and(|details| details.state_fingerprint.is_none())
@@ -596,23 +525,15 @@ impl super::AgentSession {
         (!fresh_matches).then_some(fresh)
     }
 
-    /// Deliver a stale digest onto an already-populated loop context (TS
-    /// `_appendHarnessDigestIfStale` from `_ensureHarnessDigestContext`):
-    /// no run carries the row, so it is pushed directly onto the context
-    /// and persisted eagerly, without events. The fresh digest is
-    /// authoritative and older in-context copies are regenerable
-    /// redundancy, so the append replaces them instead of stacking (TS
-    /// #2394): delivered digest rows drop, and a live compaction-summary
-    /// row yields its digest block so the context renders exactly one
-    /// digest. Persisted transcripts keep every copy; the newest digest
-    /// remains authoritative.
+    /// Deliver a stale digest onto an already-populated loop context: the row
+    /// is pushed directly and persisted eagerly, without events. The fresh
+    /// digest is authoritative, so the append replaces older in-context copies.
     async fn append_stale_harness_digest(&self) -> anyhow::Result<()> {
         let Some(render) = self.fresh_digest().await else {
             return Ok(());
         };
-        // The newest in-context digest is the provenance marker for the
-        // rows a rebuild converted: they are its exact frame, so the strip
-        // never matches a user turn that merely quotes the digest.
+        // The newest in-context digest is the provenance marker: the converted
+        // rows are its exact frame, so the strip never matches a quoting user turn.
         let latest_digest = latest_context_digest_details(&self.agent.state().await.messages)
             .map(|details| details.digest);
         let message = harness_digest_prompt_row(
@@ -636,9 +557,7 @@ impl super::AgentSession {
         Ok(())
     }
 
-    /// The last four user/assistant texts, newest first (digest ranking).
-    /// TS `_buildHarnessDigestQueryTerms` (agent-session.ts):
-    /// `.filter(user || assistant).slice(-4).reverse()` - the NEWEST
+    /// The last four user/assistant texts, newest first (digest ranking) — the NEWEST
     /// four texts of the recent window, never the chronological head.
     async fn recent_message_texts_newest_first(&self) -> Vec<String> {
         use pa_agent::types::{AgentMessage, AssistantContent, Message};
@@ -663,9 +582,8 @@ impl super::AgentSession {
                 _ => None,
             })
             .collect();
-        // TS `.slice(-4)`: keep the newest four texts (the window tail).
-        // `truncate(4)` here would keep the chronological head - the
-        // oldest four - and rank the wrong end of the window.
+        // Keep the newest four texts (the window tail): `truncate(4)`
+        // would keep the chronological head and rank the wrong end.
         if texts.len() > 4 {
             texts.drain(..texts.len() - 4);
         }
@@ -689,7 +607,5 @@ fn loop_user_text(content: &pa_agent::types::UserContent) -> String {
     }
 }
 
-// The unit battery lives in the child module (harness_digest::tests); its
-// use-super glob resolves through this facade's bindings and re-exports.
 #[cfg(test)]
 mod tests;

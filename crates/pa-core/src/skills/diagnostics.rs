@@ -1,5 +1,4 @@
 //! Resource diagnostics shared by skill and resource loading.
-//! Port of core/diagnostics.ts.
 
 use serde::Serialize;
 

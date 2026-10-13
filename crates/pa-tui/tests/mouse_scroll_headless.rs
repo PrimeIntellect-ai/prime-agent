@@ -1,36 +1,22 @@
-//! Headless e2e for the mouse-wheel scroll surface: a mock supervisor
-//! serves one attached session with a long snapshot transcript, and the
-//! headless harness feeds byte-identical SGR mouse sequences through the
-//! same decode-and-dispatch path the terminal's wheel reports take.
-//!
-//! Verifies the TS parity contract of `tui.ts`'s `handleFullscreenInput`
-//! wheel branch: wheel up/down scroll the transcript window three lines
-//! per turn, the wheel is consumed without scrolling while a picker owns
-//! the frame, and no scroll happens when the `terminal.fullscreenMouse`
-//! setting disabled tracking (reports consumed either way).
+//! Headless e2e for the mouse-wheel scroll surface (TS
+//! `handleFullscreenInput`): wheel up/down scroll the transcript three
+//! lines per turn, the wheel is consumed without scrolling while a
+//! picker owns the frame, and tracking-off reports are consumed either way.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -38,8 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-/// Mouse tracking is process-global state, so the headless runs serialize
-/// (each asserts on the tracking-active branch it drives).
+/// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
+/// tracking-active branch it drives).
 static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_lock() -> MutexGuard<'static, ()> {
@@ -70,8 +56,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach a session whose snapshot holds a long
-    /// transcript, then answer the loop's requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -185,9 +169,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result with a 40-message transcript: alternating user
-/// and assistant messages, each one short row, so the transcript is far
-/// taller than the 30-row frame.
+/// The slim attach result: 40 alternating one-row messages — the transcript is far taller than the
+/// 30-row frame.
 fn attach_data(id: &str) -> Value {
     let messages: Vec<Value> = (0..40)
         .map(|index| {
@@ -271,14 +254,12 @@ fn options(socket: PathBuf, fullscreen_mouse: bool) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames. Holds the run lock: mouse tracking is process-global.
+/// Run the headless plan and return the captured frames. Holds the run lock: mouse tracking is
+/// process-global.
 fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> Vec<String> {
     let _guard = run_lock();
-    // The ambient TMUX variable makes the startup check add its extended-keys
-    // notice to the transcript, which shifts the paused-frame geometry the
-    // assertions below reason about; scrub it so the run is the same inside
-    // tmux (a dev box) and out (the gate sandbox).
+    // The ambient TMUX variable shifts the paused-frame geometry the assertions reason about; scrub
+    // it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -304,25 +285,20 @@ fn run_plan(steps: Vec<HeadlessStep>, fullscreen_mouse: bool) -> Vec<String> {
     outcome.frames
 }
 
-/// Wheel turns scroll the transcript: up pauses tail-following (the frame
-/// shows the follow hint) and scrolls far enough to drop the newest
-/// message from the window; wheel-down turns scroll back and reaching the
-/// bottom resumes following.
+/// Wheel turns scroll the transcript: up pauses tail-following and drops the newest message
+/// from the window; wheel-down scrolls back, and reaching the bottom resumes following.
 #[test]
 fn wheel_turns_scroll_the_transcript() {
     let steps = vec![
-        // One wheel-up turn: three lines up — the tail pauses.
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        // Enough further turns to scroll the newest messages out of the
-        // window (each user/assistant pair renders several rows): eighteen
-        // lines up clears the bottom rows of the tail.
+        // Eighteen lines up clears the bottom rows of the tail (each user/assistant pair renders
+        // several rows).
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
         HeadlessStep::Mouse(WHEEL_UP.to_string()),
-        // Wheel-down turns scroll back: the window returns to the tail and
-        // following resumes (extra turns clamp at the bottom).
+        // Wheel-down turns scroll back: following resumes (extra turns clamp at the bottom).
         HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
         HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
         HeadlessStep::Mouse(WHEEL_DOWN.to_string()),
@@ -342,9 +318,7 @@ fn wheel_turns_scroll_the_transcript() {
         all.contains("to follow"),
         "wheel-up paused tail-following (the follow hint rendered):\n{all}"
     );
-    // Scrolling up moved the window: the deepest paused frame (all six
-    // wheel-up turns applied) dropped the newest rows from the window,
-    // and scrolling back down restored them.
+
     let paused = frames
         .iter()
         .rfind(|frame| frame.contains("to follow"))
@@ -363,8 +337,8 @@ fn wheel_turns_scroll_the_transcript() {
     );
 }
 
-/// The wheel is consumed without scrolling while the `/model` picker owns
-/// the frame (the TS overlay-focus gate).
+/// The TS overlay-focus gate: the wheel is consumed while the picker owns
+/// the frame.
 #[test]
 fn wheel_is_ignored_while_a_picker_owns_the_frame() {
     let steps = vec![
@@ -383,8 +357,8 @@ fn wheel_is_ignored_while_a_picker_owns_the_frame() {
         all.contains("row 38"),
         "the transcript tail stayed mounted through the picker cycle:\n{all}"
     );
-    // The picker cycled without any paused frame: every frame that shows
-    // the transcript still sits at the tail.
+    // The picker cycled without any paused frame: every frame that shows the transcript sits at the
+    // tail.
     assert!(
         !all.contains("to follow"),
         "the wheel never scrolled behind the picker:\n{all}"
@@ -396,8 +370,6 @@ fn wheel_is_ignored_while_a_picker_owns_the_frame() {
     );
 }
 
-/// With the `terminal.fullscreenMouse` setting off, tracking never enables
-/// and wheel reports are consumed without scrolling.
 #[test]
 fn wheel_reports_are_consumed_when_tracking_is_disabled() {
     let steps = vec![

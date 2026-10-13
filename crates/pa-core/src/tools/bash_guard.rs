@@ -1,12 +1,6 @@
-//! Destructive-git discard guard: the discard-command detection half of
-//! `packages/coding-agent/src/core/tools/bash.ts`.
-//!
-//! Detects git commands that discard uncommitted working-tree changes
-//! (`git checkout -- .`, `git clean -f...`, `git reset --hard`,
-//! `git restore .`), resolves which repository each discard targets
-//! (cd chains, `git -C`, inline env assignments), and formats the
-//! dirty-tree refusal. Split from the bash tool module for module-size
-//! hygiene; behavior matches the TS source.
+//! Destructive-git discard guard: detects git commands that discard uncommitted
+//! working-tree changes, resolves which repository each discard targets (cd
+//! chains, `git -C`, inline env assignments), and formats the dirty-tree refusal.
 
 /// Bypass env var for the destructive-git dirty-tree guard.
 pub(crate) const BASH_DESTRUCTIVE_GIT_BYPASS_ENV: &str = "PI_BASH_ALLOW_DESTRUCTIVE_GIT";
@@ -23,7 +17,6 @@ fn split_ws(text: &str) -> Vec<&str> {
     let re = fancy_regex::Regex::new(&pattern).expect("split_ws regex");
     let mut parts = Vec::new();
     let mut rest = text;
-    // Split on runs of whitespace, discarding empty leading segments.
     while let Some(m) = re.find(rest).ok().flatten() {
         if m.start() > 0 {
             parts.push(&rest[..m.start()]);
@@ -90,11 +83,9 @@ fn is_forced_clean_segment(args: &str) -> bool {
     })
 }
 
-/// Replace characters inside single- or double-quoted spans with spaces so the
-/// discard matcher cannot match quoted data. Character positions stay
-/// identical to the original string. Command substitution (`$(...)`,
-/// backticks) is left live because it executes. Unquoted `#` at a word
-/// boundary starts a comment, masked to end of line.
+/// Replace characters inside single- or double-quoted spans with spaces so the discard matcher
+/// cannot match quoted data; character positions stay identical. Command substitution (`$(...)`,
+/// backticks) is left live because it executes; unquoted `#` at a word boundary starts a comment.
 fn mask_quoted_spans(command: &str) -> Vec<char> {
     let mut chars: Vec<char> = command.chars().collect();
     let mut quote: Option<char> = None;
@@ -249,7 +240,6 @@ fn split_on_separators(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Port of `resolveDiscardProbeTarget` from bash.ts.
 pub fn resolve_discard_probe_target(
     command: &str,
     discard_index: usize,
@@ -264,8 +254,7 @@ pub fn resolve_discard_probe_target(
     }
     let tokens = split_ws(invocation);
 
-    // git -C <dir> (or repository-relocating global options) on the discard
-    // invocation itself.
+    // git -C <dir> (or repository-relocating global options) on the discard invocation itself.
     let mut dash_c_dir: Option<String> = None;
     let mut subcommand_index: Option<usize> = None;
     for (index, token) in tokens.iter().enumerate() {

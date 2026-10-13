@@ -1,11 +1,18 @@
-//! Worker summary/wire unit tests (moved with their concerns).
+//! Worker summary/wire unit tests.
 use super::*;
 
-/// The delivery's relationship label is edge-derived: a subagent
-/// sender whose durable parent edge points at this session is a
-/// child; a subagent from another family never is, no matter its
-/// runtime kind (the mislabeled-ack regression — sibling lanes'
-/// messages must not render "from child:").
+fn inputs() -> SummaryInputs {
+    SummaryInputs {
+        thinking_level: "default".to_string(),
+        model: None,
+        model_fallback_message: None,
+        bash_running: false,
+        quota_parked: false,
+        subagents_running: false,
+        progress_note: None,
+    }
+}
+
 #[test]
 fn sender_child_edge_decides_the_relationship_label() {
     let true_child = json!({
@@ -63,81 +70,40 @@ fn sender_child_edge_decides_the_relationship_label() {
     ));
 }
 
-/// A message-less top-level session is a draft (hidden from the agents
-/// view); a session with messages is live; a resident subagent is live
-/// before its first message (TS `activeLifecycleForSession`).
 #[test]
 fn summary_lifecycle_is_message_based() {
     let empty = SessionCore::test_core(None, "/tmp".to_string());
-    assert_eq!(
-        session_summary(
-            &empty, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .lifecycle,
-        "draft"
-    );
+    assert_eq!(session_summary(&empty, inputs()).lifecycle, "draft");
     let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
     subagent.runtime_kind = "subagent".to_string();
-    assert_eq!(
-        session_summary(
-            &subagent, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
-    // The busy-flip roster delta fires before the store flushes the
-    // admitted prompt; a busy turn is live at that wire moment (TS
-    // reads the runtime's in-memory messages, which already hold it).
+    assert_eq!(session_summary(&subagent, inputs()).lifecycle, "live");
+    // The busy-flip roster delta fires before the store flushes the admitted
+    // prompt; a busy turn is live at that wire moment.
     let mut busy = SessionCore::test_core(None, "/tmp".to_string());
     busy.busy = true;
     busy.running_tool_calls.insert("call-1".to_string());
     // `isRunningTools` is the streaming gate over the in-flight tool
-    // set (TS `isStreaming && pendingToolCalls.size > 0`): tools in
-    // flight read true only while the turn streams.
-    assert!(
-        session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .is_running_tools
-    );
+    // set.
+    assert!(session_summary(&busy, inputs()).is_running_tools);
     busy.running_tool_calls.clear();
-    assert!(
-        !session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .is_running_tools
-    );
+    assert!(!session_summary(&busy, inputs()).is_running_tools);
     busy.running_tool_calls.insert("call-1".to_string());
     busy.busy = false;
-    assert!(
-        !session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .is_running_tools
-    );
-    // The user bash state rides the summary as its own flag (TS
-    // `session.isBashRunning`).
+    assert!(!session_summary(&busy, inputs()).is_running_tools);
+    // The user bash state rides the summary as its own flag.
     assert_eq!(
         session_summary(
-            &busy, "default", None, None, /*bash_running=*/ true, /*quota_parked=*/ false
+            &busy,
+            SummaryInputs {
+                bash_running: true,
+                ..inputs()
+            },
         )
         .is_bash_running,
         Some(true)
     );
     busy.busy = true;
-    assert_eq!(
-        session_summary(
-            &busy, "default", None, None, /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
+    assert_eq!(session_summary(&busy, inputs()).lifecycle, "live");
     let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -150,19 +116,43 @@ fn summary_lifecycle_is_message_based() {
     }));
     session.rewrite().unwrap();
     let with_message = SessionCore::test_core(Some(session), "/tmp".to_string());
-    assert_eq!(
-        session_summary(
-            &with_message,
-            "default",
-            None,
-            None,
-            /*bash_running=*/ false,
-            /*quota_parked=*/ false
-        )
-        .lifecycle,
-        "live"
-    );
+    assert_eq!(session_summary(&with_message, inputs()).lifecycle, "live");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A session whose own turn ended keeps reporting `working` while any of
+/// its subagents runs (each child counts its own descendants the same
+/// way), so every roster surface classifies it running; with no running
+/// subagents it is idle again. Its own-work flag stays its own.
+#[test]
+fn running_subagents_keep_an_idle_session_working() {
+    let core = SessionCore::test_core(None, "/tmp".to_string());
+    let summary = |subagents_running| {
+        serde_json::to_value(session_summary(
+            &core,
+            SummaryInputs {
+                subagents_running,
+                ..inputs()
+            },
+        ))
+        .unwrap()
+    };
+    let classify =
+        |summary: &Value| pa_types::daemon::agent_roster::classify_summary_value(summary, false);
+    let waiting = summary(true);
+    assert_eq!(waiting["activity"], "working");
+    assert_eq!(waiting["hasRunningSubagents"], true);
+    assert_eq!(waiting["isSessionActive"], false);
+    assert_eq!(
+        classify(&waiting),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Running
+    );
+    let done = summary(false);
+    assert_eq!(done["activity"], "idle");
+    assert_eq!(
+        classify(&done),
+        pa_types::daemon::agent_roster::AgentRosterStatus::Idle
+    );
 }
 
 /// The live row's `usage` is the whole-file own-usage fold the saved
@@ -221,9 +211,7 @@ fn live_summary_usage_is_the_catalog_fold() {
         "the fixture must serve a windowed open"
     );
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
-    let summary = session_summary(
-        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
-    );
+    let summary = session_summary(&core, inputs());
     // The live row equals the saved row, whole-object.
     let catalog = crate::session_store::read_session_info(&path)
         .unwrap()
@@ -234,9 +222,8 @@ fn live_summary_usage_is_the_catalog_fold() {
         json!(catalog),
         "live and catalog rows agree"
     );
-    // And that one number is the whole file's own spend: the pre-cut
-    // turn ($1.00) + the summarizer ($0.25) + the kept turn ($0.50) —
-    // with both turns' and the summarizer's tokens folded in.
+    // The whole file's own spend: the pre-cut turn + the summarizer
+    // + the kept turn, tokens folded in.
     assert_eq!(
         json!(summary.usage),
         json!({ "inputTokens": 220, "outputTokens": 22, "cost": 1.75 })
@@ -244,10 +231,7 @@ fn live_summary_usage_is_the_catalog_fold() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A pathless `--no-session` store has no file to scan, so the same
-/// own-usage fold runs over its in-memory entries (TS
-/// `getOwnUsageSummary` over `sessionManager.getEntries()`): the live
-/// row bills the turn's own spend instead of reporting nothing.
+/// The live row bills the turn's own spend instead of reporting nothing.
 #[test]
 fn pathless_summary_usage_folds_the_in_memory_entries() {
     let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -267,9 +251,7 @@ fn pathless_summary_usage_folds_the_in_memory_entries() {
         },
     }));
     let core = SessionCore::test_core(Some(store), "/tmp".to_string());
-    let summary = session_summary(
-        &core, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false,
-    );
+    let summary = session_summary(&core, inputs());
     assert_eq!(
         json!(summary.usage),
         json!({ "inputTokens": 100, "outputTokens": 10, "cost": 0.5 })
@@ -281,4 +263,78 @@ fn display_ids_are_twelve_hex() {
     let id = crate::util::new_display_id();
     assert_eq!(id.len(), 12);
     assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+/// The summary carries the live note, and the next run's boundaries clear it.
+#[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+#[tokio::test]
+async fn summary_carries_the_live_note_until_the_run_boundaries_clear_it() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("pa-worker-note-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: std::path::PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "note-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": ["first reply", "second reply"],
+        })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "note" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let first = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "note-session", "message": "hello" }),
+        )
+        .await;
+    assert!(first.success, "the first turn failed: {first:?}");
+    let engine = worker
+        .agent_engine
+        .as_ref()
+        .expect("the faux worker runs the real engine");
+    let notes = engine
+        .progress_notes
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the built session mirrored its note store");
+    assert!(
+        notes.note("running tests", 0).accepted,
+        "the fresh store accepts the injected note"
+    );
+    let state = worker.dispatch("get_state", &json!({})).await;
+    assert!(state.success, "get_state failed: {state:?}");
+    assert_eq!(
+        state.data.as_ref().unwrap_or(&Value::Null)["progressNote"],
+        json!("running tests"),
+        "the summary carries the live note: {state:?}"
+    );
+    let second = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({ "activeSessionId": "note-session", "message": "again" }),
+        )
+        .await;
+    assert!(second.success, "the second turn failed: {second:?}");
+    let state = worker.dispatch("get_state", &json!({})).await;
+    let summary = state.data.unwrap_or(Value::Null);
+    assert!(
+        summary.get("progressNote").is_none(),
+        "the run boundary cleared the note: {summary:?}"
+    );
 }

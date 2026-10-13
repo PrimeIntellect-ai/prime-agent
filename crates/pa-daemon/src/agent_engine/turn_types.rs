@@ -1,7 +1,5 @@
 //! The turn loop's vocabulary: the per-turn outcome and admission
-//! types (`TurnResult`/`TurnAdmission`/`TurnPrompt`/`BoundaryRun`/
-//! `TurnOnce`) and the retry/abort message helpers that shape them
-//! (moved with their concern).
+//! types and the retry/abort message helpers that shape them.
 use super::{EngineEvent, Model, StopReason};
 
 /// The outcome of one admitted turn.
@@ -11,10 +9,9 @@ pub(crate) enum TurnResult {
     Message(Box<pa_agent::types::AssistantMessage>),
     /// The turn was aborted before a settled message.
     Aborted,
-    /// The turn failed before or during the model call. `assistant` is the
-    /// failed turn's settled message when one exists (provider failures:
-    /// the overflow arm inspects it); model-resolution and session-build
-    /// failures never reached the provider and carry none.
+    /// The turn failed before or during the model call; `assistant` is
+    /// the failed turn's settled message when one exists (model
+    /// resolution and session-build failures carry none).
     Error {
         error: String,
         assistant: Option<Box<pa_agent::types::AssistantMessage>>,
@@ -26,28 +23,25 @@ pub(crate) enum TurnResult {
 pub(crate) enum TurnAdmission {
     /// A fresh user prompt: the loop context gains the user message.
     FreshPrompt,
-    /// Re-issue the loop without a new user message (TS `agent.continue()`):
-    /// the overflow compact-and-retry path after the failed turn's error
-    /// message left the loop context.
+    /// Re-issue the loop without a new user message, after the failed
+    /// turn's error message left the loop context.
     Continue,
 }
 
-/// The first turn's admitted prompt (TS `preparedMessages`): a plain
-/// user prompt, or an injected custom row the turn runs on.
+/// The first turn's admitted prompt: a plain user prompt, or an
+/// injected custom row the turn runs on.
 #[derive(Debug, Clone)]
 pub(crate) enum TurnPrompt {
-    /// A user prompt: text plus its image parts, with the batched
-    /// co-delivery rows (same-lane, same-policy queue actions under mode
-    /// "all") riding the same run after the primary.
+    /// A user prompt: text plus images, with the batched co-delivery
+    /// rows riding the same run after the primary.
     User {
         text: String,
         images: Vec<pa_agent::types::ImageContent>,
         batch: Vec<crate::engine::PromptBatchRow>,
     },
-    /// An injected custom row (TS `_promptInjectedMessage` — goal
-    /// continuations, RLM child terminal notices): the loop admission
-    /// carries the row itself, so the transcript and the compaction walk
-    /// hold one representation of the turn.
+    /// An injected custom row (goal continuations, RLM child terminal
+    /// notices): the admission carries the row itself, so the transcript
+    /// holds one representation.
     Injected(pa_types::session::CustomMessage),
 }
 
@@ -55,10 +49,9 @@ pub(crate) enum TurnPrompt {
 pub(crate) enum BoundaryRun {
     /// Nothing pending, or requests consumed without stopping the run.
     Proceed,
-    /// A consumed compaction stops the loop (TS: requested compaction
-    /// stops the run on purpose). `compacted` marks the runs that
-    /// actually compacted (TS `didCompact`), the only arm whose
-    /// post-compaction goal-continuation consult mints.
+    /// A consumed compaction stops the loop. `compacted` marks the runs
+    /// that actually compacted — the only arm whose post-compaction goal
+    /// consult mints.
     StoppedForCompaction { compacted: bool },
     /// The emitter asked to stop.
     Cancelled,
@@ -76,9 +69,8 @@ pub(crate) enum TurnOnce {
     },
 }
 
-/// Remove the trailing assistant message from the loop context (TS retry:
-/// `messages.slice(0, -1)`), so a retried request does not re-send the
-/// failed turn's error message.
+/// Remove the trailing assistant message from the loop context, so a
+/// retried request does not re-send the failed turn's error message.
 pub(crate) async fn drop_trailing_assistant(agent: &std::sync::Arc<pa_agent::agent::Agent>) {
     let state = agent.state().await;
     let mut messages = state.messages;

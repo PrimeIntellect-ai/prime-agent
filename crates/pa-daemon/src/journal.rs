@@ -1,21 +1,25 @@
-//! Append-only recovery journals (ports of command-recovery-journal.ts and
-//! worker-recovery-journal.ts).
-//!
-//! The command journal makes supervisor mutations exactly-once: a received
-//! record is durable before dispatch, a missing result after a crash is
-//! reported as uncertain and never replayed. The worker journal records the
-//! latest busy/operation state per session so a replacement can mark
-//! interrupted work instead of guessing.
+//! Append-only recovery journals: the worker journal records the latest
+//! busy/operation state and queue snapshots.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const COMPACT_AFTER_RECORDS: usize = 4096;
+pub(crate) const RECOVERY_JOURNAL_SUFFIX: &str = ".recovery.jsonl";
+
+/// The worker's orphan-process journal file suffix (TS
+/// `${workerId}.orphans.jsonl`, beside the recovery journal).
+pub(crate) const ORPHAN_JOURNAL_SUFFIX: &str = ".orphans.jsonl";
+
+/// The worker's orphan-process journal path under its descriptor dir.
+#[must_use]
+pub(crate) fn orphan_journal_path(descriptor_dir: &Path, worker_id: &str) -> std::path::PathBuf {
+    descriptor_dir.join(format!("{worker_id}{ORPHAN_JOURNAL_SUFFIX}"))
+}
 
 pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -29,22 +33,17 @@ pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     let mut line = serde_json::to_string(record)?;
     line.push('\n');
     file.write_all(line.as_bytes())?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
-/// Append several records as ONE durable write: one open, all lines in one
-/// `write_all`, one `fsync`. The records land together or not at all — a
-/// batched checkpoint keeps its all-or-nothing shape (the busy verdict
-/// never publishes without the queue snapshot it describes), and the
-/// journal's on-disk bytes are exactly what the same records appended one
-/// by one would produce.
+/// Append several records as ONE durable write: the batch is
+/// all-or-nothing; the on-disk bytes match the records appended one by one.
 ///
 /// # Errors
 ///
-/// Returns an error when the parent directory, the open, a serialization,
-/// the write, or the sync fails; a partial write may leave truncated
-/// trailing lines, which the loader skips like any crash-truncated record.
+/// Returns an error when the open, serialization, write, or sync fails;
+/// the loader skips a partial write's truncated trailing lines.
 pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -60,30 +59,18 @@ pub(crate) fn append_records(path: &Path, records: &[Value]) -> Result<()> {
         lines.push(b'\n');
     }
     file.write_all(&lines)?;
-    file.sync_all()?;
+    pa_core::platform::fsync(&file)?;
     Ok(())
 }
 
-/// How the temp journal lands on its path, and whether its data rides a
-/// full sync before the swap: the two are one seam — each variant is the
-/// sync class its TS counterpart (or Rust-native owner) carries.
+/// Whether the temp journal's data rides a full sync before the swap.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Finalize {
-    /// Rename through `rename_onto`: the bounded win32 destination-busy
-    /// retry (TS `writeFileAtomicSync` -> `renameOntoSync`), with the
-    /// temp file synced before the swap (TS `fsync: true`).
-    RetryBusy,
-    /// Bare rename with the temp file synced before the swap: every
-    /// failure surfaces immediately. The Rust-native terminal-compaction
-    /// journal (no TS counterpart) keeps its belt.
+    /// Bare rename, temp synced before the swap: every failure surfaces
+    /// immediately.
     Synced,
-    /// Bare rename with an UNSYNCED temp (TS
-    /// `worker-recovery-journal.ts` compact: `writeFileSync` + plain
-    /// `renameSync` — no retry, no temp fsync): the OS carries the temp
-    /// data to the rename. Durability is owned by the append path — the
-    /// compacted form holds only records the append path already made
-    /// durable, so a lost compact falls back to the append-only history,
-    /// which replays identically.
+    /// Bare rename with an UNSYNCED temp: durability is owned by the
+    /// append path — a lost compact falls back to the append-only history.
     Bare,
 }
 
@@ -102,228 +89,90 @@ pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize
             writer.get_ref().sync_all()?;
         }
     }
-    let rename = match finalize {
-        Finalize::RetryBusy => pa_core::platform::rename_onto(&temp, path),
-        Finalize::Synced | Finalize::Bare => fs::rename(&temp, path),
-    };
+    let rename = fs::rename(&temp, path);
     rename.with_context(|| format!("persist {}", path.display()))?;
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandJournalEntry {
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub response: Option<Value>,
+// Complete records must decode exactly before recovery can replace their history.
+// Only an unterminated final JSON fragment may end with incomplete UTF-8.
+pub(crate) fn decode_journal_lines<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<&'a str>> {
+    let mut lines = Vec::new();
+    let mut records = bytes.split(|byte| *byte == b'\n').peekable();
+    while let Some(raw) = records.next() {
+        match std::str::from_utf8(raw) {
+            Ok(line) => lines.push(line),
+            Err(error) => {
+                let incomplete_final = records.peek().is_none()
+                    && !bytes.ends_with(b"\n")
+                    && serde_json::from_slice::<Value>(raw).is_err_and(|error| error.is_eof());
+                if !incomplete_final {
+                    return Err(error)
+                        .with_context(|| format!("invalid UTF-8 in journal {}", path.display()));
+                }
+            }
+        }
+    }
+    Ok(lines)
 }
 
-/// Port of `CommandRecoveryJournal`.
-pub struct CommandRecoveryJournal {
-    path: std::path::PathBuf,
-    entries: HashMap<String, CommandJournalEntry>,
-    record_count: usize,
+pub(crate) struct JournalWriteOwner {
+    file: File,
 }
 
-impl CommandRecoveryJournal {
-    /// Open the journal at `path` (creating the parent directory as needed)
-    /// and load the pending receipts from any existing records.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the parent directory cannot be created; a
-    /// missing journal loads as empty, and the record load itself never
-    /// errors (lines truncated by a crash are skipped).
-    pub fn open(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+impl Drop for JournalWriteOwner {
+    fn drop(&mut self) {
+        // Closing one descriptor can leave the lock held by an inherited copy.
+        if let Err(error) = pa_core::platform::unlock_file(&self.file) {
+            // Drop has no error channel; report without panicking if stderr is unavailable.
+            let _ = writeln!(
+                std::io::stderr(),
+                "Prime Agent: failed to release journal ownership: {error}"
+            );
         }
-        let mut journal = CommandRecoveryJournal {
-            path: path.to_path_buf(),
-            entries: HashMap::new(),
-            record_count: 0,
-        };
-        journal.load()?;
-        Ok(journal)
     }
+}
 
-    fn key(client_id: &str, command_id: &str) -> String {
-        serde_json::json!([client_id, command_id]).to_string()
-    }
+// Keep the sidecar inode stable: unlinking can admit a second ownership inode.
+// Empty sidecars remain after retirement; directory entries/inodes can accumulate.
+// Explicit unlock is attempted on guard drop; a failure leaves close as fallback.
+pub(crate) fn journal_write_owner(path: &Path) -> Result<JournalWriteOwner> {
+    let mut ownership_path = path.as_os_str().to_os_string();
+    ownership_path.push(".writer-lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(std::path::PathBuf::from(ownership_path))
+        .with_context(|| format!("open journal ownership {}", path.display()))?;
+    pa_core::platform::try_lock_exclusive(&file)
+        .with_context(|| format!("acquire journal ownership {}", path.display()))?;
+    Ok(JournalWriteOwner { file })
+}
 
-    #[must_use]
-    pub fn lookup(&self, client_id: &str, command_id: &str) -> Option<CommandJournalEntry> {
-        self.entries.get(&Self::key(client_id, command_id)).cloned()
+pub(crate) fn tail_is_torn(path: &Path) -> Result<bool> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| format!("open journal tail {}", path.display()));
+        }
+    };
+    if file
+        .metadata()
+        .with_context(|| format!("stat journal tail {}", path.display()))?
+        .len()
+        == 0
+    {
+        return Ok(false);
     }
-
-    /// Record durable receipt before dispatch. Returns the prior state when the
-    /// command was already journaled.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the receipt record cannot be appended (the
-    /// parent directory, the journal open, the serialization, the write,
-    /// or the sync fails).
-    pub fn begin(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        command_type: &str,
-    ) -> Result<Option<CommandJournalEntry>> {
-        if let Some(existing) = self.lookup(client_id, command_id) {
-            return Ok(Some(existing));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "received",
-            "key": Self::key(client_id, command_id),
-            "clientId": client_id,
-            "commandId": command_id,
-            "commandType": command_type,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            Self::key(client_id, command_id),
-            CommandJournalEntry {
-                status: "pending".to_string(),
-                response: None,
-            },
-        );
-        Ok(None)
-    }
-
-    /// Record the settled command result; a later replay of the command
-    /// answers from it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no receipt was journaled for the command (a
-    /// result cannot be recorded first), when the result record cannot be
-    /// appended, or when the post-append compaction fails.
-    pub fn record_result(
-        &mut self,
-        client_id: &str,
-        command_id: &str,
-        response: &Value,
-    ) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Err(anyhow::anyhow!(
-                "Cannot record a result before command receipt: {key}"
-            ));
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "result",
-            "key": key,
-            "response": response,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.record_count += 1;
-        self.entries.insert(
-            key,
-            CommandJournalEntry {
-                status: "complete".to_string(),
-                response: Some(response.clone()),
-            },
-        );
-        if self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    /// Acknowledge the command: the durable receipt is no longer needed.
-    /// Acknowledging an unknown command is a no-op.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the acknowledgment record cannot be appended
-    /// or the post-acknowledge compaction fails.
-    pub fn acknowledge(&mut self, client_id: &str, command_id: &str) -> Result<()> {
-        let key = Self::key(client_id, command_id);
-        if !self.entries.contains_key(&key) {
-            return Ok(());
-        }
-        let record = serde_json::json!({
-            "version": 1,
-            "type": "acknowledged",
-            "key": key,
-            "recordedAt": crate::util::now_iso(),
-        });
-        append_record(&self.path, &record)?;
-        self.entries.remove(&key);
-        if self.entries.is_empty() || self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact()?;
-        }
-        Ok(())
-    }
-
-    fn compact(&mut self) -> Result<()> {
-        let mut records = Vec::new();
-        for (key, entry) in &self.entries {
-            let mut received = serde_json::json!({
-                "version": 1,
-                "type": "received",
-                "key": key,
-            });
-            if let Some(response) = &entry.response {
-                received["response"] = response.clone();
-            }
-            records.push(received);
-        }
-        rewrite_records(&self.path, &records, Finalize::RetryBusy)?;
-        self.record_count = records.len();
-        Ok(())
-    }
-
-    fn load(&mut self) -> Result<()> {
-        let Ok(content) = fs::read_to_string(&self.path) else {
-            return Ok(());
-        };
-        for line in content.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let Ok(record) = serde_json::from_str::<Value>(line) else {
-                // A crash may leave only the final append truncated.
-                continue;
-            };
-            if record.get("version").and_then(Value::as_u64) != Some(1) {
-                continue;
-            }
-            self.record_count += 1;
-            let key = record
-                .get("key")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match record.get("type").and_then(Value::as_str) {
-                Some("received") => {
-                    self.entries.insert(
-                        key,
-                        CommandJournalEntry {
-                            status: "pending".to_string(),
-                            response: None,
-                        },
-                    );
-                }
-                Some("acknowledged") => {
-                    self.entries.remove(&key);
-                }
-                Some("result") => {
-                    if let Some(entry) = self.entries.get_mut(&key) {
-                        entry.status = "complete".to_string();
-                        entry.response = record.get("response").cloned();
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
+    file.seek(SeekFrom::End(-1))
+        .with_context(|| format!("seek journal tail {}", path.display()))?;
+    let mut tail = [0u8];
+    file.read_exact(&mut tail)
+        .with_context(|| format!("read journal tail {}", path.display()))?;
+    Ok(tail[0] != b'\n')
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -340,10 +189,14 @@ pub struct WorkerRecoveryRecord {
 
 fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRecord>> {
     let mut latest = HashMap::new();
-    let Ok(content) = fs::read_to_string(path) else {
-        return Ok(latest);
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read journal {}", path.display()));
+        }
     };
-    for line in content.lines() {
+    for line in decode_journal_lines(&bytes, path)? {
         if line.is_empty() {
             continue;
         }
@@ -355,12 +208,9 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
     Ok(latest)
 }
 
-/// One parked queue row in a worker queue snapshot: the delivery payload a
-/// respawned worker needs — the message text, the labeled preview, the
-/// injected custom row, the queue key, and the visibility flag — so a
-/// restored queued heartbeat still delivers as the `heartbeat_prompt`
-/// component (and keeps its `Heartbeat prompt:` row) instead of
-/// collapsing into a plain user message.
+/// One parked queue row in a worker queue snapshot: a restored queued
+/// heartbeat still delivers as the `heartbeat_prompt` component instead of
+/// a plain user message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerQueueItemRecord {
     pub message: String,
@@ -374,10 +224,9 @@ pub struct WorkerQueueItemRecord {
     pub queue_key: Option<String>,
     #[serde(default = "queue_visible_default")]
     pub queue_visible: bool,
-    /// The item's turn-execution class ("queued"/"injected"/"direct", see
-    /// `worker::TurnPolicy)`: the batch gathering's compatibility gate. A
-    /// record written before the field existed restores as "queued" — the
-    /// dominant lane class, and the only one a fresh snapshot can batch.
+    /// The item's turn-execution class ("queued"/"injected"/"direct"):
+    /// the batch gathering's compatibility gate. A pre-field record
+    /// restores as "queued" — the only class a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]
     pub policy: String,
 }
@@ -402,13 +251,9 @@ impl WorkerQueueItemRecord {
     }
 }
 
-/// A worker queue snapshot record: the pending steering/follow-up lanes so a
-/// respawned worker restores its queues. Lives in the worker recovery journal
-/// (TS keeps its session files free of daemon bookkeeping; queue recovery is
-/// worker-private state, so it rides the journal next to the busy records).
-/// Version 2 lanes carry the full item records; a version-1 lane (written
-/// before the item payload existed) is a bare message-text array and
-/// restores as a plain row.
+/// A worker queue snapshot record: the pending steering/follow-up lanes so
+/// a respawned worker restores its queues. Version 2 lanes carry the full
+/// item records; a version-1 lane is a bare message-text array.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerQueueSnapshotRecord {
     pub version: u32,
@@ -419,33 +264,42 @@ pub struct WorkerQueueSnapshotRecord {
     pub recorded_at: String,
 }
 
-/// Port of `WorkerRecoveryJournal`: latest busy/operation per active session,
-/// plus the latest queue snapshot per session.
+/// Latest busy/operation per active session, plus the latest queue
+/// snapshot per session.
 pub struct WorkerRecoveryJournal {
+    _write_owner: JournalWriteOwner,
     path: std::path::PathBuf,
     latest: HashMap<String, WorkerRecoveryRecord>,
     queue_snapshots: HashMap<String, WorkerQueueSnapshotRecord>,
 }
 
 impl WorkerRecoveryJournal {
-    /// Open the worker journal at `path` (creating the parent directory as
-    /// needed) and load the latest busy records and queue snapshots.
+    /// Open the worker journal at `path`, creating the parent directory as needed.
     ///
     /// # Errors
     ///
-    /// Returns an error when the parent directory cannot be created, or
-    /// when the journal exists but the queue-snapshot pass cannot read it
-    /// (a missing journal loads as empty).
+    /// Returns an error when write ownership cannot be acquired, the parent directory cannot
+    /// be created, either
+    /// record pass cannot read an existing journal, or the
+    /// torn-tail heal cannot rewrite it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let write_owner = journal_write_owner(path)?;
         let queue_snapshots = parse_queue_snapshot_records(path)?;
-        Ok(WorkerRecoveryJournal {
+        let journal = WorkerRecoveryJournal {
+            _write_owner: write_owner,
             path: path.to_path_buf(),
             latest: parse_worker_records(path)?,
             queue_snapshots,
-        })
+        };
+        if tail_is_torn(path)? {
+            // Recovery can still contain busy verdicts and queued prompts.
+            // Sync the replacement before it takes over their durable history.
+            journal.compact(Finalize::Synced)?;
+        }
+        Ok(journal)
     }
 
     /// Read the latest worker record per active session straight from a
@@ -453,28 +307,22 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Never errors: a missing or unreadable journal reads as an empty
-    /// set (the `Result` wrapper keeps the reading seam uniform).
+    /// Returns an error when an existing journal cannot be read; a missing
+    /// journal reads as an empty set.
     pub fn read_latest(path: &Path) -> Result<Vec<WorkerRecoveryRecord>> {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
 
-    /// Does the journal prove live work at the worker's last exit? A plain
-    /// supervisor startup adopts a dead worker only when this holds (a
-    /// restart must not mass-revive historical sessions): a latest `busy`
-    /// record marks an in-flight turn or an admitted-but-undelivered
-    /// prompt/queue lane. An unreadable journal proves nothing —
-    /// uncertainty must not revive a session.
+    /// Does the journal prove live work at the worker's last exit? A
+    /// restart must not mass-revive historical sessions: a latest `busy`
+    /// record marks in-flight work; an unreadable journal proves nothing.
     #[must_use]
     pub fn read_interrupted(path: &Path) -> bool {
         Self::read_latest(path).is_ok_and(|records| records.iter().any(|record| record.busy))
     }
 
     /// The newest `busy` record's `recorded_at`, when the journal proves
-    /// live work: the timestamp the boot-revival gate ages the evidence
-    /// against (an old busy record is residue of an era that already
-    /// ended, not interrupted work this boot must heal). A journal with
-    /// no busy record answers `None`.
+    /// live work: the timestamp the boot-revival gate ages the evidence against.
     #[must_use]
     pub fn latest_busy_recorded_at(path: &Path) -> Option<String> {
         Self::read_latest(path)
@@ -486,15 +334,12 @@ impl WorkerRecoveryJournal {
     }
 
     /// Settle every busy session to idle with `operation` (the give-up
-    /// belt): a supervisor that gave up on a worker records the verdict
-    /// in the same journal a later boot would read as revival evidence —
-    /// stale busy evidence must not outlive the give-up that superseded
-    /// it, or every boot re-storms the slot the cap already condemned.
+    /// belt): stale busy evidence must not outlive the give-up that
+    /// superseded it, or every boot re-storms the slot.
     ///
     /// # Errors
     ///
-    /// Returns an error when the journal cannot be opened or a settle
-    /// record cannot be appended.
+    /// Returns an error when the journal cannot be opened or a settle record cannot be appended.
     pub fn settle_busy_records(path: &Path, operation: &str) -> Result<()> {
         let mut journal = Self::open(path)?;
         let busy: Vec<WorkerRecoveryRecord> = journal
@@ -520,7 +365,7 @@ impl WorkerRecoveryJournal {
     /// # Errors
     ///
     /// Returns an error when the record cannot be serialized or appended,
-    /// or when the all-idle compaction fails.
+    /// or the all-idle compaction fails.
     pub fn record(
         &mut self,
         active_session_id: &str,
@@ -547,15 +392,11 @@ impl WorkerRecoveryJournal {
         };
         append_record(&self.path, &serde_json::to_value(&record)?)?;
         self.latest.insert(active_session_id.to_string(), record);
-        // TS parity: the all-idle check includes the just-landed record
-        // (TS `record` runs `[...this.latest.values()].every(!busy)`
-        // AFTER `set`). Checking before the insert let the session's own
-        // busy admission record block its settle's compaction, so a
-        // single-session journal never compacted and grew append-only
-        // for the session's lifetime; the compaction now fires at every
-        // changed-idle record like TS, keeping the file bounded.
+        // TS parity: the all-idle check runs AFTER the insert (TS checks
+        // after `set`); checking before it, a single-session journal never
+        // compacted.
         if self.latest.values().all(|entry| !entry.busy) {
-            self.compact()?;
+            self.compact(Finalize::Bare)?;
         }
         Ok(())
     }
@@ -569,8 +410,7 @@ impl WorkerRecoveryJournal {
     ///
     /// # Errors
     ///
-    /// Returns an error when the snapshot record cannot be serialized or
-    /// appended.
+    /// Returns an error when the snapshot record cannot be serialized or appended.
     pub fn record_queue_snapshot(
         &mut self,
         active_session_id: &str,
@@ -592,20 +432,13 @@ impl WorkerRecoveryJournal {
     }
 
     /// Record the queue snapshot and the busy/operation verdict in ONE
-    /// durable append (the queue-checkpoint pair `checkpoint_queue_recovery`
-    /// writes): the snapshot line and the verdict line share a single open,
-    /// write, and `fsync`, so a checkpoint costs one journal flush instead
-    /// of two. The on-disk order matches the sequential form exactly — the
-    /// snapshot record first, then the verdict — and the verdict still
-    /// never publishes over a snapshot that did not persist (the batch is
-    /// all-or-nothing). An unchanged verdict appends the snapshot alone,
-    /// like the sequential pair does.
+    /// durable append: the verdict never publishes over a snapshot that
+    /// did not persist.
     ///
     /// # Errors
     ///
-    /// Returns an error when either record cannot be serialized or the
-    /// batched append fails, or when the all-idle compaction fails after a
-    /// changed verdict landed.
+    /// Returns an error when either record cannot be serialized, the
+    /// batched append fails, or the all-idle compaction fails.
     #[allow(clippy::too_many_arguments)]
     pub fn record_queue_checkpoint(
         &mut self,
@@ -652,12 +485,10 @@ impl WorkerRecoveryJournal {
             .insert(active_session_id.to_string(), snapshot);
         if let Some(record) = record {
             self.latest.insert(active_session_id.to_string(), record);
-            // TS parity (the same post-insert check as `record`): the
-            // settle's compaction fires on the all-idle map that includes
-            // the just-landed verdict, never blocked by the session's own
-            // busy admission record.
+            // TS parity (same post-insert check as `record`): the
+            // compaction fires on the all-idle map including the verdict.
             if self.latest.values().all(|entry| !entry.busy) {
-                self.compact()?;
+                self.compact(Finalize::Bare)?;
             }
         }
         Ok(())
@@ -690,7 +521,7 @@ impl WorkerRecoveryJournal {
             .map(|record| (record.steering, record.follow_up)))
     }
 
-    fn compact(&self) -> Result<()> {
+    fn compact(&self, finalize: Finalize) -> Result<()> {
         let mut records: Vec<Value> = self
             .latest
             .values()
@@ -702,11 +533,10 @@ impl WorkerRecoveryJournal {
             .map(serde_json::to_value)
             .collect::<std::result::Result<_, _>>()?;
         records.extend(snapshots);
-        rewrite_records(&self.path, &records, Finalize::Bare)
+        rewrite_records(&self.path, &records, finalize)
     }
 }
 
-/// The record-type tag of a queue snapshot line.
 const QUEUE_SNAPSHOT_RECORD_TYPE: &str = "queue_snapshot";
 /// The current queue-snapshot record version: the lanes carry the full
 /// item records.
@@ -714,14 +544,14 @@ const QUEUE_SNAPSHOT_VERSION: u32 = 2;
 
 fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQueueSnapshotRecord>> {
     let mut latest: HashMap<String, WorkerQueueSnapshotRecord> = HashMap::new();
-    let contents = match fs::read_to_string(path) {
-        Ok(contents) => contents,
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(latest),
         Err(error) => {
             return Err(error).with_context(|| format!("read journal {}", path.display()))
         }
     };
-    for line in contents.split('\n').filter(|line| !line.is_empty()) {
+    for line in decode_journal_lines(&bytes, path)? {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -753,9 +583,8 @@ fn parse_queue_snapshot_records(path: &Path) -> Result<HashMap<String, WorkerQue
     Ok(latest)
 }
 
-/// One snapshot lane: a version-2 entry is the full item record, while a
-/// version-1 entry is the bare message text and restores as a plain row
-/// (no preview, no injected custom row — the pre-item payload).
+/// One snapshot lane: a version-2 entry is the full item record; a
+/// version-1 entry is the bare message text and restores as a plain row.
 fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
     value
         .and_then(Value::as_array)
@@ -791,24 +620,17 @@ mod tests {
     }
 
     #[test]
-    fn command_journal_survives_restart_with_uncertainty() {
-        let path = temp_path("command-journal.jsonl");
-        let mut journal = CommandRecoveryJournal::open(&path).unwrap();
-        assert!(journal.begin("client", "c1", "create").unwrap().is_none());
-        let response =
-            serde_json::json!({"type": "response", "command": "create", "success": true});
-        journal.record_result("client", "c1", &response).unwrap();
+    fn worker_journal_read_failures_are_not_empty_recovery_state() {
+        let path = temp_path("unreadable.jsonl");
+        fs::create_dir_all(&path).unwrap();
+        let sentinel = path.join("preserve");
+        fs::write(&sentinel, b"original data").unwrap();
 
-        let mut reloaded = CommandRecoveryJournal::open(&path).unwrap();
-        let entry = reloaded.lookup("client", "c1").unwrap();
-        assert_eq!(entry.status, "complete");
-        assert_eq!(entry.response, Some(response));
-
-        // Pending (received, no result) is reported but not replayed.
-        reloaded.begin("client", "c2", "kill").unwrap();
-        let reloaded2 = CommandRecoveryJournal::open(&path).unwrap();
-        assert_eq!(reloaded2.lookup("client", "c2").unwrap().status, "pending");
-        let _ = fs::remove_dir_all(path.parent().unwrap());
+        assert!(tail_is_torn(&path).is_err());
+        assert!(parse_worker_records(&path).is_err());
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+        assert_eq!(fs::read(&sentinel).unwrap(), b"original data");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -833,18 +655,15 @@ mod tests {
     fn worker_journal_interrupted_evidence_tracks_latest_busy() {
         let path = temp_path("interrupted.recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Idle sessions prove nothing: no interrupted work to revive.
         journal
             .record("s1", "sess1", None, false, "shutdown")
             .unwrap();
         journal.record("s2", "sess2", None, false, "ready").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
-        // One busy session is durable evidence of interrupted work.
         journal
             .record("s2", "sess2", Some("/b.jsonl"), true, "create")
             .unwrap();
         assert!(WorkerRecoveryJournal::read_interrupted(&path));
-        // The latest record per session decides: s2 settles back to idle.
         journal
             .record("s2", "sess2", None, false, "shutdown")
             .unwrap();
@@ -852,10 +671,6 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The batched queue checkpoint and the sequential form produce the
-    /// same journal: same lines in the same order, same latest records,
-    /// same restorable queue snapshots (the `recorded_at` stamps differ only
-    /// because the two runs cannot share a clock instant).
     #[test]
     fn worker_journal_batched_checkpoint_matches_sequential_form() {
         let sequential_path = temp_path("sequential.recovery.jsonl");
@@ -871,9 +686,6 @@ mod tests {
             queue_visible: true,
             policy: queue_policy_default(),
         };
-        // Admitted (snapshot + busy verdict), settle (snapshot + idle
-        // verdict + compaction), then an unchanged-verdict checkpoint whose
-        // snapshot lands alone in both forms.
         sequential
             .record_queue_snapshot("s1", std::slice::from_ref(&item), &[])
             .unwrap();
@@ -884,7 +696,6 @@ mod tests {
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
-        // An unchanged verdict: the snapshot still lands, alone.
         sequential.record_queue_snapshot("s1", &[], &[]).unwrap();
         sequential
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
@@ -938,41 +749,28 @@ mod tests {
         let _ = fs::remove_dir_all(batched_path.parent().unwrap());
     }
 
-    /// The busy verdict rides the snapshot's single flush: a checkpoint
-    /// whose batched append fails lands NEITHER record (no verdict over an
-    /// unpersisted snapshot, and no snapshot without its flush).
     #[test]
     fn worker_journal_batched_checkpoint_is_all_or_nothing() {
         let path = temp_path("allornothing.recovery.jsonl");
         fs::write(&path, "").unwrap();
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
         journal.record("s1", "sess1", None, false, "ready").unwrap();
-        // Replace the journal with a directory: every open for append now
-        // fails, so the checkpoint cannot land either record.
+        // Replace the journal with a directory: every append open now fails.
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         let result =
             journal.record_queue_checkpoint("s1", "sess1", None, true, "prompt_accepted", &[], &[]);
         assert!(result.is_err());
-        // The in-memory verdict did not advance over the failed append.
         assert!(journal.latest.get("s1").is_some_and(|record| !record.busy));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// TS parity oracle: a single session's settle compacts (the post-
-    /// insert all-idle check). The OLD pre-insert check let the session's
-    /// own busy admission record block the compaction, so a single-session
-    /// journal grew append-only forever; TS compacts at every changed-idle
-    /// record and so does the port now.
+    /// TS parity oracle: TS compacts at every changed-idle record, and so
+    /// does the port.
     #[test]
     fn worker_journal_settle_compacts_single_session() {
         let path = temp_path("settle-compacts.recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Two busy/idle cycles through the plain `record` path: the first
-        // settle compacts to one line, so the second admission starts from
-        // a one-line file (two lines mid-flight, one after the settle) —
-        // without the settle compaction the file would grow 2 lines per
-        // cycle.
         journal
             .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
             .unwrap();
@@ -995,14 +793,13 @@ mod tests {
         journal
             .record("s1", "sess1", Some("/a.jsonl"), false, "turn_end")
             .unwrap();
-        // The settle compacted: the file holds exactly the latest record.
         let content = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         assert_eq!(lines.len(), 1, "the settle compacts to the latest record");
         let record: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(record["busy"], false);
         assert_eq!(record["operation"], "turn_end");
-        // The compacted journal replays the same latest state.
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         let latest = reopened.get_latest();
         assert_eq!(latest.len(), 1);
@@ -1011,9 +808,6 @@ mod tests {
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// The settle through the batched checkpoint compacts to the same
-    /// two lines (idle verdict + latest snapshot) and restores the same
-    /// queue lanes a pre-compact append-only history would.
     #[test]
     fn worker_journal_batched_settle_compacts_and_restores() {
         let path = temp_path("batched-settle.recovery.jsonl");
@@ -1027,9 +821,6 @@ mod tests {
             policy: queue_policy_default(),
         };
         let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
-        // Two turns: each admission batch grows the file; each settle
-        // compacts it back — without the compaction the second admission
-        // would stack on the first turn's history (6 lines by the end).
         journal
             .record_queue_checkpoint(
                 "s1",
@@ -1073,11 +864,10 @@ mod tests {
         assert_eq!(verdict["operation"], "turn_end");
         let snapshot: Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(snapshot["type"], "queue_snapshot");
-        // the compact keeps the LATEST snapshot per session: the settle's
-        // (empty) lanes, not the admission's parked row.
+        // the compact keeps the LATEST snapshot per session: the
+        // settle's (empty) lanes, not the admission's parked row.
         assert_eq!(snapshot["steering"].as_array().map(Vec::len), Some(0));
-        // The reopened journal restores the settled verdict and the
-        // settle's (empty) lanes exactly like the append-only history.
+        drop(journal);
         let reopened = WorkerRecoveryJournal::open(&path).unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let restored = reopened.latest_queue_snapshot("s1").unwrap();
@@ -1086,8 +876,7 @@ mod tests {
     }
 
     /// An unchanged verdict appends the snapshot alone and never compacts
-    /// (TS `record` early-returns before its compaction check): the
-    /// compaction belongs to changed-idle records only.
+    /// (TS `record` early-returns before its compaction check).
     #[test]
     fn worker_journal_unchanged_verdict_does_not_compact() {
         let path = temp_path("unchanged-nocompact.recovery.jsonl");
@@ -1099,8 +888,6 @@ mod tests {
             .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
             .unwrap();
         let lines_after_settle = fs::read_to_string(&path).unwrap().lines().count();
-        // The unchanged settle: the snapshot lands, the verdict does not,
-        // and no compaction runs (the map never changed).
         journal
             .record_queue_checkpoint("s1", "sess1", None, false, "turn_end", &[], &[])
             .unwrap();
@@ -1112,10 +899,262 @@ mod tests {
     #[test]
     fn worker_journal_missing_or_unreadable_file_is_not_interrupted() {
         let path = temp_path("missing.recovery.jsonl");
-        // No journal: no evidence, so no revival on uncertainty.
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         std::fs::write(&path, "not json").unwrap();
         assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_skips_torn_utf8_tail() {
+        let path = temp_path("torn-utf8-tail.recovery.jsonl");
+        let item = WorkerQueueItemRecord {
+            message: "steer ünïcode".to_string(),
+            priority: Some(crate::worker::QueuePriority::Human),
+            preview: Some("preview".to_string()),
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+            policy: queue_policy_default(),
+        };
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record_queue_checkpoint(
+                "s1",
+                "sess1",
+                Some("/a.jsonl"),
+                true,
+                "prompt_accepted",
+                std::slice::from_ref(&item),
+                &[],
+            )
+            .unwrap();
+        let whole = serde_json::to_string(&WorkerRecoveryRecord {
+            active_session_id: "s2".to_string(),
+            session_id: "sess2".to_string(),
+            session_file: None,
+            busy: false,
+            operation: "shütdown".to_string(),
+            recorded_at: "2026-10-07T00:00:00Z".to_string(),
+        })
+        .unwrap();
+        let torn = &whole.as_bytes()[..=whole.find('ü').unwrap()];
+        assert!(std::str::from_utf8(torn).is_err());
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn).unwrap();
+        drop(file);
+
+        drop(journal);
+        let mut healed = WorkerRecoveryJournal::open(&path).unwrap();
+        // Reload after a fresh append so the assertions exercise the healed
+        // file, rather than only the state loaded before the rewrite.
+        healed
+            .record("s1", "sess1", Some("/a.jsonl"), true, "resumed")
+            .unwrap();
+        drop(healed);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        let latest = reopened.get_latest();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].active_session_id, "s1");
+        assert!(latest[0].busy);
+        let restored = reopened.latest_queue_snapshot("s1").unwrap();
+        assert_eq!(restored.0, vec![item]);
+        assert!(restored.1.is_empty());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_open_heals_torn_ascii_tail() {
+        let path = temp_path("torn-ascii-tail.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", Some("/a.jsonl"), true, "prompt_accepted")
+            .unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"activeSessionId":"s3","sessionId":"ses"#)
+            .unwrap();
+        drop(file);
+
+        drop(journal);
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal.record("s2", "sess2", None, false, "ready").unwrap();
+        drop(journal);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        assert_eq!(
+            reopened
+                .get_latest()
+                .iter()
+                .filter(|record| record.active_session_id == "s2")
+                .count(),
+            1,
+            "the record appended after the reopened journal must survive a reload"
+        );
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn corrupt_complete_queue_bytes_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-queue.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            let item = WorkerQueueItemRecord {
+                message: "safeXinstruction".to_string(),
+                priority: None,
+                preview: None,
+                custom_message: None,
+                queue_key: None,
+                queue_visible: true,
+                policy: queue_policy_default(),
+            };
+            journal.record_queue_snapshot("s1", &[item], &[]).unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"safeXinstruction";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 4] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            let result = WorkerRecoveryJournal::open(&path);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert!(
+                result.is_err(),
+                "complete corrupt queued prompts must block recovery"
+            );
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_complete_worker_identifiers_are_preserved_before_recovery_fails() {
+        for newline_terminated in [true, false] {
+            let path = temp_path("corrupt-complete-verdict.recovery.jsonl");
+            let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+            journal
+                .record("badXsession", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            drop(journal);
+            let mut bytes = fs::read(&path).unwrap();
+            let marker = b"badXsession";
+            let offset = bytes
+                .windows(marker.len())
+                .position(|part| part == marker)
+                .unwrap();
+            bytes[offset + 3] = 0xff;
+            if newline_terminated {
+                bytes.extend_from_slice(br#"{"activeSessionId":"torn"#);
+            } else {
+                assert_eq!(bytes.pop(), Some(b'\n'));
+            }
+            fs::write(&path, &bytes).unwrap();
+            assert!(WorkerRecoveryJournal::read_latest(&path).is_err());
+            assert!(WorkerRecoveryJournal::open(&path).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_complete_worker_record_without_newline_survives_healing() {
+        let path = temp_path("complete-eof.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        journal
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = journal.get_latest();
+        drop(journal);
+        let mut bytes = fs::read(&path).unwrap();
+        assert_eq!(bytes.pop(), Some(b'\n'));
+        fs::write(&path, bytes).unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        assert_eq!(fs::read(&path).unwrap().last(), Some(&b'\n'));
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn competing_worker_writers_cannot_replace_an_active_append() {
+        for contender in ["open", "settle"] {
+            let path = temp_path("active-append.recovery.jsonl");
+            let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+            owner
+                .record("s1", "sess1", None, true, "prompt_accepted")
+                .unwrap();
+            let first = owner.get_latest().pop().unwrap();
+            let record = WorkerRecoveryRecord {
+                active_session_id: "s2".to_string(),
+                session_id: "sess2".to_string(),
+                session_file: None,
+                busy: true,
+                operation: "prompt_accepted".to_string(),
+                recorded_at: "2026-10-11T00:00:01Z".to_string(),
+            };
+            let mut bytes = serde_json::to_vec(&record).unwrap();
+            bytes.push(b'\n');
+            let split = bytes.len() / 2;
+            let mut active_append = OpenOptions::new().append(true).open(&path).unwrap();
+            active_append.write_all(&bytes[..split]).unwrap();
+            let expected = fs::read(&path).unwrap();
+            let result = match contender {
+                "open" => WorkerRecoveryJournal::open(&path).map(drop),
+                "settle" => WorkerRecoveryJournal::settle_busy_records(&path, "worker_gave_up"),
+                _ => unreachable!("known contender"),
+            };
+            assert_eq!(fs::read(&path).unwrap(), expected);
+            assert!(
+                result.is_err(),
+                "a rival writer must not acquire the active journal"
+            );
+            active_append.write_all(&bytes[split..]).unwrap();
+            active_append.sync_all().unwrap();
+            drop(active_append);
+            drop(owner);
+            let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+            let mut latest = reopened.get_latest();
+            latest.sort_by(|left, right| left.active_session_id.cmp(&right.active_session_id));
+            assert_eq!(latest, vec![first, record]);
+            drop(reopened);
+            fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::used_underscore_binding)] // Intentionally duplicate the private lifetime guard to model an inherited descriptor.
+    fn dropping_a_journal_releases_ownership_while_a_duplicate_handle_survives() {
+        let path = temp_path("duplicate-owner.recovery.jsonl");
+        let mut owner = WorkerRecoveryJournal::open(&path).unwrap();
+        owner
+            .record("s1", "sess1", None, true, "prompt_accepted")
+            .unwrap();
+        let expected = owner.get_latest();
+        let inherited = owner._write_owner.file.try_clone().unwrap();
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(owner);
+        let successor = WorkerRecoveryJournal::open(&path)
+            .expect("logical owner drop releases its lock even while a duplicate handle survives");
+        assert_eq!(successor.get_latest(), expected);
+        assert!(WorkerRecoveryJournal::open(&path).is_err());
+
+        drop(inherited);
+        assert!(
+            WorkerRecoveryJournal::open(&path).is_err(),
+            "closing the old handle must not release the successor's ownership",
+        );
+        drop(successor);
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        assert_eq!(reopened.get_latest(), expected);
+        drop(reopened);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

@@ -1,9 +1,7 @@
 //! Compat regressions (spec §5.2) over the generic `CatalogCache` and a
 //! scripted local HTTP server: fake future versions keep last-good
-//! silently, malformed entries skip per policy, failures keep state
-//! unchanged, hourly gating + coalescing hold, and scopes isolate
-//! accounts (the Prime Inference disk cache is scope-keyed; 401/403
-//! clears only that scope).
+//! silently, malformed entries skip, failures keep state unchanged,
+//! hourly gating + coalescing hold, and scopes isolate accounts.
 
 mod common;
 
@@ -99,8 +97,6 @@ async fn fresh_fetch_writes_a_validated_0600_snapshot_and_serves_it() {
     assert!(stored["fetchedAt"].as_u64().is_some());
     assert_eq!(stored["payload"]["models"][0]["id"], "model-a");
 
-    // A second cache (new process) serves the validated disk snapshot and
-    // hits no network without a refresh.
     let cache2 = models_cache(dir.path(), server.url("/catalog"));
     let models = cache2.get(PUBLIC_SCOPE).expect("disk snapshot");
     assert!(models.iter().any(|m| m.id == "model-a"));
@@ -113,7 +109,6 @@ async fn unsupported_future_version_keeps_last_good_silently() {
     let good = catalog_json(&["model-a"]);
     let server = common::MockServer::start(vec![
         common::ok_json(good.clone(), None),
-        // A future v3 aggregate: rejected, silently, forever.
         common::ok_json(
             serde_json::to_string(&json!({
                 "schemaVersion": 3, "models": [{"id": "v3-model"}]
@@ -151,7 +146,6 @@ async fn unsupported_future_version_keeps_last_good_silently() {
         before.iter().map(|m| m.id.clone()).collect::<Vec<_>>(),
         "v3 payload silently keeps last-good"
     );
-    // The disk snapshot was not clobbered either.
     let cache2 = models_cache(dir.path(), server.url("/catalog"));
     assert!(cache2
         .get(PUBLIC_SCOPE)
@@ -199,7 +193,6 @@ async fn network_failure_and_oversize_keep_state_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let server = common::MockServer::start(vec![
         common::ok_json(catalog_json(&["model-a"]), None),
-        // The next request fails with a 5xx: state must not change.
         common::status(500, "Internal Server Error"),
     ])
     .await;
@@ -222,7 +215,6 @@ async fn network_failure_and_oversize_keep_state_unchanged() {
         .map(|m| m.id.clone())
         .collect();
 
-    // Fetch failure: the same last-good snapshot serves, no error surfaced.
     let after = cache
         .refresh(
             PUBLIC_SCOPE,
@@ -239,7 +231,6 @@ async fn network_failure_and_oversize_keep_state_unchanged() {
         "state unchanged after a failed fetch"
     );
 
-    // Oversized body on a pristine cache: no snapshot before, none after.
     let oversize = common::MockServer::start(vec![common::oversized_header()]).await;
     let big = models_cache(dir.path(), oversize.url("/catalog"));
     assert!(big
@@ -276,14 +267,12 @@ async fn hourly_gating_skips_recent_attempts_and_force_overrides() {
         .expect("first refresh");
     assert_eq!(server.request_count(), 1);
 
-    // Not forced, attempted seconds ago: no new request.
     cache
         .refresh(PUBLIC_SCOPE, RefreshOptions::default())
         .await
         .expect("served from snapshot");
     assert_eq!(server.request_count(), 1, "hourly gating");
 
-    // Forced (startup/picker/auth change): one new request.
     cache
         .refresh(
             PUBLIC_SCOPE,
@@ -400,7 +389,6 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
         team_id: Some("team-b".into()),
     };
 
-    // Account A fetches live models with its credentials on the wire.
     let a = catalog
         .refresh(&team_a, true)
         .await
@@ -416,14 +404,11 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
     assert!(request.contains("authorization: Bearer key-a"), "{request}");
     assert!(request.contains("x-prime-team-id: team-a"), "{request}");
 
-    // Account B: a different scope — A's fetched data never serves it.
     assert!(
         catalog.get(&team_b).is_none(),
         "account B sees nothing from account A's scope"
     );
 
-    // A fresh process (same URL) serves A's disk snapshot for A's scope
-    // only: the cache file is scope-keyed by the HMAC of key over team.
     let fresh = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
     assert!(
         fresh.get(&team_a).is_some(),
@@ -484,8 +469,6 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
     assert!(catalog.refresh(&creds, true).await.is_some(), "good fetch");
     assert!(catalog.get(&creds).is_some());
 
-    // 401 revocation clears only the requesting scope: the disk file is
-    // removed, the in-memory snapshot for that scope drops.
     assert!(catalog.refresh(&creds, true).await.is_none(), "401");
     assert!(catalog.get(&creds).is_none(), "scope cleared");
     assert!(
@@ -494,8 +477,6 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
             .exists(),
         "cache file removed"
     );
-    // The other scope was never populated — also clear; the invariant is
-    // that clearing is scoped, not global.
     assert!(catalog.get(&other).is_none());
 }
 
@@ -529,7 +510,6 @@ async fn mid_session_refresh_never_retargets() {
         )
         .await
         .expect("first refresh");
-    // The session resolves and keeps its model value.
     let active = first
         .iter()
         .find(|m| m.id == "before-model")
@@ -545,17 +525,12 @@ async fn mid_session_refresh_never_retargets() {
         )
         .await
         .expect("second refresh");
-    // The session's model object keeps identity + transport for the
-    // session's lifetime; only new resolutions see the new catalog.
     assert_eq!(active.id, "before-model");
     assert_eq!(active.api, "anthropic-messages");
 }
 
-/// Fire-and-forget safety (the header contract): a caller that drops its
-/// `refresh` mid-fetch — a bounded wait timing out — must not poison the
-/// coalescing gate. The dropped driver resolves the gate as a failed
-/// refresh, wakes any coalesced waiter, and the next refresh starts a
-/// fresh fetch instead of awaiting a notify that never comes.
+/// Fire-and-forget safety: a caller that drops its `refresh` mid-fetch
+/// must not poison the coalescing gate.
 #[tokio::test]
 async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh() {
     let dir = tempfile::tempdir().unwrap();
@@ -571,8 +546,7 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
 
     // A coalesced waiter joins the dropped driver: it must wake with a
     // failed refresh (None), never hang on the abandoned gate. Both waits
-    // are bounded — pre-fix, the coalesced waiter hangs on the abandoned
-    // gate and the 2s bound fails the test instead of wedging it.
+    // are bounded — the 2s bound fails the test instead of wedging it.
     let dropped = tokio::time::timeout(
         std::time::Duration::from_millis(100),
         cache.refresh(
@@ -604,9 +578,6 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
         "a dropped refresh resolves as a failed one"
     );
 
-    // The gate is clear: the next forced refresh starts a fresh fetch and
-    // lands (the second scripted response), instead of coalescing onto the
-    // abandoned in-flight gate forever.
     let next = cache
         .refresh(
             PUBLIC_SCOPE,
@@ -628,13 +599,9 @@ async fn a_dropped_refresh_resolves_the_gate_and_the_next_refresh_starts_fresh()
     );
 }
 
-/// The hourly loop (the supervisor's arm on the process-shared catalog)
-/// refreshes through the credentials closure: the first tick fires the
-/// gated Hourly trigger immediately (tokio interval semantics — a
-/// supervisor boot warms the caches without waiting an hour) and the
-/// closure's credentials ride the credentialed fetch; the tick's own
-/// fetch arms the hourly gate, so an immediate second attempt stays
-/// inside the window (one fetch per layer per hour).
+/// The first tokio tick fires immediately (a supervisor boot warms the
+/// caches without waiting an hour) and the tick's fetch arms the hourly
+/// gate, so an immediate second attempt stays inside the window.
 #[tokio::test]
 async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
     let dir = tempfile::tempdir().unwrap();
@@ -671,8 +638,6 @@ async fn the_hourly_loop_refreshes_through_the_credentials_closure() {
     };
     let hourly = Arc::clone(&catalog);
     hourly.spawn_hourly_refresh(move || Some(credentials.clone()));
-    // The first tick fires immediately: both fetch layers ran, the
-    // credentialed one carrying the closure's current credentials.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while server.request_count() < 2 {
         assert!(

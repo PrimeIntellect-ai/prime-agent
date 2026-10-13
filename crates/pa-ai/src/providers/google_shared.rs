@@ -1,8 +1,6 @@
-//! Google Generative AI / Vertex shared utilities.
-//! Port of `packages/ai/src/providers/google-shared.ts`: message/tool
-//! conversion with thought-signature replay, thinking budgets and levels,
-//! finish-reason and tool-choice mapping. The shared stream-chunk processor
-//! lives in [`crate::providers::google_stream`].
+//! Google Generative AI / Vertex shared utilities: message/tool conversion with thought-signature
+//! replay, thinking budgets and levels, finish-reason and tool-choice mapping. The shared
+//! stream-chunk processor lives in [`crate::providers::google_stream`].
 
 use serde_json::{json, Map, Value};
 
@@ -98,15 +96,15 @@ pub fn get_google_thinking_budget(
 
 /// Whether a streamed Gemini part should be treated as thinking content.
 ///
-/// Protocol note: `thought: true` is the definitive marker; `thoughtSignature`
-/// can appear on ANY part type and does NOT indicate thinking content.
+/// Protocol note: `thought: true` is the definitive marker; `thoughtSignature` can appear on ANY
+/// part type and does NOT indicate thinking content.
 pub fn is_thinking_part(part: &Value) -> bool {
     part.get("thought") == Some(&json!(true))
 }
 
-/// Retain thought signatures during streaming: some backends only send
-/// `thoughtSignature` on the first delta of a block; keep the last non-empty
-/// one. Never merges or moves signatures across distinct parts.
+/// Retain thought signatures during streaming: some backends only send `thoughtSignature` on the
+/// first delta of a block; keep the last non-empty one. Never merges or moves signatures across
+/// distinct parts.
 pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) -> Option<String> {
     if let Some(incoming) = incoming {
         if !incoming.is_empty() {
@@ -130,8 +128,7 @@ fn is_valid_thought_signature(signature: Option<&str>) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
 }
 
-/// Retain a thought signature only for the originating provider/model and when
-/// it is valid base64.
+/// Retain a thought signature only for the originating provider/model and when it is valid base64.
 fn resolve_thought_signature(
     is_same_provider_and_model: bool,
     signature: Option<&str>,
@@ -165,9 +162,9 @@ fn supports_multimodal_function_response(model_id: &str) -> bool {
     }
 }
 
-/// Convert internal context to Google `contents[]`, preserving replayable
-/// signatures only when protocol-valid.
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+/// Convert internal context to Google `contents[]`, preserving replayable signatures only when
+/// protocol-valid.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
     use crate::types::{Message, UserMessageContent, UserOrToolContent};
@@ -252,8 +249,8 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                             if thinking.thinking.trim().is_empty() {
                                 continue;
                             }
-                            // Only keep as thinking block if same provider AND
-                            // same model; otherwise convert to plain text.
+                            // Only keep as thinking block if same provider AND same model;
+                            // otherwise convert to plain text.
                             let mut part = Map::new();
                             if is_same_provider_and_model {
                                 part.insert("thought".into(), json!(true));
@@ -361,8 +358,8 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     "functionResponse": Value::Object(function_response),
                 });
 
-                // Cloud Code Assist requires all function responses in a single
-                // user turn: merge into the previous one when possible.
+                // Cloud Code Assist requires all function responses in a single user turn: merge
+                // into the previous one when possible.
                 if let Some(last) = contents.last_mut() {
                     let is_user = last.get("role").and_then(|value| value.as_str()) == Some("user");
                     let has_function_response = last
@@ -437,9 +434,8 @@ fn sanitize_for_openapi(schema: &Value) -> Value {
 
 /// Convert tools to Gemini function declarations.
 ///
-/// By default uses `parametersJsonSchema` (full JSON Schema). `use_parameters`
-/// switches to the legacy `OpenAPI` `parameters` field (needed for Cloud Code
-/// Assist with Claude models).
+/// By default uses `parametersJsonSchema` (full JSON Schema). `use_parameters` switches to the
+/// legacy `OpenAPI` `parameters` field (needed for Cloud Code Assist with Claude models).
 pub fn convert_tools(tools: &[Tool], use_parameters: bool) -> Option<Vec<Value>> {
     if tools.is_empty() {
         return None;
@@ -495,10 +491,6 @@ pub fn map_google_stop_reason(reason: &str) -> Result<StopReason, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Model classification + thinking config
-// ---------------------------------------------------------------------------
-
 pub fn is_gemma4_model(model_id: &str) -> bool {
     let lower = model_id.to_lowercase();
     lower.contains("gemma-4") || lower.contains("gemma4")
@@ -519,9 +511,9 @@ fn regex_is_match(model_id: &str, pattern: &str) -> bool {
 
 /// Thinking config for disabled reasoning, per model family.
 pub fn get_disabled_thinking_config(model_id: &str) -> Value {
-    // Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite
-    // do not support full thinking-off: use the lowest supported level without
-    // includeThoughts so hidden thinking remains invisible.
+    // Gemini 3.1 Pro cannot disable thinking, and Gemini 3 Flash / Flash-Lite do not support full
+    // thinking-off: use the lowest supported level without includeThoughts so hidden thinking
+    // remains invisible.
     if is_gemini3_pro_model(model_id) {
         return json!({ "thinkingLevel": "LOW" });
     }

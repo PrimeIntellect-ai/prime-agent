@@ -1,20 +1,7 @@
-//! The supervisor's client accept loop: transient accept errors warn
-//! and retry instead of killing the process.
-//!
-//! An accept error must not exit the process: the exit would orphan
-//! every hosted session's worker into the five-minute supervisor-lost
-//! window. The error policy mirrors Codex's control-socket acceptor
-//! (`run_control_socket_acceptor` in
-//! `app-server-transport/src/transport/unix_socket.rs`): recoverable
-//! transport noise warns and retries immediately, and every other error
-//! logs and retries after a backoff. Two deliberate divergences from
-//! Codex bound the loop: a streak of recoverable errors takes the same
-//! backoff (an immediately-ready error source cannot spin the loop
-//! hot), and the retries are bounded by [`GIVE_UP_AFTER`] consecutive
-//! failures, because this supervisor owns the socket-path singleton:
-//! a listener that failed every accept for a solid minute is
-//! permanently broken, and exiting with the error releases the bind
-//! for a fresh supervisor instead of spinning deaf forever.
+//! The supervisor's client accept loop: transient accept errors warn and retry — an
+//! exit would orphan every hosted session. The policy mirrors Codex's control-socket
+//! acceptor. Deliberate divergences: recoverable streaks take the same backoff, and
+//! retries are bounded by [`GIVE_UP_AFTER`] (a broken listener must release the bind).
 
 use std::io::ErrorKind;
 use std::time::Duration;
@@ -27,31 +14,17 @@ use super::{anyhow, Arc, Ordering, Result, Supervisor};
 /// parity: the control-socket acceptor sleeps 1s between retries).
 pub(super) const BACKOFF: Duration = Duration::from_secs(1);
 
-/// Consecutive non-recoverable accept failures the loop survives; the
-/// [`GIVE_UP_AFTER`]-th escalates the transport error out of `run`.
-///
-/// Sixty 1s-backoff retries keep the supervisor alive through transient
-/// fd-pressure storms, while a listener that failed every accept for a
-/// solid minute is permanently broken: a deaf supervisor holding the
-/// socket-path bind singleton is worse than a dead one - it blocks a
-/// fresh supervisor from serving the socket. Any accepted connection
-/// resets the count; recoverable transport noise neither spends nor
-/// resets it.
+/// Consecutive non-recoverable accept failures the loop survives before escalating the
+/// error out of `run`: a deaf supervisor holding the bind singleton is worse than a
+/// dead one. Any accepted connection resets the count.
 pub(super) const GIVE_UP_AFTER: u32 = 60;
 
-/// Consecutive recoverable accept errors after which the loop takes the
-/// same backoff. Scattered transport noise retries immediately (Codex
-/// parity), but a stream of immediately-ready recoverable errors must
-/// not spin the loop hot or flood the log: after this many, one
-/// [`BACKOFF`] sleep bounds the loop to a handful of retries and log
-/// lines per second (the log's rotation bounds the disk side).
+/// Consecutive recoverable accept errors after which the loop takes the same backoff,
+/// so a stream of them cannot spin the loop hot or flood the log.
 pub(super) const RECOVERABLE_STORM_AFTER: u32 = 8;
 
-/// The 1s pause between retries, ended early by a shutdown wake: the
-/// loop may not hold the daemon exit (and the socket-path release
-/// behind it) hostage to the full backoff. Both wake sites store the
-/// accept-loop exit flag before the notify, so a consumed wake always
-/// means the loop is exiting.
+/// The 1s pause between retries, ended early by a shutdown wake: the loop may not
+/// hold the daemon exit hostage to the full backoff.
 async fn retry_backoff(supervisor: &Supervisor) {
     tokio::select! {
         () = tokio::time::sleep(BACKOFF) => {}
@@ -59,17 +32,22 @@ async fn retry_backoff(supervisor: &Supervisor) {
     }
 }
 
-/// Serve clients until `begin_shutdown` completes its stop pass and
-/// sets the accept-loop exit flag.
+/// Serve clients until `begin_shutdown` completes its stop pass and sets the exit flag.
+///
+/// Owns the bound listener: every return path drops it, so the listener
+/// is closed before the caller's exit cleanup runs (the TS graceful-
+/// shutdown order - daemon-supervisor.ts:7436-7491 awaits the "daemon
+/// server" close step, then runs the "daemon socket" cleanup step). A
+/// live listener at the socket path after this returns can only be a
+/// successor's, which is what makes the cleanup's liveness probe sound.
 ///
 /// # Errors
 ///
-/// Returns the transport's accept error once [`GIVE_UP_AFTER`]
-/// consecutive non-recoverable accept failures exhaust the give-up
-/// budget; the caller exits the process, releasing the socket bind.
+/// Returns the transport's accept error once [`GIVE_UP_AFTER`] consecutive failures
+/// exhaust the give-up budget; the caller exits, releasing the socket bind.
 pub(super) async fn serve(
     supervisor: &Arc<Supervisor>,
-    listener: &dyn TransportListener,
+    listener: Box<dyn TransportListener>,
 ) -> Result<()> {
     let mut consecutive_failures = 0u32;
     let mut recoverable_streak = 0u32;
@@ -146,22 +124,24 @@ mod tests {
 
     use super::*;
 
-    /// A stand-in transport listener that replays a scripted accept
-    /// sequence. When the script drains, the stand-in runs the
-    /// supervisor's shutdown wake (the accept-loop exit flag plus the
-    /// notify) and parks: `serve` falls out of its loop exactly the way
-    /// a real listener does once `begin_shutdown` completes.
+    /// The scripted accept results, shared so the test can read what the
+    /// loop consumed after the stand-in is moved into `serve` (the
+    /// owned-listener shape the production loop takes now).
+    type ScriptedResults = Arc<Mutex<VecDeque<io::Result<Box<dyn TransportStream>>>>>;
+
+    /// A stand-in listener replaying a scripted accept sequence; when the script drains,
+    /// it fires the shutdown wake and parks, so `serve` falls out like a real listener.
     struct ScriptedAccepts {
-        results: Mutex<VecDeque<io::Result<Box<dyn TransportStream>>>>,
+        results: ScriptedResults,
         supervisor: Arc<Supervisor>,
     }
 
     impl TransportListener for ScriptedAccepts {
         fn accept(&self) -> AcceptFuture<'_> {
             Box::pin(async move {
-                // The guard must drop before the drained arm's await: a
-                // match scrutinee's temporary lives for the whole match,
-                // and the parked arm would hold it across the await.
+                // The guard must drop before the drained arm's await: the match scrutinee's
+                // temporary lives for the whole match, and the parked arm would hold it
+                // across the await.
                 let next = self.results.lock().unwrap().pop_front();
                 if let Some(result) = next {
                     result
@@ -188,20 +168,15 @@ mod tests {
         )
     }
 
-    /// One end of an in-memory duplex as the accepted stream - the
-    /// portable stand-in for the local socket pair (the connection
-    /// dispatch takes any `TransportStream`; the loop's error policy is
-    /// platform-free, so the tests run on Windows too). The dropped peer
-    /// half makes the accepted side read EOF, like a client that
-    /// connected and vanished.
+    /// One end of an in-memory duplex as the accepted stream (portable, so the tests run
+    /// on Windows too); the dropped peer half reads EOF, like a vanished client.
     fn accepted_stream() -> Box<dyn TransportStream> {
         let (_, accepted) = tokio::io::duplex(4096);
         Box::new(DuplexTransport(Mutex::new(accepted)))
     }
 
-    /// A duplex end as a [`TransportStream`]: a plain memory stream has
-    /// no `into_split`, so the halves come from the shared-lock split
-    /// (the `Mutex` cover carries the `Sync` the transport bound asks).
+    /// A duplex end as a [`TransportStream`]: a plain memory stream has no `into_split`, so
+    /// the halves come from the shared-lock split (the `Mutex` carries `Sync`).
     struct DuplexTransport(Mutex<tokio::io::DuplexStream>);
 
     impl TransportStream for DuplexTransport {
@@ -212,17 +187,12 @@ mod tests {
         }
     }
 
-    /// A recoverable transport error must not exit the accept loop (an
-    /// exit orphans every hosted session's worker), and scattered
-    /// noise below [`RECOVERABLE_STORM_AFTER`] must not burn the
-    /// backoff: the loop retries immediately, like Codex's
-    /// control-socket acceptor.
     #[tokio::test(start_paused = true)]
     async fn recoverable_accept_errors_do_not_exit_the_loop() {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(
+            results: Arc::new(Mutex::new(
                 vec![
                     accept_error(ErrorKind::ConnectionAborted, "aborted"),
                     accept_error(ErrorKind::ConnectionReset, "reset"),
@@ -230,11 +200,12 @@ mod tests {
                     Ok(accepted_stream()),
                 ]
                 .into(),
-            ),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("the loop must survive recoverable accept errors");
         assert!(
@@ -243,16 +214,11 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the loop kept accepting past every error and served a client"
         );
     }
 
-    /// A storm of immediately-ready recoverable errors must not spin the
-    /// loop hot or flood the log (Macroscope review): every
-    /// [`RECOVERABLE_STORM_AFTER`] consecutive errors take one backoff,
-    /// and the storm never spends the give-up budget - twice the budget
-    /// of recoverable errors still serves the client behind them.
     #[tokio::test(start_paused = true)]
     async fn recoverable_error_storms_back_off_but_never_escalate() {
         let dir = TempDir::new().unwrap();
@@ -263,11 +229,12 @@ mod tests {
         }
         results.push_back(Ok(accepted_stream()));
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("a recoverable storm must never exit the loop");
         let elapsed = started.elapsed();
@@ -281,30 +248,28 @@ mod tests {
             "exactly one backoff per storm (elapsed {elapsed:?})"
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the client behind the storm was served"
         );
     }
 
-    /// A non-recoverable accept error (fd pressure, kernel buffer
-    /// exhaustion) must back off and keep serving: the scripted client
-    /// behind it is accepted after exactly one backoff.
     #[tokio::test(start_paused = true)]
     async fn non_recoverable_accept_errors_back_off_and_keep_serving() {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(
+            results: Arc::new(Mutex::new(
                 vec![
                     accept_error(ErrorKind::Other, "too many open files"),
                     Ok(accepted_stream()),
                 ]
                 .into(),
-            ),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("one hard error must not exit the loop");
         let elapsed = started.elapsed();
@@ -317,15 +282,11 @@ mod tests {
             "exactly one backoff for one error (elapsed {elapsed:?})"
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "the loop kept serving after the error"
         );
     }
 
-    /// The give-up budget counts consecutive failures: a served
-    /// connection between two sub-budget bursts resets it, so a
-    /// repeating transient error with live client traffic never
-    /// escalates.
     #[tokio::test(start_paused = true)]
     async fn a_served_connection_resets_the_give_up_budget() {
         let dir = TempDir::new().unwrap();
@@ -340,23 +301,19 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "transient"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
-        serve(&supervisor, &scripted)
+        let results = Arc::clone(&scripted.results);
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("two sub-budget bursts with a served client between them never escalate");
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "every scripted accept was served"
         );
     }
 
-    /// A listener that failed every accept for the whole give-up budget
-    /// is permanently broken: the loop escalates the transport error
-    /// so the process releases the singleton socket bind for a fresh
-    /// supervisor - and it stops at exactly the budget, neither earlier
-    /// nor later.
     #[tokio::test(start_paused = true)]
     async fn permanent_accept_failure_escalates_after_the_budget() {
         let dir = TempDir::new().unwrap();
@@ -369,10 +326,11 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "listener broken"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
-        let error = serve(&supervisor, &scripted)
+        let results = Arc::clone(&scripted.results);
+        let error = serve(&supervisor, Box::new(scripted))
             .await
             .expect_err("a permanently broken listener must escalate");
         assert_eq!(
@@ -381,15 +339,12 @@ mod tests {
             "the escalation carries the transport error"
         );
         assert_eq!(
-            scripted.results.lock().unwrap().len(),
+            results.lock().unwrap().len(),
             overflow as usize,
             "the loop gave up at exactly the budget"
         );
     }
 
-    /// During the terminal stop pass the loop is exiting by flag, not by
-    /// error: accept errors in that window neither back off nor spend
-    /// the give-up budget.
     #[tokio::test(start_paused = true)]
     async fn accept_errors_while_shutting_down_do_not_back_off_or_escalate() {
         let dir = TempDir::new().unwrap();
@@ -400,11 +355,12 @@ mod tests {
             results.push_back(accept_error(ErrorKind::Other, "shutting down"));
         }
         let scripted = ScriptedAccepts {
-            results: Mutex::new(results),
+            results: Arc::new(Mutex::new(results)),
             supervisor: Arc::clone(&supervisor),
         };
+        let results = Arc::clone(&scripted.results);
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("shutdown-window errors never escalate");
         assert!(
@@ -413,25 +369,23 @@ mod tests {
             started.elapsed()
         );
         assert!(
-            scripted.results.lock().unwrap().is_empty(),
+            results.lock().unwrap().is_empty(),
             "every error continued immediately"
         );
     }
 
-    /// A shutdown wake must end an in-flight backoff early: the loop may
-    /// not hold the daemon exit (and the socket-path release behind it)
-    /// hostage to the full second (Macroscope review).
     #[tokio::test(start_paused = true)]
     async fn a_shutdown_wake_ends_the_backoff_early() {
         let dir = TempDir::new().unwrap();
         let supervisor = test_supervisor(&dir);
         let scripted = ScriptedAccepts {
-            results: Mutex::new(vec![accept_error(ErrorKind::Other, "hard error")].into()),
+            results: Arc::new(Mutex::new(
+                vec![accept_error(ErrorKind::Other, "hard error")].into(),
+            )),
             supervisor: Arc::clone(&supervisor),
         };
-        // The terminal wake fires mid-backoff: after a 100ms pause the
-        // accept-loop exit flag and its notify arrive, exactly like
-        // `begin_shutdown` finishing its stop pass.
+        // The terminal wake fires mid-backoff: after a 100ms pause the exit flag and
+        // its notify arrive, exactly like `begin_shutdown` finishing its stop pass.
         let shutting_down = Arc::clone(&supervisor);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -439,7 +393,7 @@ mod tests {
             shutting_down.shutdown_notify.notify_one();
         });
         let started = tokio::time::Instant::now();
-        serve(&supervisor, &scripted)
+        serve(&supervisor, Box::new(scripted))
             .await
             .expect("the shutdown wake ends the loop");
         assert!(

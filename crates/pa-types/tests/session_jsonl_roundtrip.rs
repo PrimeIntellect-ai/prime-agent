@@ -1,22 +1,17 @@
-//! Round-trip tests over captured session JSONL shapes.
-//!
-//! The committed corpus in `tests/data/` is the verifier: every line must
-//! deserialize into [`FileEntry`] and re-serialize to the same JSON value,
-//! including the live-session shapes that once failed the sweep (un-tagged
-//! user text blocks) and unknown entry types. Live session files are real
-//! user data on the host, so they are only read when explicitly opted in
-//! with `PA_TYPES_LIVE_SESSIONS=1`; the default test run is hermetic.
+//! Round-trip tests over captured session JSONL shapes: the committed corpus in `tests/data/` is
+//! the
+//! verifier (every line must deserialize into [`FileEntry`] and re-serialize identically, including
+//! un-tagged user text blocks and unknown entry types). Live sessions are opt-in with
+//! `PA_TYPES_LIVE_SESSIONS=1`; the default run is hermetic.
 
 use pa_types::session::FileEntry;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// PR #277 made the loader tolerant of foreign spellings: the raw `OpenAI`
-/// wire value `tool_calls` deserializes through `StopReason`'s serde alias
-/// to the canonical `toolUse`, so a captured foreign line reserializes with
-/// the canonical spelling. The corpus keeps the foreign line as captured
-/// (it is the record of what the loader must accept), so the comparison
-/// canonicalizes that one known alias instead of asserting identity on it.
+/// PR #277: the raw `OpenAI` wire value `tool_calls` deserializes through
+/// `StopReason`'s serde alias to the canonical `toolUse`. The corpus keeps
+/// the foreign line as captured (the record of what the loader must
+/// accept), so the comparison canonicalizes that one known alias.
 fn canonicalize_foreign_spelling(mut value: Value) -> Value {
     if let Some(stop_reason) = value
         .get_mut("message")
@@ -70,10 +65,8 @@ fn committed_fixture_roundtrips() {
     assert!(lines > 0, "no fixture lines found to verify");
 }
 
-/// Live sessions are opt-in: they are real user data whose presence and
-/// contents vary per machine (and per daemon crash), so a default test run
-/// must not depend on them. Set `PA_TYPES_LIVE_SESSIONS=1` (optionally with
-/// `PA_TYPES_SESSIONS_DIR` pointing at a sessions tree) to sweep them.
+/// Live sessions are opt-in: real user data whose presence varies per machine. Set
+/// `PA_TYPES_LIVE_SESSIONS=1` (optionally `PA_TYPES_SESSIONS_DIR`) to sweep them.
 #[test]
 fn live_captured_sessions_roundtrip_losslessly() {
     if std::env::var_os("PA_TYPES_LIVE_SESSIONS").as_deref() != Some(std::ffi::OsStr::new("1")) {

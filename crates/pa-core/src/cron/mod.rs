@@ -1,7 +1,6 @@
 //! Cron scheduling core: schedule parsing (`in`/`every`/`at`/cron),
-//! five-field cron expression evaluation, and `/heartbeat` command parsing.
-//! Port of the pure-function half of core/cron-jobs.ts; the file-backed job
-//! store lives in the `store` submodule.
+//! five-field cron expression evaluation, and `/heartbeat` command parsing;
+//! the file-backed job store lives in the `store` submodule.
 
 pub mod scheduler;
 pub mod store;
@@ -39,7 +38,6 @@ pub enum DeliveryMode {
     FollowUp,
 }
 
-/// A parsed schedule expression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCronSchedule {
@@ -92,7 +90,6 @@ pub struct AgentCronJob {
     pub run_count: u64,
 }
 
-/// Parsed `/heartbeat` command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedHeartbeatCommand {
     Status,
@@ -109,7 +106,7 @@ pub enum ParsedHeartbeatCommand {
 /// Session activity snapshot used by heartbeat deferral.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 // The mirrored TS API shape is deliberate (the booleans are the
-// product's own surface, not a refactor target).
+// product's own surface).
 #[allow(clippy::struct_excessive_bools)]
 pub struct HeartbeatSessionActivity {
     pub is_streaming: bool,
@@ -125,10 +122,8 @@ pub struct HeartbeatSessionActivity {
 ///
 /// # Errors
 ///
-/// Returns an error when the trimmed expression is empty, when an
-/// `in`/`every`/`each` delay cannot be parsed, when an `at <ISO date>` one-shot
-/// is invalid or not in the future, or when the expression is not a valid cron
-/// schedule with a next run time within one year.
+/// Returns an error when the expression is empty, an `at` one-shot is invalid,
+/// or the cron schedule has no next run.
 pub fn parse_agent_cron_schedule(
     input: &str,
     now_millis: u64,
@@ -269,8 +264,7 @@ pub fn normalize_heartbeat_schedule(input: Option<&str>) -> String {
 ///
 /// # Errors
 ///
-/// Returns an error when `value` is `Some` but is neither `"steer"` nor
-/// `"follow_up"`.
+/// Returns an error when `value` is `Some` but neither `"steer"` nor `"follow_up"`.
 pub fn normalize_heartbeat_delivery_mode(
     value: Option<&str>,
 ) -> anyhow::Result<Option<DeliveryMode>> {
@@ -296,9 +290,7 @@ pub fn resolve_heartbeat_streaming_behavior(delivery_mode: Option<DeliveryMode>)
 ///
 /// # Errors
 ///
-/// Returns an error when the command body is malformed: an unknown delivery
-/// mode is given, an `--every` option is used without an interval value, or
-/// the command ends with no instruction to set.
+/// Returns an error when the command body is malformed.
 pub fn parse_heartbeat_command(input: &str) -> anyhow::Result<ParsedHeartbeatCommand> {
     let text = input
         .strip_prefix("/heartbeat")
@@ -485,7 +477,6 @@ fn consume_every_option(text: &str) -> anyhow::Result<Option<(String, String)>> 
             None => String::new(),
         },
     };
-    // Quoted or bare interval value.
     let (interval, remainder): (String, String) = if let Some(stripped) = rest.strip_prefix('"') {
         match stripped.find('"') {
             Some(index) => (
@@ -547,7 +538,6 @@ pub fn is_heartbeat_cron_job(job: &AgentCronJob) -> bool {
     matches!(job.source.as_deref(), Some("heartbeat" | "rlm_heartbeat"))
 }
 
-/// Whether a due heartbeat should wait instead of firing now.
 #[must_use]
 pub fn should_defer_heartbeat_cron_job(
     job: &AgentCronJob,
@@ -574,9 +564,7 @@ pub fn should_defer_heartbeat_cron_job(
 ///
 /// # Errors
 ///
-/// Returns an error when an interval schedule has no interval or a zero
-/// interval, or when a cron expression is invalid or does not match within
-/// one year.
+/// Returns an error when the interval is zero or the cron matches nothing within one year.
 pub fn next_run_at_for_schedule(
     schedule: &AgentCronSchedule,
     after_millis: u64,
@@ -596,8 +584,8 @@ pub fn next_run_at_for_schedule(
     }
 }
 
-/// One-line job summary (the TS format; timestamps in local rendering are
-/// approximated by UTC ISO strings).
+/// One-line job summary (TS format; the local-rendered timestamps are
+/// approximated by UTC).
 #[must_use]
 pub fn format_agent_cron_job(job: &AgentCronJob) -> String {
     let next = job.next_run_at.as_deref().unwrap_or("-");
@@ -786,8 +774,6 @@ fn strip_matching_quotes(value: &str) -> &str {
 
 /// ISO-8601 parse to epoch millis (RFC 3339 subset).
 pub(crate) fn parse_iso_millis(text: &str) -> Option<u64> {
-    // Delegate to time-like parsing: chrono is available via pa-ai? Keep a
-    // small parser for the common ISO shapes.
     let text = text.trim();
     let (date, time) = text.split_once('T')?;
     let date_parts: Vec<&str> = date.split('-').collect();
@@ -873,7 +859,6 @@ fn parse_offset(text: &str) -> Option<i64> {
     Some(sign * (hours * 60 + minutes) * 60_000)
 }
 
-/// Whether a job is due at `now_millis`.
 pub fn is_due_job(job: &AgentCronJob, now_millis: u64) -> bool {
     if job.status != JobStatus::Active {
         return false;
@@ -902,17 +887,14 @@ mod tests {
         assert_eq!(schedule.kind, ScheduleKind::Interval);
         assert_eq!(schedule.interval_ms, Some(30_000));
         assert_eq!(next, BASE + 30_000);
-        // Too-short intervals are rejected.
         assert!(parse_agent_cron_schedule("every 5s", BASE)
             .unwrap_err()
             .to_string()
             .contains("at least 10 seconds"));
         assert!(parse_agent_cron_schedule("", BASE).is_err());
-        // `at` one-shot.
         let (_, next) = parse_agent_cron_schedule("at 2100-01-01T00:00:00Z", BASE).unwrap();
         assert_eq!(next, 4_102_444_800_000);
         assert!(parse_agent_cron_schedule("at 1999-01-01T00:00:00Z", BASE).is_err());
-        // Quoted schedules are unwrapped.
         let (schedule, _) = parse_agent_cron_schedule("'in 10m'", BASE).unwrap();
         assert_eq!(schedule.expression, "in 10m");
     }
@@ -925,11 +907,9 @@ mod tests {
         assert_eq!(schedule.expression, "0 * * * *");
         let (minute, hour, _, _, _) = civil_time(next);
         assert_eq!((minute, hour), (0, 23));
-        // Five-field: daily at noon.
         let (_, next) = parse_agent_cron_schedule("0 12 * * *", BASE).unwrap();
         let (minute, hour, _, _, _) = civil_time(next);
         assert_eq!((minute, hour), (0, 12));
-        // Lists and steps.
         let (_, next) = parse_agent_cron_schedule("*/15 9-17 * * 1-5", BASE).unwrap();
         let (minute, _, _, _, weekday) = civil_time(next);
         assert_eq!(minute % 15, 0);
@@ -937,7 +917,6 @@ mod tests {
         // Day-of-week 7 matches Sunday.
         let fields = parse_cron_expression("0 0 * * 7").unwrap();
         assert!(matches_cron_fields(4_102_617_600_000, &fields)); // a Sunday
-                                                                  // Invalid expressions error clearly.
         assert!(parse_agent_cron_schedule("* * * *", BASE).is_err());
         assert!(parse_agent_cron_schedule("60 * * * *", BASE).is_err());
         assert!(parse_agent_cron_schedule("a * * * *", BASE).is_err());
@@ -946,7 +925,6 @@ mod tests {
     #[test]
     fn next_run_rollover() {
         let (_, next) = parse_agent_cron_schedule("@daily", BASE).unwrap();
-        // The schedule after the first run is one day later.
         let schedule = AgentCronSchedule {
             kind: ScheduleKind::Cron,
             expression: "0 0 * * *".to_string(),
@@ -956,7 +934,6 @@ mod tests {
             next_run_at_for_schedule(&schedule, next).unwrap(),
             Some(next + 24 * 60 * ONE_MINUTE_MS)
         );
-        // Intervals roll by their delta; once never reruns.
         let interval = AgentCronSchedule {
             kind: ScheduleKind::Interval,
             expression: "every 10m".to_string(),
@@ -989,7 +966,6 @@ mod tests {
             Resume
         );
         assert_eq!(parse_heartbeat_command("/heartbeat stop").unwrap(), Clear);
-        // Bare instruction uses the default schedule.
         let Set {
             schedule,
             instruction,
@@ -1001,7 +977,6 @@ mod tests {
         assert_eq!(schedule, "every 5m");
         assert_eq!(instruction, "check the build");
         assert_eq!(delivery_mode, None);
-        // --every with bare and quoted values.
         let Set {
             schedule,
             instruction,
@@ -1022,7 +997,6 @@ mod tests {
         };
         assert_eq!(schedule, "every 15 m");
         assert_eq!(instruction, "watch things");
-        // Leading schedule form.
         let Set {
             schedule,
             instruction,
@@ -1033,7 +1007,6 @@ mod tests {
         };
         assert_eq!(schedule, "every 2h");
         assert_eq!(instruction, "sweep logs");
-        // Delivery flags: leading, trailing, and --deliver forms.
         let Set { delivery_mode, .. } =
             parse_heartbeat_command("/heartbeat --steer --every 5m ping").unwrap()
         else {
@@ -1058,7 +1031,6 @@ mod tests {
             panic!("expected set");
         };
         assert_eq!(delivery_mode, Some(DeliveryMode::FollowUp));
-        // Missing instruction.
         assert!(parse_heartbeat_command("/heartbeat --every 10m").is_err());
     }
 
@@ -1094,12 +1066,10 @@ mod tests {
             is_streaming: true,
             ..Default::default()
         };
-        // Non-heartbeat jobs never defer.
         assert!(!should_defer_heartbeat_cron_job(
             &job("cron", None),
             &streaming
         ));
-        // Steer heartbeats fire during streaming; follow-up waits.
         assert!(!should_defer_heartbeat_cron_job(
             &job("heartbeat", Some(DeliveryMode::Steer)),
             &streaming
@@ -1108,7 +1078,6 @@ mod tests {
             &job("heartbeat", Some(DeliveryMode::FollowUp)),
             &streaming
         ));
-        // Busy states defer regardless of mode.
         let compacting = HeartbeatSessionActivity {
             is_compacting: true,
             is_streaming: true,
@@ -1126,7 +1095,6 @@ mod tests {
             &job("rlm_heartbeat", None),
             &unfinished
         ));
-        // Idle heartbeats fire.
         assert!(!should_defer_heartbeat_cron_job(
             &job("heartbeat", None),
             &idle

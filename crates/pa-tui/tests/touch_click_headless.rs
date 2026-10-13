@@ -1,41 +1,22 @@
-//! Headless e2e for the click/touch grammar on the session surface: a
-//! mock supervisor serves one attached session whose replayed transcript
-//! carries a mixed activity run (eight ipython calls around a received
-//! agent message and hidden thinking), and the headless harness feeds
-//! byte-identical SGR press/release pairs through the same
-//! decode-and-dispatch path a terminal's clicks take.
-//!
-//! Verifies the operator's core interactions: a plain click on a tool
-//! card expands the card's own output (operator directive 2026-09-26:
-//! the card click toggles the card, not the thinking blocks around it),
-//! a plain click in the prompt bar places the caret at the clicked cell
-//! (then typing inserts there), and a plain click on a `/model` picker
-//! row moves the selection onto it. The `?1003` hover motions (the
-//! hover affordance's buttonless reports) ride the same path without
-//! disturbing the click grammar.
+//! Headless e2e for the click/touch grammar: a mock supervisor serves a mixed activity run,
+//! and the harness feeds byte-identical SGR pairs through the same decode-and-dispatch path
+//! a terminal's clicks take. A plain click toggles the card it lands on (operator directive
+//! 2026-09-26), places the caret, or moves a `/model` picker row.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -43,8 +24,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
-/// Mouse tracking is process-global state, so the headless runs serialize
-/// (each asserts on the tracking-active branch it drives).
+/// Mouse tracking is process-global state, so the headless runs serialize (each asserts on the
+/// tracking-active branch it drives).
 static RUN_LOCK: Mutex<()> = Mutex::new(());
 
 fn run_lock() -> MutexGuard<'static, ()> {
@@ -61,8 +42,8 @@ use pa_tui::interactive::{
 use pa_types::ai::Model;
 use serde_json::{json, Value};
 
-/// The SGR left press / release pair a real terminal sends with
-/// ?1002+?1006 tracking active (one-based screen cells).
+/// The SGR left press / release pair a real terminal sends with ?1002+?1006 tracking active
+/// (one-based screen cells).
 fn press(col: usize, row: usize) -> String {
     format!("\x1b[<0;{col};{row}M")
 }
@@ -73,9 +54,8 @@ fn release(col: usize, row: usize) -> String {
 
 struct MockSupervisor {
     listener: UnixListener,
-    /// The catalog the picker's background `get_model_catalog` refresh
-    /// answers with: the mock must serve the same models the run opened
-    /// with, or the refresh would empty the picker's list.
+    /// The catalog the picker's background `get_model_catalog` refresh answers with: the mock must
+    /// serve the same models the run opened with, or the refresh would empty the picker's list.
     catalog: Vec<Model>,
 }
 
@@ -87,8 +67,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: the attach replay, then answer the loop's
-    /// requests.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -217,10 +195,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The slim attach result: eight ipython calls around a received agent
-/// message and hidden thinking - the collapsed view renders every call
-/// as its own card (the 2026-09-28 undo of the condensed-run summary
-/// block), with only the thinking hidden.
+/// The slim attach result: eight ipython calls around a received agent message and hidden thinking
+/// — every call renders as its own card (the 2026-09-28 undo of the condensed-run summary block).
 fn attach_data(id: &str) -> Value {
     let tool_call = |index: usize| {
         json!({
@@ -404,8 +380,8 @@ fn options(socket: PathBuf, catalog: Vec<Model>) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames. Holds the run lock: mouse tracking is process-global.
+/// Run the headless plan and return the captured frames. Holds the run lock: mouse tracking is
+/// process-global.
 fn run_plan(steps: Vec<HeadlessStep>, catalog: Vec<Model>) -> Vec<String> {
     let _guard = run_lock();
     std::env::remove_var("TMUX");
@@ -433,8 +409,7 @@ fn run_plan(steps: Vec<HeadlessStep>, catalog: Vec<Model>) -> Vec<String> {
     outcome.frames
 }
 
-/// The last frame holding a needle and the needle's (row, column) within
-/// it — the rendered coordinates a click targets.
+/// The last frame holding a needle and its (row, column) — the coordinates a click targets.
 fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize)> {
     frames
         .iter()
@@ -448,22 +423,13 @@ fn locate(frames: &[String], needle: &str) -> Option<(usize, usize, usize)> {
         .next_back()
 }
 
-/// A click on a tool card expands the card's own output: the plain
-/// press/release pair on the card's summary row toggles the clicked
-/// card's expansion (operator directive 2026-09-26: the click lands on
-/// the card the user means — only that card's output body opens; the
-/// conversation level, the thinking blocks around it, and every other
-/// card stay untouched, exactly like TS's per-component `expanded`).
-/// The chat opens at the collapsed overview level (operator directive
-/// 2026-09-28: every activity item renders as `details` does, only the
-/// thinking hidden), so no cycling precedes the click.
+/// A click on a tool card expands the card's own output (operator directive 2026-09-26); the
+/// chat opens at the collapsed overview level (operator directive 2026-09-28).
 #[test]
 fn a_click_on_a_card_expands_it() {
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-            // The chat starts at the collapsed overview level; the tail
-            // card renders its own summary row.
             HeadlessStep::WaitRender {
                 needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
@@ -484,8 +450,8 @@ fn a_click_on_a_card_expands_it() {
             },
             click,
             release,
-            // The click's frame: the card's own output body renders (the
-            // `╰─` gutter row only appears with tool output expanded).
+            // The card's own output body renders (the `╰─` gutter row only appears with tool output
+            // expanded).
             HeadlessStep::WaitRender {
                 needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
@@ -504,9 +470,6 @@ fn a_click_on_a_card_expands_it() {
     );
 }
 
-/// The card click is a toggle: a second click on the expanded card
-/// collapses that card's own expansion back — its output body folds
-/// away and the card keeps its own summary row.
 #[test]
 fn a_second_click_on_a_card_collapses_back() {
     let frames = run_plan(
@@ -528,7 +491,6 @@ fn a_second_click_on_a_card_collapses_back() {
                 needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // The first click expands the card (its own summary row).
             HeadlessStep::Mouse(press(card_col + 1, card_row + 1)),
             HeadlessStep::Mouse(release(card_col + 1, card_row + 1)),
             HeadlessStep::WaitRender {
@@ -538,8 +500,6 @@ fn a_second_click_on_a_card_collapses_back() {
         ],
         Vec::new(),
     );
-    // The expanded frame: locate a rendered card row for the second
-    // click (its row toggles the card back).
     let (_, row, col) =
         locate(&frames, "\u{2570}\u{2500} print(7)").expect("the card renders expanded");
     let frames = run_plan(
@@ -555,7 +515,6 @@ fn a_second_click_on_a_card_collapses_back() {
                 needle: "\u{2570}\u{2500} print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // The second click lands on the now-rendered expanded row.
             HeadlessStep::Mouse(press(col + 1, row + 1)),
             HeadlessStep::Mouse(release(col + 1, row + 1)),
             HeadlessStep::WaitRender {
@@ -576,14 +535,7 @@ fn a_second_click_on_a_card_collapses_back() {
     );
 }
 
-/// One click toggles exactly the clicked component: the fixture holds
-/// the operator's subagent-spawn shape — a received agent-message row
-/// right beside the tool cards (and the `print(5)` card carrying its
-/// own sent-message receipt) — so clicking the agent message must
-/// expand only the notice's body (no tool card, no thinking block: the
-/// conversation level never moves, TS's per-component `expanded`
-/// behavior), and clicking a tool card must expand only that card,
-/// leaving the notice collapsed.
+/// One click toggles exactly the clicked component (TS per-component `expanded`).
 #[test]
 fn a_click_toggles_only_the_clicked_component() {
     let frames = run_plan(
@@ -609,8 +561,8 @@ fn a_click_toggles_only_the_clicked_component() {
             },
             HeadlessStep::Mouse(press(agent_col + 1, agent_row + 1)),
             HeadlessStep::Mouse(release(agent_col + 1, agent_row + 1)),
-            // The notice's own body opens (the `╰─` gutter row only
-            // renders with the notice expanded).
+            // The notice's own body opens (the `╰─` gutter row only renders with the notice
+            // expanded).
             HeadlessStep::WaitRender {
                 needle: "\u{2570}\u{2500} steering note".to_string(),
                 timeout_ms: 5_000,
@@ -633,9 +585,7 @@ fn a_click_toggles_only_the_clicked_component() {
         !last.contains("before the message"),
         "the thinking blocks stay hidden - the level never moved: {last}"
     );
-    // Run B: the click lands on the `print(5)` card (the card carrying
-    // its own sent-message receipt, the spawn shape inside a tool
-    // card).
+    // Run B: the click lands on the `print(5)` card (its own sent-message receipt).
     let frames = run_plan(
         vec![
             HeadlessStep::WaitIdle { timeout_ms: 30_000 },
@@ -668,11 +618,7 @@ fn a_click_toggles_only_the_clicked_component() {
     );
 }
 
-/// Buttonless motion reports (the `?1003` hover surface) flow through the
-/// same decode-and-dispatch path without disturbing the click grammar:
-/// hover motions across the frame, then a plain click on the card still
-/// expands it (the hover branch never consumes or corrupts the press
-/// state).
+/// Buttonless motion reports flow through the same decode-and-dispatch path.
 #[test]
 fn hover_motion_reports_do_not_disturb_the_click_grammar() {
     let frames = run_plan(
@@ -694,14 +640,12 @@ fn hover_motion_reports_do_not_disturb_the_click_grammar() {
                 needle: "print(7)".to_string(),
                 timeout_ms: 5_000,
             },
-            // Hover motions across the card row and the plain rows
-            // around it (the `?1003` any-event reports the real
-            // terminal sends with the hover affordance active).
+            // Hover motions across the card row and the plain rows around it (the `?1003` any-event
+            // reports the real terminal sends with the hover affordance active).
             motion(col + 1, row),
             motion(col + 1, row + 1),
             motion(3, 1),
             motion(col + 1, row),
-            // The click still fires after the hover interleaving.
             HeadlessStep::Mouse(press(col + 1, row + 1)),
             HeadlessStep::Mouse(release(col + 1, row + 1)),
             HeadlessStep::WaitRender {
@@ -722,9 +666,6 @@ fn hover_motion_reports_do_not_disturb_the_click_grammar() {
     );
 }
 
-/// A click in the prompt bar places the caret at the clicked cell: click
-/// on the cell of `world`'s first character, then type — the insert
-/// lands right there, between `hello ` and `world`.
 #[test]
 fn a_click_in_the_prompt_bar_places_the_caret() {
     let typed = "hello world";
@@ -739,10 +680,9 @@ fn a_click_in_the_prompt_bar_places_the_caret() {
         ],
         Vec::new(),
     );
-    // `world`'s first cell is the clicked one: the caret lands in front
-    // of the word, so the insert splits `hello ` from `world`.
+    // `world`'s first cell is the clicked one: the caret lands in front of the word, so the insert
+    // splits `hello ` from `world`.
     let (_, row, col) = locate(&frames, "world").expect("the draft renders");
-    // The caret goes in front of `world` (the needle's own column).
     let click = HeadlessStep::Mouse(press(col + 1, row + 1));
     let release = HeadlessStep::Mouse(release(col + 1, row + 1));
     let frames = run_plan(
@@ -770,9 +710,7 @@ fn a_click_in_the_prompt_bar_places_the_caret() {
     );
 }
 
-/// A click on a `/model` picker row moves the selection onto it: the
-/// clicked row carries the `›` marker (the selection band), exactly
-/// like the arrow keys.
+/// The clicked row carries the `›` marker, exactly like the arrows.
 #[test]
 fn a_click_selects_a_model_picker_row() {
     let catalog = vec![model("mock-1", "Mock One"), model("mock-2", "Mock Two")];
@@ -800,8 +738,7 @@ fn a_click_selects_a_model_picker_row() {
             },
             click,
             release,
-            // The selection band's move is the click's visible reaction:
-            // hold until the frame shows the marker on the clicked row.
+            // Hold until the frame shows the marker on the clicked row.
             HeadlessStep::WaitRender {
                 needle: "\u{203a} Mock Two".to_string(),
                 timeout_ms: 5_000,

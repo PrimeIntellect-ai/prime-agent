@@ -34,8 +34,7 @@ fn assert_saved_context_equals_reference(name: &str, path: &std::path::Path) {
     );
 }
 
-/// A session builder for the oracle fixtures. The returned temp dir owns
-/// the scratch tree; hold it until the assertion is done so it cleans up.
+/// A session builder for the oracle fixtures (hold the temp dir until the assertion).
 fn oracle_session() -> (
     crate::session_store::SessionFile,
     std::path::PathBuf,
@@ -109,8 +108,8 @@ fn saved_context_windowed_matches_full_parse_with_model_only_before_the_boundary
         json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":1000}),
     );
     file.rewrite().unwrap();
-    // The only model_change sits in the discarded prefix: the window
-    // walk's model overlay must supply exactly the reference's answer.
+    // The only model_change sits in the discarded prefix: the model overlay must supply the
+    // reference's answer.
     assert_saved_context_equals_reference("boundary, model only before", &path);
 }
 
@@ -131,8 +130,8 @@ fn saved_context_windowed_matches_full_parse_with_thinking_only_before_the_bound
         json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":1000}),
     );
     file.rewrite().unwrap();
-    // The only thinking_level_change sits in the discarded prefix: the
-    // walk's has-thinking and level overlays must match the reference.
+    // The only thinking_level_change sits in the discarded prefix: the overlays must match the
+    // reference.
     assert_saved_context_equals_reference("boundary, thinking only before", &path);
 }
 
@@ -156,10 +155,8 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
         json!({"provider":"battery","modelId":"mock-1"}),
     );
     file.rewrite().unwrap();
-    // Corrupt one DISCARDED-PREFIX row: the window walk must bail out of
-    // the windowed open and the full-open fallback (which skips malformed
-    // rows, keeping the retained model_change) must still answer the
-    // reference exactly.
+    // Corrupt one DISCARDED-PREFIX row: the walk must bail to the
+    // full-open fallback, which still answers the reference exactly.
     let content = std::fs::read_to_string(&path).unwrap();
     let mut lines: Vec<&str> = content.lines().collect();
     assert!(lines.len() > 8, "fixture must hold a discardable prefix");
@@ -168,10 +165,6 @@ fn saved_context_windowed_falls_back_to_the_full_open_on_a_malformed_retained_ro
     assert_saved_context_equals_reference("malformed retained row fallback", &path);
 }
 
-/// The from-store reader (the create-path reuse) answers the same saved
-/// context the file-read path answers — the full-parse reference oracle
-/// covers both entry points, so the create's pre-read context is the
-/// restore's file read by construction.
 #[test]
 fn saved_context_from_the_open_store_matches_the_file_read_and_the_reference() {
     let (mut file, path, _dir) = oracle_session();

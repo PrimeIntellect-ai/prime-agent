@@ -1,10 +1,5 @@
-//! Shell configuration and process helpers.
-//!
-//! Port of `packages/coding-agent/src/utils/shell.ts` plus the
-//! `waitForChildProcess` semantics of `utils/child-process.ts` that the bash
-//! tool relies on. Platform-specific resolution and kill semantics live in
-//! [`crate::platform`]; this module keeps the cross-platform shell environment
-//! and output sanitation.
+//! Shell configuration and process helpers: the cross-platform shell environment and output
+//! sanitation; platform-specific resolution and kill semantics live in [`crate::platform`].
 
 pub use crate::platform::shell::get_shell_config;
 
@@ -47,9 +42,8 @@ pub fn get_shell_env() -> std::collections::HashMap<String, String> {
         .cloned()
         .unwrap_or_else(|| "PATH".to_string());
     let current_path = env.get(&path_key).cloned().unwrap_or_default();
-    // Node `path.delimiter` (`:` on Unix, `;` on Windows): the std
-    // split/join helpers carry the same per-platform delimiter, and empty
-    // entries drop exactly like the TS `.filter(Boolean)`.
+    // Node `path.delimiter` (`:` on Unix, `;` on Windows): the std split/join helpers carry the
+    // same per-platform delimiter, and empty entries drop exactly like the TS `.filter(Boolean)`.
     let has_bin_dir = std::env::split_paths(&current_path)
         .filter(|dir| !dir.as_os_str().is_empty())
         .any(|dir| dir == std::path::Path::new(&bin_dir));
@@ -81,10 +75,9 @@ pub fn get_shell_env() -> std::collections::HashMap<String, String> {
     env
 }
 
-/// Sanitize binary output for display/storage.
-///
-/// Removes control characters (except tab, newline, carriage return) and
-/// Unicode format characters; lone surrogates cannot occur in Rust strings.
+/// Sanitize binary output for display/storage: removes control characters (except
+/// tab, newline, carriage return) and Unicode format characters; lone surrogates
+/// cannot occur in Rust strings.
 pub fn sanitize_binary_output(s: &str) -> String {
     s.chars()
         .filter(|&ch| {

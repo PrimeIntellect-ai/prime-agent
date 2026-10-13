@@ -1,6 +1,6 @@
-//! The agent turn loop (TS `runLoop`): assistant turns, tool-call batches,
+//! The agent turn loop: assistant turns, tool-call batches,
 //! steering/follow-up/continuation message polling, and stop-hook
-//! evaluation. Section of the port of `packages/agent/src/agent-loop.ts`.
+//! evaluation.
 
 use crate::abort::AbortSignal;
 use crate::stream::StreamFn;
@@ -16,13 +16,7 @@ use super::response::stream_assistant_response;
 use super::tools::execute_tool_calls;
 use super::{AgentEventSink, AgentLoopConfig};
 
-// ---------------------------------------------------------------------------
-// The loop
-// ---------------------------------------------------------------------------
-
-/// Port of `runLoop`.
-// Direct port of the TS turn loop; refactoring is out of scope for this
-// zero-behavior-change sweep.
+// Direct port of the TS turn loop.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run_loop(
     current_context: &mut AgentContext,

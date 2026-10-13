@@ -1,7 +1,5 @@
-//! Structured diagnostics attached to assistant messages on failures and
-//! recoveries. Ported from `packages/ai/src/utils/diagnostics.ts`; the types
-//! themselves are the shared [`AssistantMessageDiagnostic`] /
-//! [`DiagnosticErrorInfo`] from `pa-types`.
+//! Structured diagnostics attached to assistant messages on failures and recoveries; the types are
+//! the shared [`AssistantMessageDiagnostic`] / [`DiagnosticErrorInfo`] from `pa-types`.
 
 pub use crate::types::{AssistantMessage, AssistantMessageDiagnostic, DiagnosticErrorInfo};
 

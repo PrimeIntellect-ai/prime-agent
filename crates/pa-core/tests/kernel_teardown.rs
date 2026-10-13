@@ -1,6 +1,4 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28) - this target's own
-// crate root: the same bounded-boundary disposition as src/lib.rs
-// (large_futures/too_many_lines/the cast family; details there).
+// Pedantic-gate dispositions as src/lib.rs (large_futures/too_many_lines/casts).
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -10,26 +8,17 @@
     clippy::cast_precision_loss
 )]
 
-//! Verifier integration tests for kernel process teardown on drop (#232
-//! close-out hygiene): a session or harness that boots a kernel and then
-//! simply drops its handles must not leave the `python -m rlm.repl` process
-//! alive. The reader/watcher tasks used to hold strong manager references
-//! while blocked on the child's pipes, so `Inner::drop`'s kill never fired
-//! without an explicit shutdown — kernels then lived until the runtime's
-//! owner watchdog reaped them, if ever, accumulating across cargo test runs.
-//!
-//! The kernel Python is ambient product state (the auto-bootstrapped kernel
-//! venv); like `kernel_lifecycle.rs`, these tests skip (with a note) on
-//! machines without a live install so the suite stays hermetic elsewhere.
+//! Verifier integration tests for kernel process teardown on drop: a session or harness that boots
+//! a kernel and then drops its handles must not leave the `python -m rlm.repl` process alive. The
+//! kernel Python is ambient product state; skipped when absent.
 #![cfg(unix)]
 
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// The tests share one process (the process-table scans must see only the
-/// current test's kernel), so this std lock serializes them; they are the
-/// only contenders, so holding it across awaits is safe.
+/// The tests share one process (the process-table scans must see only the current test's kernel),
+/// so this std lock serializes them (the only contenders).
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn test_lock() -> MutexGuard<'static, ()> {
@@ -81,9 +70,8 @@ fn process_alive(pid: i32) -> bool {
         .unwrap_or(false)
 }
 
-/// Poll until the pid leaves the live-process table (teardown kills are
-/// synchronous, but the kernel may be mid-boot when its owner drops, so the
-/// settle budget covers the boot finishing first).
+/// Poll until the pid leaves the live-process table (teardown kills are synchronous, but the kernel
+/// may be mid-boot when its owner drops, so the settle budget covers the boot finishing first).
 async fn await_process_gone(pid: i32) {
     let deadline = Instant::now() + Duration::from_mins(1);
     while process_alive(pid) {
@@ -176,8 +164,6 @@ fn test_options() -> Option<pa_core::kernel::shared::KernelManagerOptions> {
     })
 }
 
-/// Dropping the last manager handle tears the kernel process down: no
-/// explicit shutdown call, no reliance on the runtime's owner watchdog.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn manager_drop_kills_the_kernel_process() {
@@ -191,8 +177,6 @@ async fn manager_drop_kills_the_kernel_process() {
     await_process_gone(pid).await;
 }
 
-/// The session-level seam: dropping the provisioner drops the memoized
-/// manager and the kernel goes with it.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn provisioner_drop_kills_the_kernel_process() {
@@ -216,9 +200,8 @@ async fn provisioner_drop_kills_the_kernel_process() {
 }
 
 /// The session-engine path a fixture actually uses: `create_session` with
-/// the prewarm flag boots a kernel in the background; dropping the engine
-/// must take that kernel with it. Found via the process table, so the test
-/// exercises the public session surface exactly like the product does.
+/// the prewarm flag boots a kernel in the background; found via the
+/// process table, so the test exercises the public session surface.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn session_engine_drop_kills_the_prewarmed_kernel_process() {
@@ -293,9 +276,8 @@ async fn session_engine_drop_kills_the_prewarmed_kernel_process() {
     }
 }
 
-/// The explicit dispose seam: a host that keeps the engine object but ends
-/// the session (the daemon worker's shape) must be able to take the kernel
-/// down without dropping the engine.
+/// The explicit dispose seam: a host that keeps the engine object but ends the session (the daemon
+/// worker's shape) must be able to take the kernel down without dropping the engine.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn engine_dispose_kernel_kills_the_prewarmed_kernel_process() {

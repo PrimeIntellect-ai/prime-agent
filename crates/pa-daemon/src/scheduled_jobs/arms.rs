@@ -54,12 +54,9 @@ impl Worker {
             return response;
         }
         let summary = {
-            let core = self
-                .core
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (core, inputs) = self.summary_inputs();
             self.bind_store_artifact(&core);
-            self.summary_locked(&core)
+            self.summary_locked(&core, inputs)
         };
         let heartbeats: Vec<Value> = self
             .scheduled
@@ -90,9 +87,8 @@ impl Worker {
         )
     }
 
-    /// `heartbeat_manage` (TS daemon-mode case over `manageHeartbeat`):
-    /// pause/resume/stop a heartbeat by job id; an unknown id answers the
-    /// TS error.
+    /// `heartbeat_manage` (TS daemon-mode case over `manageHeartbeat`): pause/resume/stop
+    /// a heartbeat by job id; an unknown id answers the TS error.
     pub(crate) async fn handle_heartbeat_manage(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_manage") {
             return response;
@@ -222,7 +218,7 @@ impl Worker {
             .store()
             .cancel(&job_id, crate::util::now_ms())
         {
-            Some(job) => {
+            Ok(Some(job)) => {
                 self.scheduled.remove_queued_heartbeat_follow_up(&job);
                 self.scheduled.wake().await;
                 response_success(
@@ -231,12 +227,13 @@ impl Worker {
                     Some(json!({ "job": serde_json::to_value(&job).unwrap_or(Value::Null) })),
                 )
             }
-            None => response_failure(
+            Ok(None) => response_failure(
                 None,
                 "cron_cancel",
                 &format!("No cron job found: {job_id}"),
                 None,
             ),
+            Err(error) => response_failure(None, "cron_cancel", &error.to_string(), None),
         }
     }
 
@@ -270,8 +267,8 @@ impl Worker {
         )
     }
 
-    /// `heartbeat_set` (TS daemon-mode case over `createHeartbeatForState`):
-    /// replace the session's heartbeat.
+    /// `heartbeat_set` (TS daemon-mode case over `createHeartbeatForState`): replace the
+    /// session's heartbeat.
     pub(crate) async fn handle_heartbeat_set(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_set") {
             return response;
@@ -347,9 +344,8 @@ impl Worker {
         }
     }
 
-    /// `heartbeat_update` (TS daemon-mode case over
-    /// `updateHeartbeatForState`): pause/resume/clear the session's
-    /// heartbeat.
+    /// `heartbeat_update` (TS daemon-mode case over `updateHeartbeatForState`):
+    /// pause/resume/clear the session's heartbeat.
     pub(crate) async fn handle_heartbeat_update(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("heartbeat_update") {
             return response;
@@ -369,20 +365,20 @@ impl Worker {
             self.bind_store_artifact(&core);
         }
         let outcome = match payload.get("action").and_then(Value::as_str) {
-            Some("pause") => Ok(self
+            Some("pause") => self
                 .scheduled
                 .store()
-                .pause_heartbeat(&active_session_id, now)),
+                .pause_heartbeat(&active_session_id, now),
             Some("resume") => self
                 .scheduled
                 .store()
                 .resume_heartbeat(&active_session_id, now),
-            // TS `updateHeartbeatForState`: anything but pause/resume
-            // clears the heartbeat.
-            _ => Ok(self
+            // TS `updateHeartbeatForState`: anything but pause/resume clears the
+            // heartbeat.
+            _ => self
                 .scheduled
                 .store()
-                .clear_heartbeat(&active_session_id, now)),
+                .clear_heartbeat(&active_session_id, now),
         };
         let outcome = match outcome {
             Ok(job) => job,

@@ -1,5 +1,27 @@
 # Release pipeline for Prime Agent (Rust).
 #
+# THE TWO BUILD ROUTES (one promote gate):
+#   - a plain vX.Y.Z tag (stable) BUILDS its own 5-target matrix: the stable
+#     cadence is rare, and its cut must not depend on a continuous run the
+#     staleness gate may have skipped (a superseded push builds nothing) or
+#     artifact retention may have evicted;
+#   - a vX.Y.Z-beta* tag (nightly) CONSUMES the continuous build's
+#     artifacts: continuous already built the exact parent commit the
+#     nightly tag names (nightly.yml waits out that run's green build
+#     matrix before cutting the tag), so rebuilding here would pay the
+#     full matrix twice per green merge for a tree that differs from its
+#     parent only by the version rows. The reuse-continuous job downloads
+#     that run's workflow artifacts (the download-by-run route the
+#     installer's old bootstrap used) and restamps them to the beta
+#     version — packaging only, no rebuild; the built bytes stay the
+#     continuous build's (the restamp re-proves what it can on the runner
+#     and asserts the continuous commit; the rest is continuous's own
+#     green gates on that commit). Both routes upload the same
+#     artifacts-<target> set into this run, so the promote gate consumes
+#     one shape from either route.
+#   - the Windows target (build-windows) BUILDS on both routes: continuous
+#     builds no Windows target, so a beta has no win32 artifact to consume.
+#
 
 name: release
 
@@ -17,7 +39,7 @@ permissions: {}
 concurrency:
   # Every tag promotes under its own group: a queued promotion is never
   # canceled by another tag (single-pending groups would drop a queued
-  # run), so every published tag gets its release. The rolling nightly
+  # run), so every published tag gets its versioned artifacts. The rolling nightly
   # refresh - the one piece of shared state - serializes in its own
   # nightly-refresh job group instead.
   group: release-${{ github.ref }}
@@ -37,9 +59,10 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
       - name: Validate tag matches workspace version
         run: |
           set -euo pipefail
@@ -59,6 +82,9 @@ jobs:
 
   build-gnu:
     needs: tag-check
+    # Stable-only: a -beta* tag consumes the continuous build instead (the
+    # reuse-continuous job); exactly one of the two routes runs per tag.
+    if: ${{ !contains(github.ref_name, '-') }}
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     # GLIBC 2.35 build baseline: artifacts built on the ubuntu-24.04 runner
@@ -72,7 +98,9 @@ jobs:
       # release baseline under promote). Pin the multi-arch index so both
       # matrix arches resolve from one reviewed image; update the digest
       # only through reviewed changes.
-      image: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+      # Google's Docker Hub mirror avoids anonymous Docker Hub pull limits;
+      # the identical index digest preserves both reviewed architecture images.
+      image: mirror.gcr.io/library/ubuntu@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
     # Container jobs run `run:` steps with the image's /bin/sh (dash on
     # ubuntu:22.04), which rejects `set -o pipefail`; pin the steps to bash.
     defaults:
@@ -84,14 +112,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Windows cannot ride this matrix: the job-level `container:` pins the
+        # linux builds to the reviewed ubuntu:22.04 image (the digest-pinned
+        # glibc baseline), and a Windows runner cannot host that container.
+        # The MSVC target builds in its own `build-windows` job below (the
+        # build-darwin pattern).
         include:
           - target: x86_64-unknown-linux-gnu
             runs-on: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runs-on: ubuntu-24.04-arm
-          # Windows ships when the platform trait impls land:
-          # - target: x86_64-pc-windows-msvc
-          #   runs-on: windows-2022
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -109,9 +139,15 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      - name: Trust the mounted checkout for release packaging
+        # checkout scopes its safe.directory setting to a temporary HOME.
+        # Later container steps need the same exact path in their own config.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -122,8 +158,11 @@ jobs:
           # the new key builds cold; the marker moves only with reviewed
           # baseline changes (same protocol as the image digest below).
           key: ${{ matrix.target }}-glibc235
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
       - name: Split the shipped binary + split-debug decoder (Option C posture)
         # Linux only: the build emits line tables and does not strip at
         # link; this step produces the SHIPPED binary (objcopy
@@ -182,6 +221,54 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Verify fresh channel install and reinstall
+        # Host detection must match the packaged artifact. Intel macOS is
+        # cross-built; its existing Rosetta version probe remains separate.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/test_channel_install.py \
+            --archive "${archives[0]}" --installer install-rust.sh \
+            --report "target/${{ matrix.target }}/dist/channel-install.json"
+      - name: Verify the shipped TypeScript update command
+        # The x64 Darwin artifact is cross-built on arm64. Its historical
+        # installer detects the host, so this gate runs on native hosts only.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/verify_legacy_release.py \
+            --candidate "${archives[0]}" \
+            --report "target/${{ matrix.target }}/dist/legacy-upgrade.json"
+      # The homebrew-core submission candidate: the source tarball the
+      # formula pins (scripts/release/assemble_source.py — the git tree at
+      # the tag plus the validated catalog assets at the archive root). One
+      # cut per stable release: the job gate keeps this stable-only, and the
+      # step gate holds the matrix to a single leg so the artifact exists
+      # exactly once. The output goes to its own src-dist dir — the binary
+      # artifact's upload glob (dist/prime-agent-*) must not pick the src
+      # tarball up as a per-target artifact.
+      - name: Assemble the source tarball (homebrew-core candidate)
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          python3 scripts/release/assemble_source.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/src-dist"
+          cat "target/${{ matrix.target }}/src-dist/manifest.json"
+      - name: Upload the source tarball artifacts
+        if: matrix.target == 'x86_64-unknown-linux-gnu' && !contains(github.ref_name, '-')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-source
+          path: |
+            target/${{ matrix.target }}/src-dist/prime-agent-*
+            target/${{ matrix.target }}/src-dist/SHA256SUMS
+            target/${{ matrix.target }}/src-dist/manifest.json
+          if-no-files-found: error
       - name: Upload artifacts
         # The glob carries the decoder alongside the payload files — it is
         # a workflow artifact, never a tarball member: assemble never stages
@@ -193,10 +280,15 @@ jobs:
             target/${{ matrix.target }}/dist/prime-agent-*
             target/${{ matrix.target }}/dist/SHA256SUMS
             target/${{ matrix.target }}/dist/manifest.json
+            target/${{ matrix.target }}/dist/legacy-upgrade.json
+            target/${{ matrix.target }}/dist/channel-install.json
           if-no-files-found: error
 
   build-darwin:
     needs: tag-check
+    # Stable-only: a -beta* tag consumes the continuous build instead (the
+    # reuse-continuous job); exactly one of the two routes runs per tag.
+    if: ${{ !contains(github.ref_name, '-') }}
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     permissions:
@@ -208,8 +300,17 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             runs-on: macos-14
+          # The x86_64 leg cross-compiles on the Apple-silicon pool: rustc
+          # and the Xcode linker build either darwin arch from an M-series
+          # host, and the M-pool links this binary ~2.2x faster than the
+          # macos-15-intel pool with far tighter variance (484 s vs 1046 s
+          # same-commit link tail, 2026-09-30). The livecheck below runs
+          # the assembled x64 artifact under Rosetta 2 — the macos-15
+          # arm64 image installs it, and install-rust.sh ships the x64
+          # build to an Apple-Silicon Mac's Rosetta shell, so the gate
+          # still boots the binary on its delivery runtime.
           - target: x86_64-apple-darwin
-            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+            runs-on: macos-15
     env:
       # AppleDouble resource forks must not leak into the archive; the
       # assembler additionally enforces plain-file payloads.
@@ -218,15 +319,24 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
         with:
-          toolchain: "1.98.1"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.target }}
+      # Only the shipped binary links here: the job packages `prime-agent`
+      # alone, so pa-daemon's [[bin]] would be a second thin-LTO link with
+      # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
-        run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+      # The aarch64 leg livechecks natively; the x86_64 leg,
+      # cross-compiled on the Apple-silicon pool, livechecks under
+      # Rosetta 2 — the runtime install-rust.sh gives the x64 payload on
+      # an Apple-Silicon Mac.
       - name: "Livecheck gate: --version prints the tag version"
         run: |
           set -euo pipefail
@@ -249,6 +359,123 @@ jobs:
             --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
+      - name: Verify fresh channel install and reinstall
+        # Host detection must match the packaged artifact. Intel macOS is
+        # cross-built; its existing Rosetta version probe remains separate.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/test_channel_install.py \
+            --archive "${archives[0]}" --installer install-rust.sh \
+            --report "target/${{ matrix.target }}/dist/channel-install.json"
+      - name: Verify the shipped TypeScript update command
+        # The x64 Darwin artifact is cross-built on arm64. Its historical
+        # installer detects the host, so this gate runs on native hosts only.
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: |
+          set -euo pipefail
+          archives=(target/${{ matrix.target }}/dist/prime-agent-*.tar.gz)
+          python3 scripts/release/verify_legacy_release.py \
+            --candidate "${archives[0]}" \
+            --report "target/${{ matrix.target }}/dist/legacy-upgrade.json"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+            target/${{ matrix.target }}/dist/legacy-upgrade.json
+            target/${{ matrix.target }}/dist/channel-install.json
+          if-no-files-found: error
+
+  # The Windows build: its own job (the build-darwin pattern), because the
+  # GNU builds pin their glibc baseline inside the digest-reviewed ubuntu:22.04
+  # container - a runner-level image a windows runner cannot host. The runner
+  # label is pinned to windows-2022 (never the mutable windows-latest) for the
+  # same reviewed-baseline reason as the container digest: a label that
+  # drifts under promote would drift the release baseline; it moves only
+  # through reviewed changes.
+  #
+  # BOTH ROUTES build it: the continuous workflow builds no Windows target,
+  # so a -beta* tag has no continuous win32 artifact to consume - this job
+  # builds the tag commit itself on either route and uploads the same
+  # artifacts-<target> shape into this run.
+  build-windows:
+    needs: tag-check
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      # The pinned SHA is the toolchain pin: this action version has no
+      # `toolchain` input, and its parse step hard-codes 1.98.1. Change the
+      # compiler by changing the SHA; a `toolchain:` input is ignored.
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.target }}
+      # The Windows runner images ship `python` (python3 is not a stable alias
+      # there); the release scripts run under whichever spelling exists.
+      - name: Resolve the Python interpreter
+        shell: bash
+        run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+      # Only the shipped binary links here (the build-gnu/build-darwin rule).
+      # THE STATIC VC RUNTIME (the operator's real-machine report,
+      # 2026-10-06: the dynamically linked launcher died at process start -
+      # 0xC0000135, STATUS_DLL_NOT_FOUND, exit -1073741515 - on a stock
+      # Windows box, which carries no vcruntime140.dll; the windows-2022
+      # runner image has it, so the livecheck never sees the gap): the
+      # step-scoped RUSTFLAGS below links the shipped binary against the
+      # static CRT. The pin rides THIS STEP alone and never Cargo.toml,
+      # whose dev builds stay dynamic; cargo's unit fingerprints carry
+      # RUSTFLAGS, so a cache restored from the dynamic-link era rebuilds
+      # instead of reusing a dynamically linked tree.
+      - name: Build (release, locked)
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
+      - name: "Livecheck gate: --version prints the tag version"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cargo's MSVC linker emits prime-agent.exe; the payload name the
+          # assembler stages and the installer extracts.
+          bin="target/${{ matrix.target }}/release/prime-agent.exe"
+          out="$("${bin}" --version)"
+          [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
+      - name: Generate bundled catalog assets (fixture, offline-safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/bundle_catalog.py generate --fixture \
+            --out "target/${{ matrix.target }}/catalog-assets"
+      - name: Assemble tarball + checksums + manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${PY}" scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${RELEASE_VERSION#v}" \
+            --target "${{ matrix.target }}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent.exe" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
       - name: Upload artifacts
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -259,14 +486,149 @@ jobs:
             target/${{ matrix.target }}/dist/manifest.json
           if-no-files-found: error
 
+  # THE BETA CHANNEL'S BUILD (the consume route): the continuous workflow
+  # already built the exact commit this beta names - nightly.yml waits out
+  # the pushed commit's continuous run (its whole build matrix green) before
+  # cutting the tag, so the tag-only commit's parent is a proven-built tip.
+  # This job resolves that parent, downloads ITS continuous run's workflow
+  # artifacts (the download-by-run route the installer's old bootstrap used),
+  # and restamps them to the beta version (scripts/release/restamp_continuous.py):
+  # the built bytes stay the continuous build's; the version-shaped facts move
+  # - the inner package.json (the runtime version manifest the shipped binary
+  # reports; the continuous stamp <version>-continuous.<sha> becomes the beta
+  # version), the archive/decoder names, and the manifest/SHA256SUMS rows (the
+  # manifest's `commit` provenance is KEPT). The result is re-uploaded as THIS
+  # run's artifacts-<target> set, so the promote gate consumes the same shape
+  # from either route. The gates the release build jobs ran on their own
+  # binaries (livecheck, GLIBC baseline) re-run here for the runner's own
+  # target; the other targets' evidence is the continuous run's own green
+  # build jobs on this exact commit (asserted via the manifest's commit row).
+  reuse-continuous:
+    needs: tag-check
+    if: ${{ contains(github.ref_name, '-') }}
+    name: consume the continuous build (no rebuild)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Cross-run workflow-artifact download: the continuous run's set.
+      actions: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Resolve the continuous run that built this beta's parent
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # THE ANNOTATED-TAG PEEL (the same ref-chain resolution the promote
+          # job's publish step uses): the tag names the tag-only commit
+          # nightly.yml created; its first parent is the continuous-built tip.
+          tag="${GITHUB_REF_NAME}"
+          ref_json="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}")"
+          obj_type="$(printf '%s' "${ref_json}" | jq -r '.object.type')"
+          obj_sha="$(printf '%s' "${ref_json}" | jq -r '.object.sha')"
+          if [ "${obj_type}" = "tag" ]; then
+            tag_obj="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj_sha}")"
+            obj_sha="$(printf '%s' "${tag_obj}" | jq -r '.object.sha')"
+          fi
+          parent="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${obj_sha}" --jq '.parents[0].sha')"
+          # The run whose artifacts this beta consumes - the same query
+          # nightly.yml resolves the parent with. The cut is only created
+          # after that run concluded green with its whole build matrix,
+          # so the run must exist and be green here; anything else is a
+          # malformed tag (fail loudly, never fall back to a rebuild).
+          runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/continuous.yml/runs?branch=main&per_page=1&head_sha=${parent}" 2>/dev/null || echo '{"workflow_runs":[]}')"
+          read -r status conclusion run_id < <(printf '%s\n' "${runs_json}" | jq -r \
+            '(.workflow_runs[0] // {}) | [(.status // "absent"), (.conclusion // "-"), (.id // "-")] | @tsv')
+          if [ "${status}" != "completed" ] || [ "${conclusion}" != "success" ]; then
+            echo "::error::no successful continuous run for ${parent} (${status}/${conclusion}): the beta cannot consume artifacts that do not exist - resolve the continuous run, then re-run this release"
+            exit 1
+          fi
+          echo "beta parent (the continuous-built commit): ${parent}"
+          echo "continuous run ${run_id} built ${parent}"
+          echo "parent=${parent}" >> "${GITHUB_OUTPUT}"
+          echo "run-id=${run_id}" >> "${GITHUB_OUTPUT}"
+      - name: Download the continuous build's artifacts (by run id)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          run-id: ${{ steps.resolve.outputs.run-id }}
+          github-token: ${{ github.token }}
+          pattern: artifacts-*
+          path: incoming
+      - name: Restamp the continuous set to the beta version (no rebuild)
+        run: |
+          set -euo pipefail
+          # The promote gate consumes exactly the 4-target set; a partial
+          # download must fail here, not at the channel manifest.
+          expected="artifacts-aarch64-apple-darwin artifacts-aarch64-unknown-linux-gnu artifacts-x86_64-apple-darwin artifacts-x86_64-unknown-linux-gnu"
+          actual="$(find incoming -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | tr '\n' ' ')"
+          if [ "${actual% }" != "${expected}" ]; then
+            echo "::error::the continuous run's artifact set is incomplete: ${actual% }"
+            exit 1
+          fi
+          python3 scripts/release/restamp_continuous.py \
+            --incoming incoming \
+            --version "${RELEASE_VERSION#v}" \
+            --expect-commit "${{ steps.resolve.outputs.parent }}" \
+            --out-dir restamped
+      - name: Upload the restamped set as this run's build artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-aarch64-apple-darwin
+          path: restamped/artifacts-aarch64-apple-darwin/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (aarch64-unknown-linux-gnu)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-aarch64-unknown-linux-gnu
+          path: restamped/artifacts-aarch64-unknown-linux-gnu/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (x86_64-apple-darwin)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-x86_64-apple-darwin
+          path: restamped/artifacts-x86_64-apple-darwin/*
+          if-no-files-found: error
+      - name: Upload the restamped set as this run's build artifacts (x86_64-unknown-linux-gnu)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: artifacts-x86_64-unknown-linux-gnu
+          path: restamped/artifacts-x86_64-unknown-linux-gnu/*
+          if-no-files-found: error
+
   promote:
-    needs: [build-gnu, build-darwin]
+    # One gate for both build routes: the stable build jobs (plain tags) or
+    # the reuse-continuous set (beta tags) upload the same artifacts-<target>
+    # set into this run. THE ROUTE GATE IS EXPLICIT: a job that needs a
+    # SKIPPED job is itself skipped unless its own `if` says otherwise (the
+    # GitHub documented default), so the default needs gate would strand
+    # promote on BOTH routes - each route deliberately skips the other two
+    # legs. The expression admits exactly the two healthy routes and nothing
+    # else: (stable) both build jobs succeeded, or (beta) the consume route
+    # succeeded - and on both, build-windows (it runs on either route)
+    # succeeded; a failed leg, a cancelled run, or a failed tag-check leaves
+    # promote skipped, matching the pre-consume failure semantics. The
+    # artifact completeness assertion inside the gate is the belt behind the
+    # routing: an incomplete set fails the promotion loudly either way.
+    if: ${{ !cancelled() && needs.build-windows.result == 'success' && (
+          (needs.build-gnu.result == 'success' && needs.build-darwin.result == 'success')
+          || needs.reuse-continuous.result == 'success') }}
+    needs: [build-gnu, build-darwin, build-windows, reuse-continuous]
     name: promotion gate -> release attach
     runs-on: ubuntu-latest
-    environment: release
+    # The channel gates differ: the stable channel publishes from the protected
+    # `release` environment (the required-reviewer approval is the ship gate);
+    # the nightly/beta channel publishes from `release-beta` (no required
+    # reviewers - every green merge rolls the beta automatically, the rolling
+    # channel by design; the stable cut stays the human-approved act).
+    environment: ${{ contains(github.ref_name, '-beta') && 'release-beta' || 'release' }}
     permissions:
       contents: write
       id-token: write
+      attestations: write
     timeout-minutes: 30
     steps:
       # Checkout is isolated under verification-source and is used ONLY for
@@ -330,6 +692,18 @@ jobs:
               sys.exit("hash continuity failed:\n" + "\n".join(failures))
           print(f"hash continuity verified for all archives")
           PY
+      # Existing TS updaters execute their retained installer. Verify the
+      # archive that installer activates, not merely the new curl installer.
+      - name: Verify historical native updater compatibility
+        run: |
+          set -euo pipefail
+          archives=()
+          for archive in incoming/*/prime-agent-*.tar.gz; do
+            # Source distributions are build inputs, not runnable payloads.
+            case "$archive" in *-src.tar.gz) continue ;; esac
+            archives+=("$archive")
+          done
+          python3 verification-source/scripts/release/native_compat.py "${archives[@]}"
       - name: Verify Linux decoder integrity against installed tar ELF
         run: |
           set -euo pipefail
@@ -341,20 +715,32 @@ jobs:
           import json, pathlib, tarfile
           incoming = pathlib.Path("incoming")
           merged, decoders, sums, version = [], [], [], None
+          commits = set()
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
               manifest = json.loads((entry_dir / "manifest.json").read_text())
               version = manifest["version"]
               merged.extend(manifest["binaries"])
               decoders.extend(manifest.get("decoders", []))
+              if manifest.get("commit"):
+                  commits.add(manifest["commit"])
               sums.extend(line for line in
                           (entry_dir / "SHA256SUMS").read_text().splitlines()
                           if line.strip())
+          # The consume route (beta) stamps every per-target manifest with the
+          # continuous commit it built; a set that names more than one commit
+          # is a broken restamp and must never merge into one release.
+          if len(commits) > 1:
+              raise SystemExit(f"per-target manifests name different commits: {sorted(commits)}")
           merged.sort(key=lambda b: b["file"])
           decoders.sort(key=lambda d: d["file"])
           sums.sort(key=lambda line: line.split(None, 1)[1])
           out = pathlib.Path("release-out")
           out.mkdir()
           result = {"version": version, "binaries": merged}
+          if commits:
+              # The build provenance rides the merged manifest (the stable
+              # rebuild route carries no commit row, as before).
+              result["commit"] = sorted(commits)[0]
           if decoders:
               result["decoders"] = decoders
           (out / "manifest.json").write_text(
@@ -380,6 +766,20 @@ jobs:
                   tar.extractall(unpacked, filter="data")
           PY
           ls -la release-out release-unpacked
+      - name: Assemble the npm migration bridge
+        run: |
+          set -euo pipefail
+          channel=stable
+          case "$RELEASE_VERSION" in *-beta*) channel=beta ;; esac
+          # Keep a working TS fallback when an existing npm installation
+          # cannot run the native target. The packer verifies its pinned hash.
+          curl --fail --location --silent --show-error --retry 3 \
+            https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.9.8/prime-agent-0.9.8.tgz \
+            --output /tmp/prime-agent-typescript-fallback.tgz
+          python3 verification-source/scripts/release/npm_bridge.py \
+            --repo-root verification-source --version "${RELEASE_VERSION#v}" --out-dir release-out --channel "$channel" \
+            --fallback-tarball /tmp/prime-agent-typescript-fallback.tgz
+          (cd release-out && sha256sum "prime-agent-${RELEASE_VERSION#v}.tgz" >> SHA256SUMS)
       - name: Emit the channel manifest (latest.json stable / beta.json nightly)
         run: |
           set -euo pipefail
@@ -449,7 +849,28 @@ jobs:
               rows.append(
                   {"platform": platform, "file": file_name, "sha256": sha}
               )
-          document = {"version": f"v{version}"}
+          # COMPLETENESS: the channel's platform list must match the built set.
+          # The reader serves every known platform; a manifest that silently
+          # dropped one (a skipped matrix leg, a build-job regression) would
+          # strand that platform's installs on the old channel version, so a
+          # missing row fails the release here instead of publishing a
+          # shrunken channel. `promote` needs every build job, so the merged
+          # manifest carries every known platform by construction; this gate
+          # turns that invariant into an enforced contract.
+          missing = known - seen
+          if missing:
+              sys.exit(
+                  f"the release is missing artifact rows for {sorted(missing)}: "
+                  "the channel manifest must carry a row for every known "
+                  "platform (one build job per platform)"
+              )
+          # Prime Agent 0.6+ npm clients consume package/tarball; native
+          # clients consume binaries. Keep both routes in one manifest.
+          document = {
+              "version": f"v{version}",
+              "package": "prime-agent",
+              "tarball": f"releases/v{version}/prime-agent-{version}.tgz",
+          }
           v1_rows = [row for row in rows if row["platform"] in v1_platforms]
           if v1_rows:
               document["binaries"] = v1_rows
@@ -459,36 +880,52 @@ jobs:
           out.write_text(json.dumps(document, indent=2) + "\n")
           print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
           PY
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+      - name: Generate SPDX SBOM per target (unpacked artifact tree)
+        run: |
+          set -euo pipefail
+          for dir in release-unpacked/*/; do
+            target="$(basename "${dir}")"
+            syft "dir:${dir}" -o "spdx-json=release-out/sbom-spdx-${RELEASE_VERSION#v}-${target}.json"
+          done
+          ls -la release-out/sbom-spdx-*
       # THE R2 PUBLISH PHASE (the operator's distribution-model ruling: the
-      # user path is curl <domain>/install.sh and everything it reads comes
-      # from the same R2-backed base — nobody fetches a GitHub URL).
+      # channel — pointers, manifests, payloads, checksums — lives on the
+      # R2-backed base alone. The sh one-liner's route carries no GitHub
+      # URL; the Windows one-liner's entry script comes from the repo's raw
+      # copy, and that fetch is the only GitHub touch on any user path —
+      # everything either installer reads is R2-backed).
       #
       # THE SECURITY MODEL, in one block for every future reader:
       #   - SEPARATION: the build jobs (build-gnu/build-darwin) produce and
-      #     attest the artifacts and hold NO R2 credentials; this promote job
-      #     — the protected 'release' environment, gated by the operator's
-      #     approval click — is the ONLY job that ever holds the R2 secrets.
-      #     The build is not the release: the approval gate IS the release
-      #     decision, and every s3 cp below runs only after it.
+      #     attest the artifacts and never reference the R2 secrets; this
+      #     promote job is the only job that does. The R2 secrets are
+      #     repo-level (neither environment holds any), so the environment
+      #     is not a credential boundary. Stable tags run in the 'release'
+      #     environment, whose required-reviewer approval is a process gate:
+      #     a stable s3 cp runs only after a human approves. Beta tags run in
+      #     'release-beta' (no reviewers) and publish automatically once the
+      #     builds pass.
       #   - CHECKSUM FIRST: sha256sum --check SHA256SUMS passes before any
       #     upload — a corrupt or mismatched artifact never reaches the
       #     bucket.
       #   - HEADER FORM (TS parity): the version-prefixed artifacts
       #     (releases/v<version>/) are immutable (1y) with their content
       #     types; the root pointers (latest.json, stable, beta, beta.json,
-      #     install.sh, install-beta.sh) are no-cache — the user path is
-      #     always fresh.
+      #     install.sh, install-beta.sh, install.ps1, install-beta.ps1) are
+      #     no-cache — the user path is always fresh.
       #   - NO PATS, NO LEAKS: the GitHub side uses the workflow's own
-      #     identity (github.token); the R2 keys are environment secrets
-      #     scoped to this job; nothing is echoed.
+      #     identity (github.token); the R2 keys are repo-level secrets
+      #     read only by this job; nothing is echoed.
       #   - BETA SUPERSEDE: only the LATEST green commit gets a beta cut;
-      #     a newer rust push landing while this beta built means a newer
+      #     a newer main push landing while this beta built means a newer
       #     cut is coming — this publish keeps its versioned artifacts but
       #     skips the beta channel pointers (beta.json/beta/install-beta.sh),
       #     so the channel only ever advances forward.
-      #   - AUDIT SURFACE: the GitHub release below still attaches every
-      #     artifact (the TS order: the R2 publish first, GitHub second).
-      - name: Publish the R2 channel (the user path never touches GitHub)
+      #   - AUDIT SURFACE: beta archives retain every release asset on R2;
+      #     stable releases and the rolling nightly attach them on GitHub.
+      - name: Publish the R2 channel (the channel serves no GitHub URL)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -510,7 +947,12 @@ jobs:
           (cd release-out && sha256sum --check SHA256SUMS)
 
           RELEASE_PREFIX="releases/${RELEASE_VERSION}"
-          for artifact in release-out/prime-agent-*.tar.gz; do
+          # The R2 channel serves the installers: the platform tarballs
+          # the channel manifests reference. The homebrew-core source
+          # tarball rides the GitHub release only (packagers pin it
+          # there; the R2 pointers never name it).
+          for artifact in release-out/prime-agent-*.tar.gz release-out/prime-agent-*.tgz; do
+            case "$artifact" in *-src.tar.gz) continue ;; esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
@@ -521,12 +963,25 @@ jobs:
             --content-type text/plain \
             --cache-control 'public, max-age=31536000, immutable'
 
-          # The rendered installer pair: the repo file's defaults ARE the
+          # Beta tags no longer have individual GitHub release objects. Archive
+          # their audit assets before advancing any pointer, including superseded
+          # builds. The existing versioned tarballs + sums complete this payload.
+          if [[ "$RELEASE_VERSION" == *-beta* ]]; then
+            for artifact in release-out/*.debug.gz release-out/*.json; do
+              content_type=application/json
+              case "$artifact" in *.gz) content_type=application/gzip ;; esac
+              aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type "$content_type" \
+                --cache-control 'public, max-age=31536000, immutable'
+            done
+          fi
+
+          # The rendered installer pairs: the repo files' defaults ARE the
           # official domain, so the publish render only stamps the build's
-          # R2 base + channel default into the served copies. Both renders
-          # publish on every cut (TS parity: a changed installer ships with
-          # whichever channel publishes, so the served scripts never go
-          # stale between releases).
+          # R2 base + channel default into the served copies. Production
+          # install.sh and install.ps1 publish only on stable cuts. Explicit
+          # install-beta.sh and install-beta.ps1 remain the beta entry points.
           render_installer() {
             channel="$1"
             sed -e "s|^DOWNLOAD_BASE_URL_DEFAULT=.*|DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"|" \
@@ -534,6 +989,20 @@ jobs:
                 "verification-source/install-rust.sh" > "/tmp/install-${channel}.sh"
             grep -q "^DOWNLOAD_BASE_URL_DEFAULT=\"${INSTALL_BASE_URL}\"" "/tmp/install-${channel}.sh"
             grep -q "^RELEASE_CHANNEL_DEFAULT=${channel}$" "/tmp/install-${channel}.sh"
+          }
+
+          # The Windows-native render of the same installer (install.ps1):
+          # the same base + channel stamps and channel publication rules.
+          # The Windows-idiomatic entry is
+          #   irm <base>/install.ps1 | iex
+          # while Git-Bash users run the install-rust.sh form above.
+          render_installer_ps1() {
+            channel="$1"
+            sed -e "s|^\$DownloadBaseUrlDefault = '.*'|\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'|" \
+                -e "s|^\$ReleaseChannelDefault = '.*'|\$ReleaseChannelDefault = '${channel}'|" \
+                "verification-source/install.ps1" > "/tmp/install-${channel}.ps1"
+            grep -qF "\$DownloadBaseUrlDefault = '${INSTALL_BASE_URL}'" "/tmp/install-${channel}.ps1"
+            grep -qF "\$ReleaseChannelDefault = '${channel}'" "/tmp/install-${channel}.ps1"
           }
 
           # THE ANNOTATED-TAG PEEL: the nightly cuts create ANNOTATED tags,
@@ -564,14 +1033,20 @@ jobs:
             a="${1#v}"; b="${2#v}"
             [ "$a" = "$b" ] && return 1
             a_n="${a%%-*}"; b_n="${b%%-*}"
-            awk -v an="$a_n" -v bn="$b_n" 'BEGIN {
-              split(an, A, "."); split(bn, B, ".")
-              for (i = 1; i <= 3; i++) { if (A[i] + 0 > B[i] + 0) exit 0; if (A[i] + 0 < B[i] + 0) exit 1 }
-              exit 1
-            }' && return 0
-            # same numeric base: the prerelease ordering (beta.N)
+            if [ "$a_n" != "$b_n" ]; then
+              # A lower numeric version must not fall through to beta.N ordering.
+              awk -v an="$a_n" -v bn="$b_n" 'BEGIN {
+                split(an, A, "."); split(bn, B, ".")
+                for (i = 1; i <= 3; i++) { if (A[i] + 0 > B[i] + 0) exit 0; if (A[i] + 0 < B[i] + 0) exit 1 }
+                exit 1
+              }'
+              return $?
+            fi
+            # Same numeric base: stable sorts after prereleases, then compare beta.N.
             a_pre="${a#*-}"; b_pre="${b#*-}"
-            [ "$a_pre" != "$a" ] && [ "$(printf '%s\n' "$a_pre" "$b_pre" | sort -V | tail -1)" = "$a_pre" ] && [ "$a_pre" != "$b_pre" ]
+            [ "$a_pre" = "$a" ] && return 0
+            [ "$b_pre" = "$b" ] && return 1
+            [ "$(printf '%s\n' "$a_pre" "$b_pre" | sort -V | tail -1)" = "$a_pre" ]
           }
           publish_pointer_pair() {
             # $1 = the manifest name (latest.json | beta.json), $2 = the
@@ -632,7 +1107,7 @@ jobs:
           if [[ "$RELEASE_VERSION" == *-beta* ]]; then
             # THE BETA CHANNEL: the rolling per-push cut. The supersede
             # rule — only the newest proven commit advances the channel: a
-            # newer rust push landing while this beta built means a newer
+            # newer main push landing while this beta built means a newer
             # cut is already coming; this one keeps its versioned
             # artifacts (immutable, still served to pinned installs) but
             # leaves the channel pointers alone.
@@ -650,10 +1125,10 @@ jobs:
                   --endpoint-url "$R2_ENDPOINT_URL" \
                   --content-type text/x-shellscript \
                   --cache-control no-cache
-                render_installer stable
-                aws s3 cp /tmp/install-stable.sh "s3://${R2_BUCKET}/install.sh" \
+                render_installer_ps1 beta
+                aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
                   --endpoint-url "$R2_ENDPOINT_URL" \
-                  --content-type text/x-shellscript \
+                  --content-type text/plain \
                   --cache-control no-cache
                 echo "beta channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
               fi
@@ -672,24 +1147,24 @@ jobs:
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
+              render_installer_ps1 stable
+              aws s3 cp /tmp/install-stable.ps1 "s3://${R2_BUCKET}/install.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
+                --cache-control no-cache
               render_installer beta
               aws s3 cp /tmp/install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
                 --endpoint-url "$R2_ENDPOINT_URL" \
                 --content-type text/x-shellscript \
                 --cache-control no-cache
+              render_installer_ps1 beta
+              aws s3 cp /tmp/install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+                --endpoint-url "$R2_ENDPOINT_URL" \
+                --content-type text/plain \
+                --cache-control no-cache
               echo "stable channel advanced to ${RELEASE_VERSION} at ${INSTALL_BASE_URL}"
             fi
           fi
-      - name: Install syft
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-      - name: Generate SPDX SBOM per target (unpacked artifact tree)
-        run: |
-          set -euo pipefail
-          for dir in release-unpacked/*/; do
-            target="$(basename "${dir}")"
-            syft "dir:${dir}" -o "spdx-json=release-out/sbom-spdx-${RELEASE_VERSION#v}-${target}.json"
-          done
-          ls -la release-out/sbom-spdx-*
       # [reserved] Apple notarization step goes here once certificates land:
       # sign + notarize each darwin tarball's inner binary before attach.
       - name: Attest build provenance (SLSA)
@@ -697,21 +1172,19 @@ jobs:
         with:
           subject-path: |
             release-out/prime-agent-*.tar.gz
+            release-out/prime-agent-*.tgz
             release-out/*.debug.gz
       - name: Attach to GitHub release
+        if: ${{ !contains(github.ref_name, '-') }}
         uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          # A -beta* tag publishes the nightly channel as a GitHub PRE-RELEASE:
-          # prereleases never take the Latest pointer, so the stable channel's
-          # download base (.../releases/latest/download/) keeps serving the
-          # latest stable release's latest.json (Bugbot: beta tags steal
-          # GitHub Latest).
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: false
           fail_on_unmatched_files: true
           files: |
             release-out/prime-agent-*.tar.gz
+            release-out/prime-agent-*.tgz
             release-out/*.debug.gz
             release-out/SHA256SUMS
             release-out/*.json
@@ -722,15 +1195,17 @@ jobs:
           name: nightly-refresh-payload
           path: |
             release-out/prime-agent-*.tar.gz
+            release-out/prime-agent-*.tgz
+            release-out/*.debug.gz
             release-out/SHA256SUMS
-            release-out/beta.json
+            release-out/*.json
           if-no-files-found: error
 
   # The rolling `nightly` release is the nightly channel's discoverable base:
   # GitHub's latest/download/ alias serves only the latest NON-prerelease
   # release, so beta.json has no address there. Every -beta* tag refreshes
   # the fixed `nightly` release's assets (.../releases/download/nightly/),
-  # the base a nightly install records (.install-source). This job carries
+  # for direct GitHub downloads; installers use the R2 base. This job carries
   # the workflow's only shared mutable state, so it - and it alone -
   # serializes: the group lets one refresh run at a time (a queued refresh
   # superseded by a newer tag is harmless: the newest beta's refresh wins,
@@ -738,7 +1213,21 @@ jobs:
   # refuses to clobber a newer rolling beta.json (re-runs of older tags).
   nightly-refresh:
     needs: promote
-    if: contains(github.ref_name, '-')
+    # THE GATE IS EXPLICIT (the promote precedent: an `if` without a status
+    # function is auto-prefixed with success(), and GitHub's default needs
+    # gate skips every job downstream of a skipped job in the dependency
+    # chain). On a -beta* tag the two stable-route build jobs skip themselves
+    # by their own gates; they are promote's needs and therefore this job's
+    # TRANSITIVE needs, so the bare `if: contains(github.ref_name, '-')` that
+    # lived here skipped the refresh on every
+    # green beta promote since the flow went live - the rolling `nightly`
+    # release never materialized (releases/tags/nightly 404s) while the
+    # per-tag prereleases and the R2 beta.json published and the payload
+    # uploaded inside the same green promote. The explicit form admits
+    # exactly the one healthy state: a green promote - the only producer of
+    # the nightly-refresh-payload artifact - on a -beta* tag. A failed,
+    # skipped, or cancelled promote leaves the refresh skipped.
+    if: ${{ !cancelled() && needs.promote.result == 'success' && contains(github.ref_name, '-') }}
     name: rolling nightly release refresh (the nightly channel's discoverable base)
     concurrency:
       group: rolling-nightly-refresh
@@ -755,30 +1244,54 @@ jobs:
       - name: Refresh the rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
+          # gh resolves the repo from the git remote - absent: this job never
+          # checks out - or GH_REPO, and never from GITHUB_REPOSITORY, so
+          # without this row every `gh release ...` call below dies with
+          # "failed to run git: not a git repository" (probe-pinned: the gate
+          # fix alone let the job run and its first gh call failed exactly
+          # so).
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # The rolling update channel distributes tarballs only. Per-tag
-          # releases retain the separately attested decoder and full sums;
-          # rolling SHA256SUMS must name only assets carried in this refresh.
-          python3 - <<'PY'
-          from pathlib import Path
-          sums = Path("release-out/SHA256SUMS")
-          rows = sums.read_text().splitlines()
-          tar_rows = [row for row in rows if row.split()[-1].endswith(".tar.gz")]
-          if not tar_rows:
-              raise SystemExit("nightly refresh: missing tarball checksums")
-          sums.write_text("\n".join(tar_rows) + "\n")
-          PY
-          if gh release view nightly >/dev/null 2>&1; then
+          (cd release-out && sha256sum --check SHA256SUMS)
+          # RELEASE_VERSION feeds every refresh path (guarded clobber, heal,
+          # bootstrap), so it is validated up front: a tag the strict nightly
+          # regex rejects fails closed here instead of publishing a nightly
+          # that later refreshes refuse to parse.
+          built_commit="$(python3 <<'PY_RELEASE'
+          import json, os, re
+          version = os.environ["RELEASE_VERSION"]
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+", version):
+              raise SystemExit(f"invalid nightly version: {version!r}")
+          manifest = json.load(open("release-out/manifest.json"))
+          channel = json.load(open("release-out/beta.json"))
+          if manifest.get("version") != version or channel.get("version") != version:
+              raise SystemExit("nightly payload manifests do not match the release version")
+          commit = manifest.get("commit")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit(f"invalid nightly build commit: {commit!r}")
+          print(commit)
+          PY_RELEASE
+          )"
+          # Only an explicit API 404 permits bootstrap. Authentication, network,
+          # rate-limit, and malformed-response errors must not bypass the guard.
+          state="$(mktemp -d)"
+          trap 'rm -rf "$state"' EXIT
+          if gh release view nightly --json assets > "$state/release.json"; then
+            jq -e '.assets | type == "array" and all(.[]; .name | type == "string")' "$state/release.json" >/dev/null
+            jq -r '.assets[].name' "$state/release.json" > "$state/assets"
             # The newest-wins guard protects the CURRENT beta.json, and it
             # fails CLOSED: a release that carries a beta.json we cannot read
             # is never clobbered (Bugbot: a discarded download failure fell
             # through to --clobber, so a re-run of an older tag could replace
             # a newer nightly). A release with NO beta.json asset (a partial
-            # earlier refresh) has nothing to protect - the clobber heals it.
-            if gh release view nightly --json assets --jq '.[].name' \
-                 2>/dev/null | grep -qx "beta.json"; then
-              guard="$(mktemp -d)"
+            # earlier refresh) lost its version witness, but its tarball names
+            # still name versions: the heal clobbers only when this refresh is
+            # the newest version the release serves, fails closed when a
+            # tarball's name cannot be read, and an empty release (a bootstrap
+            # interrupted before any upload) heals unconditionally.
+            if grep -qx "beta.json" "$state/assets"; then
+              guard="$state"
               ok=0
               for attempt in 1 2 3; do
                 if gh release download nightly --pattern beta.json \
@@ -794,24 +1307,75 @@ jobs:
                 echo "could not read the rolling nightly's beta.json; refusing to clobber it (re-run this refresh once the release is readable)" >&2
                 exit 1
               fi
-              current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$guard/beta.json")"
+              current="$(python3 - "$guard/beta.json" <<'PY_VERSION'
+          import json, os, re, sys
+          current = json.load(open(sys.argv[1]))["version"]
+          for version in (current, os.environ["RELEASE_VERSION"]):
+              if not isinstance(version, str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+", version):
+                  raise SystemExit(f"invalid nightly version: {version!r}")
+          print(current)
+          PY_VERSION
+              )"
               newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"
               if [ "$newest" != "$RELEASE_VERSION" ]; then
                 echo "the rolling nightly release already serves $current >= $RELEASE_VERSION; skipping the refresh"
                 exit 0
               fi
+            else
+              served="$(python3 - "$state/assets" <<'PY_ASSETS'
+          import re, sys
+          versions = []
+          for name in open(sys.argv[1]).read().split():
+              if not name.endswith(('.tar.gz', '.tgz')):
+                  continue
+              body = name[: -len('.tar.gz')] if name.endswith('.tar.gz') else name[: -len('.tgz')]
+              match = re.fullmatch(r'prime-agent-([0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+)(?:-.+)?', body)
+              if match is None:
+                  raise SystemExit(f"cannot read a version from the nightly asset name: {name!r}")
+              versions.append('v' + match.group(1))
+          print('\n'.join(versions))
+          PY_ASSETS
+              )"
+              newest="$(printf '%s\n%s\n' "$served" "$RELEASE_VERSION" | sort -V | tail -1)"
+              if [ "$newest" != "$RELEASE_VERSION" ]; then
+                echo "the rolling nightly release already serves $newest >= $RELEASE_VERSION; skipping the refresh"
+                exit 0
+              fi
             fi
             gh release upload nightly \
               release-out/prime-agent-*.tar.gz \
+              release-out/prime-agent-*.tgz \
+              release-out/*.debug.gz \
               release-out/SHA256SUMS \
-              release-out/beta.json \
+              release-out/*.json \
               --clobber
           else
+            if gh api --include "repos/${GH_REPO}/releases/tags/nightly" > "$state/response"; then
+              echo "nightly exists but could not be inspected; refusing to overwrite" >&2
+              exit 1
+            fi
+            if ! grep -Eq '^HTTP/[0-9.]+ 404([[:space:]]|$)' "$state/response"; then
+              echo "could not establish that nightly is absent; refusing to publish" >&2
+              exit 1
+            fi
             gh release create nightly \
+              --target "$built_commit" \
               --title "nightly" \
               --notes "The rolling nightly channel (beta builds). Assets are overwritten per -beta* tag; beta.json names the current build." \
               --prerelease \
               release-out/prime-agent-*.tar.gz \
+              release-out/prime-agent-*.tgz \
+              release-out/*.debug.gz \
               release-out/SHA256SUMS \
-              release-out/beta.json
+              release-out/*.json
           fi
+          # Publish first: a failed or partial asset upload must not advance
+          # the source tag. This stays inside the serialized newest-wins guard.
+          # The manifest records the verified build source, which can differ
+          # from both the version-only tag commit and today's main HEAD.
+          gh api "repos/${GH_REPO}/git/refs/tags/nightly" --method PATCH \
+            -f sha="$built_commit" -F force=true >/dev/null
+          printf 'Current build: %s\n\nSource commit: https://github.com/%s/commit/%s\n\nUpdated: %s\n\nThe rolling nightly channel. beta.json names the current build; older versioned assets may remain.\n' \
+            "$RELEASE_VERSION" "$GH_REPO" "$built_commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$state/notes.md"
+          gh release edit nightly --title "nightly ($RELEASE_VERSION)" \
+            --notes-file "$state/notes.md" --prerelease --latest=false

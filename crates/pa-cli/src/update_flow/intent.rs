@@ -1,9 +1,7 @@
-//! The coordinator intent lock (spec §4 `Acquire`): `intent.json` under the
-//! per-socket update directory holds `{update_id, pid, process_start_id,
-//! heartbeat_at}` plus the `status_path` (the record a joining process
-//! tails). A live holder means `Join`; a recorded identity that is no
-//! longer alive is the only legal cross-process steal - a dead coordinator
-//! owns nothing.
+//! The coordinator intent lock (spec §4 `Acquire`): `intent.json` under
+//! the per-socket update directory holds the holder's identity plus the
+//! `status_path`. A live holder means `Join`; a dead identity is the only
+//! legal cross-process steal - a dead coordinator owns nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -27,14 +25,13 @@ pub fn socket_update_directory(agent_dir: &Path, socket_path: &str) -> PathBuf {
     socket_update_dir(agent_dir, &hash)
 }
 
-/// Contend for the coordinator lock (spec §4): create the socket dir, write
-/// the intent record with this process's identity. An existing record with
-/// a live identity is a `Join`; a dead or unparseable record is overwritten.
+/// Contend for the coordinator lock (spec §4): create the socket dir, write the
+/// intent record with this process's identity. A live identity is a `Join`;
+/// a dead or unparseable record is overwritten.
 ///
 /// # Errors
-/// Returns an error when the socket directory cannot be created, when the
-/// intent record cannot be written, or when the confirming re-read cannot
-/// parse the persisted record.
+/// Returns an error when the socket directory cannot be created, the intent
+/// record cannot be written, or the confirming re-read cannot parse.
 pub fn acquire(
     agent_dir: &Path,
     socket_path: &str,
@@ -59,8 +56,8 @@ pub fn acquire(
     }
     let intent = intent_record(update_id, u64::from(std::process::id()), status_path);
     write_atomically(&intent_path, &intent)?;
-    // Another coordinator may have stolen between the read and the write:
-    // re-read and let the winner be whoever's record is on disk.
+    // Another coordinator may have stolen between the read and the write: re-read and let the
+    // winner be whoever's record is on disk.
     let persisted = read_intent(&intent_path).context("reread the intent lock")?;
     if persisted.update_id != *update_id {
         let join_path = persisted
@@ -76,8 +73,7 @@ pub fn acquire(
 }
 
 /// Hand the lock to the spawned coordinator: rewrite the intent record with
-/// the child's identity (it is alive by construction; if it dies, the next
-/// `Acquire` steals the dead record).
+/// the child's identity (if it dies, the next `Acquire` steals the record).
 ///
 /// # Errors
 /// Returns an error when the intent record cannot be rewritten.
@@ -109,9 +105,8 @@ pub fn release(agent_dir: &Path, socket_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// The status path this socket's coordinator writes (spec §7: one
-/// `status.json` per socket directory; the intent record carries it so a
-/// joining process can tail it).
+/// The status path this socket's coordinator writes (spec §7: one `status.json`
+/// per socket directory, so a joining process can tail it).
 #[must_use]
 pub fn status_path_for(agent_dir: &Path, socket_path: &str) -> PathBuf {
     update_status_path(&socket_update_directory(agent_dir, socket_path))
@@ -121,9 +116,8 @@ fn default_status_path(socket_dir: &Path) -> PathBuf {
     update_status_path(socket_dir)
 }
 
-/// One intent record: the holder's identity plus the `status_path` a
-/// joining process tails (the spec's intent schema with the status coupling
-/// in the `rest` map).
+/// One intent record: the holder's identity plus the `status_path` a joining
+/// process tails (the spec's schema, the coupling in the `rest` map).
 fn intent_record(update_id: &UpdateId, pid: u64, status_path: &Path) -> UpdateIntent {
     let mut rest = serde_json::Map::new();
     rest.insert(
@@ -194,13 +188,11 @@ mod tests {
         let update_id = UpdateId::from("u1".to_string());
         let status = status_path_for(agent_dir, "/tmp/s.sock");
 
-        // First acquisition wins.
         match acquire(agent_dir, "/tmp/s.sock", &update_id, &status).unwrap() {
             AcquireOutcome::Acquired => {}
             AcquireOutcome::Join { .. } => panic!("an empty socket dir must acquire"),
         }
-        // A second acquisition with this process still alive joins: the
-        // holder is this very process.
+        // A second acquisition with this process still alive joins.
         let joined = acquire(
             agent_dir,
             "/tmp/s.sock",
@@ -211,7 +203,6 @@ mod tests {
             AcquireOutcome::Join { status_path } => assert_eq!(status_path, status),
             AcquireOutcome::Acquired => panic!("a live holder must be joined, not stolen"),
         }
-        // Release, then a fresh acquisition wins again.
         release(agent_dir, "/tmp/s.sock").unwrap();
         match acquire(agent_dir, "/tmp/s.sock", &update_id, &status).unwrap() {
             AcquireOutcome::Acquired => {}
@@ -225,8 +216,8 @@ mod tests {
         let agent_dir = dir.path();
         let socket_dir = socket_update_directory(agent_dir, "/tmp/s.sock");
         std::fs::create_dir_all(&socket_dir).unwrap();
-        // A record of a process that cannot exist (pid recycling cannot
-        // produce this start id): the steal is the documented one.
+        // A record of a process that cannot exist (pid recycling cannot produce this start id): the
+        // steal is the documented one.
         let dead = UpdateIntent {
             update_id: UpdateId::from("dead".to_string()),
             pid: 4_000_000,

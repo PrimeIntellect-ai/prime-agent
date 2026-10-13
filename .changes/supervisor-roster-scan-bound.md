@@ -1,0 +1,1 @@
+- Listing agents (CLI list, resume preflight, the agent roster) and spawning a named session no longer stall behind one unresponsive session worker: resident summaries are read concurrently under a short per-worker bound that degrades an unreachable worker to its recovering row, and the saved-session and scheduled-jobs roster scans moved off the supervisor's runtime threads.

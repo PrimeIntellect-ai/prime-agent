@@ -1,12 +1,7 @@
-//! The coordinator FSM states and the legal transition table.
-//!
-//! The update coordinator drives the states of spec §4. Every state is written
-//! to the status file before acting, so the transition table here is the
-//! single legality reference shared by the coordinator driver (pa-cli), the
-//! status tailing of a joined coordinator, and the tests of the watchdog
-//! paths (spec §9): a state may only move to one of its successors, and the
-//! terminal set (`Complete`, `Join`, `Skipped`, `Aborted`, `Failed`) accepts
-//! no further transitions.
+//! The coordinator FSM states and the legal transition table (spec §4): the single legality
+//! reference shared by the coordinator driver, the status tailing of a joined coordinator, and the
+//! watchdog tests - a state may only move to one of its successors, and the terminal set accepts no
+//! further transitions.
 
 use serde::{Deserialize, Serialize};
 
@@ -83,9 +78,8 @@ impl UpdateState {
     }
 }
 
-/// Whether the coordinator FSM may move `from` to `to` (spec §4). Every
-/// out-of-table move is a driver bug: the watchdog table (spec §9) only ever
-/// produces the successors listed here.
+/// Whether the coordinator FSM may move `from` to `to` (spec §4); every
+/// out-of-table move is a driver bug.
 #[must_use]
 pub fn update_transition_allowed(from: UpdateState, to: UpdateState) -> bool {
     from.successors().contains(&to)
@@ -95,8 +89,8 @@ pub fn update_transition_allowed(from: UpdateState, to: UpdateState) -> bool {
 mod tests {
     use super::*;
 
-    /// The spec §4 state diagram, spelled out as an explicit adjacency list:
-    /// every listed edge must be legal and every other pair must not be.
+    /// The spec §4 state diagram as an explicit adjacency list: every
+    /// listed edge must be legal, every other pair not.
     const SPEC_EDGES: &[(UpdateState, UpdateState)] = &[
         (UpdateState::Acquire, UpdateState::Join),
         (UpdateState::Acquire, UpdateState::Planning),
@@ -178,9 +172,7 @@ mod tests {
 
     #[test]
     fn every_state_has_an_outgoing_or_terminal_role() {
-        // Every non-terminal state must have at least one successor; terminal
-        // states have none. This pins the table against an accidentally
-        // wedged state (invariant I1: no state without a watchdog exit).
+        // Pins the table against a wedged state (invariant I1: no state without a watchdog exit).
         for state in ALL {
             if state.is_terminal() {
                 assert!(state.successors().is_empty());

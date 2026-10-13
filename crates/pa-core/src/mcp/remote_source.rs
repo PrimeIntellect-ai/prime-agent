@@ -1,19 +1,7 @@
-//! The remote plugins-catalog snapshot source for resolution: the validated
-//! last-good disk cache (written by the fetch lane at
-//! `<agent-dir>/mcp-service-catalog.v2.json`), else the packaged bundled
-//! snapshot (`<package-dir>/mcp-services.bundled.json`), else nothing (the
-//! compiled linear/notion fallback still resolves). Read-only: fetching,
-//! cadence, and cache writing live in the fetch lane; this module only
-//! parses what is already on disk, fail-closed.
-//!
-//! The cache read mirrors TS `CatalogCache.get` over the fetch lane's disk
-//! form (`{url, scope, fetchedAt, etag?, payload}`): the snapshot must
-//! belong to THIS catalog url and the public scope, `fetchedAt` must be a
-//! finite number, and it serves at ANY age — last-good, because a failed
-//! refresh keeps yesterday's truth instead of inventing absence.
-//! Historical cache locations (beside the agent files, and the
-//! intermediate `catalog/` directory) stay readable so an upgrade never
-//! costs a cold fetch.
+//! The remote plugins-catalog snapshot source for resolution: the validated last-good
+//! disk cache the fetch lane writes, else the packaged bundled snapshot, else nothing.
+//! Read-only and fail-closed; the snapshot must belong to THIS catalog url and public
+//! scope and serves at ANY age (last-good).
 
 use std::path::{Path, PathBuf};
 
@@ -23,16 +11,12 @@ use super::catalog_schema::{parse_plugins_catalog, PluginsCatalog};
 use pa_models::cache::PUBLIC_SCOPE;
 use pa_models::fetch::MCP_SERVICE_CATALOG_URL;
 
-/// The validated last-good disk cache the fetch lane (pa-models) writes;
-/// the plugins side only reads it — fetching, cadence, and the cache write
-/// live with the fetch layer.
+/// The validated last-good disk cache the fetch lane writes; the plugins
+/// side only reads it.
 pub const PLUGINS_CACHE_FILE: &str = "mcp-service-catalog.v2.json";
 
-/// The snapshot envelope the fetch lane writes atomically (pa-models
-/// `SnapshotFile`, the TS `CatalogCache` disk `Snapshot<T>`): `url`,
-/// `scope`, `fetchedAt`, and the catalog document as `payload`. Keys the
-/// reader does not need (the refresh `etag`) are tolerated, like the TS
-/// reader.
+/// The snapshot envelope the fetch lane writes atomically: `url`, `scope`, `fetchedAt`, and the
+/// catalog document as `payload`.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SnapshotEnvelope {
@@ -42,10 +26,8 @@ struct SnapshotEnvelope {
     payload: serde_json::Value,
 }
 
-/// The validated catalog inside one snapshot file, when the file is a
-/// well-formed snapshot of THIS catalog: the url and scope must match and
-/// the payload must parse as a plugins catalog. Any age serves
-/// (last-good); a snapshot for anything else is not this catalog's truth.
+/// The validated catalog inside one snapshot file, when the file is a well-formed snapshot of THIS
+/// catalog: the url and scope must match and the payload must parse.
 fn snapshot_catalog(bytes: &[u8]) -> Option<PluginsCatalog> {
     let envelope: SnapshotEnvelope = serde_json::from_slice(bytes).ok()?;
     if envelope.url != MCP_SERVICE_CATALOG_URL
@@ -58,9 +40,8 @@ fn snapshot_catalog(bytes: &[u8]) -> Option<PluginsCatalog> {
     parse_plugins_catalog(&payload).ok()
 }
 
-/// The cache file candidates in TS order: the primary path inside the
-/// agent dir first, then the historical locations beside the agent files
-/// and in the intermediate `catalog/` directory (read-only fallbacks).
+/// The cache file candidates in TS order: the primary path inside the agent dir first, then the
+/// historical locations beside the agent files and in the intermediate `catalog/` directory.
 fn cache_candidates(agent_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = vec![agent_dir.join(PLUGINS_CACHE_FILE)];
     if let Some(parent) = agent_dir.parent() {
@@ -70,17 +51,13 @@ fn cache_candidates(agent_dir: &Path) -> Vec<PathBuf> {
     candidates
 }
 
-/// Read the best available remote snapshot (the validated disk cache, then
-/// the bundled asset). Every parse error yields `None` — the caller keeps
-/// the compiled built-ins and never surfaces the error into a session.
+/// Read the best available remote snapshot (the validated disk cache, then the bundled asset).
+/// Every parse error yields `None`.
 pub fn remote_plugins_snapshot(agent_dir: &Path) -> Option<PluginsCatalog> {
     cache_plugins_snapshot(agent_dir).or_else(bundled_plugins_snapshot)
 }
 
-/// The validated last-good disk cache: the primary path inside the agent
-/// dir, then the historical locations. The packaged bundle is deliberately
-/// NOT part of this read — the cache alone answers whether the fetch
-/// lane's truth is on disk.
+/// The validated last-good disk cache: The packaged bundle is deliberately NOT part of this read.
 fn cache_plugins_snapshot(agent_dir: &Path) -> Option<PluginsCatalog> {
     for path in cache_candidates(agent_dir) {
         if let Ok(bytes) = std::fs::read(&path) {
@@ -93,9 +70,8 @@ fn cache_plugins_snapshot(agent_dir: &Path) -> Option<PluginsCatalog> {
     None
 }
 
-/// The packaged bundled snapshot (`PI_PACKAGE_DIR` override included): the
-/// build-time asset the packer ships beside the executable, read through
-/// the fetch lane's asset reader (same package-dir resolution).
+/// The packaged bundled snapshot (`PI_PACKAGE_DIR` override included): the build-time asset the
+/// packer ships beside the executable, read through the fetch lane's asset reader.
 pub fn bundled_plugins_snapshot() -> Option<PluginsCatalog> {
     let assets = pa_models::bundled::BundledAssets::at_package_root();
     let raw = assets.read_mcp_services()?;
@@ -135,11 +111,8 @@ mod tests {
         })
     }
 
-    /// The fetch lane's disk form serves: the `~/.prime/agent/
-    /// mcp-service-catalog.v2.json` the fetch writes is this snapshot
-    /// envelope, NOT the bare catalog document — a reader that expects
-    /// the bare shape finds nothing and every installed service pins as
-    /// "catalog source unavailable".
+    /// The fetch lane's disk form serves: the file the fetch writes is this snapshot envelope, NOT
+    /// the bare catalog document.
     #[test]
     fn snapshot_envelope_serves() {
         let bytes = snapshot_file(&serde_json::json!([cache_only_entry()]));
@@ -150,9 +123,8 @@ mod tests {
             .any(|entry| entry.server == "cache-only"));
     }
 
-    /// Last-good: TS `CatalogCache.get` serves a snapshot at ANY age — the
-    /// refresh cadence belongs to the fetch lane, and an old snapshot is
-    /// yesterday's truth, never invented absence.
+    /// Last-good: TS `CatalogCache.get` serves a snapshot at ANY age — the refresh cadence belongs
+    /// to the fetch lane.
     #[test]
     fn snapshot_serves_at_any_age() {
         let ancient = serde_json::json!({
@@ -169,11 +141,8 @@ mod tests {
         assert!(snapshot_catalog(&bytes).is_some());
     }
 
-    /// A snapshot for another url or scope, a document that is not a
-    /// snapshot at all (a bare catalog file dropped at the cache path),
-    /// a non-number `fetchedAt`, or a payload that is not a catalog:
-    /// never this catalog's truth — the reader falls to the next
-    /// candidate and the bundled asset.
+    /// A snapshot for another url or scope, a bare catalog document, a non-number `fetchedAt`, or a
+    /// bad payload: never this catalog's truth.
     #[test]
     fn foreign_snapshots_never_serve() {
         let entries = serde_json::json!([cache_only_entry()]);
@@ -211,17 +180,15 @@ mod tests {
         assert!(snapshot_catalog(b"not json").is_none());
     }
 
-    /// The primary path wins; only when it is unusable do the historical
-    /// locations beside the agent files and under `catalog/` serve (an
-    /// upgrade never costs a cold fetch).
+    /// The primary path wins; only when it is unusable do the historical locations beside the agent
+    /// files and under `catalog/` serve.
     #[test]
     fn historical_locations_read_after_the_primary() {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).expect("agent dir");
-        // No cache anywhere: nothing serves from disk, so the resolution
-        // sees no remote slice (the compiled built-ins still resolve, and
-        // the packaged bundle is a separate fallback).
+        // No cache anywhere: nothing serves from disk (the compiled
+        // built-ins still resolve; the bundle is a separate fallback).
         assert!(cache_plugins_snapshot(&agent).is_none());
 
         // A snapshot at the historical location beside the agent files serves.

@@ -1,13 +1,7 @@
-//! Package manager subsystem: install/remove/list/update of `npm:`, git, and
-//! local-dir package sources against the settings store, plus the
-//! configured-npm/git child-process flows.
-//!
-//! Session resource resolution lives here as well: `PackageManager::resolve`
-//! produces the ranked skill/prompt/theme/extension paths sessions consume.
-//!
-//! Non-goals: the extension
-//! *runner* (loading/executing extension modules) and Prime Agent
-//! self-updates.
+//! Package manager subsystem: install/remove/list/update of `npm:`, git,
+//! and local-dir package sources against the settings store, plus the
+//! configured-npm/git child-process flows and session resource resolution.
+//! Non-goals: loading/executing session-resource code and self-updates.
 
 mod git;
 mod manager;
@@ -26,8 +20,8 @@ pub use manager::{
     ProgressAction, ProgressEvent, ProgressEventKind, UserOrProject,
 };
 pub use resolve::{
-    MetadataSource, MissingSourceAction, PathMetadata, ResolveExtensionOptions, ResolvedPaths,
-    ResolvedResource, ResourceOrigin, ResourceType,
+    MetadataSource, MissingSourceAction, PathMetadata, ResolvedPaths, ResolvedResource,
+    ResourceOrigin, ResourceType,
 };
 pub use source::{parse_git_url, GitSource, LocalSource, NpmSource, ParsedSource, SourceScope};
 
@@ -49,7 +43,8 @@ pub(crate) fn is_offline_mode_enabled() -> bool {
 
 /// The package directory: `PI_PACKAGE_DIR` wins (matching the TS
 /// `getPackageDir` override), then the directory of the executable (the
-/// packaged bun-binary layout).
+/// packaged bun-binary layout), through [`exe_dir_of`] so a launcher
+/// symlink resolves.
 pub(crate) fn package_dir() -> PathBuf {
     if let Ok(env_dir) = std::env::var("PI_PACKAGE_DIR") {
         if !env_dir.is_empty() {
@@ -58,8 +53,25 @@ pub(crate) fn package_dir() -> PathBuf {
     }
     std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .and_then(|exe| exe_dir_of(&exe))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// The directory beside the binary's real file: a launcher symlink (the
+/// Homebrew formula's `bin` link) must resolve, or the payload shipped
+/// beside the real binary is invisible; a plain path stays untouched.
+/// The managed installer's launcher (`update::install::install_root_of`)
+/// resolves its launch the same way.
+#[must_use]
+pub fn exe_dir_of(exe: &std::path::Path) -> Option<PathBuf> {
+    let is_symlink =
+        std::fs::symlink_metadata(exe).is_ok_and(|metadata| metadata.file_type().is_symlink());
+    let resolved = if is_symlink {
+        exe.canonicalize().ok()?
+    } else {
+        exe.to_path_buf()
+    };
+    resolved.parent().map(std::path::Path::to_path_buf)
 }
 
 /// The bundled docs directory (TS `getDocsPath`): `<package dir>/docs`.
@@ -82,10 +94,9 @@ fn home_dir() -> PathBuf {
     pa_types::platform::home_dir().unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// The workspace root at compile time (source-checkout layout): pa-core
-/// lives at `<root>/crates/pa-core`.
-/// Compile-time workspace root (`<root>/crates/pa-core` ancestors), shared by
-/// every package-dir resolution that falls back to the source-checkout layout.
+/// The compile-time workspace root (source-checkout layout): pa-core lives
+/// at `<root>/crates/pa-core`; every package-dir resolution that falls back
+/// to the source-checkout layout shares it.
 pub(crate) fn source_checkout_root() -> Option<&'static std::path::Path> {
     static ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     ROOT.get_or_init(|| {
@@ -115,9 +126,8 @@ pub(crate) fn get_bundled_skills_dir() -> PathBuf {
     packaged
 }
 
-/// Stable temporary directory for resolve-only package installs:
-/// `/tmp/pi-extensions/<prefix>/<hash8>/<suffix?>` (the hash keys on
-/// prefix+suffix so the same source always maps to one checkout).
+/// Stable temporary directory for resolve-only package installs (the hash
+/// keys on prefix+suffix so the same source always maps to one checkout).
 pub(crate) fn temporary_dir(prefix: &str, suffix: Option<&str>) -> PathBuf {
     use sha2::{Digest, Sha256};
 

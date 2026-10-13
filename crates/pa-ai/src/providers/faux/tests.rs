@@ -307,8 +307,8 @@ async fn parses_the_repeat_last_response_script_key_into_the_registration() {
     assert_eq!(registration.call_count(), 2);
     registration.unregister();
 
-    // The knob stays off unless the script opts in: the finite queue and
-    // its exhaustion error are the response-budget contract.
+    // The knob stays off unless the script opts in: the finite queue and its exhaustion error are
+    // the response-budget contract.
     let parsed = script::parse_faux_script(&serde_json::json!({ "responses": ["only"] }))
         .expect("script parses");
     assert!(!parsed.repeat_last_response);
@@ -330,8 +330,8 @@ async fn repeat_last_response_switched_on_after_serving_replays_the_last_step() 
     let last = complete(&registration.get_model(), &context, None)
         .await
         .unwrap();
-    // The queue is dry and the mode was off while it drained; switching
-    // repeat-last on now still has the last served step recorded.
+    // The queue is dry and the mode was off while it drained; switching repeat-last on now still
+    // has the last served step recorded.
     registration.set_repeat_last_response(true);
     let replay = complete(&registration.get_model(), &context, None)
         .await
@@ -1139,10 +1139,9 @@ async fn supports_aborting_mid_toolcall_stream_when_paced() {
 
 #[tokio::test]
 async fn unregisters_the_provider() {
-    // No registry reset here: clearing the process-wide registry races with
-    // the other faux tests' registrations. The registration's api id is
-    // unique (`random_id`) and `unregister` removes by source id, so the
-    // lookup below is deterministic without nuking parallel tests.
+    // No registry reset here: clearing the process-wide registry races with the other faux tests'
+    // registrations. The registration's api id is unique (`random_id`) and `unregister` removes by
+    // source id, so the lookup below is deterministic without nuking parallel tests.
     let registration = register();
     registration.set_responses(vec![text_msg("hello")]);
     let api = registration.api.clone();

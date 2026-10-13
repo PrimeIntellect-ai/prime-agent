@@ -1,8 +1,6 @@
-//! The autonomous continuation driver: the policy seam between a session turn
-//! loop and the autonomous runtime state. After every settled assistant turn
-//! the engine asks the driver what follows — an injected continuation user
-//! message, a stop with its reason, or nothing (autonomous mode inactive).
-//! The engine never inspects autonomous state itself.
+//! The autonomous continuation driver: the policy seam between a session turn loop and the
+//! autonomous runtime state.the engine asks the driver what follows; it never inspects autonomous
+//! state itself.
 
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -14,7 +12,6 @@ use super::{
     AutonomousDecisionReason, AutonomousLimitReason, AutonomousRuntimeState,
 };
 
-/// Future returned by [`AutonomousDriver::after_turn`].
 pub type AutonomousFollowUpFuture<'a> =
     Pin<Box<dyn std::future::Future<Output = AutonomousFollowUp> + Send + 'a>>;
 
@@ -26,9 +23,8 @@ pub enum AutonomousFollowUp {
     Inactive,
     /// Inject this user-message text as the next turn.
     Continue { text: String },
-    /// Stop the run; the reason and a final status snapshot are surfaced
-    /// durably by the engine (boxed: the snapshot is much larger than the
-    /// other variants).
+    /// Stop the run; the reason and a final status snapshot are surfaced durably by
+    /// the engine.
     Stop {
         reason: AutonomousStopReason,
         status: Box<AgentAutonomousStatus>,
@@ -48,12 +44,9 @@ pub enum AutonomousStopReason {
 
 /// Per-turn policy for the autonomous continuation loop.
 ///
-/// The engine calls [`account_message`](AutonomousDriver::account_message)
-/// for every settled assistant message (whatever the stop reason except
-/// errors) and [`after_turn`](AutonomousDriver::after_turn) once per settled
-/// turn with its final assistant message. Implementations decide entirely
-/// through these two methods; the engine holds no autonomous-mode logic of
-/// its own.
+/// The engine calls [`AutonomousDriver::account_message`] for every settled
+/// assistant message and [`AutonomousDriver::after_turn`] once per settled turn;
+/// implementations decide entirely through these two methods.
 pub trait AutonomousDriver: Send + Sync {
     /// Account one settled assistant message into the run state.
     fn account_message(
@@ -77,7 +70,6 @@ pub struct ShellAutonomousDriver<R = ShellGateRunner> {
     gates: R,
 }
 
-/// The driver over real shell gates in the session cwd.
 impl ShellAutonomousDriver<ShellGateRunner> {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
@@ -295,7 +287,6 @@ mod tests {
             other => panic!("expected continuation, got {other:?}"),
         }
         assert_eq!(state.continuations_used, 1);
-        // Second turn: the continuation limit is now reached -> stop.
         match after_turn(&driver, &mut state).await {
             AutonomousFollowUp::Stop { reason, status } => {
                 assert_eq!(
@@ -366,9 +357,8 @@ mod tests {
             ..Default::default()
         }));
         let mut state = create_autonomous_runtime_state(Some(&config), None);
-        // Every consult runs the same failing gate over the same snapshot:
-        // attempt 1 fails, attempt 2 is held (workspace unchanged), and
-        // attempt 3 exhausts the window without any limit being hit.
+        // Every consult runs the same failing gate over the same snapshot: attempt 1
+        // fails, attempt 2 is held (workspace unchanged), attempt 3 exhausts the window.
         let driver = ShellAutonomousDriver::with_gate_runner(HeldRunner {
             snapshot: GitWorktreeSnapshot::default(),
         });
@@ -416,13 +406,11 @@ mod tests {
     async fn inactive_turns_and_error_turns_never_continue() {
         let mut state = create_autonomous_runtime_state(Some(&enabled_config(None)), None);
         let driver = driver_with(vec![]);
-        // Disabled state is inactive.
         state.enabled = false;
         assert_eq!(
             after_turn(&driver, &mut state).await,
             AutonomousFollowUp::Inactive
         );
-        // Error and aborted turns never trigger autonomous behavior.
         state.enabled = true;
         let driver_ref = ShellAutonomousDriver::with_gate_runner(ScriptedRunner::new(vec![]));
         for stop_reason in [StopReason::Error, StopReason::Aborted] {
@@ -443,7 +431,6 @@ mod tests {
         driver.account_message(&mut state, &message(StopReason::Stop, usage(100, 40)));
         assert_eq!(state.turns_used, 1);
         assert_eq!(state.tokens_used, 140);
-        // Error turns never count.
         driver.account_message(&mut state, &message(StopReason::Error, usage(100, 40)));
         assert_eq!(state.turns_used, 1);
         // Aborted turns still count, like the settled message it was.
@@ -451,12 +438,7 @@ mod tests {
         assert_eq!(state.turns_used, 2);
     }
 
-    /// A stop carries the reason and a status snapshot (the surfaces map
-    /// them: the headless exit contract, the ACP stop reason): the stop
-    /// itself never writes a row (probed against the TS binary — a
-    /// limit-ended print run's stream ends at `agent_end` with no
-    /// `autonomous_status` row, and the headless stderr contract carries
-    /// the stop).
+    /// A stop carries the reason and a status snapshot; the stop itself never writes a row.
     #[tokio::test]
     async fn stop_carries_reason_and_status_only() {
         let config = enabled_config(Some(AgentAutonomousGateConfig {

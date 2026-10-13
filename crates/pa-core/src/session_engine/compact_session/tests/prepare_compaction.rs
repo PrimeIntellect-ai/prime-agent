@@ -1,14 +1,12 @@
-//! Compact-session tests, the preparation family (moved with their
-//! concerns): the split-arm skip guard, the recency-anchor selection,
-//! the previous-summary file-block stripping, the update-mode
-//! boundary, and the fallback + guard arms — over raw session
-//! entries with explicit ids.
+//! Compact-session tests, the preparation family: the split-arm skip
+//! guard, the recency-anchor selection, the previous-summary
+//! file-block stripping, the update-mode boundary, and the fallback +
+//! guard arms — over raw session entries with explicit ids.
 use super::*;
 use pa_types::session::EntryBase;
 
-/// The split arm of the skip guard (TS `prepareCompaction`): a
-/// mid-turn cut with no history still has the turn prefix to
-/// summarize, so the compaction prepares instead of skipping.
+/// The split arm of the skip guard: a mid-turn cut with no history still has
+/// the turn prefix to summarize, so the compaction prepares.
 #[test]
 fn prepare_compaction_split_arm_counts_the_turn_prefix_as_content() {
     let tmp = tempfile::tempdir().unwrap();
@@ -51,9 +49,7 @@ fn prepare_compaction_split_arm_counts_the_turn_prefix_as_content() {
     let preparation = prepare_compaction(&entries, 10).expect("split compaction prepares");
     assert!(preparation.cut.is_split_turn);
     assert_eq!(preparation.cut.turn_start_index, Some(1));
-    // No prior compaction: no update-mode anchors.
     assert_eq!(preparation.previous_summary, None);
-    // A fresh small session with no cut history still skips.
     let mut small = SessionManager::in_memory(tmp.path());
     small.append_message(user("one small turn")).unwrap();
     let entries = small.get_all_entries().to_vec();
@@ -129,18 +125,14 @@ fn raw_assistant_text_entry(id: &str, text: &str) -> FileEntry {
     }
 }
 
-/// The recency anchor pins to the newest kept-tail assistant text (TS
-/// #2385 `extractRecentStateAnchor`): the newest-first scan means a
-/// direction flip fails this test (an older assistant sits in the
-/// same kept tail), thinking-only assistants skip (text blocks only),
-/// long text keeps its tail within the anchor budget, and a tail
-/// without assistant text carries no anchor — compaction entries are
-/// never candidates.
+/// The recency anchor pins to the newest kept-tail assistant text: a direction
+/// flip fails (an older assistant sits in the same kept tail), thinking-only
+/// assistants skip, long text tail-truncates, and a text-less tail carries none.
 #[test]
 fn prepare_compaction_anchors_on_the_newest_kept_tail_assistant_text() {
-    // 400-char texts (100 tokens at the chars/4 heuristic) keep the
-    // cuts deterministic: a 250-token keep budget cuts at the second
-    // entry, so the kept tail holds BOTH assistants.
+    // 400-char texts (100 tokens at the chars/4 heuristic) keep the cuts
+    // deterministic: a 250-token budget cuts at the second entry, so the
+    // kept tail holds BOTH assistants.
     let entries = vec![
         raw_user_entry("m0", &"0".repeat(400)),
         raw_assistant_text_entry("a1", &"older tail text ".repeat(25)),
@@ -213,8 +205,6 @@ fn prepare_compaction_anchors_on_the_newest_kept_tail_assistant_text() {
     assert_eq!(anchor.chars().count(), 2_000);
     assert_eq!(anchor, "z".repeat(2_000));
 
-    // A tail with no assistant text carries no anchor; the prior
-    // summary alone keeps the compaction runnable.
     let entries = vec![
         raw_user_entry("m0", &"0".repeat(400)),
         raw_compaction_entry("c1", "m0", "the prior summary"),
@@ -229,10 +219,8 @@ fn prepare_compaction_anchors_on_the_newest_kept_tail_assistant_text() {
     );
 }
 
-/// File-list blocks never reach the update prompt (TS #2385
-/// `stripFileListBlocks`): the stored summary's blocks strip before it
-/// becomes `previousSummary`, and a summary that contained only file
-/// blocks leaves no update anchor at all — the initial-prompt path.
+/// File-list blocks never reach the update prompt: the stored summary's blocks
+/// strip, and a file-blocks-only summary leaves no update anchor.
 #[test]
 fn prepare_compaction_strips_file_blocks_from_the_previous_summary() {
     let entries = vec![
@@ -250,7 +238,6 @@ fn prepare_compaction_strips_file_blocks_from_the_previous_summary() {
         preparation.previous_summary,
         Some("the prior summary".to_string())
     );
-    // Only-file-block summaries drop entirely.
     let entries = vec![
         raw_user_entry("m0", "turn zero"),
         raw_compaction_entry(
@@ -265,12 +252,8 @@ fn prepare_compaction_strips_file_blocks_from_the_previous_summary() {
     assert_eq!(preparation.previous_summary, None);
 }
 
-/// The iterative update mode activates from a prior compaction (TS
-/// `prepareCompaction`): the prior summary becomes `previousSummary`
-/// and the prior compaction's first kept entry becomes the
-/// summarization boundary — the cut walks only the retained
-/// conversation, and the new history covers the messages since the
-/// boundary, never the already-summarized prefix.
+/// The iterative update mode activates from a prior compaction: the prior
+/// summary becomes `previousSummary` and its first kept entry the boundary.
 #[test]
 fn prepare_compaction_update_mode_anchors_on_the_prior_compaction() {
     let entries = vec![
@@ -282,17 +265,15 @@ fn prepare_compaction_update_mode_anchors_on_the_prior_compaction() {
         raw_user_entry("m4", "turn four"),
     ];
     let preparation = prepare_compaction(&entries, 2).expect("update compaction prepares");
-    // The boundary is the prior compaction's first kept entry.
     assert_eq!(preparation.boundary_start, 1);
     assert_eq!(
         preparation.previous_summary,
         Some("the prior summary".to_string())
     );
-    // The cut walks only the retained region (the budget counts the
-    // post-boundary messages, so it lands at the last small turn).
+    // The budget counts the post-boundary messages, so the cut
+    // lands at the last small turn.
     assert_eq!(preparation.cut.first_kept_entry_index, 5);
     assert!(!preparation.cut.is_split_turn);
-    // Without a prior compaction there are no update anchors.
     let fresh = vec![
         raw_user_entry("m0", "turn zero"),
         raw_user_entry("m1", "turn one"),
@@ -302,13 +283,10 @@ fn prepare_compaction_update_mode_anchors_on_the_prior_compaction() {
     assert_eq!(preparation.boundary_start, 0);
 }
 
-/// The boundary fallback (TS `boundaryStart = prevCompactionIndex + 1`
-/// when the retained entry is gone — session migration) and the guard
-/// (TS: `!previousSummary` — a prior summary alone is enough to run).
+/// The boundary fallback (the entry after the compaction when the retained
+/// entry is gone) and the guard (a prior summary alone is enough to run).
 #[test]
 fn prepare_compaction_boundary_fallback_and_prior_summary_guard() {
-    // The retained entry id no longer exists: the boundary falls back
-    // to the entry after the compaction.
     let entries = vec![
         raw_compaction_entry("c1", "gone-entry", "the prior summary"),
         raw_user_entry("m1", "turn one"),
@@ -319,12 +297,8 @@ fn prepare_compaction_boundary_fallback_and_prior_summary_guard() {
         preparation.previous_summary,
         Some("the prior summary".to_string())
     );
-    // A huge keep budget leaves nothing new to summarize, but the
-    // prior summary alone keeps the compaction runnable (TS: the skip
-    // guard fires only without a previousSummary).
     let preparation = prepare_compaction(&entries, 10_000).expect("prior summary runs");
     assert_eq!(preparation.cut.first_kept_entry_index, 1);
-    // The same shape WITHOUT a prior compaction skips as too short.
     let fresh = vec![raw_user_entry("m1", "turn one")];
     assert_eq!(
         prepare_compaction(&fresh, 10_000),

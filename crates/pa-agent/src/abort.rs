@@ -1,31 +1,27 @@
-//! Abort plumbing: a cloneable `AbortSignal` mirroring the TS `AbortSignal`, plus
-//! the abort-race helpers the agent loop uses on every await point.
+//! Abort plumbing: a cloneable `AbortSignal`, plus the abort-race helpers
+//! the agent loop uses on every await point.
 
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::watch;
 
-/// Error type used for every abort path. Its message matches the TS reference
-/// (`ABORT_ERROR_MESSAGE`), so surfaced text stays identical.
+/// Error type used for every abort path; its message matches the TS
+/// reference (`ABORT_ERROR_MESSAGE`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("Request was aborted")]
 pub struct AbortedError;
 
-/// Message carried by abort errors, mirroring `ABORT_ERROR_MESSAGE`.
 pub const ABORT_ERROR_MESSAGE: &str = "Request was aborted";
 
-/// Build an `anyhow` abort error.
 #[must_use]
 pub fn aborted_error() -> anyhow::Error {
     anyhow::Error::new(AbortedError)
 }
 
-/// True when the error chain contains [`AbortedError`].
-///
-/// The TS reference also treats any `Error` named `AbortError` or with the exact
-/// message "Request was aborted" as an abort. Provider-level aborts never throw in
-/// this port (they arrive as terminal stream events), so the typed marker is the
-/// single abort signal on the error path.
+/// The TS reference also treats any `Error` named `AbortError` or with the
+/// exact message "Request was aborted" as an abort. Provider-level aborts
+/// never throw in this port (they arrive as terminal stream events), so the
+/// typed marker is the single abort signal on the error path.
 #[must_use]
 pub fn is_abort_error(err: &anyhow::Error) -> bool {
     err.downcast_ref::<AbortedError>().is_some()
@@ -38,8 +34,8 @@ struct SignalInner {
 
 /// Cloneable handle that observes an [`AbortController`].
 ///
-/// The TS `AbortSignal` allows registering abort listeners; here observers await
-/// [`AbortSignal::aborted`], which resolves exactly once when aborted.
+/// The TS `AbortSignal` registers abort listeners; here observers await
+/// [`AbortSignal::aborted`].
 #[derive(Clone)]
 pub struct AbortSignal {
     inner: Arc<SignalInner>,
@@ -61,13 +57,11 @@ impl std::fmt::Debug for AbortSignal {
 }
 
 impl AbortSignal {
-    /// A signal that never aborts.
     #[must_use]
     pub fn never() -> Self {
         Self::default()
     }
 
-    /// Whether the controller has aborted.
     #[must_use]
     pub fn is_aborted(&self) -> bool {
         *self.rx.borrow()
@@ -98,7 +92,7 @@ impl AbortSignal {
     }
 }
 
-/// Creates and owns an [`AbortSignal`], mirroring the TS `AbortController`.
+/// Creates and owns an [`AbortSignal`].
 #[derive(Debug, Clone)]
 pub struct AbortController {
     signal: AbortSignal,
@@ -119,7 +113,6 @@ impl AbortController {
         }
     }
 
-    /// The signal owned by this controller.
     #[must_use]
     pub fn signal(&self) -> AbortSignal {
         self.signal.clone()
@@ -130,23 +123,18 @@ impl AbortController {
         let _ = self.signal.sender().send(true);
     }
 
-    /// Whether this controller has aborted.
     #[must_use]
     pub fn is_aborted(&self) -> bool {
         self.signal.is_aborted()
     }
 }
 
-/// Reject with an abort error as soon as `signal` aborts; otherwise resolve with
-/// the future's output.
-///
-/// Mirrors the TS `raceWithAbort`: when the signal is already aborted, the
-/// operation future is dropped and the abort error is returned immediately.
+/// Reject with an abort error as soon as `signal` aborts; otherwise resolve
+/// with the future's output.
 ///
 /// # Errors
 ///
-/// Returns the abort error (`AbortedError`) if `signal` is already aborted when
-/// called, or if it aborts before `operation` completes.
+/// Returns `AbortedError` if `signal` is already aborted, or aborts before `operation` completes.
 pub async fn race_with_abort<T, F>(operation: F, signal: &AbortSignal) -> anyhow::Result<T>
 where
     F: Future<Output = T>,
@@ -161,8 +149,6 @@ where
     }
 }
 
-/// Return an error if the signal is already aborted (`throwIfAborted` in TS).
-///
 /// # Errors
 ///
 /// Returns the abort error (`AbortedError`) if `signal` is already aborted.
@@ -174,13 +160,11 @@ pub fn throw_if_aborted(signal: &AbortSignal) -> anyhow::Result<()> {
     }
 }
 
-/// `throwIfAborted` with an optional signal (the TS loop calls it with
-/// `signal | undefined`).
+/// `throwIfAborted` with an optional signal (the TS loop calls it with `signal | undefined`).
 ///
 /// # Errors
 ///
-/// Returns the abort error (`AbortedError`) if the provided signal is already
-/// aborted; returns `Ok(())` when the signal is `None` or not aborted.
+/// Returns `AbortedError` if the provided signal is already aborted.
 pub fn throw_if_aborted_signal(signal: Option<&AbortSignal>) -> anyhow::Result<()> {
     match signal {
         Some(signal) => throw_if_aborted(signal),

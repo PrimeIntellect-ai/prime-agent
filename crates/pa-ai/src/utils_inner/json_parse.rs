@@ -1,9 +1,7 @@
-//! JSON parsing with repair and partial (streaming) tolerance.
-//! Ported from `packages/ai/src/utils/json-parse.ts`. The partial parser
-//! reproduces the semantics of the npm `partial-json` package used by the TS
-//! reference: return the longest usable prefix of truncated JSON (truncated
-//! strings keep their content, truncated containers are closed, incomplete
-//! keys/values are dropped), and fail only on genuinely invalid input.
+//! JSON parsing with repair and partial (streaming) tolerance. The partial parser reproduces the
+//! npm `partial-json` semantics used by the TS reference: the longest usable prefix of truncated
+//! JSON (truncated strings keep their content, truncated containers are closed, incomplete
+//! keys/values are dropped), failing only on genuinely invalid input.
 
 use std::fmt::Write as _;
 
@@ -100,9 +98,8 @@ pub fn repair_json(json: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns the original parse error when the text stays invalid after repair
-/// (including when the repair leaves it unchanged), otherwise the parse error
-/// of the repaired text.
+/// Returns the original parse error when the text stays invalid after repair (including when the
+/// repair leaves it unchanged), otherwise the parse error of the repaired text.
 pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
     match serde_json::from_str::<Value>(json) {
         Ok(value) => Ok(value),
@@ -121,20 +118,17 @@ pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
 pub enum ParseError {
     /// Genuinely invalid JSON (not just truncated).
     Invalid,
-    /// Input ended in the middle of a literal or container member: the member
-    /// is unusable but the enclosing prefix is recoverable.
+    /// Input ended in the middle of a literal or container member: the member is unusable but the
+    /// enclosing prefix is recoverable.
     Truncated,
 }
 
-/// Tolerant partial-JSON parser. `Ok` means a usable value was recovered
-/// (possibly a partial one); `Err(ParseError::Invalid)` means the input is not
-/// parseable JSON even with truncation tolerance.
+/// Tolerant partial-JSON parser. `Ok` means a usable value was recovered (possibly a partial one);
+/// `Err(ParseError::Invalid)` means the input is not parseable JSON even with truncation tolerance.
 ///
 /// # Errors
 ///
-/// Returns `Err(ParseError::Invalid)` when the input is not usable even with
-/// truncation tolerance: a truncated top-level literal, malformed input, or
-/// trailing non-whitespace after the recovered value.
+/// Returns `Err(ParseError::Invalid)` when the input is not usable even with truncation tolerance.
 pub fn parse_partial_json(input: &str) -> Result<Value, ParseError> {
     let mut parser = PartialParser {
         chars: input.chars().collect(),
@@ -196,8 +190,8 @@ impl PartialParser {
         for expected in literal_chars {
             match self.bump() {
                 Some(actual) if actual == expected => {}
-                // Truncated literal at EOF: the value is dropped, but the
-                // enclosing container prefix remains usable.
+                // Truncated literal at EOF: the value is dropped, but the enclosing container
+                // prefix remains usable.
                 None => return Err(ParseError::Truncated),
                 Some(_) => return Err(ParseError::Invalid),
             }
@@ -212,7 +206,6 @@ impl PartialParser {
         }
         let text: String = self.chars[start..self.pos].iter().collect();
         let mut candidate = text.as_str();
-        // Take the longest prefix that is a valid JSON number.
         while !candidate.is_empty() {
             if serde_json::from_str::<f64>(candidate).is_ok() {
                 break;
@@ -231,17 +224,15 @@ impl PartialParser {
             return Err(ParseError::Invalid);
         }
         let number = serde_json::from_str::<f64>(candidate).map_err(|_| ParseError::Invalid)?;
-        // When the number was truncated mid-literal ("12.", "1e"), consume the
-        // whole fragment so the trailing remainder is treated as truncation
-        // rather than invalid trailing input.
+        // When the number was truncated mid-literal ("12.", "1e"), consume the whole fragment so
+        // the trailing remainder is treated as truncation rather than invalid trailing input.
         self.pos = if candidate.len() == text.len() {
             start + candidate.len()
         } else {
             start + text.len()
         };
-        // Keep integers as integers so partial parses compare equal to the
-        // strict-JSON representation (the npm partial-json package produces
-        // JS numbers, which are indistinguishable between 12 and 12.0).
+        // Keep integers as integers so partial parses compare equal to the strict-JSON
+        // representation (JS numbers are indistinguishable between 12 and 12.0).
         if !candidate.contains('.') && !candidate.contains('e') && !candidate.contains('E') {
             if let Ok(int) = candidate.parse::<i64>() {
                 return Ok(Value::Number(int.into()));
@@ -252,10 +243,9 @@ impl PartialParser {
         ))
     }
 
-    /// Parse a string. Returns the content plus whether the closing quote was
-    /// seen (false when EOF truncated the string).
+    /// Parse a string. Returns the content plus whether the closing quote was seen (false when EOF
+    /// truncated the string).
     fn parse_string(&mut self) -> Result<(String, bool), ParseError> {
-        // Consume opening quote.
         self.bump();
         let mut out = String::new();
         loop {
@@ -418,9 +408,8 @@ impl PartialParser {
                 Some(_) => return Err(ParseError::Invalid),
             }
 
-            // Key: on EOF inside the key string the pair is dropped.
-            // parse_string never fails on truncation, only on invalid
-            // escape sequences inside the key.
+            // Key: on EOF inside the key string the pair is dropped. parse_string never fails on
+            // truncation, only on invalid escape sequences inside the key.
             let Ok((key, key_closed)) = self.parse_string() else {
                 return Err(ParseError::Invalid);
             };
@@ -463,8 +452,8 @@ impl PartialParser {
     }
 }
 
-/// Attempts to parse potentially incomplete JSON during streaming.
-/// Always returns a valid object, even if the JSON is incomplete.
+/// Attempts to parse potentially incomplete JSON during streaming. Always returns a valid object,
+/// even if the JSON is incomplete.
 #[must_use]
 pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
     let Some(partial_json) = partial_json else {
@@ -489,18 +478,15 @@ pub fn parse_streaming_json(partial_json: Option<&str>) -> Value {
 
 const EAGER_PARSE_LENGTH: usize = 8 * 1024;
 
-/// Streamed tool-call argument JSON with a best-effort parsed preview (port of
-/// the TS `StreamingJsonAccumulator`).
+/// Streamed tool-call argument JSON with a best-effort parsed preview.
 ///
-/// Re-parsing the whole buffer on every delta is quadratic in the argument
-/// size, so past `EAGER_PARSE_LENGTH` the preview is refreshed only after the
-/// buffer grew by 1/16 since the last parse, keeping total parse work linear.
-/// Callers still parse `text` with [`parse_streaming_json`] when the block
-/// ends.
+/// Re-parsing the whole buffer on every delta is quadratic, so past `EAGER_PARSE_LENGTH` the
+/// preview is refreshed only after the buffer grew by 1/16. Callers still parse `text` with
+/// [`parse_streaming_json`] when the block ends.
 pub struct StreamingJsonAccumulator {
     text: String,
-    /// Buffer length in UTF-16 code units, the metric of the TS reference
-    /// (`String::length`); maintained incrementally so `append` stays O(delta).
+    /// Buffer length in UTF-16 code units, the metric of the TS reference (`String::length`);
+    /// maintained incrementally so `append` stays O(delta).
     len_utf16: usize,
     parsed_length: usize,
 }
@@ -521,22 +507,21 @@ impl StreamingJsonAccumulator {
         &self.text
     }
 
-    /// Appends a delta and returns a fresh partial parse, or `None` while the
-    /// refresh is throttled (the caller keeps the previous preview).
+    /// Appends a delta and returns a fresh partial parse, or `None` while the refresh is throttled
+    /// (the caller keeps the previous preview).
     pub fn append(&mut self, delta: &str) -> Option<Value> {
         self.text.push_str(delta);
         self.len_utf16 += delta.chars().map(char::len_utf16).sum::<usize>();
         let length = self.len_utf16;
-        // `length - parsed_length < parsed_length / 16` (the TS float
-        // comparison) in exact integer form.
+        // `length - parsed_length < parsed_length / 16` in exact integer form.
         if length > EAGER_PARSE_LENGTH && 16 * (length - self.parsed_length) < self.parsed_length {
             return None;
         }
         Some(self.parse())
     }
 
-    /// Parses text not covered by the last returned parse; `None` when the
-    /// preview is already current.
+    /// Parses text not covered by the last returned parse; `None` when the preview is already
+    /// current.
     pub fn flush(&mut self) -> Option<Value> {
         (self.parsed_length != self.len_utf16).then(|| self.parse())
     }
@@ -625,8 +610,8 @@ mod tests {
     fn accumulator_keeps_exact_live_parse_while_small() {
         let mut acc = StreamingJsonAccumulator::default();
         assert_eq!(acc.flush(), None);
-        // `\q` is an invalid escape and the raw newline is invalid JSON: the
-        // preview must still track the repaired partial parse exactly.
+        // `\q` is an invalid escape and the raw newline is invalid JSON: the preview must still
+        // track the repaired partial parse exactly.
         let text = concat!(
             r#"{"command":"say \"hi\"","note":"bad \q escape","#,
             r#""multi":"line"#,
@@ -652,8 +637,8 @@ mod tests {
                 parses += 1;
                 last_parsed_length = acc.text().len();
             } else {
-                // The ASCII payload makes byte length equal the TS
-                // `text.length` (UTF-16 code units).
+                // The ASCII payload makes byte length equal the TS `text.length` (UTF-16 code
+                // units).
                 assert!(acc.text().len() - last_parsed_length < last_parsed_length / 16 + 1);
             }
         }
@@ -662,15 +647,13 @@ mod tests {
         assert_eq!(acc.flush(), None);
     }
 
-    // Benchmark, not a CI test: measures the throttled accumulator against
-    // the pre-PR per-delta reparse. Run with:
-    // cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture
+    // Benchmark, not a CI test: the throttled accumulator vs the per-delta whole-buffer reparse.
+    // Run with: cargo test -p pa-ai --release accumulator_benchmark -- --ignored --nocapture
     #[test]
     #[ignore = "benchmark; see the comment above for the run command"]
     fn accumulator_benchmark_10k_deltas() {
-        // Synthetic tool-call arguments through a 10k-delta stream: the
-        // per-delta whole-buffer reparse (pre-PR behavior) vs the
-        // growth-throttled accumulator.
+        // Synthetic tool-call arguments through a 10k-delta stream: the per-delta whole-buffer
+        // reparse vs the growth-throttled accumulator.
         let payload = format!(
             r#"{{"content":"{}","path":"/tmp/stream.json"}}"#,
             "x".repeat(150 * 1024)

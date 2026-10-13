@@ -1,8 +1,5 @@
-//! The RPC command surface, part three: the model, thinking-level, and
-//! queue-mode switches (TS `session.setModel`/`cycleModel`/
-//! `refreshAvailableModels`/`setThinkingLevel`/`cycleThinkingLevel`/
-//! `setSteeringMode`/`setFollowUpMode`), the shared selection tail
-//! (`set_model`/`cycle_model`), and the available-models registry read.
+//! The RPC command surface, part three: the model, thinking-level, and queue-mode switches, the
+//! shared selection tail (`set_model`/`cycle_model`), and the available-models registry read.
 
 use std::sync::Arc;
 
@@ -14,8 +11,7 @@ use pa_types::ai::{Model, ModelThinkingLevel};
 use super::commands::RpcState;
 use super::protocol::ResponseData;
 
-/// The available-models registry over the mode's agent dir (the same
-/// resolution `set_model` uses).
+/// The available-models registry over the mode's agent dir (the same resolution `set_model` uses).
 fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
     let auth = pa_core::auth::AuthStorage::create(&state.agent_dir);
     let mut registry =
@@ -24,10 +20,9 @@ fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
     registry
 }
 
-/// `set_model` (TS `session.setModel`): resolve through the available
-/// catalog, swap the live provider target and the agent model, clamp the
-/// thinking level, record the durable `model_change` row, and persist the
-/// settings default.
+/// `set_model`: resolve through the available catalog, swap the live
+/// provider target and the agent model, clamp the thinking level, record
+/// the durable `model_change` row, and persist the settings default.
 pub(crate) async fn set_model(
     state: &Arc<RpcState>,
     payload: &Value,
@@ -55,29 +50,25 @@ pub(crate) async fn set_model(
 }
 
 /// Apply one model selection: target swap, agent model, level clamp,
-/// durable row, settings default (the shared `set_model`/`cycle_model`
-/// tail).
+/// durable row, settings default (the shared `set_model`/`cycle_model` tail).
 async fn apply_model_selection(
     state: &Arc<RpcState>,
     registry: &mut pa_core::models::ModelRegistry,
     model: &Model,
 ) -> Result<(), String> {
     let resolved = registry.get_api_key_and_headers(model, model.headers.as_ref());
-    // An unresolvable selection refuses the switch BEFORE anything moves:
-    // the TS `setModel` path answers the sign-in/not-found error instead
-    // of installing a target whose next turn fails on missing auth.
+    // An unresolvable selection refuses the switch BEFORE anything
+    // moves: the TS path answers the sign-in/not-found error instead of
+    // installing a target that would fail on missing auth.
     if !resolved.ok {
         return Err(resolved
             .error
             .unwrap_or_else(|| "Model is not available: no credentials resolved".to_string()));
     }
     {
-        // The write guard serializes the swap with every reader that
-        // holds the handle (a prompt admission snapshots the engine
-        // while holding the read guard): the provider target, agent
-        // model, thinking clamp, and the handle's model/key facts move
-        // as one step, so a concurrently admitted turn can never see
-        // half of the selection.
+        // The write guard serializes the swap: the target, model, thinking
+        // clamp, and the handle's model/key facts move as one step, so a
+        // concurrently admitted turn never sees half of the selection.
         let mut handle = state.session.handle_mut().await;
         let provider_target = ProviderTarget {
             api_key: resolved.api_key.clone(),
@@ -105,9 +96,8 @@ async fn apply_model_selection(
             .await;
         handle.model.clone_from(model);
         handle.api_key.clone_from(&resolved.api_key);
-        // The turn-boundary model facts follow the switch: `model.info`
-        // and the context window the usage estimate reads must report
-        // the model the session NOW runs, not the assembly-time one.
+        // The turn-boundary model facts follow the switch: `model.info` and
+        // the usage estimate's context window report the model NOW running.
         handle.engine.update_model_facts(model);
         let persistence = handle.engine.session.shared_persistence();
         let mut manager = persistence.lock().await;
@@ -121,9 +111,8 @@ async fn apply_model_selection(
     Ok(())
 }
 
-/// `cycle_model` (TS `session.cycleModel`, forward only on this wire):
-/// cycle within the available catalog; fewer than two candidates answer
-/// `null` like TS.
+/// `cycle_model` (forward only on this wire): cycle within the
+/// available catalog; fewer than two candidates answer `null` like TS.
 pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let _ops = state.model_ops.lock().await;
     let mut registry = registry(state);
@@ -137,8 +126,7 @@ pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, S
     drop(current);
     // When the current model is absent from the catalog (an auth filter
     // removed it), the cycle lands on the FIRST available model — not
-    // the one after it (TS `cycleModel` steps from the current when
-    // present, and from the head otherwise).
+    // the one after it.
     let index = match available
         .iter()
         .position(|model| model.provider == current_provider && model.id == current_id)
@@ -160,20 +148,18 @@ pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, S
     })))
 }
 
-/// `get_available_models` (TS `refreshAvailableModels`): the refreshed
-/// available catalog.
+/// `get_available_models`: the refreshed available catalog.
 pub(crate) async fn get_available_models(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let mut registry = registry(state);
     let models = registry.refresh_available_models().await;
     Ok(ResponseData::Present(json!({ "models": models })))
 }
 
-/// The valid thinking-level wire names (TS `ThinkingLevel`).
+/// The valid thinking-level wire names.
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// `set_thinking_level` (TS `session.setThinkingLevel`): clamp to what
-/// the model supports, record the durable row on a change, and persist
-/// the settings default.
+/// `set_thinking_level`: clamp to what the model supports, record the
+/// durable row on a change, and persist the settings default.
 pub(crate) async fn set_thinking_level(
     state: &Arc<RpcState>,
     payload: &Value,
@@ -193,18 +179,15 @@ pub(crate) async fn set_thinking_level(
     Ok(ResponseData::Absent)
 }
 
-/// Apply one thinking level (the shared `set`/`cycle` tail): the durable
-/// row and the settings default ride an effective change, and the
-/// `thinking_level_changed` session event follows (TS `setThinkingLevel`).
+/// Apply one thinking level (the shared `set`/`cycle` tail): the durable row and the settings
+/// default ride an effective change, and the `thinking_level_changed` session event follows.
 async fn apply_thinking_level(
     state: &Arc<RpcState>,
     level: ModelThinkingLevel,
 ) -> Result<(), String> {
     let (wire_level, changed) = {
-        // The write guard orders concurrent level switches: the live
-        // level, the durable row, and the settings default land in one
-        // serial sequence instead of interleaving (the durable row must
-        // match the live level on reload).
+        // The write guard orders concurrent level switches: the live level,
+        // the durable row, and the settings default land in one sequence.
         let handle = state.session.handle_mut().await;
         let agent = handle.engine.session.agent();
         let model = handle.model.clone();
@@ -222,20 +205,16 @@ async fn apply_thinking_level(
         if changed {
             let persistence = handle.engine.session.shared_persistence();
             let mut manager = persistence.lock().await;
-            // TS `_processAgentEvent`'s persistence failure is swallowed
-            // (the row stays in the in-memory session): the live level
-            // change stands and the response succeeds — never error the
-            // live change out from under its row, and never leave the
-            // caller's retry skipping persistence.
+            // The persistence failure is swallowed (the row stays
+            // in-memory): the live level change stands.
             if let Err(error) =
                 manager.append_thinking_level_change(wire_level.as_str().unwrap_or("off"))
             {
                 eprintln!("pa-daemon: thinking level row not persisted: {error}");
             }
-            // TS persists the default when the model can think or the
-            // level is a real reasoning request. The cwd comes off the
-            // held manager (this scope holds the write and persistence
-            // guards — re-acquiring either deadlocks).
+            // TS persists the default when the model can think or the level
+            // is a real reasoning request; the cwd comes off the held
+            // manager (re-acquiring either guard here deadlocks).
             if model.reasoning || clamped != ModelThinkingLevel::Off {
                 let mut settings =
                     pa_core::settings::SettingsManager::create(manager.get_cwd(), &state.agent_dir);
@@ -260,8 +239,7 @@ async fn apply_thinking_level(
     Ok(())
 }
 
-/// `cycle_thinking_level` (TS `session.cycleThinkingLevel`): cycle the
-/// supported levels; a model without reasoning answers `null`.
+/// `cycle_thinking_level`: cycle the supported levels; a model without reasoning answers `null`.
 pub(crate) async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let _ops = state.model_ops.lock().await;
     let handle = state.session.handle().await;
@@ -274,8 +252,8 @@ pub(crate) async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<Respon
     if levels.is_empty() {
         return Ok(ResponseData::Present(Value::Null));
     }
-    // The agent's live level, mapped onto the model's level domain (the
-    // supported list lives there); the cycle steps within it.
+    // The agent's live level, mapped onto the model's level domain;
+    // the cycle steps within it.
     let current = pa_core::session_engine::provider_adapter::model_thinking_level(
         agent.state().await.thinking_level,
     );
@@ -288,8 +266,7 @@ pub(crate) async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<Respon
     Ok(ResponseData::Present(json!({ "level": next.wire_name() })))
 }
 
-/// `set_steering_mode` / `set_follow_up_mode` (TS
-/// `session.setSteeringMode`/`setFollowUpMode`).
+/// `set_steering_mode` / `set_follow_up_mode`.
 pub(crate) async fn set_queue_mode(
     state: &Arc<RpcState>,
     payload: &Value,
@@ -316,9 +293,8 @@ pub(crate) async fn set_queue_mode(
         agent.set_follow_up_mode(mode);
     }
     drop(handle);
-    // The settings default follows the live mode (the daemon handlers
-    // persist the same way): a later session/connection loads the
-    // selected mode instead of reverting.
+    // The settings default follows the live mode: a later
+    // session/connection loads the selected mode instead of reverting.
     let mut settings =
         pa_core::settings::SettingsManager::create(&state.settings_cwd().await, &state.agent_dir);
     let setting = match mode {

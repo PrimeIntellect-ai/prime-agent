@@ -8,112 +8,262 @@ use super::{
 };
 
 impl SupervisorChildSessionsInner {
-    /// Deliver the child's unattributed usage rows to the attribution
-    /// producer as one per-origin report (TS
-    /// `flushPendingChildUsageAttribution`'s observation seam; the
-    /// producer folds the batches into the spawning parent assistant row
-    /// and appends the durable `child_usage_attributed` rows). The cursor
-    /// advances past every parsed row — attributed or not — so repeated
-    /// observation never double-bills; without a wired sink nothing is
-    /// read or consumed. A torn trailing line (a concurrent append) is
-    /// skipped and lands on the next read.
-    pub(super) async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+    /// Deliver the child's unattributed usage rows as one per-origin
+    /// report; the cursor advances only past the rows the sink persisted
+    /// (no double-billing; a failed delivery re-reads the same rows);
+    /// without a sink nothing is read, a torn trailing line lands on the
+    /// next read. Returns false if the source could not be observed or its report is still owed.
+    pub(super) async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
         let sink = self.usage_sink.lock().expect("usage sink lock").clone();
         let Some(sink) = sink else {
-            return;
+            return true;
         };
-        // One emission at a time per child — an interleaved re-read would
-        // double-bill, and an interleaved DELIVERY would break the durable
-        // rows' cumulative aggregate chain (the reader fold keeps the last
-        // row's aggregate, so the second observer's rows would silently
-        // drop out of the folded row). The emission lock spans the whole
-        // flow; the record lock itself only ever frames short snapshots,
-        // so the watcher polls and close paths never wait behind a big
-        // file read.
-        // Two statements on purpose: the record guard of the first drops
-        // at its statement end, BEFORE the emit lock awaits — an emitter
-        // that already holds the emit lock re-locks the record to advance
-        // the cursor, so a record guard alive across the emit-lock wait
+        // One emission at a time per child — an interleaved re-read
+        // would double-bill, and the emission lock spans the whole flow
+        // (the record lock only frames short snapshots).
+        // Two statements on purpose: the first record guard drops BEFORE the
+        // emit lock awaits — a record guard held across the emit-lock wait
         // would deadlock the two.
         let emit_lock = record.lock().await.emit_lock.clone();
         let emit_guard = emit_lock.lock().await;
-        let (rlm_child_id, session_file, from) = {
-            let record_guard = record.lock().await;
-            (
-                record_guard.rlm_child_id.clone(),
-                record_guard
-                    .session_file
-                    .clone()
-                    .filter(|path| !path.is_empty()),
-                record_guard.attributed_rows,
-            )
-        };
-        let Some(session_file) = session_file else {
-            return;
-        };
-        // The open+parse is a blocking read of a file that can reach tens
-        // of megabytes: run it on the blocking pool, never the async
-        // worker (a slow file read must not stall unrelated tasks on the
-        // runtime).
-        let path = PathBuf::from(session_file);
-        let joined =
-            tokio::task::spawn_blocking(move || crate::session_store::SessionFile::open(&path))
+        if record.lock().await.usage_registration_forgotten {
+            return true;
+        }
+        let mut drain_fresh_interval = record.lock().await.pending_usage_report.is_some();
+        let persisted = loop {
+            let pending = record.lock().await.pending_usage_report.clone();
+            let (report, next) = if let Some(pending) = pending {
+                pending
+            } else {
+                let (rlm_child_id, session_file, from) = {
+                    let record_guard = record.lock().await;
+                    (
+                        record_guard.rlm_child_id.clone(),
+                        record_guard
+                            .session_file
+                            .clone()
+                            .filter(|path| !path.is_empty()),
+                        record_guard.attributed_rows,
+                    )
+                };
+                let Some(session_file) = session_file else {
+                    return true;
+                };
+                let Some(from) = from else {
+                    return true;
+                };
+                let path = PathBuf::from(session_file);
+                let joined = tokio::task::spawn_blocking(move || {
+                    crate::session_store::SessionFile::open(&path)
+                })
                 .await
                 .ok();
-        let Some(Ok(store)) = joined else {
-            // Same failure contract as before: a torn or unreadable file
-            // leaves the cursor untouched — the next observation retries.
-            return;
+                let Some(Ok(store)) = joined else {
+                    return false;
+                };
+                let (batches, next) =
+                    crate::rlm_child_usage::child_usage_batches(store.entries(), from);
+                if batches.is_empty() {
+                    record.lock().await.attributed_rows = Some(next);
+                    return true;
+                }
+                let report = RlmChildUsageReport {
+                    report_id: uuid::Uuid::new_v4().to_string(),
+                    rlm_child_id,
+                    batches,
+                };
+                // Install before awaiting the sink. A canceled future leaves the immutable
+                // interval available; newer child rows wait behind this exact report.
+                record.lock().await.pending_usage_report = Some((report.clone(), next));
+                (report, next)
+            };
+            let persisted = sink.record(report).await;
+            if persisted {
+                let mut record = record.lock().await;
+                record.attributed_rows = Some(next);
+                record.pending_usage_report = None;
+                drop(record);
+                if drain_fresh_interval {
+                    drain_fresh_interval = false;
+                    continue;
+                }
+            }
+            break persisted;
         };
-        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
-        {
-            let mut record_guard = record.lock().await;
-            record_guard.attributed_rows = next;
-        }
-        if batches.is_empty() {
-            return;
-        }
-        sink.record(RlmChildUsageReport {
-            rlm_child_id,
-            batches,
-        })
-        .await;
         drop(emit_guard);
+        persisted
     }
 
-    /// Drop one child's attribution registration after its final
-    /// observation (the close and delete paths call this once their last
-    /// cursor walk completed — TS keeps a child's subscription alive only
-    /// while the child lives, so sequential children must not accumulate
-    /// registrations in the producer).
-    pub(super) async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+    /// Replay a failed terminal observation once before its watcher retires.
+    /// This caps observations, not elapsed time; a second failure stays owed to the existing owner.
+    pub(super) async fn emit_final_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        if self.emit_child_usage(record).await {
+            return;
+        }
+        if record.lock().await.closed_by_parent {
+            return;
+        }
+        self.emit_child_usage(record).await;
+    }
+
+    /// Drop registration only after the final report persisted; return whether it is cleared.
+    /// A failed bounded replay leaves both the report and its registration owed.
+    pub(super) async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        if record.lock().await.usage_registration_forgotten {
+            return true;
+        }
         let sink = self.usage_sink.lock().expect("usage sink lock").clone();
         let Some(sink) = sink else {
-            return;
+            return true;
         };
-        let rlm_child_id = record.lock().await.rlm_child_id.clone();
-        sink.forget(&rlm_child_id).await;
+        // A failed final delivery keeps its report owed, and no observation
+        // follows this call: replay it once before the registration drops,
+        // or the forget orphans the retained report.
+        // Also observe the frozen child's tail if a prior caller was canceled before capturing it.
+        if !self.emit_child_usage(record).await {
+            return false;
+        }
+        let emit_lock = record.lock().await.emit_lock.clone();
+        let _emit_guard = emit_lock.lock().await;
+        let mut row = record.lock().await;
+        if row.usage_registration_forgotten {
+            return true;
+        }
+        if row.pending_usage_report.is_some() {
+            return false;
+        }
+        // Forget touches only the producer registry and does not re-enter the child record.
+        // Serialize its acknowledgment with final emission and record the receipt without an await.
+        sink.forget(&row.rlm_child_id).await;
+        row.usage_registration_forgotten = true;
+        true
     }
 
-    /// Start the follow-up usage watcher for a settled child that is busy
-    /// again — a retained child running a delayed agent-message turn. TS
-    /// keeps the child subscription alive after run settlement; the
-    /// Rust task-run watcher retired at settle, so this observation-only
-    /// watcher covers the follow-up turn's usage. It never touches the
-    /// run status, notices, or the settle hook.
+    /// Keep a confirmed-dead child's final accounting reachable after roster retirement.
+    pub(super) fn retain_retired_usage(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+        intent: super::RetirementIntent,
+    ) {
+        let mut retired = self
+            .retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !retired.iter().any(|held| Arc::ptr_eq(&held.record, record)) {
+            retired.push(super::RetiredChild {
+                record: Arc::clone(record),
+                intent,
+            });
+        }
+    }
+
+    pub(super) fn retirement_intent(
+        &self,
+        record: &Arc<Mutex<ChildRecord>>,
+    ) -> Option<super::RetirementIntent> {
+        self.retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|held| Arc::ptr_eq(&held.record, record))
+            .map(|held| held.intent)
+    }
+
+    pub(super) fn has_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) -> bool {
+        self.retirement_intent(record).is_some()
+    }
+
+    pub(super) fn remove_retired_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        self.retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|held| !Arc::ptr_eq(&held.record, record));
+    }
+
+    /// One bounded replay per matching receipt; never repeat a confirmed worker kill.
+    pub(super) async fn replay_retired_usage(&self, target: Option<&str>) -> bool {
+        let retired = self
+            .retired_usage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut persisted = true;
+        for retirement in retired {
+            let record = retirement.record;
+            let matches = {
+                let row = record.lock().await;
+                target.is_none_or(|target| row.matches(target))
+            };
+            if !matches {
+                continue;
+            }
+            let rename_lock = record.lock().await.rename_lock.clone();
+            let _guard = rename_lock.lock().await;
+            if !self
+                .retired_usage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|held| Arc::ptr_eq(&held.record, &record))
+            {
+                continue;
+            }
+            // An interrupted caller still owns lifecycle completion through the roster.
+            if self
+                .children
+                .lock()
+                .await
+                .iter()
+                .any(|held| Arc::ptr_eq(held, &record))
+            {
+                continue;
+            }
+            let usage_persisted = self.forget_child_usage(&record).await;
+            self.finish_retirement(&record).await;
+            if usage_persisted {
+                self.remove_retired_usage(&record);
+            }
+            persisted &= usage_persisted;
+        }
+        persisted
+    }
+
+    /// Start the follow-up usage watcher for a settled child that is
+    /// busy again (a delayed agent-message turn): observation-only, it
+    /// never touches the run status, notices, or the settle hook.
     pub(super) async fn arm_usage_watch(this: &Arc<Self>, record: &Arc<Mutex<ChildRecord>>) {
+        if record.lock().await.closed_by_parent {
+            return;
+        }
+        // Prime a lazy cursor at the tail so the pre-restart history is never billed.
+        if record.lock().await.attributed_rows.is_none() {
+            // A local, not an if-let scrutinee: the scrutinee's guard would
+            // live through the body and deadlock the re-lock below.
+            let session_file = record
+                .lock()
+                .await
+                .session_file
+                .clone()
+                .filter(|path| !path.is_empty());
+            if let Some(session_file) = session_file {
+                let path = PathBuf::from(session_file);
+                let tail = tokio::task::spawn_blocking(move || {
+                    crate::session_store::SessionFile::open(&path)
+                        .map(|store| store.entries().len())
+                })
+                .await;
+                // A failed read stays lazy: a zero cursor would re-bill the whole history.
+                if let Ok(Ok(tail)) = tail {
+                    record.lock().await.attributed_rows.get_or_insert(tail);
+                }
+            }
+        }
         {
             let mut record = record.lock().await;
-            if record.closed_by_parent {
-                return;
-            }
             if record.usage_watch_live {
-                // A watcher is already observing this child (armed for an
-                // earlier delivery): ask IT to observe this delivery's
-                // turn too, instead of arming a second watcher — the live
-                // watcher retires only when no delivery is owed, so a
-                // turn queued behind the one under observation never goes
-                // unobserved.
+                // A watcher is already live: ask IT to observe this
+                // delivery's turn too, instead of arming a second watcher
+                // (it retires only when no delivery is owed).
                 record.usage_rearm = true;
                 return;
             }
@@ -126,21 +276,13 @@ impl SupervisorChildSessionsInner {
         });
     }
 
-    /// Observe follow-up turns' usage: wait for the child to sit idle
-    /// once (the arm can land mid-run — a message delivered during the
-    /// task run queues behind it), wait for the delivered turn to start
-    /// (bounded — a delivery the child never picks up attributes
-    /// nothing), then idle-wait slices until the turn settles, emitting
-    /// observed rows along the way exactly like the task-run watcher's
-    /// slices. A delivery that arrived while this watcher was live
-    /// re-arms it for another turn instead of arming a second watcher,
-    /// so consecutive follow-up turns each get an observation.
+    /// Observe follow-up turns' usage: wait for the child to sit idle once, wait for the delivered
+    /// turn to start (bounded), then idle-wait slices until it settles.
     async fn watch_child_usage(self: Arc<Self>, record: Arc<Mutex<ChildRecord>>) {
         loop {
             // Phase 0: the child must sit idle once before the delivered
             // turn can start (the run in flight at arm time is NOT the
-            // delivered turn; retiring on its settle would leave the
-            // queued follow-up unobserved).
+            // delivered turn).
             let mut unreachable_polls: u32 = 0;
             loop {
                 if record.lock().await.closed_by_parent {
@@ -156,7 +298,7 @@ impl SupervisorChildSessionsInner {
                         if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
                             // A dead child keeps whatever rows its file
                             // already holds; capture them, then stop.
-                            self.emit_child_usage(&record).await;
+                            self.emit_final_child_usage(&record).await;
                             record.lock().await.usage_watch_live = false;
                             return;
                         }
@@ -185,9 +327,8 @@ impl SupervisorChildSessionsInner {
                 tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
             }
             if turn_started {
-                // Phase 2: slice-wait until the turn settles (the
-                // task-run watcher's cadence, minus its settle
-                // bookkeeping).
+                // Phase 2: slice-wait until the turn settles (the task-run
+                // watcher's cadence, minus its settle bookkeeping).
                 let mut unreachable_polls: u32 = 0;
                 loop {
                     if record.lock().await.closed_by_parent {
@@ -202,12 +343,11 @@ impl SupervisorChildSessionsInner {
                     match self.child_busy(&active_session_id).await {
                         Ok(false) => {
                             // Settle grace: the delivered-turn pop races
-                            // the idle snapshot (the queue and the busy
-                            // flag change under different locks on the
-                            // far side of a socket).
+                            // the idle snapshot (different locks on the far
+                            // side of a socket).
                             tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
                             if matches!(self.child_busy(&active_session_id).await, Ok(false)) {
-                                self.emit_child_usage(&record).await;
+                                self.emit_final_child_usage(&record).await;
                                 break;
                             }
                         }
@@ -222,7 +362,7 @@ impl SupervisorChildSessionsInner {
                                 // A dead child keeps whatever rows its
                                 // file already holds; capture them, then
                                 // stop.
-                                self.emit_child_usage(&record).await;
+                                self.emit_final_child_usage(&record).await;
                                 break;
                             }
                         }
@@ -230,23 +370,15 @@ impl SupervisorChildSessionsInner {
                     tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
                 }
             } else {
-                // The turn never showed busy: it either completed
-                // between two polls (its rows are on disk — bill them) or
-                // the delivery never started a turn (the cursor walk is a
-                // no-op). Observe once before the tail decides whether
-                // another delivery is owed — the TS subscription never
-                // stops observing a live child.
-                self.emit_child_usage(&record).await;
+                // The turn never showed busy: it completed between two
+                // polls (bill its rows) or never started (the cursor walk
+                // is a no-op).
+                self.emit_final_child_usage(&record).await;
             }
-            // The tail: a delivery that arrived while this watcher was
-            // live re-arms it for another turn (the flag was set instead
-            // of a second watcher); otherwise the observation retires.
-            // The flag read, its clear, and the live-flag clear happen in
-            // ONE record-lock section: an arm racing the tail either
-            // sees the live flag still set (its re-arm request is
-            // consumed here and this watcher loops) or sees it already
-            // clear (it spawns a fresh watcher) — the decision can never
-            // strand a re-arm request behind a retired watcher.
+            // The tail: a delivery that arrived while this watcher was live
+            // re-arms it; otherwise it retires. The flag read and clear
+            // happen in ONE record-lock section, so an arm racing the tail
+            // re-arms or spawns a fresh watcher.
             let rearm = {
                 let mut record = record.lock().await;
                 let rearm = record.usage_rearm;

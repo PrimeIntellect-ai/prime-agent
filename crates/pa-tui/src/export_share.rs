@@ -1,15 +1,13 @@
-//! The `/export` and `/share` client commands (TS `handleExportCommand` /
-//! `handleShareCommand`): the `/export` path-argument parsing, the GitHub CLI
-//! gating and gist spawn for `/share`, the gist URL parse, and the share
-//! viewer URL. The exported file itself is the daemon-side exporter (the
-//! `export_html`/`export_jsonl` commands); this module owns only the
-//! client-side pieces.
+//! The `/export` and `/share` client commands: the `/export` path-argument
+//! parsing, the GitHub CLI gating and gist spawn for `/share`, the gist
+//! URL parse, and the share viewer URL. The exported file itself is the
+//! daemon-side exporter; this module owns only the client-side pieces.
 
 use std::path::Path;
 
-/// Parse the path argument of `/export` (TS `getPathCommandArgument`):
-/// `None` for no argument; a quoted argument runs to its closing quote; an
-/// unquoted one ends at the first whitespace.
+/// Parse the path argument of `/export`: `None` for no argument; a
+/// quoted argument runs to its closing quote; an unquoted one ends at
+/// the first whitespace.
 pub fn path_command_argument(text: &str, command: &str) -> Option<String> {
     if text == command {
         return None;
@@ -28,13 +26,10 @@ pub fn path_command_argument(text: &str, command: &str) -> Option<String> {
     }
 }
 
-/// The share viewer URL for a gist id (TS `getShareViewerUrl`): the
-/// `PI_SHARE_VIEWER_URL` override, else the product default, with the id as
-/// the fragment.
-///
-/// The default URL and the env var are the TS product's wire identifiers
-/// (the viewer service the exported page integrates with); they stay
-/// byte-identical until the product renames them.
+/// The share viewer URL for a gist id: the `PI_SHARE_VIEWER_URL`
+/// override, else the product default, with the id as the fragment. The
+/// default URL and the env var are the TS product's wire identifiers;
+/// they stay byte-identical until the product renames them.
 #[must_use]
 pub fn share_viewer_url(gist_id: &str) -> String {
     let base = std::env::var("PI_SHARE_VIEWER_URL")
@@ -47,8 +42,7 @@ pub fn share_viewer_url(gist_id: &str) -> String {
 const DEFAULT_SHARE_VIEWER_URL: &str = "https://pi.dev/session/";
 
 /// The gist id from the URL `gh gist create` prints (the last path
-/// segment, TS `gistUrl.split("/").pop()`): an empty segment (a trailing
-/// slash) is no gist id.
+/// segment): an empty segment (a trailing slash) is no gist id.
 #[must_use]
 pub fn gist_id_from_url(url: &str) -> Option<&str> {
     let url = url.trim();
@@ -67,9 +61,9 @@ pub enum GhAuthStatus {
     NotInstalled,
 }
 
-/// Probe the GitHub CLI (TS `spawnSyncHidden("gh", ["auth", "status"])`):
-/// a non-zero exit means not logged in, a spawn failure means not
-/// installed. The probe never opens a window (hidden spawn).
+/// Probe the GitHub CLI with `gh auth status`: a non-zero exit means
+/// not logged in, a spawn failure means not installed. The probe never
+/// opens a window (hidden spawn).
 #[must_use]
 pub fn probe_gh_auth() -> GhAuthStatus {
     // No inherited fds: a probe must never hold the terminal the TUI owns
@@ -95,16 +89,15 @@ pub struct GistOutcome {
     pub preview_url: String,
 }
 
-/// Wait for a spawned `gh gist create` and turn its output into the share
-/// result (TS: stdout is the gist URL; stderr is the failure message).
+/// Wait for a spawned `gh gist create` and turn its output into the
+/// share result (stdout is the gist URL; stderr is the failure message).
 /// Both pipes drain concurrently (`wait_with_output`), so a chatty `gh`
 /// cannot deadlock the wait.
 ///
 /// # Errors
 ///
-/// Returns `Err` with the wait failure, the trimmed `gh` stderr (or
-/// `Unknown error` when it printed none) on a non-zero exit, or a parse
-/// failure when the gist id cannot be extracted from stdout.
+/// Returns `Err` with the wait failure, the trimmed `gh` stderr on a
+/// non-zero exit, or a parse failure.
 pub async fn gist_outcome(child: tokio::process::Child) -> Result<GistOutcome, String> {
     let output = child
         .wait_with_output()
@@ -129,14 +122,13 @@ pub async fn gist_outcome(child: tokio::process::Child) -> Result<GistOutcome, S
     })
 }
 
-/// Spawn `gh gist create --public=false <file>` (TS `spawnHidden`): output
-/// is piped, no terminal window on Windows. The child is killed when
-/// dropped mid-wait, so aborting the upload task terminates `gh`.
+/// Spawn `gh gist create --public=false <file>`: output is piped, no
+/// terminal window on Windows. The child is killed when dropped
+/// mid-wait, so aborting the upload task terminates `gh`.
 ///
 /// # Errors
 ///
-/// Returns `Err` when the OS cannot spawn the `gh` process (not installed,
-/// not executable, or another spawn error).
+/// Returns `Err` when the OS cannot spawn the `gh` process.
 pub fn spawn_gist_create(file: &Path) -> std::io::Result<tokio::process::Child> {
     gh_command()
         .args(["gist", "create", "--public=false"])
@@ -148,8 +140,8 @@ pub fn spawn_gist_create(file: &Path) -> std::io::Result<tokio::process::Child> 
         .spawn()
 }
 
-/// The async `gh` command with Windows hidden-window creation flags applied
-/// (TS `spawnHidden`; a no-op on Unix).
+/// The async `gh` command with Windows hidden-window creation flags
+/// applied (a no-op on Unix).
 #[cfg(windows)]
 fn gh_command() -> tokio::process::Command {
     // CREATE_NO_WINDOW: the loader surfaces the wait, not a console window.
@@ -183,8 +175,6 @@ fn gh_probe_command() -> std::process::Command {
 mod tests {
     use super::*;
 
-    /// The `/export` path argument parses exactly like the TS helper:
-    /// missing, bare, quoted, and whitespace-terminated arguments.
     #[test]
     fn path_arguments_parse() {
         assert_eq!(path_command_argument("/export", "/export"), None);
@@ -208,11 +198,9 @@ mod tests {
             path_command_argument("/export a b c", "/export"),
             Some("a".to_string())
         );
-        // An unclosed quote is no argument at all (TS returns undefined).
         assert_eq!(path_command_argument("/export \"unclosed", "/export"), None);
     }
 
-    /// The gist id is the URL's last path segment.
     #[test]
     fn gist_ids_parse() {
         assert_eq!(
@@ -226,8 +214,6 @@ mod tests {
         );
     }
 
-    /// The share viewer URL is the base plus the fragment, and the env
-    /// override wins while it is non-empty.
     #[test]
     fn share_viewer_urls() {
         // SAFETY: single-threaded test setup for a std::env var.
@@ -244,8 +230,8 @@ mod tests {
     }
 
     /// The full gh spawn path against a stub `gh` (the e2e harness uses the
-    /// same stub): the upload file must exist and the printed URL becomes
-    /// the gist + viewer pair. Unix-only (the stub is a shell script).
+    /// same stub): the upload file must exist and the printed URL becomes the
+    /// gist + viewer pair. Unix-only (the stub is a shell script).
     #[cfg(unix)]
     #[tokio::test]
     async fn gist_spawn_against_stub_gh() {
@@ -282,7 +268,6 @@ esac
         assert_eq!(outcome.gist_url, "https://gist.github.com/testuser/abc123");
         assert_eq!(outcome.preview_url, "https://pi.dev/session/#abc123");
 
-        // A missing upload file is the stub's failure, surfaced verbatim.
         std::env::set_var("PATH", format!("{}:{}", dir.path().display(), previous));
         let child = spawn_gist_create(&dir.path().join("nope.html")).expect("spawn gh");
         let error = gist_outcome(child)

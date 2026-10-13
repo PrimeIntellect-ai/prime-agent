@@ -1,16 +1,7 @@
-//! The `/heartbeats` management view (TS `HeartbeatManagerComponent`,
-//! redesigned per the operator's 2026-09-23 directive): the current
-//! session's heartbeats as a columned table (interval, label, next run,
-//! status) instead of text blobs, and Enter on a row opens the detail
-//! drill-in — the full prompt text, which agent created it, and the
-//! management actions (pause/resume, stop) as up/down-selectable rows in
-//! the same control pattern as the `/mcp` view. The table fills the full
-//! width of the TUI (the operator's 2026-09-24 ruling): the selected
-//! row's wash spans the terminal width while the columns keep their
-//! content-hug geometry. Rendered inline-picker style (the `/model`
-//! geometry — a plain-text title line with the status counts, the
-//! shortcuts at the bottom with no rule below them, one blank line of
-//! spacing under the hint).
+//! The `/heartbeats` management view (redesigned per the operator's
+//! 2026-09-23 directive): a columned table, Enter opens the detail
+//! drill-in and the management actions in the `/mcp` control pattern.
+//! The table fills the full TUI width (the operator's 2026-09-24 ruling).
 
 use serde_json::Value;
 
@@ -20,11 +11,6 @@ use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
 
-// The wire/parse + label layer (the cron-job and catalog shapes, the session scoping
-// and sort, the session/source/default labels, and the timestamp/countdown helpers)
-// moved to the child module at the same tree position (heartbeats_picker::data); the
-// facade re-exports keep every crate path stable (the wire contract rides the
-// facade, the composition-root pattern).
 mod data;
 
 pub use data::{
@@ -33,43 +19,28 @@ pub use data::{
     HeartbeatEntry, HeartbeatJob,
 };
 
-// The cron interpreter (the field vocabulary, the day names, and the
-// human-readable schedule form) moved to the child module at the same tree
-// position (heartbeats_picker::schedule); the facade re-export keeps the pub API
-// path stable (human_schedule rides the facade).
 mod schedule;
 
 pub use schedule::human_schedule;
 
-// The pane chrome (the column geometry and its caps, the header/hint/error rows, the
-// detail drill-in's pair block, the row primary, and the action rows) moved to the
-// child module at the same tree position (heartbeats_picker::render); the facade
-// bindings keep the picker impl's bare call sites in scope.
 mod render;
 
 use render::{
     action_row, detail_block_lines, detail_pairs, error_line, hint_line, pane_header_lines, Columns,
 };
 
-/// The preferred visible rows of the list (TS
-/// `PREFERRED_VISIBLE_HEARTBEATS`).
 const PREFERRED_VISIBLE: usize = 8;
 
-/// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, blank, hint, blank — the shortcuts ride
-/// the pane's last row with no rule below them, one blank line of
-/// spacing under them instead (the operator's 2026-09-24 /model ruling);
-/// the conditional scroll-indicator row rides `menu_list_layout`'s
-/// scroll reservation, never counted twice).
+/// Rows the list reserves outside its items (rule, title, blank, column
+/// header, blank, hint, blank; the scroll-indicator row rides
+/// `menu_list_layout`'s reservation, never counted twice).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The detail pane's labeled-pair row budget: the seven base pairs
-/// (created, session, delivery, schedule, next run, runs, last error)
-/// all fit — the schedule fact (item 3) must never displace the error
-/// row to the clipped tail.
+/// The detail pane's labeled-pair row budget: the seven base pairs all
+/// fit — the schedule fact never displaces the error row.
 const MAX_DETAIL_ROWS: usize = 7;
 
-/// The management-action vocabulary (TS `AgentHeartbeatManagementAction`).
+/// The management-action vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeartbeatAction {
     Pause,
@@ -89,8 +60,7 @@ impl HeartbeatAction {
     }
 }
 
-/// The pane's interactive mode: the columned list, or the selected
-/// heartbeat's detail drill-in (TS `HeartbeatManagerMode`, redesigned).
+/// The pane's interactive mode: the columned list, or the selected heartbeat's detail drill-in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     List,
@@ -123,12 +93,12 @@ pub enum HeartbeatsPickerAction {
 pub struct HeartbeatsPicker {
     /// The scoped, sorted catalog.
     heartbeats: Vec<HeartbeatEntry>,
-    /// The selected heartbeat's job id (TS `selectedHeartbeatId`).
+    /// The selected heartbeat's job id.
     selected_heartbeat_id: Option<String>,
     mode: Mode,
-    /// The last catalog fetch failure (TS `heartbeatCatalogFetchError`).
+    /// The last catalog fetch failure.
     fetch_error: Option<String>,
-    /// The last management-action error (TS `error`).
+    /// The last management-action error.
     error: Option<String>,
     viewport_rows: usize,
 }
@@ -158,9 +128,8 @@ impl HeartbeatsPicker {
         picker
     }
 
-    /// A landed catalog refresh (TS `applyHeartbeatCatalog`): replace the
-    /// rows, clear the fetch error, and keep the selection when the job
-    /// survived.
+    /// A landed catalog refresh: replace the rows, clear the fetch
+    /// error, and keep the selection when the job survived.
     pub fn apply_catalog(&mut self, heartbeats: Vec<HeartbeatEntry>, fetch_error: Option<String>) {
         self.heartbeats = heartbeats;
         self.fetch_error = fetch_error;
@@ -169,9 +138,8 @@ impl HeartbeatsPicker {
         self.dirty_conform_mode();
     }
 
-    /// A management result (TS `manageHeartbeat`'s catalog patch): a stop
-    /// removes the row, anything else replaces the job in place; the pane
-    /// returns to the list.
+    /// A management result: a stop removes the row, anything else
+    /// replaces the job in place; the pane returns to the list.
     pub fn apply_managed_job(&mut self, updated: HeartbeatJob, stopped: bool) {
         if stopped {
             self.heartbeats.retain(|entry| entry.job.id != updated.id);
@@ -188,28 +156,26 @@ impl HeartbeatsPicker {
         self.error = None;
     }
 
-    /// Surface a management-action failure (TS `runAction`'s catch).
+    /// Surface a management-action failure.
     pub fn set_action_error(&mut self, error: String) {
         self.error = Some(error);
         self.mode = Mode::List;
     }
 
-    /// Surface a background-catalog refresh failure (TS
-    /// `heartbeatCatalogFetchError`): the rows stay (stale-while-revalidate)
-    /// and the failure renders inside the view until the next good refresh.
+    /// A background-catalog refresh failure: the rows stay
+    /// (stale-while-revalidate) and the failure renders until the next
+    /// good refresh.
     pub fn set_fetch_error(&mut self, error: Option<String>) {
         self.fetch_error = error;
     }
 
-    /// Return to the list pane without a job patch (TS `runAction`'s
-    /// success path still ends in `{ type: "list" }`).
+    /// Return to the list pane without a job patch.
     pub fn back_to_list(&mut self) {
         self.mode = Mode::List;
         self.error = None;
     }
 
-    /// Reset the selection to the first row when the selected job vanished
-    /// (TS `render`'s fallback).
+    /// Reset the selection to the first row when the selected job vanished.
     fn conform_selection(&mut self, selected: Option<&str>) {
         let exists =
             selected.is_some_and(|id| self.heartbeats.iter().any(|entry| entry.job.id == id));
@@ -218,8 +184,7 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// Drop a detail pane whose heartbeat vanished (TS `render`'s mode
-    /// fallback).
+    /// Drop a detail pane whose heartbeat vanished.
     fn dirty_conform_mode(&mut self) {
         if let Mode::Detail { heartbeat_id, .. } = self.mode.clone() {
             if !self
@@ -232,7 +197,7 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// The selected row's index (TS `getSelectedIndex`, first when unset).
+    /// The selected row's index (first when unset).
     fn selected_index(&self) -> usize {
         self.heartbeats
             .iter()
@@ -244,8 +209,8 @@ impl HeartbeatsPicker {
         self.heartbeats.iter().find(|entry| entry.job.id == id)
     }
 
-    /// The action rows of one heartbeat (TS `availableActions`): the
-    /// pause/resume complement of its status, then stop.
+    /// The action rows of one heartbeat: the pause/resume complement of
+    /// its status, then stop.
     fn available_actions(entry: &HeartbeatEntry) -> Vec<(String, HeartbeatAction, String)> {
         let mut actions = Vec::with_capacity(2);
         if entry.job.is_active() {
@@ -272,7 +237,6 @@ impl HeartbeatsPicker {
     /// One key id (TS `handleInput`, minus the busy gate: the session UI
     /// awaits the management request itself).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> HeartbeatsPickerAction {
-        // Cancel keys close the view (TS `tui.select.cancel`).
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return HeartbeatsPickerAction::Close;
         }
@@ -294,8 +258,6 @@ impl HeartbeatsPicker {
             self.move_selection(delta);
             return HeartbeatsPickerAction::None;
         }
-        // The open-selected binding (right) opens the selected heartbeat's
-        // detail drill-in from the list.
         if self.mode == Mode::List && kb.matches(key, "app.heartbeats.openSelected") {
             self.open_detail();
             return HeartbeatsPickerAction::None;
@@ -306,8 +268,8 @@ impl HeartbeatsPicker {
         HeartbeatsPickerAction::None
     }
 
-    /// Move the selection (TS `moveSelection`): the list walks rows by job
-    /// id, the detail pane walks its action rows by index.
+    /// Move the selection: the list walks rows by job id, the detail
+    /// pane walks its action rows by index.
     fn move_selection(&mut self, delta: isize) {
         match self.mode.clone() {
             Mode::List => {
@@ -336,7 +298,7 @@ impl HeartbeatsPicker {
     }
 
     /// Enter on the list opens the selected heartbeat's detail drill-in;
-    /// Enter on an action row runs it (TS `confirmSelection`).
+    /// Enter on an action row runs it.
     fn confirm_selection(&mut self) -> HeartbeatsPickerAction {
         match self.mode.clone() {
             Mode::List => {
@@ -364,8 +326,7 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// Open the selected heartbeat's detail drill-in (TS
-    /// `confirmSelection`'s list branch).
+    /// Open the selected heartbeat's detail drill-in.
     fn open_detail(&mut self) {
         let Some(id) = self.selected_heartbeat_id.clone() else {
             return;
@@ -378,7 +339,7 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// The list's visible-row budget (TS `getListLayout`, inline shape).
+    /// The list's visible-row budget (inline shape).
     fn visible_items(&self) -> usize {
         // Both error blocks render two rows each when present (the
         // fetch failure and the action failure stack in the footer).
@@ -389,10 +350,8 @@ impl HeartbeatsPicker {
                 (_, true) => 2,
                 _ => 0,
             };
-        // The shared layout floors at one row so a picker never reads
-        // empty; this view must never render past its viewport, so a
-        // frame too short for any row renders none (the scroll
-        // indicator follows: nothing to scroll).
+        // The shared layout floors at one row; this view must never render past
+        // its viewport, so a frame too short for any row renders none.
         if self.viewport_rows <= reserved {
             return 0;
         }
@@ -405,7 +364,6 @@ impl HeartbeatsPicker {
         )
     }
 
-    /// Render the view's frame: the columned list or the detail drill-in.
     #[must_use]
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match &self.mode {
@@ -417,10 +375,7 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// The list pane (the `/model` picker idiom over a columned table):
-    /// the title line with the status counts, the dim column header, one
-    /// row per heartbeat, the scroll indicator, and a single bottom hint
-    /// line.
+    /// The list pane (the `/model` picker idiom over a columned table).
     fn render_list(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let counts: Vec<(ThemeColor, String)> = self.status_counts();
         let mut lines = pane_header_lines(theme, width, "Heartbeats", &counts, None);
@@ -454,15 +409,14 @@ impl HeartbeatsPicker {
             }
         }
         lines.extend(self.pane_footer(theme, width, &Self::list_hint(kb)));
-        // The budget math keeps every normal viewport exact; a terminal
-        // shorter than the frame itself degrades by truncation — the
-        // pane never renders past its allocated rows.
+        // The budget math keeps every normal viewport exact; a terminal shorter
+        // than the frame itself degrades by truncation — the pane never renders
+        // past its allocated rows.
         lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
-    /// The active/paused counts for the title line's right-aligned
-    /// cluster (TS `countLabel`'s numbers, in the status colors).
+    /// The active/paused counts for the title line's right-aligned cluster, in the status colors.
     fn status_counts(&self) -> Vec<(ThemeColor, String)> {
         let active = self
             .heartbeats
@@ -480,9 +434,8 @@ impl HeartbeatsPicker {
         counts
     }
 
-    /// The detail drill-in: the heartbeat's name and schedule, the full
-    /// prompt text (wrapped, never single-lined), the created-by facts,
-    /// and the action rows in the `/mcp` view's control pattern.
+    /// The detail drill-in: the full prompt text (wrapped, never
+    /// single-lined), the created-by facts, and the action rows.
     fn render_detail(
         &self,
         theme: &Theme,
@@ -526,15 +479,12 @@ impl HeartbeatsPicker {
             _ => 0,
         };
         let fixed = 4 + 1 + actions.len() + 3 + error_rows;
-        // The created-by pairs shrink first (they summarize; the full
-        // prompt text is the drill-in's content), then the prompt clips
-        // its tail — the action rows never yield. The prompt block's own
-        // leading blank and label ride the budget too, and the pairs
-        // block's blank renders only with its rows.
+        // The created-by pairs shrink first (they summarize), then the prompt
+        // clips its tail — the action rows never yield.
         let prompt_width = width.saturating_sub(4).max(10);
-        // Non-newline control characters scrub before the wrap (an
-        // escape sequence in a prompt can never execute terminal
-        // control operations when rendered).
+        // Non-newline control characters scrub before the wrap (an escape
+        // sequence in a prompt can never execute terminal control operations
+        // when rendered).
         let prompt = entry
             .job
             .prompt
@@ -546,10 +496,8 @@ impl HeartbeatsPicker {
         let mut prompt_budget = self
             .viewport_rows
             .saturating_sub(fixed + 1 + pairs_rows + 2);
-        // The prompt is the drill-in's content: when the default math
-        // starves it, the pairs shrink first (they summarize — the
-        // documented order) until at least one prompt row renders. A
-        // heartbeat without prompt text never trades pairs away.
+        // When the default math starves the prompt, the pairs shrink first
+        // until at least one prompt row renders.
         let has_prompt = !entry.job.prompt.trim().is_empty();
         if prompt_budget == 0 && pairs_rows > 0 && has_prompt {
             pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 4));
@@ -604,13 +552,9 @@ impl HeartbeatsPicker {
         lines
     }
 
-    /// The list's bottom hint line: every shortcut in one line (the close
-    /// key never repeats). The open and close segments carry both of
-    /// their keys while both are bound — the confirm/openSelected pair
-    /// opens the detail drill-in, the back/cancel pair closes from the
-    /// list — and an override that empties one of the pair drops that
-    /// key (the hint never advertises a key the handler does not take;
-    /// the confirm/cancel fallbacks are the pane's core keys).
+    /// The list's bottom hint line: every shortcut in one line. An override
+    /// that empties one of the open/close key pairs drops that key — the
+    /// hint never advertises a key the handler does not take.
     fn list_hint(kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
@@ -648,10 +592,9 @@ impl HeartbeatsPicker {
         )
     }
 
-    /// The pane footer: the fetch and action errors, a blank, the hint
-    /// line, and one blank line below the shortcuts (the operator's
-    /// 2026-09-24 ruling: no rule rides under the hint — the /model
-    /// geometry, with the same single blank of spacing below).
+    /// The pane footer: the fetch and action errors, a blank, the hint line,
+    /// and one blank below (no rule under the hint — the /model geometry, per
+    /// the operator's 2026-09-24 ruling).
     fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(fetch_error) = &self.fetch_error {
@@ -676,9 +619,5 @@ impl HeartbeatsPicker {
     }
 }
 
-// The unit battery moved with its concern to the child module at the same tree
-// position (heartbeats_picker::tests); the facade decl keeps the cfg(test) gate and
-// the descendant glob reaches every facade-resident item (the agents-view/interactive
-// stage-1 pattern).
 #[cfg(test)]
 mod tests;

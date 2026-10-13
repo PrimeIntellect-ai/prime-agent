@@ -1,5 +1,5 @@
 //! Golden differential tests: replay the corpus recorded from the REAL
-//! TypeScript tools (see `tests/golden/harness.mjs`) against the Rust port
+//! TypeScript tools (frozen in `tests/golden/corpus/`) against the Rust port
 //! and assert identical model-facing output.
 //!
 //! Corpus cases cover fuzzy edits, file-not-found, bash timeouts and
@@ -30,7 +30,7 @@ fn corpus(name: &str) -> serde_json::Value {
     serde_json::from_str(&std::fs::read_to_string(path).expect("corpus file")).expect("corpus JSON")
 }
 
-/// Normalize temp paths the same way harness.mjs does.
+/// Normalize temp paths to the forms the recorded corpus uses.
 fn norm_string(s: &str, tmp: &str) -> String {
     let out = s.replace(&format!("{tmp}/"), "<TMP>/");
     let re = regex_lite("golden-[A-Za-z0-9_]{6}");
@@ -115,8 +115,6 @@ fn assert_json_eq(actual: &serde_json::Value, expected: &serde_json::Value, what
     );
 }
 
-// ---------------------------------------------------------------------------
-
 #[tokio::test]
 async fn golden_edit_group_matches_ts() {
     let corpus = corpus("edit");
@@ -127,7 +125,7 @@ async fn golden_edit_group_matches_ts() {
         let mut input = case["input"].clone();
         if case["applyPrepareArguments"].as_bool().unwrap_or(false) {
             input = crate::tools::edit::prepare_edit_arguments(input);
-            // The TS harness records the prepared input for such cases.
+            // The TS harness recorded the prepared input for such cases.
             assert_json_eq(
                 &input.clone(),
                 &case["preparedInput"].clone(),
@@ -182,8 +180,6 @@ async fn golden_edit_group_matches_ts() {
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
-
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn golden_bash_group_matches_ts() {
@@ -253,9 +249,8 @@ async fn golden_bash_group_matches_ts() {
                     norm_string(result.content[0].as_text().expect("text block"), tmp_root());
                 let expected_text = recorded["text"].as_str().expect("text");
                 if text != expected_text {
-                    // Stdout/stderr interleaving is OS-timing dependent in
-                    // both implementations; the same multiset of lines is
-                    // accepted, anything else is a mismatch.
+                    // Stdout/stderr interleaving is OS-timing dependent in both implementations;
+                    // the same multiset of lines is accepted, anything else is a mismatch.
                     let mut actual_lines: Vec<&str> = text.lines().collect();
                     let mut expected_lines: Vec<&str> = expected_text.lines().collect();
                     actual_lines.sort_unstable();
@@ -310,8 +305,6 @@ async fn golden_bash_group_matches_ts() {
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
-
-// ---------------------------------------------------------------------------
 
 #[test]
 fn golden_truncate_group_matches_ts() {
@@ -371,8 +364,6 @@ fn golden_preview_group_matches_ts() {
     }
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
-
-// ---------------------------------------------------------------------------
 
 struct MockKernel {
     executions: Mutex<Vec<MockOutcome>>,
@@ -561,10 +552,16 @@ async fn golden_ipython_group_matches_ts() {
             } else {
                 None
             },
+            on_late_sent_agent_message: None,
         };
-        let result =
-            ipython::execute_ipython(&options, case["code"].as_str().expect("code"), None, None)
-                .await;
+        let result = ipython::execute_ipython(
+            &options,
+            case["code"].as_str().expect("code"),
+            None,
+            None,
+            None,
+        )
+        .await;
         let recorded = &case["result"];
         match result {
             Ok(result) => {
@@ -611,8 +608,6 @@ async fn golden_ipython_group_matches_ts() {
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
 
-// ---------------------------------------------------------------------------
-
 #[test]
 fn golden_schema_group_matches_ts() {
     let corpus = corpus("schema");
@@ -625,6 +620,7 @@ fn golden_schema_group_matches_ts() {
             "ipython" => crate::tools::ipython::create_ipython_tool_definition(
                 "/tmp",
                 IpythonToolOptions {
+                    on_late_sent_agent_message: None,
                     provisioner: Arc::new(MockProvisioner {
                         kernel: Arc::new(MockKernel {
                             executions: Mutex::new(Vec::new()),
@@ -658,7 +654,6 @@ fn golden_schema_group_matches_ts() {
     assert_eq!(checked, corpus["caseCount"].as_u64().expect("caseCount"));
 }
 
-// ---------------------------------------------------------------------------
 // Small direct checks of guard parsing (subsumed by the bash golden group).
 
 #[test]

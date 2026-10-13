@@ -1,8 +1,6 @@
-//! Cooperative abort signal for kernel operations.
-//!
-//! Port of the TypeScript `AbortSignal` usage: aborting a cell interrupts the
-//! kernel out-of-band, aborting a start cancels the wait, and an already
-//! aborted signal short-circuits the operation.
+//! Cooperative abort signal for kernel operations: aborting a cell
+//! interrupts the kernel out-of-band, aborting a start cancels the wait,
+//! and an already aborted signal short-circuits the operation.
 
 use tokio_util::sync::CancellationToken;
 

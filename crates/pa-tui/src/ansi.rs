@@ -1,29 +1,25 @@
-//! ANSI encoding of styled lines (used by debug output and tests) and the
-//! general-purpose ANSI stripper (TS `stripAnsi` in utils.ts).
+//! ANSI encoding of styled lines (used by debug output and tests) and the general-purpose ANSI
+//! stripper (TS `stripAnsi` in utils.ts).
 
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier};
 use std::fmt::Write;
 
-/// Remove all escape sequences (CSI, OSC, DCS, APC/PM/SOS, and ordinary
-/// two-char escapes), leaving plain text — the exact port of TS `stripAnsi`
-/// (utils.ts:899): the common CSI form goes first (its regex fast path),
-/// then the shared scanner (`escape_len`) handles the wider CSI grammar,
-/// control strings, and malformed sequences. An ESC immediately before a
-/// line separator stays (TS strips neither half of `ESC \n`).
+/// Remove all escape sequences (CSI, OSC, DCS, APC/PM/SOS, two-char escapes), leaving plain
+/// text — the exact port of TS `stripAnsi`: the common CSI form goes first (its regex fast
+/// path), then the shared scanner handles the wider grammar. An ESC immediately before a line
+/// separator stays (TS strips neither half of `ESC \n`).
 ///
 /// # Panics
 ///
-/// Cannot panic for any valid `str`: the internal `expect`s guard
-/// byte-scan invariants (every visited index starts a char; the
-/// two-char strip only runs once the following char exists).
+/// Cannot panic for any valid `str`: the internal `expect`s guard byte-scan invariants.
 #[must_use]
 pub fn strip_ansi(text: &str) -> String {
     if !text.contains('\u{1b}') {
         return text.to_string();
     }
-    // TS COMMON_CSI_REGEX: `\x1b\[[0-9;:?<=>]*[\x40-\x7e]`, anywhere in the
-    // string (including inside control strings — TS strips those too).
+    // COMMON_CSI_REGEX: `\x1b\[[0-9;:?<=>]*[\x40-\x7e]`, anywhere in the string (including
+    // inside control strings — TS strips those too).
     let mut common_csi_stripped = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -172,11 +168,9 @@ pub fn raw_span(s: &str) -> Span {
 mod tests {
     use super::strip_ansi;
 
-    /// Goldens generated from the TS `stripAnsi` (utils.ts:899, the
-    /// installed parity ground truth): the common CSI fast path, OSC-8
-    /// (BEL- and ST-terminated), DCS, APC with astral content, SOS, the
-    /// two-char rule, ESC-before-newline preserved, and malformed CSI
-    /// (both halves of the leading `ESC [` go, the later valid CSI strips).
+    /// Goldens generated from the live TS `stripAnsi` binary (the parity ground truth): the
+    /// common CSI fast path, OSC-8 (BEL- and ST-terminated), DCS, APC with astral content,
+    /// SOS, the two-char rule, ESC-before-newline preserved, and malformed CSI.
     #[test]
     fn strip_ansi_matches_ts_goldens() {
         let cases: Vec<(&str, &str)> = vec![
@@ -200,7 +194,6 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(strip_ansi(input), expected, "strip mismatch for {input:?}");
         }
-        // No escape codes: returned as-is.
         assert_eq!(strip_ansi("plain 你好"), "plain 你好");
     }
 }

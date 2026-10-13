@@ -42,9 +42,9 @@ async fn engine_runs_tool_loop_and_persists() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
-    // First turn: call the tool. Second turn: final text.
     provider.push_tool_call_turn(
         Some("checking"),
         vec![("call-1", "echo", serde_json::json!({ "text": "hi" }))],
@@ -55,8 +55,11 @@ async fn engine_runs_tool_loop_and_persists() {
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        on_late_sent_agent_message: None,
+        semantic_edges: None,
         cron_store: None,
         queued_steering_probe: None,
+        should_stop_after_turn: None,
         image_model_router: None,
         steering_mode: None,
         follow_up_mode: None,
@@ -78,11 +81,12 @@ async fn engine_runs_tool_loop_and_persists() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
+        rlm_usage_store: None,
+        progress_note_emit: None,
         rlm_depth: None,
+        daemonless: true,
         telemetry: None,
         model_info: None,
-        cli_extension_sources: vec![],
-        extension_tool_allow_list: None,
         on_background_work_settled: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
@@ -104,7 +108,6 @@ async fn engine_runs_tool_loop_and_persists() {
     assert_eq!(outcome, PromptOutcome::Prompt);
     engine.session.agent().wait_for_idle().await;
 
-    // The loop executed the tool and produced the final message.
     let state = engine.session.agent().state().await;
     assert!(state.messages.iter().any(|message| match message {
         pa_agent::types::AgentMessage::Standard(pa_agent::types::Message::ToolResult(result)) => {
@@ -123,7 +126,6 @@ async fn engine_runs_tool_loop_and_persists() {
         }
         _ => false,
     }));
-    // The session persisted user + assistant turns.
     let entries = engine.session.entries().await;
     assert!(entries.iter().any(|entry| matches!(
         entry,
@@ -136,8 +138,7 @@ async fn engine_runs_tool_loop_and_persists() {
 }
 
 /// A spawned child's prompt stamps its recursion depth: `create_session`
-/// at depth N reads "depth: N (not root)", never the root identity the
-/// pre-fix default (None -> 0) stamped on every child.
+/// at depth N reads "depth: N (not root)", never the root identity.
 #[tokio::test]
 async fn spawned_child_prompt_stamps_its_depth() {
     let model = pa_agent::types::Model {
@@ -150,14 +151,18 @@ async fn spawned_child_prompt_stamps_its_depth() {
         cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
+        max_tokens_explicit: false,
     };
     let provider = Arc::new(ScriptedProvider::new(model.clone()));
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
     let engine = create_session(SessionEngineConfig {
+        on_late_sent_agent_message: None,
+        semantic_edges: None,
         cron_store: None,
         queued_steering_probe: None,
+        should_stop_after_turn: None,
         image_model_router: None,
         steering_mode: None,
         follow_up_mode: None,
@@ -179,11 +184,12 @@ async fn spawned_child_prompt_stamps_its_depth() {
         additional_prompt_paths: vec![],
         extra_builtin_skill_overrides: vec![],
         rlm_subagent_host: None,
+        rlm_usage_store: None,
+        progress_note_emit: None,
         rlm_depth: Some(2),
+        daemonless: true,
         telemetry: None,
         model_info: None,
-        cli_extension_sources: vec![],
-        extension_tool_allow_list: None,
         on_background_work_settled: None,
         prewarm_ipython_kernel: None,
         queued_goal_context_purge: None,
@@ -197,11 +203,9 @@ async fn spawned_child_prompt_stamps_its_depth() {
     assert!(!engine.system_prompt.contains("depth: 0 (root)"));
 }
 
-/// The login chain's prompt-gating end to end at the engine level: a
-/// settings-declared OAuth server stays gated, an endpoint-bound
-/// credential (exactly what `mcp.begin_login` persists) unlocks it in
-/// the NEXT session the engine builds, and a credential bound to
-/// another endpoint does not.
+/// The login chain's prompt-gating end to end: a settings-declared OAuth
+/// server stays gated, an endpoint-bound credential unlocks it in the NEXT
+/// session, and one bound to another endpoint does not.
 #[tokio::test]
 async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     fn model() -> pa_agent::types::Model {
@@ -215,6 +219,7 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             cost: pa_agent::types::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
+            max_tokens_explicit: false,
         }
     }
 
@@ -224,8 +229,11 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
         stream_fn: pa_agent::stream::StreamFn,
     ) -> SessionEngineConfig {
         SessionEngineConfig {
+            on_late_sent_agent_message: None,
+            semantic_edges: None,
             cron_store: None,
             queued_steering_probe: None,
+            should_stop_after_turn: None,
             image_model_router: None,
             steering_mode: None,
             follow_up_mode: None,
@@ -247,11 +255,12 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
             additional_prompt_paths: vec![],
             extra_builtin_skill_overrides: vec![],
             rlm_subagent_host: None,
+            rlm_usage_store: None,
+            progress_note_emit: None,
             rlm_depth: None,
+            daemonless: true,
             telemetry: None,
             model_info: None,
-            cli_extension_sources: vec![],
-            extension_tool_allow_list: None,
             on_background_work_settled: None,
             prewarm_ipython_kernel: None,
             queued_goal_context_purge: None,
@@ -281,7 +290,6 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     .unwrap();
     let provider = Arc::new(ScriptedProvider::new(model()));
 
-    // Gated: no credentials, no generic MCP guidance in the prompt.
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
@@ -309,16 +317,13 @@ async fn oauth_creds_unlock_generic_mcp_gating_in_new_sessions() {
     };
 
     // A credential bound to another endpoint stays gated: the token
-    // must prove where it belongs (a retargeted entry forces a
-    // re-login).
+    // must prove where it belongs.
     write_credential("https://other.example/mcp");
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
         .unwrap();
     assert!(!engine.system_prompt.contains("# Generic MCP Connections"));
 
-    // The endpoint-bound credential unlocks the prompt guidance in the
-    // next session the engine builds.
     write_credential("https://fixture.example/mcp");
     let engine = create_session(config(&cwd, &agent_dir, provider.stream_fn()))
         .await
@@ -363,7 +368,6 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
     })
     .await
     .unwrap();
-    // The agent loop gained the ipython tool backed by the kernel.
     let names: Vec<String> = engine
         .session
         .agent()
@@ -374,7 +378,97 @@ async fn create_session_registers_goal_and_heartbeat_handlers() {
         .map(|tool| tool.name().to_string())
         .collect();
     assert!(
-        names.iter().any(|name| name == "ipython"),
+        names.iter().any(|name| name == "python_repl"),
         "tools: {names:?}"
+    );
+}
+
+/// A daemon-shaped resume: an in-memory session manager (the daemon's
+/// non-persisted engine session) already holding a message, plus a
+/// `conversation_log_path`, still auto-appends the missing
+/// thinking-level and service-tier rows (#3350's gate regression).
+#[tokio::test]
+async fn create_session_appends_missing_resume_settings_rows() {
+    let model = pa_agent::types::Model {
+        id: "m".into(),
+        name: "m".into(),
+        api: "test".into(),
+        provider: "test".into(),
+        base_url: "http://localhost".into(),
+        reasoning: false,
+        cost: pa_agent::types::UsageCost::default(),
+        context_window: 1_000,
+        max_tokens: 100,
+        max_tokens_explicit: false,
+    };
+    let provider = Arc::new(ScriptedProvider::new(model.clone()));
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut session_manager =
+        crate::session::manager::SessionManager::in_memory_in_session_dir(&cwd, tmp.path());
+    session_manager
+        .append_message(pa_types::session::AgentMessage::User(
+            pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("resumed".into()),
+                timestamp: 0,
+                rest: serde_json::Map::default(),
+            },
+        ))
+        .unwrap();
+    let engine = create_session(SessionEngineConfig {
+        on_late_sent_agent_message: None,
+        semantic_edges: None,
+        cron_store: None,
+        queued_steering_probe: None,
+        should_stop_after_turn: None,
+        image_model_router: None,
+        steering_mode: None,
+        follow_up_mode: None,
+        cwd: cwd.clone(),
+        agent_dir: tmp.path().join("agent"),
+        mcp_manager: None,
+        model: Some(model),
+        thinking_level: None,
+        stream_fn: Some(provider.stream_fn()),
+        tools: vec![],
+        custom_system_prompt: None,
+        prompt_guidelines: vec![],
+        generic_mcp_servers: vec![],
+        allow_recursion: None,
+        session_manager: Some(session_manager),
+        extra_host_handlers: None,
+        conversation_log_path: Some(tmp.path().join("session.jsonl")),
+        additional_skill_paths: vec![],
+        additional_prompt_paths: vec![],
+        extra_builtin_skill_overrides: vec![],
+        rlm_subagent_host: None,
+        rlm_usage_store: None,
+        progress_note_emit: None,
+        rlm_depth: None,
+        daemonless: true,
+        telemetry: None,
+        model_info: None,
+        on_background_work_settled: None,
+        prewarm_ipython_kernel: None,
+        queued_goal_context_purge: None,
+    })
+    .await
+    .unwrap();
+
+    let entries = engine.session.entries().await;
+    assert!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            pa_types::session::FileEntry::ThinkingLevelChange { .. }
+        )),
+        "entries: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| matches!(
+            entry,
+            pa_types::session::FileEntry::ServiceTierChange { .. }
+        )),
+        "entries: {entries:?}"
     );
 }

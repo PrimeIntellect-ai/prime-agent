@@ -1,13 +1,7 @@
-//! Daemon command planes (TS `DAEMON_COMMAND_PLANE`): which socket a
-//! command belongs on. Session-plane commands address exactly one live
-//! session and may travel over a direct worker peer link; control-plane
-//! commands belong to the supervisor (roster, lifecycle, restarts) or
-//! mutate supervisor-owned state.
-//!
-//! The worker enforces this table for direct peer connections (a session
-//! client may only send session-plane commands for its own session) and the
-//! routed clients in pa-tui use it to pick the socket per request, so the
-//! table is the shared wire contract and lives here.
+//! Daemon command planes (TS `DAEMON_COMMAND_PLANE`): which socket a command belongs on -
+//! session-plane commands address one live session and may travel over a direct worker peer link;
+//! control-plane commands belong to the supervisor. The worker enforces this table on peer links,
+//! and pa-tui's routed clients pick the socket from it.
 
 /// The plane one command type belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,8 +13,7 @@ pub enum DaemonCommandPlane {
 }
 
 /// TS `DAEMON_COMMAND_PLANE`: every session-plane command the TS product
-/// defines has an entry; all other commands, known or unknown, are control
-/// (never forwarded on a peer link).
+/// defines has an entry; all other commands, known or unknown, are control.
 #[must_use]
 pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
     use DaemonCommandPlane::{Control, Session};
@@ -101,8 +94,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "get_last_assistant_text"
         | "get_system_prompt"
         | "get_tool_definition"
-        | "set_session_entry_label"
-        | "extension_ui_response" => Session,
+        | "set_session_entry_label" => Session,
         _ => Control,
     }
 }
@@ -113,9 +105,9 @@ pub fn is_session_plane_daemon_command(command_type: &str) -> bool {
     command_plane(command_type) == DaemonCommandPlane::Session
 }
 
-/// TS `READ_ONLY_DAEMON_COMMANDS`, verbatim: the commands that never mutate
-/// daemon state. Everything else counts as a mutation for the update-flow
-/// admission gate and the in-flight mutation drain (`attach`/`reattach` are
+/// TS `READ_ONLY_DAEMON_COMMANDS`, verbatim: the commands that never mutate daemon state;
+/// everything
+/// else counts as a mutation for the update-flow admission gate (`attach`/`reattach` are
 /// intentionally read-only, so a reconnecting client is never fenced out).
 const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "ack_result",
@@ -157,23 +149,20 @@ const READ_ONLY_DAEMON_COMMANDS: &[&str] = &[
     "get_tool_definition",
 ];
 
-/// TS `isDaemonMutatingCommand`: a command mutates daemon state unless it is
-/// in the read-only table.
+/// TS `isDaemonMutatingCommand`: mutates unless in the read-only table.
 #[must_use]
 pub fn is_daemon_mutating_command(command_type: &str) -> bool {
     !READ_ONLY_DAEMON_COMMANDS.contains(&command_type)
 }
 
-/// TS `UPDATE_RESTART_DRAIN_COMMANDS`: mutations that still pass the
-/// admission gate while the prepare transaction is `Draining` — they cancel
-/// or drain in-flight session work, so letting them through shortens the
-/// drain instead of fencing it off.
+/// TS `UPDATE_RESTART_DRAIN_COMMANDS`: mutations that still pass the admission gate while
+/// `Draining`;
+/// they cancel or drain in-flight session work, shortening the drain.
 #[must_use]
 pub fn is_update_drain_command(command_type: &str) -> bool {
     matches!(
         command_type,
-        "extension_ui_response"
-            | "abort"
+        "abort"
             | "abort_bash"
             | "kill_kernel_bash"
             | "abort_branch_summary"
@@ -186,8 +175,7 @@ pub fn is_update_drain_command(command_type: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The plane assignments the direct-attach path depends on: the session
-    /// commands a peer may send, and the control commands it must not.
+    /// The plane assignments the direct-attach path depends on.
     #[test]
     fn planes_match_ts() {
         for session in [
@@ -218,8 +206,7 @@ mod tests {
         assert!(!is_session_plane_daemon_command("not_a_command"));
     }
 
-    /// TS `READ_ONLY_DAEMON_COMMANDS` membership as the admission gate reads
-    /// it: reads and attach pass, session work and lifecycle mutate.
+    /// Reads and attach pass the admission gate; session work and lifecycle mutate.
     #[test]
     fn mutating_classification_matches_ts() {
         for read_only in [
@@ -254,11 +241,9 @@ mod tests {
         }
     }
 
-    /// TS `UPDATE_RESTART_DRAIN_COMMANDS`, verbatim.
     #[test]
     fn update_drain_commands_match_ts() {
         for drain in [
-            "extension_ui_response",
             "abort",
             "abort_bash",
             "abort_branch_summary",

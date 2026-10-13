@@ -4,10 +4,8 @@
 
 use super::*;
 
-// Tool-result entries (session-file parity, TS `_processAgentEvent`): a
-// real-engine turn whose scripted response requests an unknown tool
-// persists a `role: "toolResult"` message entry, streams the message pair
-// to attached clients, and counts in `get_session_stats`.
+// TS `_processAgentEvent` session-file parity: a `role: "toolResult"`
+// entry persists, streams, and counts.
 #[test]
 fn tool_result_entries_persisted_and_streamed() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -63,8 +61,6 @@ fn tool_result_entries_persisted_and_streamed() {
     let (prompt_ack, mut lines) = client.read_response_and_lines("p1");
     assert_eq!(prompt_ack["success"], true, "prompt failed: {prompt_ack}");
 
-    // Streamed events: the tool execution frames, then the toolResult
-    // message pair, then the closing turn.
     let mut tool_result_message = serde_json::Value::Null;
     let mut message_pair = 0usize;
     let mut tool_execution_end = serde_json::Value::Null;
@@ -82,7 +78,9 @@ fn tool_result_entries_persisted_and_streamed() {
                     tool_result_message = event["message"].clone();
                 }
             }
-            Some("turn_end") => break,
+            // The first turn ends after the tool result; the scripted final
+            // assistant response is persisted only before agent_end.
+            Some("agent_end") => break,
             _ => {}
         }
     }
@@ -103,7 +101,6 @@ fn tool_result_entries_persisted_and_streamed() {
     );
     assert_eq!(tool_result_message["isError"], true);
 
-    // The stats command counts the persisted entry.
     client.send_command(
         "s1",
         &serde_json::json!({ "type": "get_session_stats", "activeSessionId": session_id }),
@@ -114,7 +111,7 @@ fn tool_result_entries_persisted_and_streamed() {
     assert_eq!(stats["data"]["toolResults"], 1, "stats: {stats}");
     assert_eq!(stats["data"]["totalMessages"], 4, "stats: {stats}");
 
-    // The session file carries the entry in the TS envelope shape.
+    // The TS envelope shape on disk.
     let session_file = std::path::PathBuf::from(
         stats["data"]["sessionFile"]
             .as_str()

@@ -1,7 +1,6 @@
-//! Google Vertex AI streaming provider.
-//! Port of `packages/ai/src/providers/google-vertex.ts`: project/location
-//! resolution, API-key or OAuth (ADC) authentication, the Vertex
-//! `streamGenerateContent` endpoint, and the shared Google stream processor.
+//! Google Vertex AI streaming provider: project/location resolution, API-key or OAuth (ADC)
+//! authentication, the Vertex `streamGenerateContent` endpoint, and the shared Google stream
+//! processor.
 
 use serde_json::{json, Map, Value};
 
@@ -35,7 +34,7 @@ use crate::utils_inner::stream_failure::{
 pub const VERTEX_API_VERSION: &str = "v1";
 const GCP_VERTEX_CREDENTIALS_MARKER: &str = "gcp-vertex-credentials";
 
-/// Provider-native options (`GoogleVertexOptions` in the TS reference).
+/// Provider-native options.
 #[derive(Clone, Default)]
 pub struct GoogleVertexOptions {
     pub base: StreamOptions,
@@ -95,9 +94,9 @@ fn resolve_location(options: &GoogleVertexOptions) -> Result<String, String> {
 
 /// Resolve an OAuth access token for Application Default Credentials.
 ///
-/// The TS reference uses google-auth-library ADC. Here the token comes from an
-/// explicit `GOOGLE_OAUTH_ACCESS_TOKEN` env var, or from the gcloud CLI's
-/// credential source; failures surface as provider errors.
+/// Divergence from the TS google-auth-library ADC: the token comes from an explicit
+/// `GOOGLE_OAUTH_ACCESS_TOKEN` env var or the gcloud CLI's credential source; failures surface as
+/// provider errors.
 fn resolve_adc_access_token() -> Result<String, String> {
     if let Ok(token) = std::env::var("GOOGLE_OAUTH_ACCESS_TOKEN") {
         if !token.trim().is_empty() {
@@ -141,7 +140,6 @@ fn base_url_includes_api_version(base_url: &str) -> bool {
     })
 }
 
-/// Port of `streamGoogleVertex`.
 pub fn stream_google_vertex(
     model: &Model,
     context: &Context,
@@ -268,7 +266,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleVertexOptions)
     Value::Object(body)
 }
 
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 async fn run_stream(
     model: &Model,
@@ -354,9 +352,6 @@ async fn run_stream(
         on_response(
             crate::types::ProviderResponse {
                 status: response.status,
-                // Collected into the ordered map: the hook payload can
-                // serialize, and the HTTP header arrival order is not a
-                // stable serialization order.
                 headers: response.headers.clone().into_iter().collect(),
             },
             model,
@@ -365,9 +360,9 @@ async fn run_stream(
 
     if response.status >= 400 {
         let body = response.read_all_text().await.unwrap_or_default();
-        // The genai `ApiError` carries no `.error` object for the TS
-        // classifier (its `code` is numeric): the class name is the
-        // provider error type and the classified form carries no detail.
+        // The genai `ApiError` carries no `.error` object for the TS classifier (its `code` is
+        // numeric): the class name is the provider error type and the classified form carries no
+        // detail.
         let mut error =
             ProviderError::from_http_status_body(response.status, &body, response.headers.clone());
         if let ProviderError::Http(http) = &mut error {
@@ -430,7 +425,6 @@ async fn run_stream(
     Ok(())
 }
 
-/// Port of `streamSimpleGoogleVertex`.
 pub fn stream_simple_google_vertex(
     model: &Model,
     context: &Context,
@@ -447,11 +441,9 @@ pub fn stream_simple_google_vertex(
     stream_google_vertex(model, context, Some(&stream_options))
 }
 
-/// The thinking arm `stream_simple_google_vertex` picks for a model +
-/// reasoning level: disabled, level-based, or budget-based. Level-based covers
-/// Gemini 3 Pro/Flash and Gemma 4 (TS #2946: the Gemini API rejects
-/// `thinkingBudget` with a 400 for Gemma 4, so it must ride `thinkingLevel`
-/// like the Generative AI provider has since ee2483cd3).
+/// The thinking arm `stream_simple_google_vertex` picks for a model + reasoning level: disabled,
+/// level-based, or budget-based. Level-based covers Gemini 3 Pro/Flash and Gemma 4 (the Gemini API
+/// rejects `thinkingBudget` with a 400 for Gemma 4, so it must ride `thinkingLevel`).
 fn resolve_simple_thinking(
     model: &Model,
     options: Option<&SimpleStreamOptions>,
@@ -551,9 +543,8 @@ mod tests {
         }
     }
 
-    /// TS #2946: Gemma 4 on Vertex rides `thinkingLevel` (like the Generative
-    /// AI provider since ee2483cd3), never `thinkingBudget` — the Gemini API
-    /// answers a budget for Gemma 4 with a 400.
+    /// Gemma 4 on Vertex rides `thinkingLevel`, never `thinkingBudget` — the Gemini API answers a
+    /// budget for Gemma 4 with a 400 (TS #2946).
     #[test]
     fn gemma4_reasoning_uses_thinking_levels_not_budgets() {
         let model = gemma4_model();
@@ -587,8 +578,8 @@ mod tests {
         );
     }
 
-    /// A budget-based model keeps the budget arm (the level list must not
-    /// swallow the default path).
+    /// A budget-based model keeps the budget arm (the level list must not swallow the default
+    /// path).
     #[test]
     fn gemini2_keeps_the_budget_arm() {
         let model = serde_json::from_value::<Model>(json!({

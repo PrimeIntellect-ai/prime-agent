@@ -1,5 +1,4 @@
 //! Anthropic prompt-cache pricing helpers.
-//! Ported from `packages/ai/src/cache-pricing.ts`.
 
 use crate::types::Model;
 

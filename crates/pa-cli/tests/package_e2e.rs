@@ -1,13 +1,6 @@
-// The Tier-C/D ruling (fleet-uniform, 2026-09-28): stack-resident futures
-// by design on hot paths (boxing 130 fns is allocation-churn with zero
-// correctness gain); the fn-length threshold is a style gate, not
-// correctness (the harness fns are intentionally linear); 64-bit targets -
-// the narrowing sits at OS/protocol boundaries where the values are
-// bounded (pid syscalls, epoch/elapsed milliseconds, calendar math,
-// guarded parses), and checked conversions would add panic paths where
-// silent wrap was deliberate (the one genuinely-suspect family, args.rs's
-// parse_positive_u32 lacking its u32::MAX bound, is flagged in the lane
-// dossier for the conductor).
+// large_futures: stack-resident futures on hot paths by design.
+// too_many_lines: style gate, not correctness. Casts: 64-bit targets;
+// narrowing sits at bounded OS/protocol boundaries.
 #![allow(
     clippy::large_futures,
     clippy::too_many_lines,
@@ -20,15 +13,8 @@
 //! Package-manager e2e verifier: a fixture root (local package, npm shim,
 //! bare git repo with an ssh shim) plus a scripted corpus of `package`
 //! invocations run against BOTH the installed TypeScript `prime-agent`
-//! binary (parity ground truth) and the Rust binary. Exit codes, stdout, and
-//! stderr must match after normalizing sandbox paths, version numbers, and
-//! commit hashes; the Rust sandbox state is additionally asserted directly
-//! (settings documents, install directories).
-//!
-//! No network is used: npm installs run against a bash shim wired through
-//! the `npmCommand` setting, and git sources clone through an ssh shim that
-//! maps `ssh://localhost/...` onto the local bare repo (the product only
-//! accepts https/ssh/git protocol URLs for git sources).
+//! binary (parity ground truth) and the Rust binary; exit codes, stdout,
+//! and stderr must match after normalizing paths, versions, and hashes.
 #![cfg(unix)]
 
 use std::fmt::Write as _;
@@ -261,7 +247,6 @@ impl Sandbox {
         for dir in [&home, &cwd, &agent_dir, &global_root] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        // Local fixture package in the sandbox cwd.
         std::fs::create_dir_all(cwd.join("local-pkg").join("skills")).unwrap();
         std::fs::write(
             cwd.join("local-pkg").join("package.json"),
@@ -358,9 +343,8 @@ fn normalize_versions(text: &str) -> String {
                     out.push('.');
                 }
             } else {
-                // Non-version digit runs (hash fragments, numbers) are kept
-                // verbatim: trimming here would corrupt adjacent separators
-                // such as the `..` between git fetch commit ranges.
+                // Non-version digit runs are kept verbatim: trimming
+                // would corrupt separators like the `..` in fetch ranges.
                 out.push_str(&token);
             }
         } else {
@@ -399,13 +383,9 @@ fn normalize_hashes(text: &str) -> String {
     out
 }
 
-/// Git fetch ranges (`<old>..<new>`) must survive version normalization
-/// regardless of where digits appear in the commit hashes; `normalize_hashes`
-/// then reduces both sides to `<HASH>..<HASH>`. Regression: the old
-/// normalizer trimmed a `..` to `.` whenever the old hash ended in a digit
-/// and the new one started with a letter, which made the two drives'
-/// transcripts differ for ~29% of runs (the `move` commits are new every
-/// run, so the fetch line normalized asymmetrically).
+/// Git fetch ranges (`<old>..<new>`) must survive version normalization.
+/// Regression: the old normalizer trimmed a `..` to `.` whenever the old
+/// hash ended in a digit, making the drives differ for ~29% of runs.
 #[test]
 fn normalize_keeps_git_fetch_ranges_for_all_hash_shapes() {
     let fetch_ranges = [
@@ -441,11 +421,9 @@ fn ts_binary() -> Option<PathBuf> {
     (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
-/// Run the whole scripted corpus against one binary, returning the combined
-/// transcript.
+/// Run the whole scripted corpus against one binary, returning the combined transcript.
 fn drive(binary: &Path, base: &Path, fixtures: &Fixtures) -> (String, Sandbox) {
-    // Reset the shared fixtures to their per-run initial state so both
-    // binaries drive identical state transitions.
+    // Reset the shared fixtures so both binaries drive identical states.
     std::fs::write(
         fixtures
             .root
@@ -533,9 +511,7 @@ fn package_manager_corpus_matches_ts_binary() {
         "TS transcript:\n{ts_transcript}\nRust transcript:\n{rust_transcript}"
     );
 
-    // Rust sandbox state assertions (the verifier half): the local package
-    // is the only configured entry, bound at its project-scope path, and the
-    // git/npm installs left the expected directories behind.
+    // Rust sandbox state assertions (the verifier half).
     let project_settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(
             rust_sandbox

@@ -1,21 +1,12 @@
 //! # pa-telemetry
 //!
-//! Modular telemetry for Prime Agent: a small client surface
-//! ([`TelemetryClient::track`], [`TelemetryClient::flush`],
-//! [`TelemetryClient::shutdown`]), a primitive-only property schema, batched
-//! delivery to pluggable [`TelemetrySink`]s, and the pseudonymous
-//! installation identity.
-//!
-//! Privacy contract: properties are JSON primitives only; no prompt, session,
-//! or tool content is ever emitted. Telemetry is best-effort and must never
-//! block or fail the agent.
+//! Modular telemetry over a primitive-only property schema: non-blocking
+//! [`TelemetryClient::track`], batched [`TelemetrySink`] delivery, and the
+//! pseudonymous installation identity.
 
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: wire-format and duration arithmetic narrows validated or
-//   structurally bounded values (millisecond durations, clamped property
-//   bounds, non-negative-guarded JSON numbers); guarded conversions would
-//   add panic paths the bounds guarantee away.
+// Casts narrow values that are validated or structurally bounded (millisecond
+// durations, clamped property bounds, non-negative JSON numbers); guarded
+// conversions would add panic paths the bounds guarantee away.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -28,7 +19,6 @@ mod client;
 mod env;
 mod event;
 mod events;
-mod flags;
 mod install_id;
 mod platform;
 mod properties;
@@ -37,35 +27,47 @@ mod sink;
 mod sinks;
 mod time;
 
-/// Product version stamped on outgoing requests (`prime-agent/<version>`).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Set the product version stamped on every event and on outgoing requests
+/// (`prime-agent/<version>`). The binary passes its runtime version: a
+/// release restamps the packaged manifest, not the compiled-in crate
+/// version. The first call wins.
+pub fn set_version(version: &str) {
+    let _ = VERSION.set(version.to_string());
+}
+
+/// The product version: the one given to [`set_version`], else the
+/// compiled-in crate version.
+#[must_use]
+pub fn version() -> &'static str {
+    VERSION
+        .get()
+        .map_or(env!("CARGO_PKG_VERSION"), String::as_str)
+}
 
 pub use catalog::{
-    catalog, lookup, sanitize, EventRule, PropKind, PropertyRule, AUTH_CATEGORIES, BUILD_CHANNELS,
-    ERROR_CATEGORIES, ERROR_CLASSIFIER_REVISION, ERROR_CODES, ERROR_COMPONENTS,
-    ERROR_MESSAGE_POLICY_REVISION, ERROR_MESSAGE_SOURCES, ERROR_OPERATIONS, ERROR_STAGES,
-    ERROR_SUBTYPES, FEATURE_NAMES, FEATURE_OUTCOMES, INPUT_OUTCOMES, INPUT_STAGES,
-    INSTALLATION_ACTIONS, INSTALLATION_OUTCOMES, INSTALLATION_REASONS, INSTALLATION_SOURCES,
-    INSTALLATION_STAGES, MODEL_CATEGORIES, ONBOARDING_ENTRY_REASONS, ONBOARDING_OUTCOMES,
-    ONBOARDING_STAGES, PROVIDER_CATEGORIES, READY_KINDS, RECOVERY_ACTIONS, RECOVERY_OUTCOMES,
-    RUN_TRIGGERS, STARTUP_KINDS, STARTUP_OUTCOMES, STARTUP_STAGES, STOP_REASONS, TERMINAL_OUTCOMES,
-    TIMING_ORIGINS, TIMING_STAGES, TOOL_CATEGORIES, WORKLOAD_ORIGINS,
+    catalog, feature_outcome_key, input_stage_key, lookup, sanitize, EventRule, PropKind,
+    PropertyRule, AUTH_CATEGORIES, BUILD_CHANNELS, ERROR_CATEGORIES, ERROR_SUBTYPES, FEATURE_NAMES,
+    FEATURE_OUTCOMES, INPUT_STAGES, INSTALLATION_ACTIONS, INSTALLATION_OUTCOMES,
+    INSTALLATION_REASONS, INSTALLATION_SOURCES, INSTALLATION_STAGES, MODEL_CATEGORIES,
+    ONBOARDING_ENTRY_REASONS, ONBOARDING_OUTCOMES, ONBOARDING_STAGES, PROVIDER_CATEGORIES,
+    READY_KINDS, RUN_TRIGGERS, STARTUP_KINDS, STARTUP_OUTCOMES, STARTUP_STAGES, STOP_REASONS,
+    TERMINAL_OUTCOMES, TOOL_CATEGORIES, WORKLOAD_ORIGINS,
 };
 pub use client::{TelemetryClient, TelemetryClientConfig};
-pub use env::{env_telemetry_override, parse_bool_override};
+pub use env::parse_bool_override;
 pub use event::TelemetryEvent;
 pub use events::{
-    AgentError, AgentFeatureOutcome, AgentInputStage, AgentInstallationStage, AgentRunStarted,
-    AgentStartupStage, AgentTiming, AgentToolSummary, ErrorEventKind, OnboardingStage, RunTrigger,
-    TimingStage, ToolCategory,
+    AgentInstallationStage, AgentStartupStage, OnboardingStage, RunTrigger, ToolCategory,
+    UpdateHomebrewRefusal,
 };
-pub use flags::{FlagsClient, FLAG_CACHE_TTL};
-pub use install_id::install_id;
+pub use install_id::{existing_install_id, install_id};
 pub use platform::{base_properties, SCHEMA_VERSION};
 pub use properties::Properties;
 pub use rename::rename_onto;
 pub use sink::{SinkOutcome, TelemetrySink};
-pub use sinks::{FileSink, MockSink, NoopSink, PostHogEndpoint, PostHogSink, RecordedBatch};
+pub use sinks::{AnalyticsSink, FileSink, MockSink, NoopSink, RecordedBatch, ANALYTICS_ENDPOINT};
 
 #[cfg(test)]
 mod tests {
@@ -204,6 +206,33 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(a.event_names(), vec!["fanned"]);
         assert_eq!(b.event_names(), vec!["fanned"]);
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_live_switch_drops_while_off_and_resumes_when_on() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mock = Arc::new(MockSink::new());
+        let on = Arc::new(AtomicBool::new(false));
+        let mut config = TelemetryClientConfig::new("install-1");
+        config.flush_interval = Duration::from_mins(1);
+        config.sinks = vec![mock.clone() as Arc<dyn TelemetrySink>];
+        let switch = Arc::clone(&on);
+        config.enabled = Some(Arc::new(move || switch.load(Ordering::SeqCst)));
+        let client = TelemetryClient::spawn(config).unwrap();
+        client.track("while off", Properties::new());
+        // The worker takes the event while off; telemetry is turned back
+        // on before any delivery pass, and that event still never sends.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        on.store(true, Ordering::SeqCst);
+        client.track("back on", Properties::new());
+        client.flush().await.unwrap();
+        assert_eq!(mock.event_names(), vec!["back on"]);
+        assert_eq!(
+            client.dropped_count(),
+            1,
+            "the event tracked while off is dropped"
+        );
         client.shutdown().await.unwrap();
     }
 

@@ -1,20 +1,17 @@
-//! The team picker concern (moved with its concern): TS
-//! `PrimeTeamSelectorComponent` — the mounted picker state (the search
-//! field over the personal-first rows) and its drive (the fuzzy filter,
-//! the row parts, and the pick).
+//! The team picker: TS `PrimeTeamSelectorComponent` — the mounted picker state (the search
+//! field over the personal-first rows) and its drive (the fuzzy filter, the row parts, and
+//! the pick).
 
 use super::{
     fuzzy_filter, scrub_controls, Line, PrimeTeamOption, PrimeTeamPick, SearchInput, Span,
 };
 
-/// The mounted team picker (TS `PrimeTeamSelectorComponent`): the search
-/// field over the personal-first rows.
+/// The mounted team picker: the search field over the personal-first rows.
 #[derive(Debug)]
 pub(super) struct PrimeTeamPicker {
     /// The team rows; the personal account rides first as its own row.
     pub(super) teams: Vec<PrimeTeamOption>,
-    /// TS `currentTeamId`: the stored selection's team id; `None` marks
-    /// the personal account current.
+    /// The stored selection's team id; `None` marks the personal account current.
     pub(super) current: Option<String>,
     pub(super) search: SearchInput,
     /// Indices over the full row list (0 = personal, i + 1 = teams[i]).
@@ -22,16 +19,15 @@ pub(super) struct PrimeTeamPicker {
     pub(super) selected: usize,
 }
 
-/// One trailing cell of a team row: a muted detail or the "current"
-/// marker (TS `MenuRow`'s meta with `theme.fg("success", ...)`).
+/// One trailing cell of a team row: a muted detail or the "current" marker.
 pub(super) enum PickerSegment {
     Muted(String),
     Current,
 }
 
 impl PrimeTeamPicker {
-    /// TS `filterOptions`: the fuzzy filter over the full row list; a
-    /// fresh query resets the cursor to the first row.
+    /// The fuzzy filter over the full row list; a fresh query resets the cursor to the first
+    /// row.
     pub(super) fn refilter(&mut self) {
         let query = self.search.value().to_string();
         let rows = self.teams.len() + 1;
@@ -45,8 +41,7 @@ impl PrimeTeamPicker {
         self.selected = 0;
     }
 
-    /// TS `getSearchText`: the personal account or the team's name,
-    /// slug, role, and id.
+    /// The personal account or the team's name, slug, role, and id.
     fn search_text(&self, row: usize) -> String {
         if row == 0 {
             return "personal account".to_string();
@@ -63,10 +58,8 @@ impl PrimeTeamPicker {
         }
     }
 
-    /// The row's primary and trailing cells (TS `getPrimary`/
-    /// `getSecondary`/`getMeta`): the name with the slug/role detail,
-    /// "personal account" for the personal row, and the "current"
-    /// marker on the stored selection.
+    /// The row's primary and trailing cells: the name with the slug/role detail, "personal
+    /// account" for the personal row, and the "current" marker on the stored selection.
     pub(super) fn row_parts(&self, row: usize) -> (Line, Vec<PickerSegment>) {
         if row == 0 {
             let mut trailing = vec![PickerSegment::Muted("personal account".to_string())];
@@ -78,8 +71,8 @@ impl PrimeTeamPicker {
         let Some(team) = self.teams.get(row - 1) else {
             return (Vec::new(), Vec::new());
         };
-        // The team fields are provider-supplied: the same control
-        // character hygiene every daemon-supplied row carries.
+        // The team fields are provider-supplied: the same control character hygiene every
+        // daemon-supplied row carries.
         let name = scrub_controls(&team.name);
         let role = team.role.as_deref().map_or_else(
             || "member".to_string(),
@@ -96,9 +89,8 @@ impl PrimeTeamPicker {
         (vec![Span::raw(name)], trailing)
     }
 
-    /// TS confirm on the selected row: the personal row answers the
-    /// personal account, a team row answers the team; an empty filter
-    /// selects nothing.
+    /// Confirm on the selected row: the personal row answers the personal account, a team row
+    /// answers the team; an empty filter selects nothing.
     pub(super) fn pick(&self) -> Option<PrimeTeamPick> {
         let row = *self.filtered.get(self.selected)?;
         Some(if row == 0 {

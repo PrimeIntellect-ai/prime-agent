@@ -1,7 +1,5 @@
-//! The legacy subagent topology surfaces (moved with their concern):
-//! the pre-ledger per-parent registry reader with its bounded
-//! header-line probe, and the per-child display sidecar entry with
-//! its atomic writer.
+//! The legacy subagent topology surfaces: the pre-ledger per-parent registry reader with its
+//! bounded header-line probe, and the per-child display sidecar entry with its atomic writer.
 use std::io::Write as _;
 
 use anyhow::Context as _;
@@ -47,8 +45,7 @@ pub struct LegacyRlmSubagentEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RlmSubagentDisplayEntry {
-    /// Always `rlm_subagent`; a file of any other type is not a display
-    /// entry and reads as absent.
+    /// Always `rlm_subagent`; a file of any other type is not a display entry and reads as absent.
     #[serde(default, rename = "type")]
     pub type_tag: String,
     #[serde(default)]
@@ -87,16 +84,12 @@ pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagent
     Some(entry)
 }
 
-/// Atomically write one child's display entry. A non-delete write over a
-/// deletion tombstone is refused (the deleted child stays deleted), exactly
-/// like the TS display writer.
+/// Atomically write one child's display entry (a tombstone refusal keeps the
+/// deleted child deleted).
 ///
 /// # Errors
 ///
-/// Returns an error when the display directory cannot be created, the
-/// entry cannot be serialized, or the atomic temp write or rename onto
-/// the display file fails; a refused write over a tombstone answers
-/// `Ok(false)`.
+/// Returns an error on a display-dir, serialization, or temp-write failure.
 pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<bool> {
     if entry.status != "deleted"
         && read_rlm_subagent_display(Path::new(&entry.session_dir))
@@ -107,9 +100,8 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     let dir = Path::new(&entry.session_dir);
     fs::create_dir_all(dir)?;
     let payload = serde_json::to_string(entry)?;
-    // TS `writeFileAtomicSync` temp naming (`${path}.${pid}.${uuid}.tmp`): a
-    // unique temp per writer, so two processes writing the same display file
-    // (a raced admission and its re-adoption) never share one temp.
+    // TS `writeFileAtomicSync` temp naming: a unique temp per writer, so
+    // two processes never share one temp.
     let temp = dir.join(format!(
         "rlm-subagent.json.{}.{}.tmp",
         std::process::id(),
@@ -131,23 +123,14 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     Ok(true)
 }
 
-/// The bounded header read cap for the legacy registry probe: the header
-/// id the probe extracts rides the file's first line, so the read stays
-/// bounded to a line instead of the parent transcript's whole bytes (a
-/// multi-megabyte parent's registry probe must not read megabytes to
-/// extract one id). A first line longer than the cap reads as absent -
-/// the same judgment `read_first_line_bounded`'s callers make, and far
-/// past any real session header (the 512-byte list gate's class).
+/// The bounded header read cap for the legacy registry probe: the header id rides the file's first
+/// line, so the read stays bounded; a first line longer than the cap reads as absent.
 pub(super) const LEGACY_REGISTRY_HEADER_READ_MAX_BYTES: usize = 64 * 1024;
 
-/// The legacy registry path for one parent session file (TS
-/// `legacyRlmSubagentRegistryPath`): the parent's artifacts dir, keyed by
-/// the session header id. The id rides the file's first line, so the
-/// probe reads that line bounded instead of the whole transcript: the
-/// passive roster walk probes every live child's parent once per walk,
-/// and the whole-file read made each catalog fetch linear in the
-/// family's total transcript bytes (a deep tree of large parents re-read
-/// every parent transcript per `list_saved_sessions`).
+/// The legacy registry path for one parent session file: the parent's
+/// artifacts dir, keyed by the session header id. The probe stays bounded
+/// — the passive walk probes every parent once, so a whole-file read
+/// would be linear in transcript bytes.
 pub(super) fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
     let line = crate::session_store::read_first_line_bounded(
         session_file,
@@ -162,9 +145,8 @@ pub(super) fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
     Some(artifacts_root.join(header_id).join("rlm-subagents.jsonl"))
 }
 
-/// Tolerant reader for a per-parent legacy registry (TS
-/// `readLegacyRlmSubagentRegistry`): latest entry per childId, malformed
-/// lines ignored, a missing file an empty registry.
+/// Tolerant reader for a per-parent legacy registry (TS `readLegacyRlmSubagentRegistry`): latest
+/// entry per childId, malformed lines ignored, a missing file an empty registry.
 pub(crate) fn read_legacy_registry(session_file: &Path) -> Vec<LegacyRlmSubagentEntry> {
     let Some(registry) = legacy_registry_path(session_file) else {
         return Vec::new();

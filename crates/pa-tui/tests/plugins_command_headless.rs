@@ -1,30 +1,21 @@
 //! Headless e2e for the `/plugins` command (TS `handlePluginsCommand` ->
-//! `showServiceCatalogPicker`): the command opens the external-services
-//! catalog view (this client's merged `/mcp` view over the daemon's
-//! resolved `services` cards) and an argument prefills the search field.
+//! `showServiceCatalogPicker`): opens the external-services catalog view
+//! (the merged `/mcp` view) and an argument prefills the search field.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -48,8 +39,7 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then answer the
-    /// loop's requests (the roster carries two catalog services).
+    /// Serve one connection: the roster carries two catalog services.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -280,9 +270,6 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/plugins` opens the catalog view over the daemon's resolved services
-/// (this client's merged `/mcp` view): the search field and every service
-/// card render.
 #[test]
 fn plugins_opens_the_catalog_view() {
     let steps = vec![
@@ -302,9 +289,6 @@ fn plugins_opens_the_catalog_view() {
     );
 }
 
-/// `/plugins <query>` (TS `showServiceCatalogPicker(initialSearch)`)
-/// opens the view with the search prefilled: the matching row stays and
-/// the non-matching one is filtered out.
 #[test]
 fn plugins_argument_prefills_the_search() {
     let steps = vec![

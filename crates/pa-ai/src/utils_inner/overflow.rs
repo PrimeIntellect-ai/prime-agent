@@ -1,6 +1,4 @@
-//! Context overflow detection.
-//! Ported from `packages/ai/src/utils/overflow.ts`, including the provider
-//! pattern table and the silent-overflow heuristics.
+//! Context overflow detection: the provider pattern table and the silent-overflow heuristics.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -58,10 +56,9 @@ fn non_overflow_patterns() -> &'static Vec<Regex> {
 
 /// Check if an assistant message represents a context overflow error.
 ///
-/// Handles error-based overflow (`stop_reason` "error" with a pattern-matching
-/// message), silent overflow (usage.input exceeds the context window while the
-/// stream reported success), and length-stop overflow (server truncates input,
-/// returns `stop_reason` "length" with zero output).
+/// Handles error-based overflow (`stop_reason` "error" with a pattern-matching message), silent
+/// overflow (usage.input exceeds the context window while the stream reported success), and
+/// length-stop overflow (server truncates input, returns `stop_reason` "length" with zero output).
 #[must_use]
 pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u64>) -> bool {
     if message.stop_reason == StopReason::Error {
@@ -87,8 +84,8 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<u6
             }
         }
 
-        // Length-stop overflow (Xiaomi MiMo style): server truncates oversized
-        // input to fit the context window, leaving no room for output.
+        // Length-stop overflow (Xiaomi MiMo style): server truncates oversized input to fit the
+        // context window, leaving no room for output.
         if message.stop_reason == StopReason::Length && message.usage.output == 0 {
             let input_tokens = message.usage.input + message.usage.cache_read;
             // The 0.99 ratio threshold is the TS port's f64 comparison; token counts sit far below 2^53.
@@ -199,9 +196,8 @@ mod tests {
 
     #[test]
     fn detects_combined_input_output_limit_overflow() {
-        // The live Prime Inference 400: input + requested output over a
-        // combined ceiling — no single-part wording matches any older
-        // pattern.
+        // The live Prime Inference 400: input + requested output over a combined ceiling — no
+        // single-part wording matches any older pattern.
         let m = message(
             StopReason::Error,
             Some(
@@ -217,8 +213,8 @@ mod tests {
 
     #[test]
     fn combined_limit_remedy_text_alone_classifies() {
-        // The remedy wording without the leading "combined" phrasing still
-        // matches the combined-limit arm.
+        // The remedy wording without the leading "combined" phrasing still matches the
+        // combined-limit arm.
         let m = message(
             StopReason::Error,
             Some("400: Please reduce the input length or requested output length and try again."),

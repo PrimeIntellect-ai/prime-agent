@@ -1,17 +1,7 @@
-//! Package source parsing: `npm:` specs, git URLs, and local paths, plus the
-//! path-resolution helpers the package manager uses to bind sources to
-//! install locations and settings entries.
-//!
-//! Behavior contract (user-visible strings included):
-//! - `npm:<spec>` is always an npm source; the spec may pin a version
-//!   (`npm:@scope/pkg@1.2.3`), which disables auto-updates.
-//! - Local sources are anything that is not an `npm:`/`git:`/URL protocol
-//!   prefix, including bare relative paths.
-//! - Git sources are explicit protocol URLs (`https://`, `http://`, `ssh://`,
-//!   `git://`) or - with the `git:` prefix - host/path shorthand and
-//!   scp-like forms. `git://` URLs are *not* git sources: the `git:` prefix
-//!   is stripped first, so `git://host/path` parses as a local path. This
-//!   quirk is product behavior, not a bug to fix here.
+//! Package source parsing: `npm:` specs, git URLs, and local paths, plus
+//! the path-resolution helpers that bind sources to install locations and
+//! settings entries. `git://` URLs are *not* git sources: the `git:` prefix strips
+//! first, so `git://host/path` parses as a local path (product behavior, not a bug).
 
 use std::path::{Path, PathBuf};
 
@@ -82,7 +72,6 @@ pub struct LocalSource {
     pub path: String,
 }
 
-/// The parsed form of a package source string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedSource {
     Npm(NpmSource),
@@ -172,9 +161,9 @@ const HOSTED_DOMAINS: &[(&str, &str)] = &[
     ("www.bitbucket.org", "bitbucket.org"),
 ];
 
-/// Resolve a URL to a known hosted domain, or `None` for everything else.
-/// Supports `#committish` suffixes and `git+` URL prefixes, which is what the
-/// TS candidate loop relies on.
+/// Resolve a URL to a known hosted domain, or `None` otherwise; supports
+/// `#committish` suffixes and `git+` prefixes (what the TS candidate loop
+/// relies on).
 fn hosted_from_url(candidate: &str) -> Option<HostedInfo> {
     let (url_part, committish) = match candidate.split_once('#') {
         Some((url, c)) => (url, Some(c.to_string())),
@@ -271,10 +260,8 @@ fn parse_generic_git_url(url: &str) -> Option<GitSource> {
     })
 }
 
-/// Parse a package source into a git source.
-///
-/// Rules: with the `git:` prefix every historical shorthand form is accepted;
-/// without it only explicit protocol URLs parse as git.
+/// Rules: with the `git:` prefix every historical shorthand form is accepted; without it only
+/// explicit protocol URLs.
 #[must_use]
 pub fn parse_git_url(source: &str) -> Option<GitSource> {
     let trimmed = source.trim();
@@ -366,7 +353,6 @@ pub fn parse_npm_spec(spec: &str) -> (String, Option<String>) {
     (name.to_string(), Some(version.to_string()))
 }
 
-/// Parse a raw package source string.
 pub fn parse_source(source: &str) -> ParsedSource {
     if let Some(spec) = source.strip_prefix("npm:") {
         let spec = spec.trim();

@@ -1,12 +1,6 @@
-//! The skill-invocation block format. Port of `core/skill-blocks.ts`: the
-//! `<skill name="..." location="...">...</skill>` wrapper the session
-//! engine expands `/skill:<name>` submissions into, and the parse the
-//! renderers use to pull that block back out of a persisted user message.
-//!
-//! Pure data and pure functions only, like the slash-command table: the
-//! session engine (pa-core) builds the block, every surface that renders
-//! user messages (the TUI live and replay paths) parses it, so the format
-//! lives in the shared crate.
+//! The skill-invocation block format (TS `skill-blocks.ts`): the `<skill name="..."
+//! location="...">...</skill>` wrapper the session engine expands `/skill:<name>` submissions into,
+//! and the parse the renderers use to pull it back out of a persisted user message.
 
 /// A parsed skill block from a user message.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,24 +11,17 @@ pub struct ParsedSkillBlock {
     pub location: String,
     /// The block body (the skill content, frontmatter stripped).
     pub content: String,
-    /// The user text that followed the block (`None` when the submission
-    /// carried no arguments).
+    /// The user text that followed the block (`None` without arguments).
     pub user_message: Option<String>,
 }
 
-/// The block opener both sides emit byte-identically (TS
-/// `AgentSession._expandSkillCommand`).
+/// The block opener both sides emit byte-identically (TS `AgentSession._expandSkillCommand`).
 const BLOCK_OPEN: &str = "<skill name=\"";
 
-/// Parse a skill block from message text.
-///
-/// Mirrors the TS `parseSkillBlock` anchored match: the text must BE one
-/// block (`^<skill name="..." location="...">\n[body]\n</skill>`), with an
-/// optional `\n\n`-separated user message after it. Like the TS regex's
-/// non-greedy body group, the body closes at the FIRST `\n</skill>` whose
-/// tail can still satisfy the match (empty, or `\n\n` plus trailing text);
-/// a body containing earlier close tags keeps them. Returns `None` when
-/// the text is not a skill block.
+/// Parse a skill block from message text. Mirrors the TS `parseSkillBlock` anchored match: the text
+/// must BE one block, with an optional `\n\n`-separated user message after it. Like the TS
+/// non-greedy body group, the body closes at the FIRST `\n</skill>` whose tail can still satisfy
+/// the match; a body containing earlier close tags keeps them.
 #[must_use]
 pub fn parse_skill_block(text: &str) -> Option<ParsedSkillBlock> {
     let rest = text.strip_prefix(BLOCK_OPEN)?;
@@ -47,9 +34,8 @@ pub fn parse_skill_block(text: &str) -> Option<ParsedSkillBlock> {
     loop {
         let end = body[search_from..].find(close)? + search_from;
         let tail = &body[end + close.len()..];
-        // The TS match after the close tag: end of text, or the
-        // `\n\n`-separated user message (`([\s\S]+)`, so the trailing
-        // text must be non-empty for the occurrence to win).
+        // The TS match after the close tag: end of text, or a `\n\n`-
+        // separated user message (must be non-empty to win).
         let user_message = match tail.strip_prefix("\n\n") {
             Some(trailing) if !trailing.is_empty() => {
                 let trimmed = trailing.trim();
@@ -114,8 +100,7 @@ mod tests {
 
     #[test]
     fn rejects_non_block_text() {
-        // Plain prompts and partial blocks never parse: the TS match is
-        // anchored to the whole text.
+        // The TS match is anchored to the whole text.
         for text in [
             "",
             "hello world",
@@ -134,9 +119,8 @@ mod tests {
 
     #[test]
     fn the_body_keeps_close_tags_the_tail_cannot_absorb() {
-        // The non-greedy TS body group extends past a close tag whose tail
-        // cannot satisfy the anchored match; a LATER close tag with a valid
-        // tail wins instead.
+        // The non-greedy body extends past a close tag whose tail cannot
+        // satisfy the match; a LATER close tag with a valid tail wins.
         let nested = "<skill name=\"x\" location=\"/x\">\nkeep \n</skill> inner\n</skill>";
         let parsed = parse_skill_block(nested).expect("parses");
         assert_eq!(parsed.content, "keep \n</skill> inner");

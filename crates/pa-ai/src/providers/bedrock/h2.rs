@@ -1,15 +1,7 @@
-//! The bedrock default transport: h2c prior-knowledge HTTP/2 over cleartext.
-//!
-//! The TS bedrock client (bun) runs the AWS SDK's `NodeHttp2Handler`: HTTP/2
-//! with prior knowledge over cleartext (`http2.connect`, no upgrade), an
-//! isolated session per event-stream request, no transport retries
-//! (`maxAttempts: 1`), and no transport timeout. The TS-visible failure
-//! surface is bun's node:http2 error text (`Protocol error`,
-//! `The pending stream has been canceled`, ...), pinned byte-for-byte by the
-//! provider-error probe. This module drives the same protocol directly on
-//! the `h2` crate — one connection per request — so the failure classes the
-//! TS surfaces (stream reset, session GOAWAY, socket failure, protocol
-//! violations) classify into the same texts (see `utils_inner::h2_classify`).
+//! The bedrock default transport: h2c prior-knowledge HTTP/2 over cleartext, mirroring the TS
+//! bedrock client's `NodeHttp2Handler` (isolated session per request, no transport retries or
+//! timeout); failure texts are pinned by the provider-error probe and classify via
+//! `utils_inner::h2_classify`.
 
 use std::future::Future;
 
@@ -21,9 +13,8 @@ use crate::utils_inner::stream_failure::{
     ConnectionErrorKind, ConnectionErrorProfile, H2Failure, ProviderConnectionError, ProviderError,
 };
 
-/// The bedrock wire transport, mirroring the TS request-handler selection:
-/// the AWS SDK's `NodeHttp2Handler` by default; `NodeHttpHandler` (http1) when
-/// `AWS_BEDROCK_FORCE_HTTP1=1` or a proxy environment is configured.
+/// The bedrock wire transport, mirroring the TS request-handler selection: `NodeHttp2Handler` by
+/// default; `NodeHttpHandler` (http1) for `AWS_BEDROCK_FORCE_HTTP1=1` or a proxy environment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BedrockTransport {
     /// The node http1 handler (`AWS_BEDROCK_FORCE_HTTP1=1`, proxy env).
@@ -34,9 +25,6 @@ pub(crate) enum BedrockTransport {
     H2TlsAlpn,
 }
 
-/// Port of the TS request-handler selection: `NodeHttp2Handler` (http2) by
-/// default; the http1 `NodeHttpHandler` for `AWS_BEDROCK_FORCE_HTTP1=1` or any
-/// configured proxy environment (the product's own proxy path).
 pub(crate) fn select_transport(
     scheme: &str,
     force_http1: bool,
@@ -96,8 +84,8 @@ impl H2Response {
         };
         match chunk {
             Some(Ok(bytes)) => {
-                // h2 flow control: the connection window must be released or
-                // long event streams stall once the default window drains.
+                // h2 flow control: the connection window must be released or long event streams
+                // stall once the default window drains.
                 let _ = self.body.flow_control().release_capacity(bytes.len());
                 Ok(Some(bytes.to_vec()))
             }
@@ -117,11 +105,9 @@ impl H2Response {
 
     /// Classify a mid-body h2 failure into the TS transport's failure texts.
     fn body_error(&self, error: &h2::Error) -> ProviderError {
-        // A peer GOAWAY does not fail streams at or below its last-stream-id;
-        // the stream only dies when the socket then closes — and a reset can
-        // clobber the h2 crate's pending GOAWAY error before it is observed.
-        // The wire observer (see `goaway`) keeps the session error the TS
-        // transport reports.
+        // A peer GOAWAY does not fail streams at or below its last-stream-id; the stream only dies
+        // when the socket then closes — and a reset can clobber the h2 crate's pending GOAWAY error
+        // before it is observed; the wire observer (see `goaway`) keeps the session error.
         let failure = self.observer.classify_mid_body(error);
         ProviderError::Connection(ProviderConnectionError {
             kind: ConnectionErrorKind::H2MidStream(failure),
@@ -147,8 +133,8 @@ async fn select_cancel(
     }
 }
 
-/// A pre-response transport failure: the h2 failure detail, no
-/// deserialization hint (the AWS SDK has no response to deserialize yet).
+/// A pre-response transport failure: the h2 failure detail, no deserialization hint (the AWS SDK
+/// has no response to deserialize yet).
 fn h2_request_error(error: &h2::Error, connection: &ConnectionErrorProfile) -> ProviderError {
     ProviderError::Connection(ProviderConnectionError {
         kind: ConnectionErrorKind::H2Request(classify_h2_error(error)),
@@ -157,9 +143,8 @@ fn h2_request_error(error: &h2::Error, connection: &ConnectionErrorProfile) -> P
     })
 }
 
-/// A TCP connect failure: refused connects surface the TS stream-cancel
-/// text with the node-style cause embedded; other connect failures surface
-/// the bare stream-cancel text.
+/// A TCP connect failure: refused connects surface the TS stream-cancel text with the node-style
+/// cause embedded; others the bare text.
 fn connect_error(error: &std::io::Error, connection: &ConnectionErrorProfile) -> ProviderError {
     let kind = if error.kind() == std::io::ErrorKind::ConnectionRefused {
         ConnectionErrorKind::Connect
@@ -182,10 +167,9 @@ fn timeout_error(connection: &ConnectionErrorProfile, timeout_ms: u64) -> Provid
     })
 }
 
-/// Issue one h2c prior-knowledge request: connect, handshake, send the
-/// request, and resolve once the response HEADERS arrive. The body is read
-/// through the returned [`H2Response`].
-// Long by design (a 1:1 port of the upstream provider shape); refactoring is out of scope for the zero-behavior pedantic sweep.
+/// Issue one h2c prior-knowledge request: connect, handshake, send the request, and resolve once
+/// the response HEADERS arrive. The body is read through the returned [`H2Response`].
+// Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, ProviderError> {
     let H2RequestOptions {
@@ -222,8 +206,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
         let port = url.port_or_known_default().unwrap_or(80);
         let authority = format!("{connect_host}:{port}");
 
-        // Connect: one connection per request, like the TS isolated
-        // event-stream sessions.
+        // Connect: one connection per request, like the TS isolated event-stream sessions.
         let tcp = tokio::net::TcpStream::connect(&authority)
             .await
             .map_err(|error| connect_error(&error, &connection))?;
@@ -233,15 +216,13 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
             crate::providers::bedrock::goaway::TrackedReadHalf::new(read_half);
         let io = crate::providers::bedrock::goaway::TrackedStream::new(tracked_read, write_half);
 
-        // Handshake sends the h2 connection preface; the peer's answer is
-        // validated by the codec when frames are read (an HTTP/1.1 answer
-        // fails the first frame decode).
+        // Handshake sends the h2 connection preface; the peer's answer is validated by the codec
+        // when frames are read (an HTTP/1.1 answer fails the first frame decode).
         let (mut send_request, connection_drive) = h2::client::handshake(io)
             .await
             .map_err(|error| h2_request_error(&error, &connection))?;
-        // Drive the protocol: nothing progresses unless the connection task
-        // is polled; it ends when both request handles drop (the abort and
-        // error paths reset the stream on release).
+        // Drive the protocol: nothing progresses unless the connection task is polled; it ends when
+        // both request handles drop (the abort and error paths reset the stream on release).
         tokio::spawn(async move {
             let _ = connection_drive.await;
         });
@@ -331,8 +312,7 @@ mod tests {
             select_transport("https", false, false),
             BedrockTransport::H2TlsAlpn
         );
-        // FORCE_HTTP1 and the proxy environment select the http1 handler,
-        // like the TS request-handler switch.
+        // FORCE_HTTP1 and the proxy environment select the http1 handler.
         assert_eq!(
             select_transport("http", true, false),
             BedrockTransport::Http1Handler
@@ -353,8 +333,7 @@ mod tests {
             refused.to_string(),
             "The pending stream has been canceled (caused by: connect ECONNREFUSED 127.0.0.1:1)"
         );
-        // Other connect failures (unreachable, DNS) surface the bare
-        // stream-cancel text.
+        // Other connect failures (unreachable, DNS) surface the bare stream-cancel text.
         let other = connect_error(
             &std::io::Error::from(std::io::ErrorKind::HostUnreachable),
             &aws_http2_profile(),
@@ -369,9 +348,8 @@ mod tests {
     }
 }
 
-/// Raw-socket h2 mock for the transport tests: one connection, one scripted
-/// response. Frames are written/parsed by hand (the probe drives the TS
-/// binary through the same wire sequences).
+/// Raw-socket h2 mock for the transport tests: one connection, one scripted response. Frames are
+/// written/parsed by hand (the probe drives the TS binary through the same wire sequences).
 #[cfg(test)]
 mod h2_wire_tests {
     use super::*;
@@ -506,8 +484,7 @@ mod h2_wire_tests {
         }
     }
 
-    /// `RST_STREAM` mid-body: the nghttp2 code name + the AWS SDK
-    /// deserialization hint (TS-binary verified).
+    /// `RST_STREAM` mid-body: the nghttp2 code name + the deserialization hint.
     #[tokio::test]
     async fn rst_stream_mid_body_text() {
         let error = mid_stream_error(MockAction::RstStream).await;
@@ -537,27 +514,26 @@ mod h2_wire_tests {
         );
     }
 
-    /// An HTTP/1.1 answer at a prior-knowledge h2 endpoint: the pre-response
-    /// protocol error, no deserialization hint.
+    /// An HTTP/1.1 answer at a prior-knowledge h2 endpoint: the pre-response protocol error, no
+    /// deserialization hint.
     #[tokio::test]
     async fn http1_answer_is_protocol_error() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr_http1 = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            // The shared frame-draining helper (its settings ACK is
-            // harmless: the answer below still fails the h2 parse).
+            // The shared frame-draining helper (its settings ACK is harmless: the answer below
+            // still fails the h2 parse).
             read_client_preface(&mut socket).await;
             socket
                 .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\n\r\n{}")
                 .await
                 .unwrap();
             socket.shutdown().await.ok();
-            // The readiness event is the client's EOF, not elapsed time:
-            // the read consumes the request DATA (a close over unread
-            // data resets, and Windows would discard the queued answer
-            // on the reset) and holds the socket until the client -
-            // which closes once the parse fails - has the answer.
+            // The readiness event is the client's EOF, not elapsed time: the read consumes the
+            // request DATA (a close over unread data resets, and Windows would discard the queued
+            // answer on the reset) and holds the socket until the client - which closes once the
+            // parse fails - has the answer.
             let mut rest = Vec::new();
             let _ = socket.read_to_end(&mut rest).await;
         });
@@ -569,8 +545,7 @@ mod h2_wire_tests {
         assert_eq!(error, "Protocol error");
     }
 
-    /// A refused connect: the canceled pending stream with the node-style
-    /// connect cause embedded.
+    /// A refused connect: the canceled pending stream with the node-style connect cause embedded.
     #[tokio::test]
     async fn refused_connect_text() {
         // Port 1 is never served (the probe's dead port).

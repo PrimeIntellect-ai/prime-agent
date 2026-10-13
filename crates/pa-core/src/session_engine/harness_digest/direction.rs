@@ -1,10 +1,5 @@
-//! Digest window-direction oracles (TS `_buildHarnessDigestQueryTerms`,
-//! core/agent-session.ts: `.slice(-4).reverse()` - the NEWEST four
-//! user/assistant texts, newest first). The port shipped the window as
-//! `truncate(4)` on the chronological list - the OLDEST four - so every
-//! `digest_query_terms` consumer ranked the wrong end of the recent
-//! context window: `recent_message_texts_newest_first` was named for the
-//! TS direction while the selection kept the chronological head.
+//! Digest window-direction oracles: the window is the NEWEST four
+//! user/assistant texts, newest first (TS `.slice(-4).reverse()`).
 
 use super::*;
 use crate::refinement::HarnessEntry;
@@ -70,8 +65,7 @@ fn direction_memory(id: &str, title: &str, content: &str) -> HarnessEntry {
 }
 
 /// Seed the rig's global harness dir with the given `(id, title, content)`
-/// memories in one save (each save rewrites the state file, so the memories
-/// must ride one `save_harness_state`).
+/// memories in one save (each save rewrites the state file).
 fn seed_global_memories(dir: &std::path::Path, memories: &[(&str, &str, &str)]) {
     let mut state = crate::refinement::empty_harness_state();
     let records = state
@@ -84,11 +78,9 @@ fn seed_global_memories(dir: &std::path::Path, memories: &[(&str, &str, &str)]) 
     crate::refinement::save_harness_state(dir, &state).unwrap();
 }
 
-/// The direction rig: an `AgentSession` whose live context carries `texts`
-/// as chronological user/assistant rows (the writer's wire shape, built
-/// through the product's own wire->loop converter so every fixture takes
-/// the real path), with the harness-state dirs under `tmp` and no persisted
-/// goal - the window's terms come from the texts alone.
+/// An `AgentSession` whose live context carries `texts` as chronological
+/// rows, with no persisted goal — the window's terms come from the texts
+/// alone.
 async fn direction_rig(
     tmp: &tempfile::TempDir,
     texts: &[&str],
@@ -156,12 +148,8 @@ const DISTINCT6: [&str; 6] = [
     "foxtrot frontier newest reply",
 ];
 
-/// The reproduction: a >=5-text window where the oldest-4 and newest-4
-/// selections differ. TS `.slice(-4)` keeps the NEWEST four texts and the
-/// recency ladder (2.0, 1.5, 1.0, 1.0) walks them newest first; the shipped
-/// `truncate(4)` kept the OLDEST four, so the digest's relevance terms
-/// ranked the wrong end of the recent context (the newest texts never
-/// reached the terms at all).
+/// A >=5-text window where the oldest-4 and newest-4 selections differ:
+/// the recency ladder (2.0, 1.5, 1.0, 1.0) walks the NEWEST four first.
 #[tokio::test]
 async fn digest_terms_rank_the_newest_four_texts() {
     let tmp = tempfile::tempdir().unwrap();
@@ -188,7 +176,6 @@ async fn digest_terms_rank_the_newest_four_texts() {
             "the oldest texts fall outside the TS slice(-4) window"
         );
     }
-    // Served-path: the selected window IS the newest four texts.
     let selected = engine.recent_message_texts_newest_first().await;
     let expected_newest_first: Vec<String> = DISTINCT6[2..]
         .iter()
@@ -198,13 +185,8 @@ async fn digest_terms_rank_the_newest_four_texts() {
     assert_eq!(selected, expected_newest_first);
 }
 
-/// The differential across window shapes. Where the two selections coincide
-/// (windows of <=4 texts; >=5-text windows whose texts are all identical)
-/// the delivered digest bytes are frozen: the base selection and the TS
-/// selection must render byte-identical digests with identical fingerprints
-/// (the fingerprint never sees the query terms, TS #2400). Where they differ
-/// (>=5 distinct texts) the renders diverge - the direction is the only
-/// difference - and the engine's terms are exactly the newest-4 selection's.
+/// Where the two selections coincide the renders are byte-identical with
+/// identical fingerprints (the fingerprint never sees the query terms).
 #[tokio::test]
 async fn digest_direction_differential_across_window_shapes() {
     let identical6 = ["uniform repeated window text"; 6];
@@ -251,8 +233,6 @@ async fn digest_direction_differential_across_window_shapes() {
         );
     }
 
-    // The >=5-distinct-text class: the selections differ and the renders
-    // diverge; the engine's terms are exactly the newest-4 selection's.
     let tmp = tempfile::tempdir().unwrap();
     seed_global_memories(
         &tmp.path().join("harness"),
@@ -293,9 +273,8 @@ async fn digest_direction_differential_across_window_shapes() {
     assert_eq!(inputs.terms, digest_query_terms(None, &newest_four));
 }
 
-/// The user/model-visible divergence: the digest's relevance ranking must
-/// rank the newest texts' memory first (TS). The shipped direction ranked
-/// the oldest texts' memory first.
+/// The digest's relevance ranking must rank the newest texts' memory
+/// first.
 #[tokio::test]
 async fn digest_ranks_the_newest_texts_memory_first() {
     let tmp = tempfile::tempdir().unwrap();

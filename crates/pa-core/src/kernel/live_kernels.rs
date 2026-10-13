@@ -1,12 +1,7 @@
-//! The live-kernel registry: one registry serves every kernel client so
-//! process-wide cleanup (session end, signal-driven shutdown) can dispose
-//! them exactly once.
-//!
-//! Ported from the `liveKernels` registry and `installSignalHandlersOnce` in
-//! `core/kernel/shared.ts`. The TS process hooks (`beforeExit`/SIGINT/SIGTERM)
-//! live in the process layer here: the binary crate calls
-//! [`shutdown_all_live_kernels`] from its own signal handling, keeping the
-//! same flush-then-teardown ordering.
+//! The live-kernel registry: one registry serves every kernel client so process-wide
+//! cleanup can dispose them exactly once. The TS process hooks live in the process
+//! layer here: the binary crate calls [`shutdown_all_live_kernels`] with the same
+//! flush-then-teardown ordering.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -19,9 +14,8 @@ fn registry() -> &'static Registry {
     &REGISTRY
 }
 
-/// Track a kernel from the moment startup begins so cleanup can dispose a
-/// kernel that is still booting. Entries are weak: dropping the manager
-/// deregisters implicitly even if `remove` was not called.
+/// Track a kernel from the moment startup begins so cleanup can dispose a kernel. Entries are weak:
+/// dropping the manager deregisters implicitly.
 pub(crate) fn add(inner: &std::sync::Arc<Inner>) {
     let mut entries = registry()
         .lock()
@@ -57,11 +51,9 @@ fn contains(entries: &[Weak<Inner>], inner: &std::sync::Arc<Inner>) -> bool {
         .any(|weak| std::ptr::eq(Weak::as_ptr(weak), std::sync::Arc::as_ptr(inner)))
 }
 
-/// Flush and tear down every live kernel, discarding individual failures:
-/// the shutdown of one wedged kernel must not block the others.
-///
-/// Mirrors the TS async shutdown handler (`snapshot: true`, no host-request
-/// drain) run before process exit.
+/// Flush and tear down every live kernel, discarding individual failures: the shutdown of one
+/// wedged kernel must not block the others. Mirrors the TS async shutdown handler (`snapshot:
+/// true`).
 pub async fn shutdown_all_live_kernels() {
     let snapshots: Vec<std::sync::Arc<Inner>> = {
         let mut entries = registry()

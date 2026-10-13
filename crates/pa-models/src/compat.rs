@@ -1,13 +1,7 @@
-//! `compat` validation for catalog entries (`isModelCompat` in the TS).
-//!
-//! Ported from `packages/ai/src/model-compat-schema.ts`: the top-level keys
-//! of a `compat` object must match the schema the model's `api` selects
-//! (unknown keys reject the entry), and every value must match its declared
-//! type. Nested objects (`OpenRouter` routing preferences, Vercel gateway
-//! routing, price caps, percentile thresholds) keep the TS default of
-//! allowing additional properties, so the check here is structural, per the
-//! `TypeBox` validators — deliberately independent of the permissive
-//! `pa_types` wire structs.
+//! `compat` validation for catalog entries: keys must match the schema
+//! the model's `api` selects, values their declared type. The check is
+//! structural per the TS validators, deliberately independent of the
+//! permissive `pa_types` wire structs.
 
 use serde_json::Value;
 
@@ -55,8 +49,7 @@ const THINKING_FORMATS: &[&str] = &[
 ///
 /// # Panics
 ///
-/// Never panics: the key-table `expect` is unreachable because the preceding
-/// `keys.is_none()` guard returns `false` before reaching it.
+/// Never panics: the key-table `expect` is unreachable behind the preceding `keys.is_none()` guard.
 #[must_use]
 pub fn is_model_compat(api: &str, compat: Option<&serde_json::Map<String, Value>>) -> bool {
     let Some(compat) = compat else {

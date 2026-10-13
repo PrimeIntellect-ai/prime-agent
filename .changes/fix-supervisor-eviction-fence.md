@@ -1,0 +1,1 @@
+- Idle passivation now defers while a command to the session is still in flight (for example adding a heartbeat or cron job), so such a job no longer stays dormant until the session is resumed.

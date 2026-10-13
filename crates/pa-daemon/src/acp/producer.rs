@@ -1,14 +1,8 @@
-//! The sole producer of ACP `session/update` notifications for one session.
-//!
-//! ACP notifications are asynchronous, so assigning an id at each call site
-//! is insufficient: detached calls can be observed out of order. This
-//! producer serializes publication and stamps the *delivered* order:
-//! a strictly increasing `eventSequence` per connection, the
-//! `promptTurnId` allocated at prompt admission, and a phase
-//! (ordinary work / response boundary / terminal quiescence). Updates
-//! published before the `session/new` response is queued are held in a
-//! buffer and released after it, so no session-scoped update can precede
-//! the admission response.
+//! The sole producer of ACP `session/update` notifications for one session:
+//! serializes publication and stamps the delivered order (a strictly
+//! increasing `eventSequence`, the `promptTurnId` allocated at prompt
+//! admission, and a phase). Updates published before the `session/new`
+//! response is queued are held and released after it.
 
 use std::sync::Arc;
 
@@ -27,7 +21,6 @@ use serde_json::{json, Value};
 /// publication order.
 pub type FrameSink = tokio::sync::mpsc::UnboundedSender<Value>;
 
-/// Per-session update producer.
 pub struct UpdateProducer {
     session_id: String,
     sink: FrameSink,
@@ -91,16 +84,15 @@ impl UpdateProducer {
     }
 
     /// Open admission: the `session/new` response has been queued on the
-    /// sink, so held updates may now flow behind it.
+    /// sink, so held updates may now flow behind it. The flush holds the
+    /// lock so a concurrent publish cannot interleave.
     pub async fn commit_session_new_response(&self) {
-        let held = {
-            let mut state = self.state.lock().await;
-            if state.admission.mode != AdmissionMode::Buffering {
-                return;
-            }
-            state.admission.mode = AdmissionMode::Open;
-            std::mem::take(&mut state.admission.held)
-        };
+        let mut state = self.state.lock().await;
+        if state.admission.mode != AdmissionMode::Buffering {
+            return;
+        }
+        state.admission.mode = AdmissionMode::Open;
+        let held = std::mem::take(&mut state.admission.held);
         for frame in held {
             self.send(frame);
         }
@@ -114,9 +106,9 @@ impl UpdateProducer {
         state.admission.held.clear();
     }
 
-    /// Publish one update with its correlation fields. Returns `false`
-    /// when the producer is fenced or the sink is gone; a false boundary
-    /// publication fails the prompt (TS reports the same failure).
+    /// Publish one update with its correlation fields. Returns `false` when
+    /// the producer is fenced or the sink is gone; a false boundary
+    /// publication fails the prompt.
     pub async fn publish(
         &self,
         update: &AcpSessionUpdate,
@@ -124,8 +116,11 @@ impl UpdateProducer {
         phase: PrimeAgentEventPhase,
         outcome: Option<PrimeAgentOutcome>,
     ) -> bool {
-        let frame = self.correlate(update, turn_id, phase, outcome).await;
+        // Stamp and send under one lock hold so `eventSequence` order is
+        // delivery order.
         let mut state = self.state.lock().await;
+        state.event_sequence += 1;
+        let frame = self.correlate(update, turn_id, phase, outcome, state.event_sequence);
         match state.admission.mode {
             AdmissionMode::Buffering => {
                 state.admission.held.push(frame);
@@ -140,24 +135,21 @@ impl UpdateProducer {
     }
 
     /// Stamp the update with its `eventSequence` and namespace payload.
-    async fn correlate(
+    fn correlate(
         &self,
         update: &AcpSessionUpdate,
         turn_id: u64,
         phase: PrimeAgentEventPhase,
         outcome: Option<PrimeAgentOutcome>,
+        event_sequence: u64,
     ) -> Value {
         let mut value = update.to_bare_value();
-        let correlation = {
-            let mut state = self.state.lock().await;
-            state.event_sequence += 1;
-            PrimeAgentSessionMeta {
-                prompt_turn_id: Some(turn_id),
-                event_sequence: Some(state.event_sequence),
-                phase: Some(phase),
-                outcome,
-                ..Default::default()
-            }
+        let correlation = PrimeAgentSessionMeta {
+            prompt_turn_id: Some(turn_id),
+            event_sequence: Some(event_sequence),
+            phase: Some(phase),
+            outcome,
+            ..Default::default()
         };
         // Merge with any namespace payload the update already carries
         // (e.g. ipython rich output): correlation fields are stamped onto

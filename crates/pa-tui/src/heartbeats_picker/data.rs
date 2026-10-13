@@ -1,6 +1,6 @@
-//! The data concern (moved with its concern): the cron-job wire shape, the catalog
-//! rows, the scope/sort vocabulary, and the label/countdown helpers the view and the
-//! columns render from.
+//! The data concern: the cron-job wire shape, the catalog rows, the
+//! scope/sort vocabulary, and the label/countdown helpers the view and
+//! the columns render from.
 
 use super::Value;
 
@@ -29,8 +29,18 @@ pub struct HeartbeatJob {
 
 impl HeartbeatJob {
     /// The job's status word, `active` or `paused`.
-    pub(super) fn is_active(&self) -> bool {
+    pub(crate) fn is_active(&self) -> bool {
         self.status == "active"
+    }
+
+    /// Whether this job belongs to the session: its durable session
+    /// matches, or its live session does (TS `scopeHeartbeatsToSession`'s
+    /// own-session arms). An empty id is no session identity: neither
+    /// arm matches on one.
+    pub(crate) fn in_session(&self, active_session_id: Option<&str>, session_id: &str) -> bool {
+        (!session_id.is_empty() && self.session_id == session_id)
+            || active_session_id
+                .is_some_and(|active| !active.is_empty() && self.active_session_id == active)
     }
 
     /// Whether an agent created this job (TS source label test).
@@ -52,10 +62,10 @@ pub struct HeartbeatEntry {
 /// is missing: rows without a parseable id drop, matching the
 /// supervisor's own id-keyed merge.
 pub fn parse_heartbeat_job(job: &Value) -> Option<HeartbeatJob> {
-    // Every daemon-supplied string renders somewhere in the view (the
-    // table cells, the subtitle, the detail pairs): control characters
-    // scrub at the parse boundary — an ANSI/OSC sequence in catalog data
-    // can never execute terminal control operations when rendered.
+    // Every daemon-supplied string renders somewhere in the view (the table
+    // cells, the subtitle, the detail pairs): control characters scrub at
+    // the parse boundary — an ANSI/OSC sequence in catalog data can never
+    // execute terminal control operations when rendered.
     let text = |field: &str| {
         job.get(field)
             .and_then(Value::as_str)
@@ -121,15 +131,13 @@ pub fn scope_heartbeats(
     session_id: Option<&str>,
     child_active_session_ids: &[String],
 ) -> Vec<HeartbeatEntry> {
-    let Some(session_id) = session_id.filter(|id| !id.is_empty()) else {
+    let Some(session_id) = session_id else {
         return Vec::new();
     };
     entries
         .into_iter()
         .filter(|entry| {
-            entry.job.session_id == session_id
-                || (active_session_id.is_some()
-                    && entry.job.active_session_id == active_session_id.unwrap_or_default())
+            entry.job.in_session(active_session_id, session_id)
                 || child_active_session_ids.contains(&entry.job.active_session_id)
         })
         .collect()
@@ -172,7 +180,6 @@ pub fn session_label(entry: &HeartbeatEntry) -> String {
         .unwrap_or_else(|| entry.job.session_id.clone())
 }
 
-/// TS `sourceLabel`.
 #[must_use]
 pub fn source_label(entry: &HeartbeatEntry) -> &'static str {
     if entry.job.is_user_created() {
@@ -182,7 +189,6 @@ pub fn source_label(entry: &HeartbeatEntry) -> &'static str {
     }
 }
 
-/// TS `defaultHeartbeatName`.
 #[must_use]
 pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
     if entry.job.is_user_created() {
@@ -192,13 +198,13 @@ pub fn default_heartbeat_name(entry: &HeartbeatEntry) -> &'static str {
     }
 }
 
-/// TS `singleLine`: collapse all whitespace runs to single spaces.
+/// Collapse all whitespace runs to single spaces.
 #[must_use]
 pub fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// TS `formatTimestamp`: ISO timestamps cut to `YYYY-MM-DD HH:MM`.
+/// ISO timestamps cut to `YYYY-MM-DD HH:MM`.
 #[must_use]
 pub fn format_timestamp(value: &str) -> String {
     let Some(cut) = value.get(..16) else {
@@ -212,14 +218,12 @@ pub fn format_timestamp(value: &str) -> String {
     }
 }
 
-/// The next-run label in natural language ("in 45s", "in 5m", "in 10h").
-/// The unit rules mirror TS `formatHeartbeatCountdown`: rounded seconds
-/// under a minute, then rounded minutes, hours, and days, with a
-/// one-second floor so a due or overdue run reads "in 1s". The `in `
-/// prefix is the operator's wording (2026-09-26 directive) — TS renders
-/// the bare countdown in its agents view and a raw timestamp in its
-/// manager, both superseded here. A missing next run keeps the `—`
-/// placeholder; a value the clock cannot parse renders raw.
+/// The next-run label in natural language ("in 45s", "in 5m", "in 10h"):
+/// rounded seconds under a minute, then rounded minutes, hours, and days,
+/// with a one-second floor. The `in ` prefix is the operator's wording
+/// (2026-09-26 directive) — TS renders the bare countdown, superseded
+/// here. A missing next run keeps the `—` placeholder; an unparseable
+/// value renders raw.
 #[must_use]
 pub fn next_run_label(next_run_at: Option<&str>, now_ms: u64) -> String {
     let Some(value) = next_run_at else {

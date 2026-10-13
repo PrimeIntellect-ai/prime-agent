@@ -1,8 +1,6 @@
-//! The transcript layout cache and per-frame composition (extracted from
-//! `view.rs`: the incremental layout is its own ownership area). The
-//! render-loop cost model lives here — see `layout_pass` and
-//! `transcript_window` for the streaming-while-long-transcript
-//! guarantees (the dogfood CPU-spin fix).
+//! The transcript layout cache and per-frame composition. The
+//! render-loop cost model lives here (`layout_pass`,
+//! `transcript_window`).
 
 use super::AgentView;
 use crate::chat::{render_loader, ChatEntry};
@@ -19,88 +17,50 @@ thread_local! {
 #[path = "layout_tests.rs"]
 mod tests;
 
-/// One chat entry's cached transcript layout: its rendered rows plus the
-/// spacing decision they were laid out under (TS keeps every component's
-/// rendered lines resident across renders and recomputes only the dynamic
-/// conversation-spacing decision; the Rust layout pass stores that
-/// decision with the rows, so a settled entry keeps its layout while a
-/// tail message streams instead of re-rendering per delta).
+/// One chat entry's cached layout: its rendered rows plus the spacing
+/// decision they were laid out under.
 #[derive(Debug, Clone)]
 pub(super) struct EntryLayout {
-    /// The [`AgentView::entry_spacing`] decision the rows render under.
+    /// The spacing decision the rows render under.
     pub(super) spacing: bool,
     pub(super) rows: std::sync::Arc<RowPack>,
 }
 
-/// One packed row's start: its content offset in [`RowPack::blob`] and
-/// the index of its first span record.
+/// One packed row's start: its content blob offset and first span
+/// record.
 #[derive(Debug, Clone, Copy)]
 struct RowStart {
     offset: u32,
     first: u32,
 }
 
-/// One span's packed record: its content length plus the id of its
-/// style in [`RowPack::styles`]. The blob offset is not stored — the
-/// blob is contiguous, so a row's spans read as running lengths from
-/// the row's [`RowStart::offset`] (the tui-scroll-retain2 census: the
-/// offset field was structurally redundant, 4 of every 20 record
-/// bytes).
+/// One span's packed record: content length plus style id. The blob offset is not stored — spans
+/// read as running lengths from the row's [`RowStart::offset`].
 #[derive(Debug, Clone, Copy)]
 struct PackedSpan {
     len: u32,
     style: u32,
 }
 
-/// Packed row storage for one cached layout: the entry's rendered rows
-/// as a single content blob plus dense per-span records, expanded
-/// byte-exactly on demand.
-///
-/// The layout cache keeps every visited entry's rows for the process
-/// lifetime, and a scroll walk over a large transcript retains hundreds
-/// of thousands of fragment-sized spans (the tui-scroll-retain census:
-/// a 2600-key walk retained 713k spans holding 9.6MB of text — most of
-/// the retained heap was per-span `Vec`/`String` chunk overhead, not
-/// text). Packing stores the same rows — the same span boundaries, the
-/// same styles, the same content bytes — as one blob plus dense
-/// records, and [`RowPack::range`] rebuilds the exact `Vec<Line>` form
-/// for any row range, so every consumer (frame composition, selection
-/// walks, the exit-flush inline scrollback) sees byte-identical rows:
-/// the compaction is storage-only, invisible to every output path.
-/// The records stay minimal because every derived field is derived on
-/// read: a span's blob offset is the running length from its row's
-/// start, and its style is an id into the pack's small table of
-/// distinct styles (the styles come from the renderer's fixed palette —
-/// the tui-scroll-retain2 census measured at most 6 distinct styles per
-/// entry on the canonical fixtures — so the dedup scan stays trivial
-/// and the table stays tiny). Each record is 8 bytes (length + style
-/// id) against the expanded span's ~40-byte chunk cost and the earlier
-/// 20-byte records' redundant offset and inline style.
-/// Expansion allocates only the requested range, so a frame inside a
-/// huge entry (the transcript's pad row set) pays only its visible rows
-/// — the same clones the sliced form always cost per frame.
+/// Packed row storage for one cached layout: the entry's rendered rows as a single content blob
+/// plus dense per-span records, expanded byte-exactly on demand — the cache keeps every visited
+/// entry's rows for the process lifetime, so rows store packed.
 #[derive(Debug, Clone)]
 pub(super) struct RowPack {
     /// Row i's spans are `spans[starts[i].first..starts[i + 1].first]`,
-    /// reading content from `starts[i].offset` as running lengths; the
-    /// final element is the sentinel end (blob length, span count).
+    /// reading content from `starts[i].offset`; the final element is the
+    /// sentinel end.
     starts: Vec<RowStart>,
     spans: Vec<PackedSpan>,
     blob: String,
-    /// The pack's distinct styles; a record's `style` id indexes this
-    /// table, and expansion copies the exact style back out.
+    /// The pack's distinct styles (`style` ids index this table).
     styles: Vec<ratatui::style::Style>,
 }
 
 impl RowPack {
-    /// Pack freshly rendered rows (byte-exact: boundaries, styles, and
-    /// content bytes are preserved; empty spans keep their records), or
-    /// `None` when the rows cannot be represented: the records store
-    /// `u32` span indices and blob offsets, so a rendered entry whose
-    /// span count or content bytes exceed `u32::MAX` is refused rather
-    /// than narrowed — wrapped offsets would make [`Self::range`] read
-    /// the wrong bytes (or panic slicing the blob off a UTF-8
-    /// boundary). Oversized entries simply stay uncached.
+    /// Pack freshly rendered rows (byte-exact), or `None` when the rows
+    /// cannot be represented as `u32` offsets — oversized entries stay
+    /// uncached.
     pub(super) fn pack(rows: &[Line]) -> Option<Self> {
         let span_count: usize = rows.iter().map(Line::len).sum();
         let content_bytes: usize = rows
@@ -121,10 +81,8 @@ impl RowPack {
                 first: spans.len() as u32,
             });
             for span in line {
-                // The style id dedups against the pack's few distinct
-                // styles (renderer palette-bounded; see the struct
-                // docs) — the scan cost is bounded by the palette, not
-                // the span count.
+                // The style dedup scan is bounded by the renderer
+                // palette, not the span count.
                 let style = if let Some(id) = styles.iter().position(|style| *style == span.style) {
                     id
                 } else {
@@ -150,13 +108,12 @@ impl RowPack {
         })
     }
 
-    /// The number of packed rows.
     pub(super) fn len(&self) -> usize {
         self.starts.len().saturating_sub(1)
     }
 
-    /// Rebuild rows `[from, to)` in the expanded `Vec<Line>` form
-    /// (byte-exact to the rows that were packed).
+    /// Rebuild rows `[from, to)` byte-exact to the rows that were
+    /// packed.
     pub(super) fn range(&self, from: usize, to: usize) -> Vec<Line> {
         let rows = self.len();
         let from = from.min(rows);
@@ -191,7 +148,6 @@ pub(super) enum EntryRows {
 }
 
 impl EntryRows {
-    /// The row count (the sparse walk's section lengths).
     pub(super) fn len(&self) -> usize {
         match self {
             EntryRows::Packed(pack) => pack.len(),
@@ -199,8 +155,8 @@ impl EntryRows {
         }
     }
 
-    /// Whether the section holds no rows (the touch surface's
-    /// shows-tail peek skips empty trailing sections).
+    /// Whether the section holds no rows (the shows-tail peek skips
+    /// empty trailing sections).
     pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -219,7 +175,7 @@ impl EntryRows {
 }
 
 /// Exact transcript geometry plus the small splash/status surfaces. Entry
-/// rows are constructed only when `transcript_window` visits their range.
+/// rows are constructed only when `transcript_window` visits them.
 pub(crate) struct TranscriptLayout {
     pub(super) splash: Vec<Line>,
     /// Absolute row starts, including the end sentinel.
@@ -242,17 +198,9 @@ impl TranscriptLayout {
 }
 
 impl AgentView {
-    /// Whether one chat entry's rows are stable: content that later frames
-    /// cannot change (nothing mutates status/user/slash rows once pushed;
-    /// an assistant message stops changing when its stream settles; a tool
-    /// card stops animating once it holds a final result - except a cell
-    /// whose final result carries a still-running background shell, whose
-    /// summary line keeps animating with the working icon). Everything
-    /// else the rows depend on rides the cache key instead (the spacing
-    /// decision) or the cache key (width, detail, render options), so a
-    /// settled entry keeps its layout while another message streams — the
-    /// transcript-wide "any streaming" exclusion re-rendered every
-    /// settled agent message per streaming delta, the dogfood CPU spin.
+    /// Whether one chat entry's rows are stable: content that later frames cannot change (an
+    /// assistant settles with its stream; a tool card with a final result, except a still-running
+    /// background shell). Everything else rides the cache key.
     pub(super) fn entry_cacheable(entry: &ChatEntry) -> bool {
         match entry {
             ChatEntry::Status { .. }
@@ -260,12 +208,8 @@ impl AgentView {
             | ChatEntry::SlashCommand { .. }
             | ChatEntry::CompactionSummary { .. }
             | ChatEntry::SkillInvocation(_)
-            // Spacing-driven rows (agent messages, shell completions, tool
-            // cards) lean on the conversation-spacing scan over PRECEDING
-            // entries; the scan result is stored with the cached rows, and
-            // a preceding entry's mutation propagates through
-            // `mark_entry_stale`, so the look-back stays correct without a
-            // per-frame re-render.
+            // Spacing-driven rows lean on the scan over PRECEDING entries; a preceding mutation
+            // propagates through `mark_entry_stale`.
             | ChatEntry::AgentMessage(_)
             | ChatEntry::ShellCompletion(_)
             | ChatEntry::InjectedPrompt(_)
@@ -278,21 +222,13 @@ impl AgentView {
                     crate::tool_card::PanelStatus::Queued | crate::tool_card::PanelStatus::Running
                 ) && !crate::tool_card::ipython::background_shell_running(card)
             }
-            // A running bash card animates (the loader spinner frames);
-            // a settled one caches like the other spacing-driven rows.
+            // A running bash card animates; a settled one caches.
             ChatEntry::BashExecution(card) => !card.running,
         }
     }
 
-    /// The spacing decision [`Self::render_entry`] lays this entry's rows
-    /// out under: the leading-blank flags for spacer-driven rows (the
-    /// first-entry rule, the conversation-leading scan for agent
-    /// messages, shell completions, and tool cards) or the
-    /// preceded-by-tool flag for assistant bodies. Every input is
-    /// kind-based or a look-back over PRECEDING entries, so the decision
-    /// is stable for a settled entry while a tail message streams; the
-    /// stored rows go stale with it only through `mark_entry_stale`'s
-    /// forward propagation.
+    /// The spacing decision [`Self::render_entry`] lays this entry's rows out under: leading-blank
+    /// flags for spacer-driven rows, or the preceded-by-tool flag for assistant bodies.
     pub(super) fn entry_spacing(
         &self,
         index: usize,
@@ -301,15 +237,9 @@ impl AgentView {
         preceded_by_tool_activity: bool,
     ) -> bool {
         match entry {
-            // TS `addMessageToChat`: a user submission leads with
-            // `Spacer(1)` unless the chat is empty — except the skill
-            // invocation's own argument text, which joins the card above
-            // it without a spacer.
+            // TS `addMessageToChat`: a user submission leads with `Spacer(1)` unless the chat is
+            // empty.
             ChatEntry::User { .. } => {
-                // TS `addMessageToChat`: a user submission leads with
-                // `Spacer(1)` unless the chat is empty — except the skill
-                // invocation's own argument text, which joins the card
-                // above it without a spacer.
                 let follows_skill_card = index > 0
                     && matches!(
                         self.chat.get(index - 1),
@@ -324,8 +254,7 @@ impl AgentView {
                 self.conversation_leading(index, self.entry_detail(index).tool_output_expanded())
             }
             // The bash card's own mount rule (TS `Spacer(1)` unless the
-            // chat's last child is an agent message, captured on the card
-            // when it mounted).
+            // chat's last child is an agent message).
             ChatEntry::BashExecution(card) => !card.suppress_leading_space,
             ChatEntry::Assistant(_) => preceded_by_tool_activity,
             ChatEntry::Status { .. }
@@ -335,8 +264,7 @@ impl AgentView {
         }
     }
 
-    /// Measure entries through shared count-only render geometry. Exact
-    /// heights persist independently of rendered Lines for every detail.
+    /// Measure entries through shared count-only render geometry.
     pub(crate) fn layout_pass(&mut self, width: usize) -> TranscriptLayout {
         self.sparse_enabled = false;
         self.prepare_layout(width);
@@ -345,10 +273,8 @@ impl AgentView {
             crate::chat::Detail::Details => 1,
             crate::chat::Detail::All => 2,
         };
-        // A splash suppressed at the rebuild boundary (a chat that opened
-        // directly into content) contributes no rows: the offsets start
-        // at the first entry and every scroll/geometry consumer sees the
-        // same layout with or without it.
+        // A suppressed splash contributes no rows: the offsets start at
+        // the first entry.
         let splash = if self.splash_suppressed {
             Vec::new()
         } else {
@@ -369,8 +295,7 @@ impl AgentView {
                 self.entry_heights[index][detail] = Some((spacing, count));
             }
             offsets.push(offsets.last().copied().unwrap_or(0) + count);
-            // TS `precededByToolActivity` = the compact set (tool calls,
-            // agent messages, bash executions, shell completions).
+            // TS `precededByToolActivity` = the compact set.
             preceded_by_tool_activity = Self::is_compact_neighbor(entry);
             first = false;
         }
@@ -419,10 +344,8 @@ impl AgentView {
 
     pub(super) fn render_transcript_tail(&self, width: usize) -> Vec<Line> {
         let mut tail: Vec<Line> = Vec::new();
-        // In-flight bash output for the current turn renders ABOVE the
-        // execution indicator (TS `pendingMessagesContainer` sits between
-        // the chat rows and the status area) and flushes into the
-        // transcript when the turn settles.
+        // In-flight bash output renders ABOVE the execution indicator and
+        // flushes into the transcript when the turn settles.
         if !self.pending_bash.is_empty() {
             // TS `keyText("tui.select.cancel")`: every key of the
             // binding joins the hint ("Esc/Ctrl+C").
@@ -439,10 +362,8 @@ impl AgentView {
                 ));
             }
         }
-        // While the provider retry loop waits, its countdown loader owns
-        // the status area (TS `stopWorkingLoader` + `retryLoader`); a
-        // compaction run owns it next (TS `startCompactionLoader`); the
-        // working loader renders only when neither is active.
+        // The retry loader owns the status area, a compaction run next;
+        // the working loader renders only when neither is active.
         if let Some(retry) = &self.retry {
             tail.extend(crate::chat::render_retry(
                 retry,
@@ -466,11 +387,8 @@ impl AgentView {
                 &self.theme,
                 width,
             ));
-            // The live streamed-summary block (the operator's "stream
-            // the compacted summary" feature): under the loader row, the
-            // expanded view renders the summary as the compaction model
-            // generates it — one delta at a time — nested on the branch
-            // grammar like the expanded summary row that settles it.
+            // The live streamed-summary block (the operator's "stream the compacted summary"
+            // feature): the expanded view renders it under the loader row.
             tail.extend(crate::compaction_row::render_compaction_stream(
                 compaction,
                 self.detail.tool_output_expanded(),
@@ -480,13 +398,8 @@ impl AgentView {
         } else if let Some(working) = &self.working {
             tail.extend(render_loader(working, self.pulse_frame, &self.theme, width));
         }
-        // The side-question pane (TS `sideQuestionContainer`): a scroll-area
-        // component under the status area, not a dock row — it hugs the
-        // transcript tail, so the frame's slack (a short transcript against
-        // a bottom-pinned dock) lands between the pane and the editor like
-        // TS, never inside the pane. TS mounts the pane behind a `Spacer(1)`
-        // (`sideQuestionContainer.addChild(new Spacer(1))`), so one blank
-        // row precedes the component's own leading blank.
+        // The side-question pane hugs the transcript tail, not the dock, so the frame's slack
+        // lands between the pane and the editor (TS mounts it behind a `Spacer(1)`).
         if let Some(pane) = &self.side_pane {
             tail.push(Vec::new());
             tail.extend(pane.render(
@@ -500,8 +413,8 @@ impl AgentView {
         tail
     }
 
-    /// Materialize only rows intersecting `[start, start + height)`.
-    /// `usize::MAX` intentionally requests the whole transcript (inline).
+    /// Materialize only rows intersecting `[start, start + height)`;
+    /// `usize::MAX` requests the whole transcript (inline).
     pub(crate) fn transcript_window(
         &mut self,
         layout: &TranscriptLayout,
@@ -524,7 +437,7 @@ impl AgentView {
             let from = rows.len();
             Self::slice_entry_rows(&source, &mut rows, offset, start, end);
             // The entry's visible span feeds the click surface's window
-            // map (view/click.rs) — bounded by the rows on screen.
+            // map — bounded by the rows on screen.
             if from < rows.len() {
                 self.click.record_window_section(index, from, rows.len());
             }
@@ -543,9 +456,8 @@ impl AgentView {
         rows
     }
 
-    /// Append the source rows that fall inside `[start, end)` (absolute
-    /// transcript positions starting at `offset`) and return the offset
-    /// after the section.
+    /// Append the source rows inside `[start, end)` (absolute positions
+    /// from `offset`); return the offset after the section.
     fn slice_rows(
         source: &[Line],
         out: &mut Vec<Line>,
@@ -562,8 +474,7 @@ impl AgentView {
     }
 
     /// [`Self::slice_rows`] for one entry's rows: only the intersecting
-    /// range is expanded (a packed entry pays its visible rows, not the
-    /// whole row set).
+    /// range is expanded.
     fn slice_entry_rows(
         source: &EntryRows,
         out: &mut Vec<Line>,
@@ -578,34 +489,21 @@ impl AgentView {
         }
         offset + source.len()
     }
-    /// The cross-view layout handoff's seed (see `view::handoff`): a
-    /// held handoff whose render shape matches this preparation places
-    /// its visible-window packs into the (fresh or wiped) layout cache
-    /// so the first window build serves them instead of re-rendering —
-    /// the reuse is the byte-exact expansion of rows a fresh render of
-    /// the same entries would produce (pack storage is output-neutral,
-    /// the tui-scroll-retain2 contract). A shape mismatch (a resize, a
-    /// theme/settings change, an image-fallback flip since the handoff)
-    /// or a handoff whose entry indices fall outside this transcript
-    /// drops the affected packs — the window re-renders exactly as
-    /// before this cut.
+    /// The cross-view layout handoff's seed (see `view::handoff`): a matching handoff places its
+    /// packs into the layout cache; a mismatch drops the packs.
     fn seed_pending_handoff(&mut self) {
         let Some(handoff) = self.pending_handoff.take() else {
             return;
         };
         let (width, options) = match self.layout_options.as_ref() {
-            // The branch above leaves the view's layout state equal to
-            // this draw's shape (it either just set it or found it
-            // unchanged), so the held packs validate against the view's
-            // own current shape without re-deriving it.
+            // The branch above left the layout state equal to this
+            // draw's shape, so the packs validate against it.
             Some(options) => (self.layout_width, options),
             None => return,
         };
         if handoff.shape.0 != width || &handoff.shape.1 != options {
-            // A shape-mismatched handoff drops its packs and the window
-            // re-renders: the served-path observable must NOT count it
-            // (the counter is the verifiers' proof the reuse actually
-            // happened, so it counts only windows the packs served).
+            // A shape-mismatched handoff drops its packs: the
+            // served-path observable must NOT count it.
             return;
         }
         let mut seeded = 0usize;

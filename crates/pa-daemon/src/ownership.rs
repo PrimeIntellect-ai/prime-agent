@@ -1,17 +1,7 @@
-//! The owned-session and worker-recovery surface (protocol breadth wave
-//! b9): the supervisor arms for `complete_owned_session`,
-//! `promote_owned_session`, and `retry_worker` (TS daemon-supervisor
-//! `case "complete_owned_session"` / `case "promote_owned_session"` /
-//! `case "retry_worker"` + `promoteOwnedWorker` / `retryWorkerRecovery`).
-//!
-//! A worker is client-owned while its descriptor carries `ownerClientId`
-//! (the creating client's id, stamped by `handle_create`). `complete`/`
-//! promote` move that ownership: completing stops the owned worker (the
-//! TS `stopWorker` cleanup), promoting clears the owner so the session
-//! outlives its creating client. `retry_worker` is the supervisor's
-//! manual recovery trigger (the audit's fix: the Rust supervisor
-//! previously routed it to the worker, which answered the unknown-worker
-//! error instead of recovering).
+//! The owned-session and worker-recovery surface: `complete_owned_session`
+//! stops the owned worker, `promote_owned_session` clears the owner so the
+//! session outlives its creating client, and `retry_worker` is the
+//! supervisor's manual recovery trigger (the worker never sees it).
 
 use std::sync::Arc;
 
@@ -27,10 +17,16 @@ use crate::supervisor::{Supervisor, ROUTE_TIMEOUT_MS};
 
 impl Supervisor {
     /// Resolve the resident a `retry_worker` targets: the direct match on
-    /// the root active session id or the root persisted session id (TS
-    /// `direct`), then the generic selector resolution.
+    /// the root active session id or the root persisted session id, then
+    /// the generic selector resolution. This is the ONE descriptor-scan
+    /// primitive behind the owned-session arms, so the boot-reconciliation
+    /// quarantine fences HERE: a quarantined resident never matches, and
+    /// the refusal reads as the unknown session.
     async fn resolve_retry_target(&self, selector: &str) -> Result<Arc<ResidentWorker>, String> {
         for resident in self.registry.list().await {
+            if resident.identity_quarantined() {
+                continue;
+            }
             let matches = {
                 let descriptor = resident.descriptor.lock().await;
                 descriptor.root_active_session_id == selector
@@ -74,11 +70,9 @@ impl Supervisor {
             );
         }
         // TS `stopWorker`: the owned stop tears the worker down; the
-        // ephemeral schedule cancel (`cancelEphemeralWorkerScheduledJobs`)
-        // rides `stop_worker` itself, keyed on the descriptor's owner. The
-        // stop's durable intent persists before the worker is told, and a
-        // persist failure fails the owned stop (TS throws) instead of
-        // stopping an untombstoned worker.
+        // ephemeral schedule cancel rides `stop_worker` itself. The stop's
+        // durable intent persists before the worker is told, and a persist
+        // failure fails the owned stop.
         if let Err(error) = self.stop_worker(&resident).await {
             return Self::owned_failure(
                 command_id,
@@ -98,7 +92,6 @@ impl Supervisor {
 
     /// `promote_owned_session`: the owner clears the ownership so the
     /// session outlives its creating client (TS `promoteOwnedWorker`).
-    /// The response carries the session's public summary.
     pub(crate) async fn handle_promote_owned_session(
         self: &Arc<Self>,
         command: &DaemonCommand,
@@ -284,5 +277,130 @@ impl Supervisor {
             ))],
             false,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use pa_types::daemon::DaemonWorkerDescriptor;
+    use serde_json::json;
+
+    use crate::registry::ResidentWorker;
+    use crate::supervisor::Supervisor;
+    use crate::supervisor_roster::WorkerRosterDelta;
+
+    /// One supervisor with one registered resident whose persisted identity
+    /// (`s0` / `s0.jsonl`) the quarantine fence must never serve.
+    async fn supervisor_with_stale_identity(dir: &std::path::Path) -> Arc<Supervisor> {
+        let supervisor = Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.join("daemon.sock"),
+                agent_dir: dir.join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-a",
+            "pid": 0,
+            "socketPath": "/tmp/none.sock",
+            "recoveryJournalPath": "/tmp/none.jsonl",
+            "supervisorSocketPath": "/tmp/none.sock",
+            "authenticationToken": "token-a",
+            "rootActiveSessionId": "w-a",
+            "rootSessionId": "s0",
+            "sessionFile": dir.join("s0.jsonl").to_string_lossy(),
+            "createdAt": "2026-09-30T00:00:00Z",
+            "updatedAt": "2026-09-30T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": { "sessionPath": dir.join("s0.jsonl").to_string_lossy() },
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        supervisor
+            .registry
+            .insert(ResidentWorker::new(
+                "w-a".to_string(),
+                descriptor,
+                dir.join("w-a.json"),
+            ))
+            .await;
+        supervisor
+    }
+
+    /// The boot-reconciliation quarantine fences the owned-session scan:
+    /// the address OR the OLD durable id never reaches the unreconciled
+    /// worker; the live word (the worker's own roster push) reconciles
+    /// the identity and the scan serves again — on the reconciled
+    /// identity only.
+    #[tokio::test]
+    async fn the_owned_session_scan_refuses_a_quarantined_identity() {
+        let dir = std::env::temp_dir().join(format!("pa-own-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = supervisor_with_stale_identity(&dir).await;
+        let resident = supervisor.registry.get("w-a").await.expect("resident");
+
+        resident.mark_identity_quarantined();
+        assert!(
+            supervisor.resolve_retry_target("w-a").await.is_err(),
+            "the quarantined address never serves the owned-session arms"
+        );
+        assert!(
+            supervisor.resolve_retry_target("s0").await.is_err(),
+            "the stale persisted durable id never reaches the worker"
+        );
+
+        // The live word: the worker's own roster push (no command
+        // channel involved) reconciles the identity onto sA.
+        let summary = json!({
+            "id": "w-a",
+            "lifecycle": "live",
+            "activity": "idle",
+            "isSessionActive": false,
+            "activeSessionId": "w-a",
+            "sessionId": "sA",
+            "sessionFile": dir.join("a.jsonl").to_string_lossy(),
+            "sessionName": "owned",
+            "cwd": dir.to_string_lossy(),
+            "rlmDepth": 0,
+            "runtimeKind": "top-level",
+            "messageCount": 1,
+            "attachedClients": 0,
+            "thinkingLevel": "default",
+            "workerState": "ready",
+        });
+        let response = supervisor
+            .handle_worker_roster_delta(
+                "d",
+                "worker_roster_delta",
+                WorkerRosterDelta {
+                    worker_token: "token-a".to_string(),
+                    summary,
+                    removed: Vec::new(),
+                    sequence: Some(1),
+                    worker_instance_id: Some("i1".to_string()),
+                },
+            )
+            .await;
+        assert!(response.success, "the delta applied: {response:?}");
+
+        // The scan serves again: the address resolves, the OLD durable id
+        // never does.
+        let resolved = supervisor
+            .resolve_retry_target("w-a")
+            .await
+            .expect("the address serves once reconciled");
+        assert_eq!(
+            resolved.descriptor.lock().await.root_session_id.as_deref(),
+            Some("sA"),
+            "the served identity is the reconciled one"
+        );
+        assert!(
+            supervisor.resolve_retry_target("s0").await.is_err(),
+            "the superseded durable id never resolves again"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,7 +1,8 @@
 //! The `rlm.*` kernel host-request bridge: wire validation, the child-session
 //! host seam, and handler registration for `rlm.spawn` (`rlm.run`),
 //! `rlm.create_session`, `rlm.find_models`, `rlm.list_subagents`,
-//! `rlm.collect`, `rlm.progress.note`, and `rlm.delete_subagent`.
+//! `rlm.collect`, `rlm.progress.note`, `rlm.delete_subagent`, and
+//! `rlm.rename`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
 //! parses strict `snake_case` replies. Pure normalization lives in
@@ -14,7 +15,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
-use tokio::sync::Mutex;
 
 use crate::kernel::rlm_runtime::{
     find_rlm_model_matches, kwargs_from_payload, normalize_requested_rlm_subagent_model,
@@ -31,9 +31,7 @@ pub const RLM_PROGRESS_NOTE_MAX_LENGTH: usize = 512;
 pub const RLM_PROGRESS_NOTE_MIN_INTERVAL_MS: u64 = 10_000;
 const RLM_COLLECT_MAX_TIMEOUT_MS: u64 = 2_147_483_647;
 
-// ---------------------------------------------------------------------------
 // Wire shapes (strict snake_case, parsed by the Python rlm module)
-// ---------------------------------------------------------------------------
 
 /// `rlm.spawn` handle returned once the child task is admitted.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -62,7 +60,8 @@ pub struct RlmSubagentEntry {
     pub session_id: Option<String>,
     pub session_name: String,
     pub session_dir: String,
-    /// `running` | `completed` | `error`.
+    /// `running` | `completed` | `error` | `cancelled` (a cancelled run
+    /// keeps its status verbatim in the registry row).
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<RlmSubagentActivity>,
@@ -98,6 +97,9 @@ pub struct RlmSubagentActivity {
 pub struct RlmDeleteSubagentResult {
     pub subagent: RlmSubagentEntry,
     /// `deleted` | `skipped_running`; absent when the host reports neither.
+    /// A re-delete of an already-deleted selector is idempotent and reports
+    /// `deleted` with the tombstone row (retirement never errors on the
+    /// second call).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<&'static str>,
 }
@@ -115,6 +117,10 @@ pub struct RlmChildResult {
     pub settled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer_preview: Option<String>,
+    /// The full final-answer text (the settle-binding lane; the roster
+    /// preview stays compact), bounded by the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,9 +131,7 @@ pub struct RlmChildResult {
     pub replied_since_task: Option<bool>,
 }
 
-// ---------------------------------------------------------------------------
 // Requests into the host
-// ---------------------------------------------------------------------------
 
 /// Validated `rlm.spawn` request handed to the child-session host.
 #[derive(Debug, Clone)]
@@ -139,6 +143,9 @@ pub struct RlmSpawnRequest {
     pub model: Option<String>,
     /// Validated thinking level; the host checks model support.
     pub thinking: Option<String>,
+    /// The parent's in-flight turn request the spawn anchors to (TS
+    /// `spawnedByRequestId`): `None` for a spawn outside an active run.
+    pub spawned_by_request_id: Option<String>,
     pub cell_source_code: Option<String>,
 }
 
@@ -152,33 +159,44 @@ pub struct RlmCreateSessionRequest {
     pub cwd: Option<String>,
 }
 
-/// One pending host call. Boxed (not RPITIT) because the host crosses the
-/// pa-core/pa-daemon boundary as a dyn object: the daemon supplies the
-/// implementation and pa-core only owns the contract.
+/// One pending host call. Boxed (not RPITIT): the host crosses the pa-core/pa-daemon boundary
+/// as a dyn object — the daemon supplies the implementation, pa-core owns the contract.
 pub type RlmHostFuture<T> = std::pin::Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send>>;
 
-/// The child-session machinery the daemon supplies. Sessions without a host
-/// (headless print mode today) answer with the no-children behavior:
-/// rosters are empty, spawns fail explicitly, and selectors cannot match.
+/// The child-session machinery the daemon supplies. Sessions without a
+/// host answer with the no-children behavior: empty rosters, explicit
+/// spawn failures, no selector matches.
 pub trait RlmSubagentHost: Send + Sync {
-    /// Spawn a recursive child session and return once its task is admitted.
     fn spawn(&self, request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle>;
-    /// Create and prompt a resident depth-0 daemon session.
     fn create_session(
         &self,
         request: RlmCreateSessionRequest,
     ) -> RlmHostFuture<RlmCreateSessionHandle>;
-    /// Roster of direct children retained by this parent session.
     fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>>;
-    /// Delete one running or retained direct child.
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult>;
-    /// Typed fan-in of child results; a timeout returns snapshots, never errors.
+    /// A timeout returns snapshots, never errors.
     fn collect(&self, targets: Vec<String>, timeout_ms: u64) -> RlmHostFuture<Vec<RlmChildResult>>;
+    /// Rename the current session (`session_id` absent) or one direct
+    /// child (TS `rlm.rename`); answers the applied name.
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String>;
 }
 
 /// Host behavior for sessions with no child runtime: truthful empties and the
 /// TS selector errors, so the kernel surface never silently invents children.
-pub struct NoRlmChildren;
+/// A self-rename still lands locally (TS `setSessionName`): the session's own
+/// `session_info` name row.
+pub struct NoRlmChildren {
+    /// The session whose name a self-rename appends.
+    session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>,
+}
+
+impl NoRlmChildren {
+    /// The no-children host over one session's persistence.
+    #[must_use]
+    pub fn new(session: Arc<tokio::sync::Mutex<crate::session::manager::SessionManager>>) -> Self {
+        Self { session }
+    }
+}
 
 impl RlmSubagentHost for NoRlmChildren {
     fn spawn(&self, _request: RlmSpawnRequest) -> RlmHostFuture<RlmSpawnHandle> {
@@ -192,9 +210,7 @@ impl RlmSubagentHost for NoRlmChildren {
         &self,
         _request: RlmCreateSessionRequest,
     ) -> RlmHostFuture<RlmCreateSessionHandle> {
-        Box::pin(async {
-            anyhow::bail!("rlm.create_session requires a daemon-backed depth-0 session");
-        })
+        Box::pin(async { Err(rlm_create_session_daemonless_error()) })
     }
     fn list_subagents(&self) -> RlmHostFuture<Vec<RlmSubagentEntry>> {
         Box::pin(async { Ok(Vec::new()) })
@@ -213,6 +229,21 @@ impl RlmSubagentHost for NoRlmChildren {
     ) -> RlmHostFuture<Vec<RlmChildResult>> {
         Box::pin(async move { no_children_collect(&targets) })
     }
+    fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+        // The alias boxes a `'static` future, so the session handle moves
+        // in by value — nothing here borrows `self`.
+        let session = Arc::clone(&self.session);
+        Box::pin(async move {
+            if session_id.is_some() {
+                anyhow::bail!("rlm.rename with session_id requires a daemon-backed session");
+            }
+            let mut session = session.lock().await;
+            session
+                .append_session_info(&name)
+                .map_err(anyhow::Error::from)?;
+            Ok(name)
+        })
+    }
 }
 
 /// `collect` against an empty roster: every target is a miss.
@@ -228,9 +259,131 @@ pub fn no_children_collect(targets: &[String]) -> anyhow::Result<Vec<RlmChildRes
     Ok(Vec::new())
 }
 
-// ---------------------------------------------------------------------------
+// Shared spawn-site extractions (the daemon's supervisor host and the
+// daemonless inline host answer with the same text and the same layout).
+
+/// The workspace's default recursion bound (TS `DEFAULT_RLM_MAX_DEPTH`).
+pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
+
+/// The spawn refusal at the recursion bound.
+#[must_use]
+pub fn rlm_depth_limit_error(depth: u32, max_depth: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "RLM recursion depth limit reached (RLM_DEPTH={depth}, RLM_MAX_DEPTH={max_depth})"
+    )
+}
+
+/// The spawn-name refusal: one source keeps the reservation check and the
+/// availability check byte-identical across hosts.
+#[must_use]
+pub fn spawn_name_unavailable_error(name: &str, depth: u32) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
+    )
+}
+
+/// The `rlm.create_session` refusal for daemonless sessions (the
+/// [`NoRlmChildren`] text, shared by every host that cannot create
+/// resident sessions).
+#[must_use]
+pub fn rlm_create_session_daemonless_error() -> anyhow::Error {
+    anyhow::anyhow!("rlm.create_session requires a daemon-backed depth-0 session")
+}
+
+/// The per-child session directory under the parent's artifacts tree (an
+/// ephemeral temp dir when the parent has no durable session id).
+///
+/// # Errors
+///
+/// Error when the directory cannot be created.
+pub fn rlm_child_session_dir(
+    agent_dir: &std::path::Path,
+    parent_session_id: Option<&str>,
+    child_id: &str,
+) -> anyhow::Result<std::path::PathBuf> {
+    let base = match parent_session_id {
+        Some(session_id) => agent_dir
+            .join("session-artifacts")
+            .join(session_id)
+            .join(child_id),
+        None => std::env::temp_dir().join(format!("prime-agent-rlm-{child_id}")),
+    };
+    std::fs::create_dir_all(&base).map_err(|error| {
+        anyhow::anyhow!("create RLM child session dir {}: {error}", base.display())
+    })?;
+    Ok(base)
+}
+
+/// The last persisted `rlm_max_depth_state` custom entry in a session
+/// file (TS `_loadPersistedRlmMaxDepthState`): the chat override a
+/// resumed session re-seeds its depth bound from. `None` when absent or
+/// unreadable.
+pub fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
+    let path = std::path::Path::new(path?);
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::BufReader::new(std::fs::File::open(path).ok()?),
+        &mut bytes,
+    )
+    .ok()?;
+    let content = std::str::from_utf8(&bytes).ok()?;
+    content
+        .lines()
+        .rev()
+        // The exact union gate: a matching row's raw text carries either the
+        // `customType` literal or a `\u`-escape (serde never letter-escapes),
+        // so the union admits every line the reference could match;
+        // `rlm_max_depth_row` judges the candidates by the decoded fields.
+        .filter(|line| line.contains("rlm_max_depth_state") || line.contains("\\u"))
+        .find_map(rlm_max_depth_row)
+}
+
+/// One candidate line's depth bound: `Some(depth)` for a matching custom
+/// row with a parseable `data.maxDepth`, `None` otherwise.
+fn rlm_max_depth_row(line: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type").and_then(serde_json::Value::as_str) != Some("custom") {
+        return None;
+    }
+    if value.get("customType").and_then(serde_json::Value::as_str) != Some("rlm_max_depth_state") {
+        return None;
+    }
+    value
+        .get("data")
+        .and_then(|data| data.get("maxDepth"))
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// The depth-bound resolution and its precedence: chat override >
+/// inherited > global setting > env > default. Returns the bound with its
+/// source label (the daemon surfaces the label as `rlm_max_depth_source`).
+#[must_use]
+pub fn resolve_rlm_max_depth(
+    session_file: Option<&str>,
+    inherited: Option<u32>,
+    cwd: &std::path::Path,
+    agent_dir: &std::path::Path,
+) -> (u64, &'static str) {
+    persisted_rlm_max_depth(session_file)
+        .map(|depth| (depth, "chat"))
+        .or_else(|| inherited.map(|depth| (u64::from(depth), "inherited")))
+        .or_else(|| {
+            crate::settings::SettingsManager::create(cwd, agent_dir)
+                .get_rlm_max_depth()
+                .map(|depth| (depth, "global"))
+        })
+        .or_else(|| {
+            std::env::var("RLM_MAX_DEPTH")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| *value >= 1)
+                .map(|depth| (depth, "env"))
+        })
+        .unwrap_or((u64::from(DEFAULT_RLM_MAX_DEPTH), "default"))
+}
+
 // Progress notes
-// ---------------------------------------------------------------------------
 
 /// Outcome of one `rlm.progress.note`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,11 +393,11 @@ pub struct RlmProgressNoteResult {
     pub retry_after_ms: Option<u64>,
 }
 
-/// Latest-note store with the 10-second throttle. The daemon roster reads
-/// `latest_note` so a child snapshot surfaces the note to its parent.
+/// Latest-note store with the 10-second throttle; the sync roster-summary
+/// composer reads it, so the lock is a std mutex.
 #[derive(Debug, Default)]
 pub struct RlmProgressNotes {
-    state: Mutex<RlmProgressNoteState>,
+    state: std::sync::Mutex<RlmProgressNoteState>,
 }
 
 #[derive(Debug, Default)]
@@ -255,8 +408,11 @@ struct RlmProgressNoteState {
 
 impl RlmProgressNotes {
     /// Accept or throttle one note. The message is already validated.
-    pub async fn note(&self, message: &str, now_ms: u64) -> RlmProgressNoteResult {
-        let mut state = self.state.lock().await;
+    pub fn note(&self, message: &str, now_ms: u64) -> RlmProgressNoteResult {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(last_at) = state.last_at {
             let elapsed_ms = last_at.elapsed().as_millis() as u64;
             if elapsed_ms < RLM_PROGRESS_NOTE_MIN_INTERVAL_MS {
@@ -275,42 +431,75 @@ impl RlmProgressNotes {
     }
 
     /// The newest accepted note with its wall-clock timestamp.
-    pub async fn latest_note(&self) -> Option<(String, u64)> {
-        self.state.lock().await.latest.clone()
+    pub fn latest_note(&self) -> Option<(String, u64)> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest
+            .clone()
+    }
+
+    /// Drops the stored note at a run boundary; the throttle clock stays.
+    pub fn clear(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .latest = None;
     }
 }
+
+/// Announces one accepted note (message, wall-clock ms) as the
+/// `rlm_progress_note` session event.
+pub type RlmProgressNoteEmit = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 /// Message length in UTF-16 code units, matching the host-side bound.
 pub fn utf16_length(message: &str) -> usize {
     message.chars().map(char::len_utf16).sum()
 }
 
-// ---------------------------------------------------------------------------
 // Handler registration
-// ---------------------------------------------------------------------------
+
+/// The parent-side spawn anchor (TS `_startRlmChildRun`'s
+/// `spawnedByRequestId` snapshot): the in-flight turn's request id a
+/// mid-turn `rlm.spawn` names. The bridge is built before the session's
+/// agent exists, so the engine sets this once the agent is built.
+pub(crate) struct SemanticSpawnAnchor {
+    pub(crate) agent: std::sync::Weak<pa_agent::agent::Agent>,
+    pub(crate) recorder: Arc<super::semantic_edges::SemanticEdgeRecorder>,
+}
 
 /// Session-scoped RLM state the handlers share.
 pub struct RlmHostBridge {
     registry: Arc<ModelRegistry>,
     pub notes: Arc<RlmProgressNotes>,
+    /// Fires on every accepted note; `None` keeps the store the only surface.
+    note_emit: Option<RlmProgressNoteEmit>,
     host: Arc<dyn RlmSubagentHost>,
     /// The child-usage attribution producer `rlm.spawn` registers into
     /// and the daemon's child observation drives.
     pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    /// The spawn anchor [`register_run`] reads the in-flight turn from
+    /// (`None` until the engine built the session's agent).
+    pub(crate) semantic_spawn: std::sync::OnceLock<SemanticSpawnAnchor>,
 }
 
 impl RlmHostBridge {
-    /// Build the bridge: an explicit host, or the no-children behavior.
+    /// Build the bridge over one child-session host: the daemon supplies
+    /// [`SupervisorChildSessions`]; session embeddings without one pass
+    /// [`NoRlmChildren`] (built against the session's own persistence).
     pub fn new(
         registry: Arc<ModelRegistry>,
-        host: Option<Arc<dyn RlmSubagentHost>>,
+        host: Arc<dyn RlmSubagentHost>,
         usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+        note_emit: Option<RlmProgressNoteEmit>,
     ) -> Self {
         Self {
             registry,
             notes: Arc::new(RlmProgressNotes::default()),
-            host: host.unwrap_or_else(|| Arc::new(NoRlmChildren)),
+            note_emit,
+            host,
             usage,
+            semantic_spawn: std::sync::OnceLock::new(),
         }
     }
 }
@@ -324,6 +513,7 @@ pub fn register_rlm_host_handlers(handlers: &mut HostRequestHandlers, bridge: &A
     register_list_subagents(handlers, bridge);
     register_delete_subagent(handlers, bridge);
     register_collect(handlers, bridge);
+    register_rename(handlers, bridge);
 }
 
 fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
@@ -370,10 +560,12 @@ fn register_find_models(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHost
 
 fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
     let notes = Arc::clone(&bridge.notes);
+    let note_emit = bridge.note_emit.clone();
     handlers.register(
         "rlm.progress.note",
         host_handler(move |payload| {
             let notes = Arc::clone(&notes);
+            let note_emit = note_emit.clone();
             Box::pin(async move {
                 let Some(raw) = payload.data.get("message").and_then(Value::as_str) else {
                     anyhow::bail!("rlm.progress.note message must be a non-empty string");
@@ -391,7 +583,10 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|duration| duration.as_millis() as u64)
                     .unwrap_or_default();
-                let outcome = notes.note(message, now_ms).await;
+                let outcome = notes.note(message, now_ms);
+                if let (true, Some(emit)) = (outcome.accepted, note_emit.as_deref()) {
+                    emit(message, now_ms);
+                }
                 Ok(match outcome.retry_after_ms {
                     None => json!({ "accepted": true }),
                     Some(retry_after_ms) => json!({
@@ -405,13 +600,11 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
 }
 
 fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
-    let host = Arc::clone(&bridge.host);
-    let usage = Arc::clone(&bridge.usage);
+    let bridge = Arc::clone(bridge);
     handlers.register(
         "rlm.run",
         host_handler(move |payload| {
-            let host = Arc::clone(&host);
-            let usage = Arc::clone(&usage);
+            let bridge = Arc::clone(&bridge);
             Box::pin(async move {
                 let data = &payload.data;
                 let Some(prompt) = data.get("prompt").and_then(Value::as_str) else {
@@ -419,21 +612,37 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                 };
                 let mut request = spawn_request_from_payload(prompt, data)?;
                 request.cell_source_code = payload.cell_source_code.clone();
-                let handle = host.spawn(request).await?;
+                // TS `_startRlmChildRun`: the spawning request is the turn
+                // whose tool call is executing now (the anchor is computed
+                // before the spawn admission's first await); a spawn
+                // outside an active run has no such turn, and an absent
+                // edge beats a wrong one.
+                request.spawned_by_request_id = match bridge.semantic_spawn.get() {
+                    Some(anchor) => {
+                        let agent = anchor.agent.upgrade();
+                        match agent {
+                            Some(agent) if agent.state().await.is_streaming => {
+                                anchor.recorder.last_turn_request_id()
+                            }
+                            _ => None,
+                        }
+                    }
+                    None => None,
+                };
+                let handle = bridge.host.spawn(request).await?;
                 // TS `_findLastAssistantMessage` at spawn: the spawning
                 // assistant row (persisted at `message_end` before tool
                 // execution) is the target every child-usage attribution
                 // folds into.
-                usage.register_spawn(&handle.rlm_child_id).await;
+                bridge.usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),
     );
 }
 
-/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected with
-/// the sorted key list, and name/model/thinking normalize through the pure
-/// helpers.
+/// Shared kwargs validation for `rlm.run`: unsupported keys are rejected
+/// with the sorted key list.
 fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmSpawnRequest> {
     const OPERATION: &str = "rlm.spawn";
     let kwargs = kwargs_from_payload(data);
@@ -453,6 +662,7 @@ fn spawn_request_from_payload(prompt: &str, data: &Value) -> anyhow::Result<RlmS
         name,
         model,
         thinking,
+        spawned_by_request_id: None,
         cell_source_code: None,
     })
 }
@@ -597,6 +807,45 @@ fn register_collect(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBrid
     );
 }
 
+fn register_rename(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
+    let host = Arc::clone(&bridge.host);
+    handlers.register(
+        "rlm.rename",
+        host_handler(move |payload| {
+            let host = Arc::clone(&host);
+            Box::pin(async move {
+                const OPERATION: &str = "rlm.rename";
+                let data = &payload.data;
+                // The name follows the spawn rules exactly (TS
+                // `createRlmRenameHostHandler` reuses the spawn
+                // normalizer); absent or non-string names read as the
+                // TS "must be a string" error.
+                let Some(name) = normalize_requested_rlm_subagent_session_name(
+                    data.get("name").and_then(Value::as_str),
+                    OPERATION,
+                )?
+                else {
+                    anyhow::bail!("rlm.rename name must be a string");
+                };
+                assert_direct_agent_message_target(&name)?;
+                let session_id = match data.get("session_id") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(raw)) => {
+                        let trimmed = raw.trim();
+                        if trimmed.is_empty() {
+                            anyhow::bail!("rlm.rename session_id must be a non-empty string");
+                        }
+                        Some(trimmed.to_string())
+                    }
+                    Some(_) => anyhow::bail!("rlm.rename session_id must be a non-empty string"),
+                };
+                let name = host.rename(name, session_id).await?;
+                Ok(json!({ "name": name }))
+            })
+        }),
+    );
+}
+
 /// Present-but-non-string kwargs fail like the TS normalizers do.
 fn optional_string_kwarg<'a>(
     kwargs: &'a Map<String, Value>,
@@ -633,16 +882,20 @@ mod tests {
     use crate::kernel::shared::HostRequestPayload;
     use crate::session::manager::SessionManager;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     /// A host recording every call, answering with fixed handles.
     /// One recorded collect call: its targets and timeout.
     type CollectCall = (Vec<String>, u64);
+    /// One recorded rename: the normalized name and the optional child id.
+    type RecordedRename = (String, Option<String>);
 
     struct RecordingHost {
         spawn_requests: Arc<Mutex<Vec<RlmSpawnRequest>>>,
         create_requests: Arc<Mutex<Vec<RlmCreateSessionRequest>>>,
         targets: Arc<Mutex<Vec<String>>>,
         collects: Arc<Mutex<Vec<CollectCall>>>,
+        renames: Arc<Mutex<Vec<RecordedRename>>>,
     }
 
     impl RecordingHost {
@@ -652,6 +905,7 @@ mod tests {
                 create_requests: Arc::new(Mutex::new(Vec::new())),
                 targets: Arc::new(Mutex::new(Vec::new())),
                 collects: Arc::new(Mutex::new(Vec::new())),
+                renames: Arc::new(Mutex::new(Vec::new())),
             })
         }
     }
@@ -750,11 +1004,19 @@ mod tests {
                     status: "done",
                     settled: true,
                     answer_preview: Some("all done".into()),
+                    answer_text: Some("all done".into()),
                     error: None,
                     duration_ms: Some(2_000),
                     tool_use_count: Some(3),
                     replied_since_task: Some(true),
                 }])
+            })
+        }
+        fn rename(&self, name: String, session_id: Option<String>) -> RlmHostFuture<String> {
+            let renames = Arc::clone(&self.renames);
+            Box::pin(async move {
+                renames.lock().await.push((name.clone(), session_id));
+                Ok(name)
             })
         }
     }
@@ -824,6 +1086,8 @@ mod tests {
             crate::session_engine::runtime_wiring::RlmWiring {
                 model_registry: Some(Arc::clone(&registry)),
                 subagent_host: host,
+                usage_store: None,
+                progress_note_emit: None,
             },
             None,
             None,
@@ -863,7 +1127,6 @@ mod tests {
         .await
         .unwrap();
         let models = response["models"].as_array().unwrap();
-        // Exact selector first; the turbo sibling matches by substring.
         assert_eq!(models.len(), 2);
         assert_eq!(
             models[0],
@@ -875,7 +1138,6 @@ mod tests {
             })
         );
         assert_eq!(models[1]["selector"], "test-provider/glm-5.3-turbo");
-        // A shared id fragment ranks the exact selector match first.
         let response = call(
             &wiring,
             "rlm.find_models",
@@ -945,9 +1207,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(accepted, json!({ "accepted": true }));
-        let (latest, _) = wiring.rlm.notes.latest_note().await.unwrap();
+        let (latest, _) = wiring.rlm.notes.latest_note().unwrap();
         assert_eq!(latest, "making progress");
-        // An immediate second note is throttled with a retry hint.
+        wiring.rlm.notes.clear();
+        assert!(wiring.rlm.notes.latest_note().is_none());
+        let still_throttled = call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "too soon" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(still_throttled["accepted"], false);
         let throttled = call(
             &wiring,
             "rlm.progress.note",
@@ -974,6 +1245,57 @@ mod tests {
             error.to_string(),
             "rlm.progress.note message must be at most 512 characters"
         );
+    }
+
+    /// The accepted note announces with its message and wall-clock
+    /// timestamp; a throttled note announces nothing.
+    #[tokio::test]
+    async fn accepted_note_announces_throttled_note_stays_silent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let session = persisted_session(dir.path());
+        let announced: Arc<std::sync::Mutex<Vec<(String, u64)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = Arc::clone(&announced);
+        let wiring = crate::session_engine::runtime_wiring::wire_session_runtime(
+            session,
+            dir.path(),
+            crate::session_engine::runtime_wiring::RlmWiring {
+                model_registry: None,
+                subagent_host: None,
+                usage_store: None,
+                progress_note_emit: Some(Arc::new(move |message, timestamp| {
+                    sink.lock().unwrap().push((message.to_string(), timestamp));
+                })),
+            },
+            None,
+            None,
+        );
+        call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "halfway" }),
+        )
+        .await
+        .unwrap();
+        let seen = announced.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "the accepted note announced: {seen:?}");
+        assert_eq!(seen[0].0, "halfway");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(
+            seen[0].1.abs_diff(now_ms) < 5_000,
+            "the announcement carries the note's wall-clock timestamp"
+        );
+        call(
+            &wiring,
+            "rlm.progress.note",
+            json!({ "type": "rlm.progress.note", "message": "again" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(announced.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1238,6 +1560,108 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "rlm.delete_subagent target must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_round_trip_and_validation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = RecordingHost::new();
+        let renames = Arc::clone(&host.renames);
+        let wiring = wired(dir.path(), Some(host));
+
+        // A child rename forwards the normalized name and the trimmed
+        // session id (the Python side already resolved handles to child
+        // ids).
+        let reply = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "  bench-runner ", "session_id": "  sub-1  " }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({ "name": "bench-runner" }));
+        assert_eq!(
+            *renames.lock().await,
+            vec![("bench-runner".to_string(), Some("sub-1".to_string()))]
+        );
+
+        // A self rename carries no session id.
+        call(&wiring, "rlm.rename", json!({ "name": "solo" }))
+            .await
+            .unwrap();
+        assert_eq!(
+            renames.lock().await.last(),
+            Some(&("solo".to_string(), None))
+        );
+
+        // Validation: the shared spawn normalizer (the length rule) plus
+        // the rename-local broadcast guard, then the session id shape.
+        let error = call(&wiring, "rlm.rename", json!({})).await.unwrap_err();
+        assert_eq!(error.to_string(), "rlm.rename name must be a string");
+        let error = call(&wiring, "rlm.rename", json!({ "name": "x".repeat(65) }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename name must be at most 64 characters"
+        );
+        let error = call(&wiring, "rlm.rename", json!({ "name": "all" }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Broadcast agent messaging is not supported"
+        );
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": "   " }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename session_id must be a non-empty string"
+        );
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": 7 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename session_id must be a non-empty string"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_host_rename_appends_locally_and_rejects_child_targets() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wiring = wired(dir.path(), None);
+        // A self rename appends the session's `session_info` name row
+        // (TS `setSessionName`).
+        let renamed = call(&wiring, "rlm.rename", json!({ "name": "solo-lane" }))
+            .await
+            .unwrap();
+        assert_eq!(renamed, json!({ "name": "solo-lane" }));
+        assert_eq!(
+            wiring.session.lock().await.get_session_name(),
+            Some("solo-lane".to_string())
+        );
+        // A child target requires the daemon-backed host.
+        let error = call(
+            &wiring,
+            "rlm.rename",
+            json!({ "name": "x", "session_id": "sub-1" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "rlm.rename with session_id requires a daemon-backed session"
         );
     }
 

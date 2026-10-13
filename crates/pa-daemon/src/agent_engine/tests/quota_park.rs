@@ -1,10 +1,7 @@
 //! The quota-park tests (the park entry/wake durability, resume/retire clearing).
 use super::*;
 
-/// An engine with the quota-park seams live: the worker cron wiring
-/// (store + binding + scheduler-less mutation hook), the supervisor
-/// link the binding resolves, and a session file whose header names
-/// the durable session id.
+/// An engine with the quota-park seams live (cron wiring, supervisor link, durable session id).
 fn park_engine(dir: &std::path::Path) -> AgentSessionEngine {
     std::fs::create_dir_all(dir.join("agent")).unwrap();
     let session_file = dir.join("session.jsonl");
@@ -81,31 +78,20 @@ fn quota_failure_message(
     }
 }
 
-/// The park entry appender's write-failure propagation (the
-/// persist-or-decline plumbing the park-arming arms guard with): a
-/// PERSISTING session manager whose file becomes a directory fails the
-/// append at the write stage (EISDIR, root included — a mode-based
-/// injection would not stop root), and the `io::Result` reaches the
-/// caller — the arming arms' decline gate consumes exactly this Err.
-///
-/// The daemon worker's INSTALLED engine session stays non-persisted
-/// (`in_memory_in_session_dir`: the worker owns the durable file and
-/// mirrors the entries), so its appends answer `Ok` and the park
-/// proceeds unchanged; this `Err` path is the persisted-manager
-/// contract the gate exists for.
+/// The park entry appender's write-failure propagation: a PERSISTING
+/// manager whose file becomes a directory fails the append (EISDIR, root
+/// included) and the `io::Result` reaches the caller.
 #[tokio::test]
 async fn a_failed_park_entry_write_propagates_to_the_caller() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = park_engine(dir.path());
     let session_file = dir.path().join("session.jsonl");
-    // A persisting manager over the session file (open repairs + pins
-    // the durable path).
+    // A persisting manager over the session file.
     let handle = std::sync::Arc::new(tokio::sync::Mutex::new(
         pa_core::session::manager::SessionManager::open(dir.path(), dir.path(), &session_file),
     ));
     // Seed the first assistant entry: custom appends before it defer
-    // (the pre-first-assistant buffer, TS parity), so the park entry
-    // must land after one to flush at all.
+    // (the pre-first-assistant buffer, TS parity).
     handle
         .lock()
         .await
@@ -151,18 +137,13 @@ async fn a_failed_park_entry_write_propagates_to_the_caller() {
     );
 }
 
-/// A quota failure whose reported reset exceeds the wait cap parks the
-/// session: the surfaced status names the wake, the state counts the
-/// park, and the durable wake job lands in the session's artifacts.
 #[tokio::test]
 async fn quota_failure_beyond_cap_parks_with_a_durable_wake() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = park_engine(dir.path());
     let message = quota_failure_message(Some("rate_limit"), Some(3_600_000));
-    // Captured BEFORE the park call: the slack assertion measures against
-    // the pre-park clock, so test-process delay can only widen the slack
-    // (the park's own resume_at already includes the grace from its
-    // later now_ms), never shrink it under the window's lower bound.
+    // Captured BEFORE the park call: test-process delay can only widen
+    // the slack, never shrink it under the window's lower bound.
     let before_park_ms = crate::util::now_ms();
     let outcome = engine
             .park_for_quota_reset(
@@ -213,8 +194,6 @@ async fn quota_failure_beyond_cap_parks_with_a_durable_wake() {
     );
 }
 
-/// A repeat quota failure while the wake is still armed is a no-op: no
-/// new park, no new wake, the already-parked status surfaces.
 #[tokio::test]
 async fn repeat_failure_while_parked_keeps_the_scheduled_wake() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -256,8 +235,7 @@ async fn repeat_failure_while_parked_keeps_the_scheduled_wake() {
     assert_eq!(store.store.list().len(), 1, "no second wake job is created");
 }
 
-/// Non-quota failures never park, and a quota failure without a
-/// reported reset keeps the abort (a blind park would guess a wake).
+/// Non-quota failures never park; a quota failure without a reported reset keeps the abort.
 #[tokio::test]
 async fn non_quota_and_no_reset_failures_do_not_park() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -275,17 +253,12 @@ async fn non_quota_and_no_reset_failures_do_not_park() {
     assert!(!engine.is_quota_parked());
 }
 
-/// A spent park budget ends the episode: the stale park clears and
-/// the give-up stands (the goal fails like the bounded wait it
-/// replaced).
 #[tokio::test]
 async fn spent_park_budget_clears_the_stale_park() {
     let dir = tempfile::TempDir::new().unwrap();
     let engine = park_engine(dir.path());
     // Arm a wake, then age the park state past its wake time: the
-    // budget check runs against a wake that already fired (the
-    // store only accepts future one-shots; the state is what the
-    // consumed-wake paths read).
+    // budget check runs against a wake that already fired.
     let fired_job_id = engine
         .create_quota_resume_job(crate::util::now_ms() + 60_000)
         .await
@@ -310,8 +283,6 @@ async fn spent_park_budget_clears_the_stale_park() {
     );
 }
 
-/// The wake fired but its probe failed with no new reset: the bounded
-/// re-arm probes again instead of parking forever.
 #[tokio::test]
 async fn consumed_wake_without_reset_re_arms_bounded() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -365,10 +336,8 @@ async fn consumed_wake_without_reset_re_arms_bounded() {
     assert!(!engine.is_quota_parked());
 }
 
-/// The replacement teardown ends the retired session's park with it:
-/// the state clears so an unparked replacement is never reported
-/// quota-parked (the replacement build restores whatever its own
-/// branch says).
+/// The replacement teardown ends the retired session's park with it,
+/// so an unparked replacement is never reported quota-parked.
 #[tokio::test]
 async fn retire_session_runtime_clears_the_live_park() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -386,9 +355,8 @@ async fn retire_session_runtime_clears_the_live_park() {
     );
 }
 
-/// A parked session that completes a model call resumes: the park
-/// clears, the pending wake cancels, and an early success queues the
-/// resume marker (the wake probe's success must not).
+/// A parked session that completes a model call resumes; an early success
+/// queues the marker.
 #[tokio::test]
 async fn early_resume_clears_the_park_and_cancels_the_wake() {
     let dir = tempfile::TempDir::new().unwrap();

@@ -1,6 +1,5 @@
-//! A scripted loopback HTTP server (the pa-models `tests/common` pattern):
-//! answers from a queue of raw responses and records every request head
-//! (headers included). Nothing leaves loopback.
+//! A scripted loopback HTTP server (the pa-models `tests/common` pattern): answers from a queue of
+//! raw responses and records every request head (headers included). Nothing leaves loopback.
 
 #![allow(dead_code)]
 
@@ -42,12 +41,10 @@ impl MockServer {
         }
     }
 
-    /// The URL for a request path.
     pub fn url(&self, path: &str) -> String {
         format!("http://127.0.0.1:{}{path}", self.port)
     }
 
-    /// Every recorded request head so far.
     pub fn recorded_requests(&self) -> Vec<String> {
         self.requests.lock().unwrap().clone()
     }
@@ -55,9 +52,8 @@ impl MockServer {
 
 type ResponseQueue = Arc<Mutex<VecDeque<Scripted>>>;
 
-/// One scripted server behavior: raw bytes, raw bytes after a delay (a
-/// slow catalog fetch), or a held connection that never answers (a fetch
-/// that never settles).
+/// One scripted server behavior: raw bytes, raw bytes after a delay (a slow catalog fetch), or a
+/// held connection that never answers (a fetch that never settles).
 pub enum Scripted {
     Response(Vec<u8>),
     Delayed(Vec<u8>, std::time::Duration),

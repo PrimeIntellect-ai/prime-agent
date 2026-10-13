@@ -18,6 +18,16 @@ use pa_types::JsonMap;
 /// Current on-disk session format version.
 pub const CURRENT_SESSION_VERSION: u32 = 3;
 
+/// `custom` entry `customType` marking that this session has already drawn
+/// the Anthropic subscription ban-risk warning (operator directive
+/// 2026-09-29: the warning fires once per session LIFECYCLE, not once per
+/// TUI instance — the shown-state persists in the session's own durable
+/// store, exactly like `thread_goal_state`, so a reattach or a resume of
+/// the same session reads the row and skips the warning; a genuinely new
+/// session, or a fresh auth landing, shows it once). The row's `data` is
+/// `{ "shown": true }`.
+pub const ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE: &str = "anthropic_subscription_warning_shown";
+
 /// Entry types that can represent user intent (vs. daemon bookkeeping).
 pub const CONTENT_ENTRY_TYPES: [&str; 10] = [
     "message",
@@ -236,10 +246,9 @@ fn migrate_v2_to_v3(entries: &mut [FileEntry]) {
         if let FileEntry::Header { header } = entry {
             header.version = Some(3);
         }
-        // hookMessage -> custom: AgentMessage deserializes unknown roles into
-        // Unknown variant, where the rewrite happens through raw JSON. The
-        // Unknown arm is intentionally empty here; the payload-level rewrite
-        // happens in migrate hooks upstream. See v2->v3 in the TS port:
+        // hookMessage -> custom happens through raw JSON (AgentMessage
+        // deserializes unknown roles into Unknown); the payload-level
+        // rewrite happens in migrate hooks upstream (v2->v3 in the TS port).
     }
 }
 
@@ -344,12 +353,10 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         }
     }
 
-    // Harness digests are regenerable snapshots of persistent state, so only
-    // the newest one belongs in the built context (TS #2394): older digest
-    // custom messages are skipped at assembly time, and a compaction-entry
-    // snapshot yields to any digest appended after the compaction.
-    // Persisted entries keep every copy; the newest digest is authoritative
-    // and is re-delivered at cold boundaries.
+    // Only the newest harness digest belongs in the built context (TS #2394)
+    // — they are regenerable snapshots: older digest custom messages are
+    // skipped at assembly, and a compaction snapshot yields to any digest
+    // appended after it. Persisted entries keep every copy.
     let mut newest_digest_path_idx: Option<usize> = None;
     let mut newest_digest_entry_id: Option<String> = None;
     for (path_idx, &index) in path.iter().enumerate().rev() {

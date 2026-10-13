@@ -1,9 +1,6 @@
-//! Credential, eligibility, and paste-flow helpers over resolved service
-//! descriptors (port of the pure half of
-//! `packages/coding-agent/src/core/mcp/service-catalog.ts`): the shared
-//! usability rules for OAuth grants and pasted static tokens, the paste
-//! credential resolution (credentialSet aliasing), the derived prompt
-//! label, login eligibility (endpoint pinning), and the fresh-login gate.
+//! Credential, eligibility, and paste-flow helpers over resolved service descriptors: the paste
+//! credential resolution, the derived prompt label, login eligibility (endpoint pinning), and the
+//! fresh-login gate.
 
 use std::collections::HashSet;
 
@@ -22,10 +19,8 @@ pub fn mcp_credential_key(connection_id: &str) -> String {
 const PASTE_CREDENTIAL_FIELD_KINDS: [SetupFieldKind; 2] =
     [SetupFieldKind::BearerToken, SetupFieldKind::ApiKey];
 
-/// The required credential fields a service collects, in catalog order.
-/// Non-credential fields (env-var kind, url, tenant) are NOT returned: the
-/// flow never prompts for them and never stores values for them; setup
-/// field ids are metadata, never environment variables to read.
+/// The required credential fields a service collects, in catalog order. Non-credential fields
+/// (env-var kind, url, tenant) are NOT returned.
 pub fn mcp_credential_fields(service: &McpServiceDescriptor) -> Vec<&McpSetupField> {
     service
         .setup
@@ -40,13 +35,9 @@ pub fn mcp_credential_fields(service: &McpServiceDescriptor) -> Vec<&McpSetupFie
         .collect()
 }
 
-/// The ONE credential a paste flow collects for a service, or `None` when
-/// the service does not collect exactly one. The runtime sends ONE
-/// `Authorization: Bearer` per connection, so multiple fields are
-/// collectable ONLY as alternative names for the same credential (a shared
-/// `credentialSet` id — GitHub's `GITHUB_PAT_TOKEN` and
-/// `GITHUB_PERSONAL_ACCESS_TOKEN`); genuinely distinct credentials stay NOT
-/// pasteable, fail closed.
+/// The ONE credential a paste flow collects for a service, or `None` when the service does not
+/// collect exactly one. Multiple fields are collectable ONLY as alternative names for the same
+/// credential (a shared `credentialSet` id).
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpPasteCredential {
     /// The field the prompt labels (the first alternative).
@@ -81,11 +72,9 @@ pub fn mcp_paste_credential(service: &McpServiceDescriptor) -> Option<McpPasteCr
     })
 }
 
-/// True when selecting this catalog entry opens the inline paste panel: an
-/// HTTP endpoint that requires setup and collects EXACTLY ONE credential
-/// (possibly under several alternative names). Connect-by-OAuth stays the
-/// fresh-login path; entries without a concrete endpoint are not pasteable
-/// (no URL, no handshake to verify against).
+/// True when selecting this catalog entry opens the inline paste panel: an HTTP endpoint that
+/// requires setup and collects EXACTLY ONE credential. Entries without a concrete endpoint are not
+/// pasteable.
 pub fn is_pasteable_token_service(service: &McpServiceDescriptor) -> bool {
     if service.transport.endpoint().is_none() {
         return false;
@@ -96,15 +85,12 @@ pub fn is_pasteable_token_service(service: &McpServiceDescriptor) -> bool {
     mcp_paste_credential(service).is_some()
 }
 
-/// Tokens that stay uppercase in the derived label: real acronyms, not
-/// shouty ids ("DD" is deliberately absent — it is a branding abbreviation
-/// the strip rule removes: "Datadog `DD_API_KEY`" reads as "Datadog API key").
+/// Tokens that stay uppercase in the derived label: real acronyms, not shouty ids ("DD" is
+/// deliberately absent — it is a branding abbreviation).
 const FIELD_LABEL_ACRONYMS: [&str; 6] = ["api", "aws", "ci", "sdk", "cli", "id"];
 
-/// Human prompt label for one credential field, derived from the field id
-/// and the service identity ("GitHub personal access token"). The
-/// derivation is display copy only — it never influences what is stored or
-/// sent.
+/// Human prompt label for one credential field, derived from the field id and the service identity.
+/// Display copy only — it never influences what is stored or sent.
 #[must_use]
 pub fn mcp_credential_field_prompt_label(
     service: &McpServiceDescriptor,
@@ -133,10 +119,8 @@ pub fn mcp_credential_field_prompt_label(
             continue;
         }
         if kept.is_empty() {
-            // Branding prefixes never name the credential: a direct prefix
-            // of the service id ("cld" for "cloudinary") or a short
-            // uppercase abbreviation sharing the id's first letter ("DD"
-            // for "datadog").
+            // Branding prefixes never name the credential: a direct prefix of the service id
+            // ("cld" for "cloudinary").
             if service_id_lower.starts_with(lower.as_str()) {
                 continue;
             }
@@ -177,9 +161,8 @@ pub fn mcp_credential_field_prompt_label(
     format!("{} {noun}", service.label)
 }
 
-/// A discoverable OAuth candidate is not a certification or a successful
-/// connection: concrete http endpoint, oauth-or-unknown strategy,
-/// setup-ready, and not pinned from a vanished record.
+/// A discoverable OAuth candidate is not a certification: concrete http endpoint, oauth-or-unknown
+/// strategy, setup-ready, and not pinned from a vanished record.
 pub fn fresh_mcp_login_allowed(service: &McpServiceDescriptor) -> bool {
     let Some(url) = service.transport.endpoint() else {
         return false;
@@ -194,9 +177,8 @@ pub fn fresh_mcp_login_allowed(service: &McpServiceDescriptor) -> bool {
         && !service.pinned_from_record
 }
 
-/// A concrete, safe OAuth endpoint: absolute URL, no credentials or
-/// fragment, https (or http on explicit loopback for local development),
-/// and no unresolved template placeholders.
+/// A concrete, safe OAuth endpoint: absolute URL, no credentials or fragment, https, and no
+/// unresolved template placeholders.
 pub fn concrete_oauth_endpoint(endpoint: &str) -> bool {
     if endpoint.contains('{') || endpoint.contains('}') {
         return false;
@@ -224,10 +206,8 @@ pub enum OAuthGrantUsabilityReason {
     ExpiredNoRefresh,
 }
 
-/// ONE shared rule for whether a stored credential is a usable OAuth grant
-/// at an endpoint: typed oauth, non-empty access, bound to exactly this
-/// endpoint, and not expired without a refresh token. Dispatch eligibility
-/// and the view states consume this predicate so their answers never drift.
+/// ONE shared rule for whether a stored credential is a usable OAuth grant: typed oauth, non-empty
+/// access, bound to exactly this endpoint, and not expired without a refresh token.
 pub fn oauth_grant_usable(
     credential: Option<&AuthCredential>,
     endpoint: &str,
@@ -274,10 +254,8 @@ pub enum McpStaticTokenUsabilityReason {
     EmptyBearer,
 }
 
-/// ONE shared rule for whether a stored credential is a usable pasted
-/// static token at an endpoint: typed `mcp_static_token`, bound to exactly
-/// this endpoint, with a non-empty bearer. No expiry: a static token is
-/// usable until the user removes or replaces it.
+/// ONE shared rule for whether a stored credential is a usable pasted static token at an endpoint:
+/// typed `mcp_static_token`, bound to exactly this endpoint, with a non-empty bearer.
 pub fn mcp_static_token_usable(
     credential: Option<&AuthCredential>,
     endpoint: &str,
@@ -315,7 +293,7 @@ pub enum ReservedOwnership {
     Conflict(String),
 }
 
-/// Reserved definitions keep one canonical owner (TS `reservedMcpOwnership`).
+/// Reserved definitions keep one canonical owner.
 pub fn reserved_mcp_ownership(
     service: Option<&McpServiceDescriptor>,
     config: Option<&McpServerConfig>,
@@ -371,10 +349,8 @@ fn config_uses_oauth(config: &McpServerConfig) -> bool {
     )
 }
 
-/// Resolved login eligibility for one connection (TS `mcpLoginEligibility`,
-/// the paths the Rust port wires: ownership, disabled settings, setup
-/// gating, endpoint repair from installed records/credentials — the pin —
-/// and fresh catalog discovery).
+/// Resolved login eligibility for one connection: ownership, disabled settings, setup gating,
+/// endpoint repair from installed records/ credentials and fresh catalog discovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpLoginEligibility {
     pub allowed: bool,
@@ -472,9 +448,8 @@ pub fn mcp_login_eligibility(
             None => deny("This service requires setup before OAuth login."),
         };
     }
-    // The ENDPOINT PIN: an installed credential or record proves the
-    // endpoint the account approved; a login targets it, never a changed
-    // catalog URL.
+    // The ENDPOINT PIN: an installed credential or record proves the endpoint the account
+    // approved;.
     let bound_endpoint = match credential {
         Some(AuthCredential::Oauth {
             access, endpoint, ..
@@ -511,9 +486,8 @@ pub fn mcp_login_eligibility(
             .as_deref()
             .is_some_and(concrete_oauth_endpoint)
     {
-        // Add allocates a NEW account id for an INSTALLED service whose own
-        // record proves the endpoint was approved: the new account lands at
-        // that same durable endpoint, never at a changed or unreviewed URL.
+        // Add allocates a NEW account id for an INSTALLED service whose own record proves the
+        // endpoint was approved: the new account lands at that same durable endpoint.
         return McpLoginEligibility {
             allowed: true,
             endpoint: repair_endpoint,

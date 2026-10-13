@@ -1,8 +1,7 @@
 //! Server-sent event decoding shared by streaming providers.
 //!
-//! Mirrors the SSE decoder from the Anthropic provider in the TS reference:
-//! handles \n, \r\n and \r line breaks, comment lines, `event:`/`data:` fields
-//! and multi-line data, flushing on blank lines and at end-of-stream.
+//! Mirrors the TS SSE decoder: \n, \r\n and \r line breaks, comment lines, `event:`/`data:` fields
+//! and multi-line data, blank-line/EOF flush.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerSentEvent {

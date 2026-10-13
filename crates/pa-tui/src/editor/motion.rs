@@ -6,8 +6,6 @@ use super::{is_atomic_marker, is_whitespace_char, word_wrap_line, Editor, Visual
 use crate::width::{is_punctuation_char, str_width};
 
 impl Editor {
-    // ---- cursor movement --------------------------------------------------
-
     pub(crate) fn set_cursor_col(&mut self, col: usize) {
         self.cursor_col = col;
         self.preferred_visual_col = None;
@@ -16,7 +14,7 @@ impl Editor {
 
     pub(crate) fn move_to_line_start(&mut self) {
         self.last_action = None;
-        // Home lands after the hidden bang prefix (TS `moveToLineStart`).
+        // Home lands after the hidden bang prefix.
         self.set_cursor_col(self.line_start_col(self.cursor_line));
     }
 
@@ -26,8 +24,8 @@ impl Editor {
         self.set_cursor_col(len);
     }
 
-    /// Move to the start of the whole text (TS has no doc jump; the
-    /// standard `Ctrl+Home` / macOS `Cmd+Up` editors' motion).
+    /// Move to the start of the whole text (no TS doc jump; the standard `Ctrl+Home` / macOS
+    /// `Cmd+Up` motion).
     pub(crate) fn move_to_doc_start(&mut self) {
         self.last_action = None;
         self.cursor_line = 0;
@@ -481,12 +479,6 @@ mod tests {
         Editor::new()
     }
 
-    /// A backward jump onto the hidden bang prefix lands the cursor before
-    /// the prefix (TS `jumpToChar` assigns the raw index); the visual-line
-    /// lookup maps that column to the logical line's FIRST visual segment
-    /// (TS `findVisualLineAt`'s hidden-prefix arm), never to the whole
-    /// map's last visual line, and vertical motion consumes the mapped
-    /// line.
     #[test]
     fn a_backward_jump_onto_the_bang_prefix_stays_on_the_first_visual_line() {
         let mut e = ed();
@@ -520,7 +512,6 @@ mod tests {
         let mut e = ed();
         e.set_text("aaaaaaaaaa bbbbbbbbbb");
         let vl = e.build_visual_line_map(10);
-        // The trailing space of chunk 1 wraps to its own visual line (TS parity).
         assert_eq!(vl.len(), 3);
         assert_eq!(vl[0].length, 10);
         assert_eq!(vl[1].length, 1);

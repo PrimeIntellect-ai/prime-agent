@@ -1,31 +1,8 @@
 //! The `get_context_tree` children cache: the background refresh behind
-//! `/context`'s children rows.
-//!
-//! The children of the context tree are store-dependent disk data: each
-//! persisted child dir's newest session file is read and parsed, usage
-//! recomputed, and grandchildren walked recursively
-//! (`context_tree_children`). On a grown session store that walk is a
-//! multi-second read, so it runs here as a single-flight background
-//! refresh and `get_context_tree` serves the cached snapshot instantly:
-//!
-//! - the root node (usage totals, context usage, label, model) is
-//!   computed from the in-memory store on every request
-//!   (`state_getters::handle_get_context_tree`);
-//! - the live roster stays fresh per read: the registry snapshot is read
-//!   per request and its identity/status overlaid on the cached bodies
-//!   (a child that settled between refreshes keeps its last cached row
-//!   until the next refresh files it under the persisted children);
-//! - the cached bodies (usage, model, grandchildren) are as fresh as the
-//!   last completed refresh — a display tree's point-in-time snapshot,
-//!   the same staleness the walk always accepted implicitly by racing
-//!   child turns;
-//! - the refresh re-arms on every read older than [`REFRESH_TTL`] (and
-//!   immediately when the session changed — fork/switch), is warmed at
-//!   create/attach, and is replaced-session-guarded: a snapshot from
-//!   another session never serves.
-//!
-//! A cold cache serves the root plus live rows alone; the full tree
-//! fills on the next read after the walk lands.
+//! `/context`'s children rows. The children walk is multi-second disk data
+//! on a grown store, so it runs as a single-flight background refresh; a
+//! snapshot from another session never serves. A cold cache serves the
+//! live rows alone.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -38,9 +15,7 @@ use serde_json::{json, Value};
 use crate::state_getters::empty_usage;
 
 /// The refresh poke window: a read older than this re-arms the background
-/// walk (one walk in flight at a time). The TTL bounds the age of the
-/// cached usage/grandchildren bodies only — live identities and statuses
-/// are overlaid fresh on every request.
+/// walk (one walk in flight at a time). Bounds only the cached bodies.
 pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(1);
 
 /// One completed background walk.
@@ -48,15 +23,12 @@ pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(1);
 pub(crate) struct CachedWalk {
     pub(crate) computed_at: Instant,
     /// The durable session id the walk resolved against: a replaced
-    /// session (fork/switch) invalidates the snapshot on read — the old
-    /// session's children must never leak into the new session's tree.
+    /// session (fork/switch) invalidates the snapshot on read.
     session_id: String,
     /// Live-child nodes keyed by the registry's child id (the walk's
-    /// file-derived body with the refresh-time identity overlay; serve
-    /// re-overlays the fresh identity).
+    /// file-derived body; serve re-overlays the fresh identity).
     live_nodes: HashMap<String, Value>,
-    /// Persisted child dirs' nodes (everything the walk loaded that was
-    /// not live at refresh time), in the walk's mtime order.
+    /// Persisted child dirs' nodes, in the walk's mtime order.
     persisted: Vec<Value>,
 }
 
@@ -66,23 +38,16 @@ pub(crate) struct CachedWalk {
 pub(crate) struct ContextTreeCache {
     state: Mutex<Option<CachedWalk>>,
     refresh: tokio::sync::Mutex<()>,
-    /// Child ids invalidated since the last walk stored (`delete_subagent`):
-    /// an in-flight walk that started BEFORE a deletion must not
-    /// republish the child when its snapshot lands. The set drains as
-    /// each storing walk filters it (later walks never see the child:
-    /// the registry row is gone and the ledger tombstones the skip set).
+    /// Child ids invalidated since the last walk stored: an in-flight walk
+    /// that started BEFORE a deletion must not republish the child.
     invalidated: Mutex<HashSet<String>>,
-    /// A poke that arrived while another walk held the single-flight
-    /// guard and targets a session the in-flight walk does NOT serve
-    /// (a fork/switch racing a walk): the completing walk re-arms the
-    /// pending session itself, so the replaced tree does not stay cold
-    /// until a later read. The last poke wins (an overwritten earlier
-    /// session re-arms on its next read).
+    /// A poke that arrived while another walk held the guard and targets a
+    /// session the in-flight walk does NOT serve: the completing walk
+    /// re-arms it. The last poke wins.
     pending: Mutex<Option<(String, Option<PathBuf>)>>,
-    /// The session the CURRENT in-flight walk serves (the guard holder's
-    /// own record — the published snapshot is NOT a proxy for it: after a
-    /// fork the in-flight walk serves the new session while the published
-    /// one is still the old).
+    /// The session the CURRENT in-flight walk serves (the published
+    /// snapshot is NOT a proxy for it: after a fork the in-flight walk
+    /// serves the new session while the published one is still the old).
     in_flight: Mutex<Option<String>>,
 }
 
@@ -91,18 +56,10 @@ impl ContextTreeCache {
         Self::default()
     }
 
-    /// Assemble the `get_context_tree` children from the cache and the
-    /// fresh live roster snapshot: every live child appears with its fresh
-    /// identity and status over the cached body (the same minimal
-    /// usage-empty fallback the walk uses for a live child whose dir is
-    /// unreadable). A child that was live at refresh and has since
-    /// settled (its worker exited) keeps its last cached row until the
-    /// next refresh files it under the persisted children — a settling
-    /// child never vanishes from the tree between refreshes. Then the
-    /// persisted children, minus any whose id went live since the refresh
-    /// (its live row already shows). A cold cache yields the live rows
-    /// alone (the disk tree fills on the next read after the
-    /// warm/poked walk lands).
+    /// Assemble the `get_context_tree` children from the cache and the fresh
+    /// live roster snapshot: every live child appears with its fresh identity
+    /// and status over the cached body (or the usage-empty fallback), then
+    /// the settled and persisted children minus any whose id went live.
     pub(crate) fn serve_children(
         &self,
         current_session_id: Option<&str>,
@@ -115,15 +72,9 @@ impl ContextTreeCache {
             .clone()
             .filter(|walk| {
                 // A snapshot from a previous session (fork/switch) is not
-                // this session's tree: serve the live rows alone and let
-                // the poke refresh the new session.
+                // this session's tree: serve the live rows alone.
                 Some(walk.session_id.as_str()) == current_session_id
             });
-        // Deletions recorded since the last walk stored hide immediately —
-        // even if an in-flight walk (which filtered the set before the
-        // deletion landed) publishes a snapshot that still carries the
-        // child, the row must not come back between that publish and the
-        // next walk.
         let invalidated = {
             let invalidated = self
                 .invalidated
@@ -138,9 +89,7 @@ impl ContextTreeCache {
         };
         // A live row's cached body: the live-node entry first, then the
         // persisted row with the same id — a child that went live AFTER the
-        // walk's roster snapshot often already carries real usage in
-        // `persisted`, and the fresh live identity overlays that body
-        // instead of the empty fallback.
+        // walk's roster snapshot often already carries real usage in `persisted`.
         let mut persisted_by_id: HashMap<String, Value> = HashMap::new();
         if let Some(walk) = cached.as_ref() {
             for node in &walk.persisted {
@@ -160,8 +109,7 @@ impl ContextTreeCache {
                 .unwrap_or_default();
             live_ids.insert(id.to_string());
             if invalidated.contains(id) {
-                // A deletion that outran the roster removal (the record
-                // is closing): the row must not come back.
+                // A deletion that outran the roster removal: the row must not come back.
                 continue;
             }
             let mut node = cached
@@ -182,10 +130,7 @@ impl ContextTreeCache {
             children.push(node);
         }
         if let Some(walk) = cached {
-            // Settled since the refresh: keep the last cached body in the
-            // tree until the next refresh files it under the persisted
-            // children (the registry no longer lists it; the disk walk
-            // will).
+            // Settled since the refresh: keep the last cached body until the next refresh files it.
             children.extend(walk.live_nodes.into_values().filter(|node| {
                 node.get("id")
                     .and_then(Value::as_str)
@@ -203,9 +148,7 @@ impl ContextTreeCache {
     }
 
     /// Drop one child's cached rows (the `delete_subagent` boundary): a
-    /// deleted subagent leaves the tree immediately, not at the next
-    /// refresh (the settled-children backfill would otherwise keep its
-    /// last live row visible until the walk re-files or drops it).
+    /// deleted subagent leaves the tree immediately, not at the next refresh.
     pub(crate) fn invalidate_child(&self, child_id: &str) {
         {
             let mut state = self
@@ -218,22 +161,15 @@ impl ContextTreeCache {
                     .retain(|node| node.get("id").and_then(Value::as_str) != Some(child_id));
             }
         }
-        // Remember the deletion: an in-flight walk that started before it
-        // must not republish the child when its snapshot lands.
         self.invalidated
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(child_id.to_string());
     }
 
-    /// Re-arm the background walk when the cached snapshot is missing,
-    /// older than [`REFRESH_TTL`], or was taken for a DIFFERENT session
-    /// (a fork/switch replacement must walk its own tree immediately, not
-    /// wait out the previous session's TTL). Single flight: while one
-    /// walk is in progress, pokes return without spawning (the in-flight
-    /// walk stores a newer snapshot than any poke could). The engine's
-    /// roster snapshot is read inside the task, so sync callers
-    /// (create/attach warm, the request handler) never block on it.
+    /// Re-arm the background walk when the cached snapshot is missing, older
+    /// than [`REFRESH_TTL`], or was taken for a DIFFERENT session. Single
+    /// flight: while one walk is in progress, pokes return without spawning.
     pub(crate) fn poke_refresh(
         self: &Arc<Self>,
         engine: Arc<dyn crate::engine::SessionEngine>,
@@ -255,28 +191,16 @@ impl ContextTreeCache {
         }
         let cache = Arc::clone(self);
         tokio::spawn(async move {
-            // No session yet (the create path warms before the store
-            // lands): nothing to walk, the next read re-arms.
+            // No session yet (the create path warms before the store lands): nothing to walk.
             let Some(first) = current_session_id else {
                 return;
             };
             let mut request = (first, session_file);
             loop {
-                // Single flight: the guard is taken inside the task,
-                // against the owned cache clone (a guard on `self` cannot
-                // outlive this method's borrow); while one walk is in
-                // progress a poke's task takes nothing and records a
-                // pending session instead (below).
                 let Ok(_guard) = cache.refresh.try_lock() else {
-                    // A walk is in flight: record this poke unless the
-                    // in-flight walk already serves this session — the
-                    // completing walk re-arms a DIFFERENT session's tree
-                    // itself, so a replaced tree must not stay cold until
-                    // a later read. `in_flight` is the guard holder's own
-                    // record (the published snapshot is not a proxy for
-                    // it); an unread record (the tiny window between the
-                    // guard's acquisition and its write) records the poke,
-                    // which the drain then drops as already-served.
+                    // A walk is in flight: record this poke unless the in-flight walk already
+                    // serves this session — the completing walk re-arms a DIFFERENT session's
+                    // tree itself. `in_flight` is the guard holder's own record.
                     let in_flight = {
                         let in_flight = cache
                             .in_flight
@@ -297,12 +221,8 @@ impl ContextTreeCache {
                     .in_flight
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.clone());
-                // Another task may have completed a fresh walk between
-                // this poke's TTL check and its guard acquisition (a
-                // burst of expired reads): recheck so redundant walks
-                // cannot serialize behind each other. A pending session
-                // recorded meanwhile still gets served (the loop takes it
-                // instead of returning).
+                // Another task may have completed a fresh walk between this poke's TTL check
+                // and its guard acquisition: recheck so redundant walks cannot serialize.
                 let already_fresh = {
                     let state = cache
                         .state
@@ -351,11 +271,8 @@ impl ContextTreeCache {
                             .invalidated
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        // Deletions that landed while this walk ran: the
-                        // stale snapshot must not republish them. The set
-                        // drains here (later walks never see the
-                        // children: the registry rows are gone and the
-                        // ledger tombstones the skip set).
+                        // Deletions that landed while this walk ran must not be
+                        // republished by the stale snapshot. The set drains here.
                         for child_id in invalidated.iter() {
                             live_nodes.remove(child_id);
                             persisted.retain(|node| {
@@ -382,8 +299,7 @@ impl ContextTreeCache {
                     }
                 }
                 // Drain a pending session (a replaced session that poked
-                // while this walk ran): serve it in this same task while
-                // the guard is held, instead of leaving its tree cold.
+                // while this walk ran): serve it in this same task.
                 request = match cache
                     .pending
                     .lock()
@@ -406,11 +322,9 @@ impl ContextTreeCache {
     }
 }
 
-/// One full artifact-tree walk (the computation `handle_get_context_tree`
-/// ran inline per request before the cache): the model registry, the RLM
-/// ledger's tombstones, every live child's file-derived node, and every
-/// persisted child dir under the session's own artifact tree. Runs on the
-/// blocking pool only; never on the request path.
+/// One full artifact-tree walk: the model registry, the ledger tombstones,
+/// every live child's file-derived node, and every persisted child dir under
+/// the session's artifact tree. Blocking pool only.
 fn walk_children(
     agent_dir: &Path,
     session_id: &str,
@@ -419,13 +333,9 @@ fn walk_children(
 ) -> Result<(HashMap<String, Value>, Vec<Value>)> {
     let registry = crate::state_getters::worker_model_registry(agent_dir);
     let artifacts_root = crate::context_tree_children::session_artifacts_dir(agent_dir);
-    // User-deleted subagents stay hidden at every depth: the ledger's
-    // tombstones key by the deleted child's parent session file, so this
-    // session's deletions resolve into the root skip set and the record
-    // hands down for each recursion level to resolve its own (the TS
-    // in-memory guard is its restart-behavior; the ledger is the durable
-    // authority here). Unreadable ledgers degrade to no filtering, never
-    // a failed tree.
+    // User-deleted subagents stay hidden at every depth: the tombstones key by the deleted
+    // child's parent session file, so this session's deletions resolve into the root skip
+    // set and each recursion level its own. Unreadable ledgers degrade to no filtering.
     let mut skip_ids: HashSet<String> = snapshots
         .iter()
         .filter_map(|child| child.get("id").and_then(Value::as_str))
@@ -451,10 +361,8 @@ fn walk_children(
             skip_ids.extend(deleted.iter().cloned());
         }
     }
-    // Live children (TS: `run.session?.getContextTree() ??
-    // loadContextTreeChildFromDisk(...)`): the node carries the child's
-    // real usage and its recursive grandchildren; the registry supplies
-    // the fresher identity.
+    // Live children: the node carries the child's real usage and its
+    // recursive grandchildren; the registry supplies the fresher identity.
     let mut live_nodes = HashMap::with_capacity(snapshots.len());
     for child in snapshots {
         let mut node = child
@@ -546,10 +454,6 @@ mod tests {
         json!({ "id": id, "label": "child", "status": status })
     }
 
-    /// A child that was live at refresh and has since settled (the
-    /// registry no longer lists it) keeps its last cached row until the
-    /// next refresh files it under the persisted children — it never
-    /// vanishes from the tree between refreshes.
     #[test]
     fn settled_children_keep_their_cached_row() {
         let cache = cache_with_walk("session-a", &[("child-live", 100)], &[]);
@@ -564,8 +468,6 @@ mod tests {
         );
     }
 
-    /// A snapshot taken for another session (fork/switch) never serves:
-    /// the new session's tree starts from its live rows alone.
     #[test]
     fn replaced_session_snapshots_never_serve() {
         let cache = cache_with_walk("session-old", &[("child-live", 100)], &["child-disk"]);
@@ -579,8 +481,6 @@ mod tests {
         assert_eq!(children.len(), 2, "live backfill + persisted row");
     }
 
-    /// The live overlay wins over the cached identity: a running child's
-    /// status is fresh even while its cached usage body is a refresh old.
     #[test]
     fn live_identity_overlays_the_cached_body() {
         let cache = cache_with_walk("session-a", &[("child-live", 100)], &[]);
@@ -591,9 +491,6 @@ mod tests {
         assert_eq!(children[0]["totalUsage"]["input"], json!(100));
     }
 
-    /// The `delete_subagent` boundary: the deleted child's cached rows
-    /// leave the tree immediately, from both the live backfill and the
-    /// persisted rows.
     #[test]
     fn invalidated_children_leave_the_tree_immediately() {
         let cache = cache_with_walk("session-a", &[("child-live", 100)], &["child-disk"]);
@@ -604,9 +501,8 @@ mod tests {
             children.is_empty(),
             "deleted children must leave the tree immediately: {children:?}"
         );
-        // A stale snapshot published after the invalidation (an in-flight
-        // walk that filtered the set before the deletion landed) must not
-        // bring the child back at serve time.
+        // A stale snapshot published after the invalidation must not bring
+        // the child back at serve time.
         *cache.state.lock().unwrap() = Some(CachedWalk {
             computed_at: Instant::now(),
             session_id: "session-a".to_string(),
@@ -628,9 +524,6 @@ mod tests {
         );
     }
 
-    /// An invalidation that lands while a walk is in flight wins over the
-    /// stale snapshot: the walk's store filters the deleted child out
-    /// (the store step drains the invalidated set).
     #[test]
     fn an_in_flight_walk_cannot_republish_a_deleted_child() {
         let cache = cache_with_walk("session-a", &[("child-live", 100)], &[]);
@@ -656,9 +549,6 @@ mod tests {
         );
     }
 
-    /// A child that went live AFTER the walk's roster snapshot (it sits in
-    /// `persisted` with real usage) carries that body under its fresh live
-    /// identity — not the empty fallback.
     #[test]
     fn a_newly_live_child_rides_its_cached_persisted_usage() {
         // The persisted row carries REAL usage (the seeded tree's spend) —
@@ -693,8 +583,6 @@ mod tests {
         );
     }
 
-    /// A cold cache yields the live rows alone (the disk tree fills on the
-    /// next read after the warm/poked walk lands).
     #[test]
     fn cold_cache_serves_live_rows_with_the_usage_fallback() {
         let cache = ContextTreeCache::new();

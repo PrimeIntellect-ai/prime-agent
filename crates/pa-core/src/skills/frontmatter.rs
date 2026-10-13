@@ -1,4 +1,4 @@
-//! YAML frontmatter parsing. Port of utils/frontmatter.ts.
+//! YAML frontmatter parsing.
 
 use serde_json::Value;
 
@@ -17,12 +17,10 @@ fn extract_frontmatter(content: &str) -> (Option<String>, String) {
     let Some(end_index) = normalized[3..].find("\n---") else {
         return (None, normalized);
     };
-    // end_index is relative to offset 3; the yaml block runs from offset 4 to
-    // the absolute close, the body starts after "\n---" (4 chars from the
-    // find position). An EMPTY block (the close follows the open, e.g.
-    // `---\n---`) is NO frontmatter on the TS side (`!yamlString`), and its
-    // slice bounds are inverted (4 > 3) — fall back to the whole document
-    // instead of slicing.
+    // end_index is relative to offset 3; the yaml block runs from offset 4 to the absolute close,
+    // the body starts after "\n---" (4 chars from the find position). An EMPTY block (the close
+    // follows the open, e.g. `---\n---`) is NO frontmatter on the TS side (`!yamlString`): fall
+    // back to the whole document instead of slicing.
     let Some(yaml) = normalized.get(4..end_index + 3) else {
         return (None, normalized);
     };
@@ -89,8 +87,7 @@ mod tests {
     #[test]
     fn an_empty_frontmatter_block_is_no_frontmatter() {
         // TS `!yamlString`: the close follows the open, so the whole
-        // document is the body (the slice bounds are inverted, which
-        // previously panicked).
+        // document is the body (the slice bounds are inverted).
         for text in ["---\n---\nbody", "---\n---", "---\n----\nbody"] {
             let (frontmatter, body) = parse_frontmatter(text);
             assert!(frontmatter.as_object().unwrap().is_empty(), "{text}");

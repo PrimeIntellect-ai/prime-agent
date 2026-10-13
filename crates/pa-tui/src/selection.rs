@@ -1,42 +1,28 @@
-//! In-app mouse text selection (TS `fullscreen.ts`'s selection state plus
-//! the selection branches of `tui.ts`'s `handleFullscreenInput`).
-//!
-//! A selection is anchored to transcript lines (streaming appends and
-//! scrolling never shift what is selected): press starts it, drag extends
-//! it, release copies the spanned text out through OSC 52. Transcript
-//! selections highlight the window rows; presses outside the window start a
-//! frame selection over the dock's selectable spans (the picker, selector,
-//! and editor rows), the TS `beginFrameSelection` fallback. Markdown table
-//! cell selection (TS mode `"table"`) needs per-cell region metadata the
-//! Rust tables do not expose yet; table rows select as plain transcript
-//! text.
+//! In-app mouse text selection, anchored to transcript lines: press starts it, drag extends it,
+//! release copies the spanned text through OSC 52; presses outside the window start a frame
+//! selection over the dock's selectable spans. Markdown table cell selection is not ported; table
+//! rows select as plain text.
 
 use crate::view::AgentView;
 use crate::width::{char_width, line_width, slice_line_by_column};
 use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
 
-/// Rows above the transcript window (the pinned top bar; TS `headerHeight`).
 pub(crate) const HEADER_ROWS: usize = 1;
 
-/// A selection endpoint (TS `SelectionPoint`): a transcript line index plus
-/// a visible column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SelectionPoint {
     line: usize,
     col: usize,
 }
 
-/// What a selection spans (TS `SelectionMode`; the table mode is not ported).
+/// What a selection spans; the TS table-cell mode is not ported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionMode {
-    /// Transcript lines.
     Transcript,
-    /// Frame rows (the dock / picker surface), bounded by selectable spans.
     Frame,
 }
 
-/// One selectable span within a frame row (TS `FrameSelectionRegion`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FrameRegion {
     line: usize,
@@ -44,16 +30,15 @@ struct FrameRegion {
     width: usize,
 }
 
-/// TS `FrameSelectionSnapshot`: the frame a frame selection started on, so
-/// extraction reads the text the press saw even if later frames changed.
+/// The frame a frame selection started on: extraction reads the text the
+/// press saw even if later frames changed.
 #[derive(Debug, Clone)]
 struct FrameSnapshot {
     rows: Vec<String>,
     regions: Vec<FrameRegion>,
 }
 
-/// Ordered selection endpoints (TS `orderedSelection`): the anchor and head
-/// with start/end normalized, or `None` when the two points coincide.
+/// Ordered selection endpoints: the anchor and head normalized, `None` when they coincide.
 fn ordered_selection(
     anchor: Option<SelectionPoint>,
     head: Option<SelectionPoint>,
@@ -66,7 +51,6 @@ fn ordered_selection(
     Some(if flipped { (b, a) } else { (a, b) })
 }
 
-/// The column span a selection covers on one line (TS `selectionSpan`).
 fn selection_span(
     line: usize,
     start: SelectionPoint,
@@ -84,10 +68,8 @@ fn selection_span(
     Some((from, to))
 }
 
-/// Highlight `[from, to)` columns of a row with reverse video (TS
-/// `highlightLine`): the selected run drops its styling — the TS writer
-/// strips ANSI and re-wraps the text in `ESC[7m` — so the highlight reads
-/// as default-color inverted text between the untouched surroundings.
+/// Highlight `[from, to)` columns of a row with reverse video: the selected
+/// run drops its styling, so the highlight reads as default-color inverted text.
 pub(crate) fn highlight_line(line: &Line, from: usize, to: usize) -> Line {
     let width = line_width(line);
     let from = from.min(width);
@@ -105,8 +87,7 @@ pub(crate) fn highlight_line(line: &Line, from: usize, to: usize) -> Line {
     out
 }
 
-/// Plain text of a rendered row: styling, OSC zone markers, and hyperlinks
-/// stripped, spans joined (the cell-to-text mapping's text source).
+/// Plain text of a rendered row: styling, OSC zone markers, and hyperlinks stripped, spans joined.
 fn row_text(line: &[Span]) -> String {
     let mut stripped = line.to_vec();
     crate::osc133::strip(&mut stripped);
@@ -115,7 +96,7 @@ fn row_text(line: &[Span]) -> String {
 }
 
 /// Slice plain text by visible column (the text counterpart of
-/// [`crate::width::slice_line_by_column`).
+/// [`crate::width::slice_line_by_column`]).
 fn slice_text_by_column(text: &str, start: usize, length: usize) -> String {
     let mut out = String::new();
     let end = start.saturating_add(length);
@@ -133,8 +114,8 @@ fn slice_text_by_column(text: &str, start: usize, length: usize) -> String {
     out
 }
 
-/// The visible non-whitespace span of a row (TS `visibleContentSpan`):
-/// the selectable run a dock row offers a frame selection.
+/// The visible non-whitespace span of a row: the selectable run a dock row offers a frame
+/// selection.
 fn visible_content_span(text: &str, max_width: usize) -> Option<(usize, usize)> {
     if max_width == 0 {
         return None;
@@ -157,9 +138,8 @@ fn visible_content_span(text: &str, max_width: usize) -> Option<(usize, usize)> 
     from.map(|from| (from, to))
 }
 
-/// Regions a frame selection may cover (TS `createDockSelectionRegions`):
-/// every dock row's visible content span. The `/model`, `/effort`, `/tree`,
-/// and `/fork` panes mount in the dock, so their rows select here too.
+/// Regions a frame selection may cover: every dock row's visible content
+/// span; the dock-mounted panes (`/model`, `/effort`, `/tree`, `/fork`) select here too.
 fn dock_regions(rows: &[String], first_dock_row: usize, width: usize) -> Vec<FrameRegion> {
     rows.iter()
         .enumerate()
@@ -175,17 +155,13 @@ fn dock_regions(rows: &[String], first_dock_row: usize, width: usize) -> Vec<Fra
         .collect()
 }
 
-/// The selection state machine (TS `FullscreenViewport`'s selection fields).
 #[derive(Debug, Default)]
 pub(crate) struct SelectionState {
     anchor: Option<SelectionPoint>,
     head: Option<SelectionPoint>,
     mode: Option<SelectionMode>,
-    /// The frame a frame selection started on (TS `activeFrameSelection`).
     frame: Option<FrameSnapshot>,
-    /// Plain text of the last composed frame's rows.
     frame_text: Vec<String>,
-    /// Selectable spans of the last composed frame's dock rows.
     frame_regions: Vec<FrameRegion>,
 }
 
@@ -197,9 +173,8 @@ impl SelectionState {
         self.frame = None;
     }
 
-    /// Whether a drag is in progress (an anchor armed, not yet ended): the
-    /// transient overlays (the action toasts) sit a drag out so a
-    /// selection never reads rows the overlay covers.
+    /// Whether a drag is in progress (an anchor armed, not yet ended):
+    /// transient overlays sit a drag out so a selection never reads their rows.
     pub(crate) fn is_dragging(&self) -> bool {
         self.anchor.is_some() && self.mode.is_some()
     }
@@ -208,7 +183,6 @@ impl SelectionState {
         ordered_selection(self.anchor, self.head).is_some()
     }
 
-    /// Regions on one frame line (TS `frameRegionsForLine`).
     fn frame_regions_for_line(regions: &[FrameRegion], line: usize) -> Vec<&FrameRegion> {
         let mut hits: Vec<&FrameRegion> = regions
             .iter()
@@ -218,8 +192,7 @@ impl SelectionState {
         hits
     }
 
-    /// Clamp a point into a line's regions (TS `clampFrameSelectionPoint`):
-    /// inside a region keeps the column, outside snaps to the nearest edge.
+    /// Inside keeps the column, outside snaps to the nearest edge.
     fn clamp_frame_point(point: SelectionPoint, regions: &[FrameRegion]) -> Option<SelectionPoint> {
         let hits = Self::frame_regions_for_line(regions, point.line);
         let first = *hits.first()?;
@@ -248,8 +221,6 @@ impl SelectionState {
         })
     }
 
-    /// Whether a frame point sits inside a selectable region (TS
-    /// `isFrameSelectable`).
     fn is_frame_selectable(point: SelectionPoint, regions: &[FrameRegion]) -> bool {
         regions.iter().any(|region| {
             region.line == point.line
@@ -258,8 +229,7 @@ impl SelectionState {
         })
     }
 
-    /// The spans a frame selection covers on one line (TS
-    /// `selectedFrameSpans`): the selection span clipped to each region.
+    /// The spans a frame selection covers on one line: the selection span clipped to each region.
     fn selected_frame_spans(
         line: usize,
         start: SelectionPoint,
@@ -279,7 +249,6 @@ impl SelectionState {
             .collect()
     }
 
-    /// The highlighted span of one transcript line, if any.
     fn transcript_highlight_span(&self, line: usize) -> Option<(usize, usize)> {
         if self.mode != Some(SelectionMode::Transcript) {
             return None;
@@ -288,8 +257,6 @@ impl SelectionState {
         selection_span(line, start, end)
     }
 
-    /// The highlighted spans of one frame line, if any (TS
-    /// `applyFrameSelection`'s row pass).
     fn frame_highlight_spans(&self, line: usize) -> Vec<(usize, usize)> {
         if self.mode != Some(SelectionMode::Frame) {
             return Vec::new();
@@ -304,16 +271,15 @@ impl SelectionState {
         Self::selected_frame_spans(line, start, end, regions)
     }
 
-    /// Record a freshly composed frame (TS `applyFrameSelection`'s inputs):
-    /// the plain row texts the dock regions and frame selections read.
+    /// Record a freshly composed frame: the plain row texts the dock regions and frame selections
+    /// read.
     fn note_frame(&mut self, rows: Vec<String>, first_dock_row: usize, width: usize) {
         self.frame_regions = dock_regions(&rows, first_dock_row, width);
         self.frame_text = rows;
     }
 
-    /// The transcript's plain text of a finished transcript selection (TS
-    /// `extractSelectionText`): per-line column slices, trailing
-    /// whitespace trimmed, joined by newlines; `None` when only whitespace.
+    /// The text of a finished transcript selection: per-line column slices,
+    /// trailing whitespace trimmed; `None` when only whitespace.
     fn extract_transcript_text(
         rows: &[Line],
         start: SelectionPoint,
@@ -337,8 +303,7 @@ impl SelectionState {
         (text.trim().length_is_not_zero()).then_some(text)
     }
 
-    /// The text of a finished frame selection (TS `extractFrameSelectionText`):
-    /// the snapshot's rows sliced to the covered regions.
+    /// The text of a finished frame selection: the snapshot's rows sliced to the covered regions.
     fn extract_frame_text(&self, start: SelectionPoint, end: SelectionPoint) -> Option<String> {
         let snapshot = self.frame.as_ref()?;
         let lines = (start.line..=end.line)
@@ -372,11 +337,8 @@ impl TrimLength for str {
 }
 
 impl AgentView {
-    /// Shift tail-relative transcript endpoints by `delta` (content that
-    /// grew by `delta` rows below them keeps its position selected only
-    /// when the endpoints move with the growth; TS achieves this by
-    /// keeping absolute rows, the sparse frame keeps tail-relative ones).
-    /// Top-anchored (absolute) endpoints never shift.
+    /// Shift tail-relative transcript endpoints by `delta` (content growing below keeps its
+    /// selection only when they move with it); top-anchored endpoints never shift.
     pub(crate) fn shift_tail_selection_points(&mut self, delta: isize) {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return;
@@ -385,11 +347,8 @@ impl AgentView {
             .into_iter()
             .flatten()
         {
-            // The tail-relative points sit in the TAIL_SELECTION_ORIGIN
-            // band - within an `isize` of the integer's ceiling - so
-            // the shift works in usize: a growth lowers the point
-            // toward zero, a shrink raises it toward the origin, and
-            // neither conversion can overflow.
+            // The tail-relative points sit in the TAIL_SELECTION_ORIGIN band, within an `isize` of
+            // the integer's ceiling, so the shift works in usize: neither conversion can overflow.
             point.line = if delta >= 0 {
                 point.line.saturating_sub(delta as usize)
             } else {
@@ -398,12 +357,9 @@ impl AgentView {
         }
     }
 
-    /// Rebase transcript endpoints from Top-anchor (absolute) coordinates
-    /// onto the tail frame, given the transcript's total row count: the
-    /// inverse of [`Self::resolve_tail_selection`]. The window re-anchors
-    /// to the tail here (a Top-anchored window that ran off the
-    /// transcript end switches to following), and the selection keeps its
-    /// content highlighted by moving with the frame.
+    /// Rebase transcript endpoints from Top-anchor (absolute) coordinates onto
+    /// the tail frame, the inverse of [`Self::resolve_tail_selection`]: the window
+    /// re-anchors to the tail here and the selection keeps its content highlighted.
     pub(crate) fn rebase_top_selection_to_tail(&mut self, total: usize) {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return;
@@ -432,9 +388,8 @@ impl AgentView {
         }
     }
 
-    /// The transcript line under a screen row (TS
-    /// `transcriptLineForScreenRow`): `None` outside the window unless
-    /// clamping, which folds the position onto the nearest window row.
+    /// The transcript line under a screen row: `None` outside the window
+    /// unless clamping, which folds the position onto the nearest window row.
     fn transcript_line_for_screen_row(
         &self,
         screen_row: usize,
@@ -452,9 +407,8 @@ impl AgentView {
         Some(self.selection_window_start() + row - HEADER_ROWS)
     }
 
-    /// Begin a transcript selection at a screen position (TS
-    /// `beginSelection`): `false` — selection cleared — when the position
-    /// is outside the transcript window.
+    /// Begin a transcript selection at a screen position: `false` —
+    /// selection cleared — when the position is outside the transcript window.
     pub fn begin_selection(&mut self, screen_row: usize, screen_col: usize) -> bool {
         let Some(line) = self.transcript_line_for_screen_row(screen_row, false) else {
             self.selection.clear();
@@ -471,8 +425,8 @@ impl AgentView {
         true
     }
 
-    /// Extend the active selection to a screen position (TS
-    /// `extendSelection`, clamping into the window like the drag path).
+    /// Extend the active selection to a screen position, clamping into the window like the drag
+    /// path.
     fn extend_selection(&mut self, screen_row: usize, screen_col: usize) {
         if self.selection.anchor.is_none() || self.selection.mode != Some(SelectionMode::Transcript)
         {
@@ -487,7 +441,6 @@ impl AgentView {
         });
     }
 
-    /// Extend whichever selection is active (TS `extendActiveSelection`).
     pub fn extend_active_selection(&mut self, screen_row: usize, screen_col: usize) {
         match self.selection.mode {
             Some(SelectionMode::Frame) => self.extend_frame_selection(screen_row, screen_col),
@@ -496,9 +449,8 @@ impl AgentView {
         }
     }
 
-    /// Begin a frame selection at a screen position (TS
-    /// `beginFrameSelection`): `false` — selection cleared — when the
-    /// position is not inside a selectable region.
+    /// Begin a frame selection at a screen position: `false` — selection
+    /// cleared — when the position is not inside a selectable region.
     pub fn begin_frame_selection(&mut self, screen_row: usize, screen_col: usize) -> bool {
         let height = self.frame_rows;
         if height == 0 {
@@ -524,8 +476,7 @@ impl AgentView {
         true
     }
 
-    /// Extend a frame selection, clamping into the snapshot's regions (TS
-    /// `extendFrameSelection`).
+    /// Extend a frame selection, clamping into the snapshot's regions.
     fn extend_frame_selection(&mut self, screen_row: usize, screen_col: usize) {
         if self.selection.anchor.is_none() || self.selection.mode != Some(SelectionMode::Frame) {
             return;
@@ -549,10 +500,8 @@ impl AgentView {
         }
     }
 
-    /// Finish the active selection and return its plain text (TS
-    /// `endActiveSelection` / `endSelection` / `endFrameSelection`):
-    /// `None` when nothing but whitespace is spanned. The selection is
-    /// cleared either way.
+    /// Finish the active selection and return its plain text: `None` when
+    /// nothing but whitespace is spanned. The selection is cleared either way.
     pub fn end_active_selection(&mut self) -> Option<String> {
         let text = match self.selection.mode {
             Some(SelectionMode::Transcript) => {
@@ -584,19 +533,16 @@ impl AgentView {
         text
     }
 
-    /// Drop the active selection (TS `clearSelection`).
     pub fn clear_selection(&mut self) {
         self.selection.clear();
     }
 
-    /// Whether a selection is visible (TS `hasSelection`).
     pub fn has_selection(&self) -> bool {
         self.selection.has_selection()
     }
 
-    /// The auto-scroll direction a drag at `screen_row` arms (TS
-    /// `selectionAutoScrollDirection`): dragging past the window edge the
-    /// head moved towards scrolls that way while scroll room remains.
+    /// The auto-scroll direction a drag at `screen_row` arms: dragging past
+    /// the window edge the head moved towards scrolls that way.
     pub fn selection_auto_scroll_direction(&self, screen_row: usize) -> Option<isize> {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return None;
@@ -617,8 +563,7 @@ impl AgentView {
     }
 
     /// Scroll one step for an auto-scrolling selection, extending the head
-    /// onto the edge row (TS `scrollSelection`): `false` when the window
-    /// did not move.
+    /// onto the edge row; `false` when the window did not move.
     pub fn scroll_selection(&mut self, direction: isize, screen_col: usize) -> bool {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return false;
@@ -637,8 +582,8 @@ impl AgentView {
         true
     }
 
-    /// The highlighted column span of one transcript line, if any (the
-    /// selection-diff restyle pairs this with the cached rows).
+    /// The highlighted column span of one transcript line, if any (the selection-diff restyle pairs
+    /// this with the cached rows).
     pub(crate) fn transcript_highlight_span(
         &self,
         transcript_line: usize,
@@ -646,18 +591,15 @@ impl AgentView {
         self.selection.transcript_highlight_span(transcript_line)
     }
 
-    /// The URL of the link covering one screen cell of the last composed
-    /// frame (TS `viewport.hyperlinkAt`), or `None` when the position is
-    /// not over a link.
+    /// The URL of the link covering one screen cell of the last composed frame,
+    /// or `None` when the position is not over a link.
     pub(crate) fn hyperlink_at(&self, row: usize, col: usize) -> Option<String> {
         crate::hyperlinks::url_at(&self.frame_links, row, col)
     }
 
-    /// Apply frame-selection highlights to a freshly composed frame and
-    /// record its plain rows (TS `applyFrameSelection` + the region scan).
-    /// `first_dock_row` bounds where the selectable regions start: the
-    /// transcript window's bottom on the session surface, row 0 when a
-    /// pane (the onboarding splash) owns the whole frame.
+    /// Apply frame-selection highlights to a freshly composed frame and record its plain rows.
+    /// `first_dock_row` bounds where the selectable regions start: the transcript window's bottom
+    /// on the session surface, row 0 when a pane (the onboarding splash) owns the frame.
     pub(crate) fn apply_frame_selection(
         &mut self,
         frame: &mut [Line],
@@ -701,8 +643,7 @@ mod tests {
     }
 
     /// A transcript window row: the top bar sits at row 0, so the first
-    /// transcript line lands at row 1 (a 40-line transcript in a 12-row
-    /// frame keeps the whole window on screen).
+    /// transcript line lands at row 1.
     #[test]
     fn drag_across_one_transcript_row_copies_it() {
         let mut v = view();
@@ -716,7 +657,6 @@ mod tests {
         let col = rendered_row(&frame, row)
             .find("select this line")
             .expect("text present");
-        // Press before the text, drag past its end, release.
         assert!(v.begin_selection(row, col));
         v.extend_active_selection(row, col + 7);
         assert!(v.has_selection());
@@ -731,8 +671,7 @@ mod tests {
     }
 
     /// A multi-row drag anchors to transcript lines: the span follows the
-    /// lines through the window, and the copy carries each row's slice
-    /// (TS `extractSelectionText`'s per-line trimEnd).
+    /// lines through the window, and the copy carries each row's slice.
     #[test]
     fn drag_down_multiple_rows_copies_each_line() {
         let mut v = view();
@@ -756,10 +695,8 @@ mod tests {
         // The press's draw records the transcript text the release copies.
         v.render_frame(80, 12);
         let text = v.end_active_selection().expect("copied text");
-        // Every line in the range copies its column slice, trailing
-        // whitespace trimmed (TS `extractSelectionText`): the first row
-        // from the anchor column, intermediate spacer rows as empty
-        // lines, the last row up to the head column.
+        // Every line in the range copies its column slice, trailing whitespace trimmed: first row
+        // from the anchor column, spacer rows as empty lines, last row up to the head column.
         let mut expected = Vec::new();
         for row in first..=second {
             let text_row = rendered_row(&frame, row);
@@ -803,9 +740,8 @@ mod tests {
             .unwrap();
         assert!(v.begin_selection(row, 0));
         v.extend_active_selection(row, 80);
-        // The user contract the sibling test asserts on the growing
-        // stream: the copy keeps the text the drag saw, even though the
-        // mutation grew an unseen entry above the window.
+        // The copy keeps the text the drag saw, even though the mutation grew
+        // an unseen entry above the window.
         let expected = rendered_row(&frame, row).trim_end().to_string();
         v.prepare_entry_mutation(0);
         if let ChatEntry::Assistant(message) = &mut v.chat[0] {
@@ -821,11 +757,8 @@ mod tests {
     #[test]
     fn top_window_reaching_tail_keeps_the_selection_highlighted() {
         let mut v = view();
-        // A transcript shorter than the window: a Top-anchored walk runs
-        // off the end and re-anchors to the tail with the selection active
-        // (TS keeps the selection through the follow re-pin) — the
-        // endpoints rebase without a geometry resolve and the release
-        // still copies the dragged text.
+        // A transcript shorter than the window: a Top-anchored walk runs off the end and re-anchors
+        // to the tail with the selection active — the release still copies the dragged text.
         v.push_entry(ChatEntry::Status {
             text: "short transcript row".into(),
             kind: crate::chat::StatusKind::Info,
@@ -1001,8 +934,7 @@ mod tests {
         assert_eq!(v.end_active_selection(), expected);
     }
 
-    /// A press outside the transcript window (the dock) starts no
-    /// transcript selection (TS `beginSelection` returns false there).
+    /// A press outside the transcript window (the dock) starts no transcript selection.
     #[test]
     fn press_outside_the_window_fails_to_begin() {
         let mut v = view();
@@ -1012,8 +944,6 @@ mod tests {
         assert!(!v.has_selection());
     }
 
-    /// A dock press inside its content span starts a frame selection: the
-    /// rows highlight and the release copies the spanned region text.
     #[test]
     fn dock_press_starts_a_frame_selection() {
         let mut v = view();
@@ -1031,8 +961,7 @@ mod tests {
             .next_back()
             .expect("a dock content row");
         assert!(v.begin_frame_selection(row, col));
-        // The press anchors both endpoints on one point, so nothing is
-        // selected until the drag moves (TS `orderedSelection`).
+
         assert!(!v.has_selection());
         v.extend_active_selection(row, col + 4);
         assert!(v.has_selection());
@@ -1040,8 +969,7 @@ mod tests {
         assert!(!text.trim().is_empty(), "the region text copied: {text}");
     }
 
-    /// A frame selection outside every region never begins (TS
-    /// `isFrameSelectable`).
+    /// A frame selection outside every region never begins.
     #[test]
     fn dock_press_on_blank_columns_never_begins() {
         let mut v = view();
@@ -1054,10 +982,8 @@ mod tests {
         assert!(!v.has_selection());
     }
 
-    /// The auto-scroll direction: a head above the anchor held at the
-    /// window's top edge arms upward, below the anchor at the bottom edge
-    /// arms downward, and anything else disarms (TS
-    /// `selectionAutoScrollDirection`).
+    /// The auto-scroll direction: a head above the anchor held at the top
+    /// edge arms upward, below the anchor at the bottom edge arms downward.
     #[test]
     fn auto_scroll_direction_follows_the_dragged_head() {
         let mut v = view();
@@ -1072,7 +998,6 @@ mod tests {
         v.scroll_by(-4);
         v.render_frame(80, 12);
         let (first, last) = (HEADER_ROWS, HEADER_ROWS + v.window_rows - 1);
-        // No selection yet: no direction.
         assert_eq!(v.selection_auto_scroll_direction(first), None);
         assert!(v.begin_selection(last - 1, 1));
         v.extend_active_selection(first, 1);
@@ -1086,7 +1011,7 @@ mod tests {
     }
 
     /// `scroll_selection` scrolls the window and re-aims the head onto the
-    /// edge row (TS `scrollSelection`); a clamped scroll reports no move.
+    /// edge row; a clamped scroll reports no move.
     #[test]
     fn scroll_selection_scrolls_and_reaims_the_head() {
         let mut v = view();
@@ -1121,9 +1046,6 @@ mod tests {
         assert!(!v.scroll_selection(-1, 0), "scroll_top is already zero");
     }
 
-    /// The dock regions carry the visible content spans only (TS
-    /// `visibleContentSpan`): blank rows and leading blanks stay
-    /// unselectable.
     #[test]
     fn visible_content_span_skips_blank_columns() {
         assert_eq!(visible_content_span("     hi  ", 80), Some((5, 7)));
@@ -1134,8 +1056,7 @@ mod tests {
         assert_eq!(visible_content_span(&long, 4), Some((0, 4)));
     }
 
-    /// Column slicing over plain text keeps the dragged columns only (the
-    /// text counterpart of the span highlight).
+    /// Column slicing over plain text keeps the dragged columns only.
     #[test]
     fn slice_text_by_column_cuts_visible_columns() {
         assert_eq!(slice_text_by_column("abcdef", 2, 3), "cde");
@@ -1143,8 +1064,6 @@ mod tests {
         assert_eq!(slice_text_by_column("abcdef", 0, 0), "");
     }
 
-    /// The highlight wraps the selected columns in reverse video and keeps
-    /// the surrounding spans untouched (TS `highlightLine`).
     #[test]
     fn highlight_line_reverses_only_the_span() {
         let line: Line = vec![Span::raw("hello "), Span::raw("world")];
@@ -1159,12 +1078,8 @@ mod tests {
         assert_eq!(reversed, "lo wor");
     }
 
-    /// The onboarding pane owns the whole frame (TS's splash is a 100%
-    /// overlay, and TS's frame selection falls through to the overlay's
-    /// rows): a press-drag over the mounted login URL copies it, and the
-    /// URL's OSC 8 wrap resolves through the same frame the click
-    /// dispatch reads — the first-run surface can select AND click the
-    /// Prime login URL, the exact row the operator could not copy before.
+    /// The onboarding pane owns the whole frame: a press-drag over the mounted login URL copies it,
+    /// and a click on the same URL opens it.
     #[test]
     fn onboarding_pane_rows_select_and_its_url_link_resolves() {
         crate::hyperlinks::set_hyperlinks_override(Some(true));
@@ -1186,8 +1101,7 @@ mod tests {
         let col = rendered_row(&frame, row)
             .find(url)
             .expect("the URL text present");
-        // The pane's rows are frame regions (the region scan spans the
-        // whole splash), so a drag over the URL copies its text.
+        // The pane's rows are frame regions, so a drag over the URL copies its text.
         assert!(v.begin_frame_selection(row, col));
         v.extend_active_selection(row, col + url.len());
         let text = v.end_active_selection().expect("the dragged text");

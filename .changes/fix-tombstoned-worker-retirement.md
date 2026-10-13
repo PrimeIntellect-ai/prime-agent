@@ -1,0 +1,1 @@
+- Session workers whose registration reaches an interrupted stop now retire and release their session lease instead of repeatedly registering and re-running the stop after a daemon restart.

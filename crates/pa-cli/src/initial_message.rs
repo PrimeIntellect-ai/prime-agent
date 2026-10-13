@@ -1,15 +1,12 @@
-//! Initial message composition for non-interactive runs, ported from
-//! `cli/initial-message.ts`.
+//! Initial message composition for non-interactive runs.
 
-/// The combined initial prompt for a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitialMessageResult {
     pub initial_message: Option<String>,
 }
 
 /// Combine stdin content, @file text, and the first CLI message into a single
-/// initial prompt, mirroring `buildInitialMessage`. The first message is
-/// consumed from `messages` in place.
+/// initial prompt (the first message is consumed from `messages` in place).
 pub fn build_initial_message(
     messages: &mut Vec<String>,
     file_text: Option<&str>,

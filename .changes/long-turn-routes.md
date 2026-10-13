@@ -1,0 +1,1 @@
+- ACP prompts and other long daemon requests (waiting for a turn, idle or headless completion, compaction, tree navigation, session start) now wait up to 24 hours like the TypeScript daemon instead of failing with "Session worker timed out" after 10 minutes, and a session worker that dies mid-request now fails it right away instead of after its restart.

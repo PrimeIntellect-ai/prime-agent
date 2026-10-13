@@ -1,13 +1,7 @@
 //! ACP wire types: the method surface, `session/update` payload shapes,
-//! and prompt-block parsing.
-//!
-//! The served surface is exactly what the TS product serves: `initialize`,
-//! `session/new`, `session/prompt`, `session/close` (requests),
-//! `session/cancel` (notification), `session/set_config_option` (the
-//! model/effort pickers, TS #2455), and the outgoing `session/update`
-//! notification. ACP-spec methods the TS product does not serve
-//! (`session/load`, `session/read`, `session/clone`, cwd adoption) are not
-//! invented here.
+//! and prompt-block parsing. The served surface is exactly what the TS
+//! product serves; ACP-spec methods it does not serve (`session/load`,
+//! `session/read`, `session/clone`, cwd adoption) are not invented here.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,11 +81,12 @@ pub enum AcpToolKind {
 }
 
 impl AcpToolKind {
-    /// The TS kind map: the model-facing tool is the Python REPL; bash is the
+    /// The kind map: the model-facing tool is the Python REPL; bash is the
     /// secondary escape hatch.
     pub fn of_tool(tool_name: &str) -> AcpToolKind {
         match tool_name {
-            "ipython" | "bash" => AcpToolKind::Execute,
+            name if pa_types::ai::is_python_tool_name(name) => AcpToolKind::Execute,
+            "bash" => AcpToolKind::Execute,
             "read" => AcpToolKind::Read,
             "edit" | "write" => AcpToolKind::Edit,
             _ => AcpToolKind::Other,
@@ -181,8 +176,8 @@ pub enum AcpSessionUpdate {
         #[serde(rename = "_meta")]
         meta: Value,
     },
-    /// The session's configuration options changed (TS #2455): the full
-    /// set with current values, connection-scoped like the TS publish.
+    /// The session's configuration options changed (TS #2455): the
+    /// full set with current values, connection-scoped.
     #[serde(rename = "config_option_update")]
     ConfigOptionUpdate {
         #[serde(rename = "configOptions")]
@@ -243,9 +238,8 @@ pub enum PromptBlockError {
 /// Split ACP prompt blocks into the text and images the agent accepts.
 ///
 /// Image, embedded-resource, and resource-link blocks are advertised in
-/// `initialize`, so they must actually reach the model: dropping them
-/// silently would let a client believe a pasted screenshot was accepted.
-/// Embedded text resources become context the model can read.
+/// `initialize`, so they must actually reach the model: dropping them would
+/// let a client believe a pasted screenshot was accepted.
 pub fn parse_prompt_blocks(
     prompt: &[Value],
 ) -> Result<(String, Vec<ImageBlock>), PromptBlockError> {
@@ -298,6 +292,20 @@ pub fn parse_prompt_blocks(
 pub struct ImageBlock {
     pub data: String,
     pub mime_type: String,
+}
+
+/// The prompt content admitted into a turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmittedPrompt {
+    pub text: String,
+    pub images: Vec<ImageBlock>,
+}
+
+impl AdmittedPrompt {
+    pub fn parse(prompt: &[Value]) -> Result<AdmittedPrompt, PromptBlockError> {
+        let (text, images) = parse_prompt_blocks(prompt)?;
+        Ok(AdmittedPrompt { text, images })
+    }
 }
 
 /// The `session/new` request params.
@@ -375,15 +383,6 @@ impl SetConfigOptionParams {
     }
 }
 
-/// A bare `{ "sessionId": ... }` params reader shared by close and cancel.
-pub fn session_id_params(params: &Value) -> String {
-    params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
-}
-
 /// The initialize result with the served capability set.
 pub fn initialize_result(product_version: &str) -> InitializeResult {
     InitializeResult {
@@ -434,7 +433,7 @@ mod tests {
 
     #[test]
     fn tool_kind_map_matches_the_ts_map() {
-        assert_eq!(AcpToolKind::of_tool("ipython"), AcpToolKind::Execute);
+        assert_eq!(AcpToolKind::of_tool("python_repl"), AcpToolKind::Execute);
         assert_eq!(AcpToolKind::of_tool("bash"), AcpToolKind::Execute);
         assert_eq!(AcpToolKind::of_tool("read"), AcpToolKind::Read);
         assert_eq!(AcpToolKind::of_tool("edit"), AcpToolKind::Edit);

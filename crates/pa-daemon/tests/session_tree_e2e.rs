@@ -1,26 +1,18 @@
 //! Session-tree worker commands against the real `pa-daemon` binary:
 //! `get_session_tree`, `set_session_entry_label`,
-//! `get_user_messages_for_forking`, `navigate_tree` (plain branch move,
-//! leaf no-op, branch summary, unknown target), and `fork`. The wire shapes
-//! are the TS daemon-protocol contract; the leaf moves are asserted through
-//! the store's `get_messages` read of the moved branch.
-// Pedantic-gate dispositions (fleet-uniform ruling; see this lane's PR for
-// the full rationale).
-// Stack-resident futures by design on the daemon's hot paths; boxing the
-// call sites for a lint tick is a perf regression with zero correctness gain.
+//! `get_user_messages_for_forking`, `navigate_tree`, and `fork`. The wire
+//! shapes are the TS daemon-protocol contract.
+// Stack-resident futures by design on the daemon's hot paths.
 #![allow(clippy::large_futures)]
-// 64-bit-only targets; the narrowing casts sit at OS boundaries
-// (pid/fd/time/size) where the values are bounded by the kernel - the
-// dead-guard expect()s would add panic paths where silent wrap was
-// deliberate.
+// Narrowing casts sit at OS boundaries (pid/fd/time/size) where the kernel
+// bounds the values.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// The fn-length threshold is a style gate, not correctness; the structure
-// campaign owns the god-fn splits as a follow-up.
+// Style gate only, not correctness.
 #![allow(clippy::too_many_lines)]
 // API-shape opinions, not defects; the surfaces are deliberate.
 #![allow(
@@ -141,7 +133,6 @@ impl Client {
     }
 }
 
-/// The text of every message row in a `get_messages` response.
 fn message_texts(response: &serde_json::Value) -> Vec<String> {
     response["data"]["messages"]
         .as_array()
@@ -162,7 +153,6 @@ fn message_texts(response: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// One scripted prompt turn (prompt, then wait out the turn events).
 fn scripted_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
     client.send_command(
         id,
@@ -226,7 +216,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     scripted_turn(&mut client, &session_id, "first question", "p1");
     scripted_turn(&mut client, &session_id, "second question", "p2");
 
-    // The tree: every entry in file order plus the leaf id.
     client.send_command(
         "t1",
         &serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
@@ -237,7 +226,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert!(flat.len() >= 4, "entries present: {flat:?}");
     let leaf_id = tree["data"]["leafId"].as_str().expect("leafId").to_string();
     assert!(!leaf_id.is_empty());
-    // The flat nodes are wire entries with id/parentId.
     assert!(flat.iter().all(|node| node["entry"]["id"].is_string()));
     let first_user = flat
         .iter()
@@ -265,7 +253,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         .expect("the second user message node");
     let second_user_id = entry_id(second_user).to_string();
 
-    // Labels persist and surface in the flat tree.
     client.send_command(
         "l1",
         &serde_json::json!({
@@ -290,7 +277,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         .expect("the labeled node");
     assert_eq!(labeled_node["label"], serde_json::json!("checkpoint"));
 
-    // Fork points: the two user messages with their text.
     client.send_command(
         "f0",
         &serde_json::json!({
@@ -321,7 +307,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert_eq!(missing["success"], false);
     assert_eq!(missing["error"], "Entry no-such-entry not found");
 
-    // Navigating to the current leaf is a no-op.
     client.send_command(
         "n1",
         &serde_json::json!({
@@ -335,8 +320,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert_eq!(noop["data"]["cancelled"], serde_json::json!(false));
     assert!(noop["data"].get("editorText").is_none());
 
-    // Navigate to the first assistant message: a plain branch move (the
-    // second turn's entries are abandoned on their branch).
     client.send_command(
         "n2",
         &serde_json::json!({
@@ -360,9 +343,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         "the abandoned branch dropped: {texts:?}"
     );
 
-    // Navigate to the first user message WITH a branch summary: the
-    // abandoned branch is summarized (scripted), the summary entry lands
-    // on the new branch, and the user text returns to the editor.
     client.send_command(
         "n3",
         &serde_json::json!({
@@ -385,7 +365,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         summarized["data"]["summaryEntry"]["summary"],
         serde_json::json!("explored the second branch")
     );
-    // The branch_summary entry persisted to the session file.
     let mut saw_branch_summary = false;
     for entry in std::fs::read_dir(&session_dir)
         .expect("read session dir")
@@ -403,8 +382,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         "the branch_summary entry persisted to the session file"
     );
 
-    // Fork from the second user message: a new session file with the path
-    // up to that point, and the message text back as selectedText.
     client.send_command(
         "f1",
         &serde_json::json!({
@@ -419,8 +396,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         forked["data"]["selectedText"],
         serde_json::json!("second question")
     );
-    // The worker's session is now the forked branch: the second turn's
-    // messages are the pre-fork path.
     client.send_command(
         "m2",
         &serde_json::json!({ "type": "get_messages", "activeSessionId": session_id }),
@@ -432,7 +407,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
         !texts.iter().any(|text| text.contains("second question")),
         "the fork cut before the target message: {texts:?}"
     );
-    // The fork created a second session file.
     let session_files: Vec<_> = std::fs::read_dir(&session_dir)
         .expect("read session dir")
         .flatten()
@@ -445,7 +419,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     );
 }
 
-/// One raw private-frame client for the session worker's own socket.
 struct WorkerClient {
     stream: UnixStream,
 }
@@ -532,9 +505,6 @@ fn read_exact_timeout(stream: &mut UnixStream, buffer: &mut [u8], deadline: Inst
     }
 }
 
-/// The tree commands over the DIRECT worker link (the interactive client's
-/// upgraded transport): the peer gate admits them and the branch moves are
-/// observable through the store.
 #[test]
 fn session_tree_commands_over_the_direct_worker_link() {
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -576,7 +546,6 @@ fn session_tree_commands_over_the_direct_worker_link() {
     scripted_turn(&mut client, &session_id, "first question", "p1");
     scripted_turn(&mut client, &session_id, "second question", "p2");
 
-    // The supervisor-issued direct-transport ticket + worker peer auth.
     client.send_command(
         "tk1",
         &serde_json::json!({
@@ -605,7 +574,6 @@ fn session_tree_commands_over_the_direct_worker_link() {
     );
     assert_eq!(auth["success"], true, "peer auth failed: {auth}");
 
-    // The tree read over the direct link.
     let tree = worker.request(
         "get_session_tree",
         &serde_json::json!({ "type": "get_session_tree", "activeSessionId": session_id }),
@@ -630,7 +598,6 @@ fn session_tree_commands_over_the_direct_worker_link() {
     let first_assistant_id = entry_of("first answer", "assistant");
     let second_user_id = entry_of("second question", "user");
 
-    // The navigation over the direct link (the timed-out TUI path).
     let navigated = worker.request(
         "navigate_tree",
         &serde_json::json!({
@@ -645,8 +612,6 @@ fn session_tree_commands_over_the_direct_worker_link() {
     );
     assert_eq!(navigated["data"]["cancelled"], serde_json::json!(false));
 
-    // The fork over the direct link: `before` cuts ahead of the second
-    // user message (its text returns as selectedText).
     let forked_before = worker.request(
         "fork",
         &serde_json::json!({

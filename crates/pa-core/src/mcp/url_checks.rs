@@ -1,10 +1,6 @@
-//! Literal-address URL checks for the MCP catalog validator and the local
-//! source loader (port of `packages/ai/src/mcp/url-checks.ts`).
-//!
-//! Structural checks only: loopback, RFC1918 private, link-local and
-//! unspecified IPs, plus plain `localhost` names. This is NOT DNS, redirect
-//! or rebinding SSRF enforcement — request-time network policy stays with the
-//! host/runtime. DNS names that resolve to private space are out of scope.
+//! Literal-address URL checks for the MCP catalog validator and the local source loader. Structural
+//! checks only: NOT DNS, redirect, or rebinding SSRF enforcement — request-time network policy
+//! stays with the host/runtime.
 
 /// True when the host is a literal private, loopback, link-local or
 /// unspecified address (structural check only).
@@ -64,9 +60,8 @@ pub(crate) fn is_literal_private_or_loopback_host(hostname: &str) -> bool {
     false
 }
 
-/// A dotted-quad IPv4 literal: `Ok` for a canonical quad, `Refused` for a
-/// malformed or out-of-range quad (refused like TS), `None` when the host is
-/// not quad-shaped at all.
+/// A dotted-quad IPv4 literal: `Ok` for a canonical quad, `Refused` for a malformed
+/// or out-of-range quad (refused like TS), `None` when the host is not quad-shaped.
 enum ParsedIpv4 {
     Quad([u8; 4]),
     Refused,

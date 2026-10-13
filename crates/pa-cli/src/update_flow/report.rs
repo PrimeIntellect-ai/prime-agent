@@ -1,5 +1,4 @@
-//! The terminal status report (TS `buildDaemonUpdateRestartReport` port): the
-//! user-facing lines the invoking CLI prints from a terminal status - the
+//! The terminal status report the invoking CLI prints from a terminal status: the
 //! `failures[]` detail, the restore counts, and the failure warning.
 
 use pa_types::daemon::update_flow::{UpdateState, UpdateStatus};
@@ -12,9 +11,8 @@ pub struct UpdateReport {
 }
 
 impl UpdateReport {
-    /// The TS report rules, kept verbatim: a `failed` status warns even
-    /// before the counts; `complete` reports restored/resumed/failed counts
-    /// and every per-session failure.
+    /// The TS report rules, kept verbatim: a `failed` status warns even before the
+    /// counts; `complete` reports the restored/resumed/failed counts.
     #[must_use]
     pub fn build(status: &UpdateStatus) -> Self {
         let mut report = Self::default();
@@ -23,9 +21,8 @@ impl UpdateReport {
                 "Updated, but could not restart the daemon ({}).",
                 status.message.as_deref().unwrap_or("unknown error")
             ));
-            // TS #2515: the failed restart leaves the OLD daemon running
-            // (the update is on disk but not live) - say what to do next
-            // instead of leaving a vague warning.
+            // TS #2515: the failed restart leaves the OLD daemon running (the update is
+            // on disk but not live) - say what to do next.
             report.warnings.push(
                 "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update."
                     .to_string(),
@@ -147,8 +144,8 @@ mod tests {
             report.warnings,
             vec![
                 "Updated, but could not restart the daemon (boot timed out).",
-                // TS #2515: the second warning names the shutdown+restart
-                // hint (the old daemon is still running).
+                // TS #2515: the second warning names the shutdown+restart hint (the old daemon is
+                // still running).
                 "The daemon still runs the previous version; run `prime-agent shutdown`, then run `prime-agent` to restart and apply the update.",
             ]
         );

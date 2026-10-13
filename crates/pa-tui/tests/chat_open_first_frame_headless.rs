@@ -1,39 +1,22 @@
-//! Headless e2e for the chat-open first frame (the operator's
-//! 2026-09-26 layout-shift report): opening a chat view must paint its
-//! final geometry in the FIRST frame. The activity dock — the muted
-//! divider rule plus the panel row that render under the prompt bar —
-//! and the pinned title bar ride the first content frame together with
-//! the transcript, and a chat that opens directly into content never
-//! renders the brand splash at all.
-//!
-//! The mock supervisor serves the attach snapshot immediately but
-//! delays the `heartbeats_list` and `list_kernel_bash` responses (the
-//! loaded-daemon repro from the report): the dock's count data must
-//! fold synchronously with the attach, so no captured frame ever
-//! repaints the dock in late.
+//! Headless e2e for the chat-open first frame (operator 2026-09-26
+//! layout-shift report): opening a chat must paint its final geometry in
+//! the FIRST frame — the dock folds synchronously with the attach even
+//! when the catalog responses lag; no captured frame repaints the dock.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -46,11 +29,9 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
-/// The loaded-daemon stand-in: the dock's data requests answer this
-/// late, far past the first frame's render — late enough that a
-/// fire-and-forget open-time fetch (the layout-shift bug) always paints
-/// a first frame without the dock, and short enough to sit well inside
-/// the attach's bounded waits.
+/// The loaded-daemon stand-in: the dock's data requests answer this late, far past the first
+/// frame's render — late enough that a fire-and-forget open-time fetch (the layout-shift bug)
+/// always paints a first frame without the dock, short enough to sit inside the attach's waits.
 const DOCK_DATA_DELAY_MS: u64 = 300;
 
 struct MockSupervisor {
@@ -64,9 +45,8 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach one session (with or without
-    /// transcript messages), subscribe the roster, and answer the dock
-    /// data requests after the delay.
+    /// Serve one connection: attach, subscribe the roster, and answer the dock data requests after
+    /// the delay.
     fn serve(self, with_content: bool) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -190,8 +170,8 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The attach result: one live session whose transcript either carries
-/// a settled exchange or is empty.
+/// The attach result: one live session whose transcript either carries a settled exchange or is
+/// empty.
 fn attach_data(id: &str, with_content: bool) -> Value {
     let messages = if with_content {
         json!([
@@ -279,8 +259,6 @@ enum OpeningTranscript {
     Content,
 }
 
-/// Run one headless open against a fresh mock supervisor and return the
-/// captured frames.
 fn run_open(transcript: &OpeningTranscript) -> Vec<String> {
     let with_content = matches!(transcript, OpeningTranscript::Content);
     std::env::remove_var("TMUX");
@@ -314,11 +292,8 @@ fn is_divider_row(line: &str, width: usize) -> bool {
     !line.is_empty() && line.chars().count() == width && line.chars().all(|c| c == '\u{2500}')
 }
 
-/// The dock's counts (the activity panel row under the prompt bar) are
-/// first-frame state: every captured frame carries both rows with the
-/// final count, so the delayed dock data never repaints the row in
-/// late — the first frame is the final geometry (the operator's
-/// zero-layout-shift report).
+/// The dock's counts are first-frame state: every captured frame carries both rows with the final
+/// count, so the delayed dock data never repaints the row in late.
 #[test]
 fn the_activity_dock_is_in_every_frame_from_the_first() {
     let frames = run_open(&OpeningTranscript::Empty);
@@ -341,10 +316,9 @@ fn the_activity_dock_is_in_every_frame_from_the_first() {
     );
 }
 
-/// A chat that opens directly into content paints its first frame from
-/// the snapshot: the transcript, the pinned title row, and the dock all
-/// ride that same frame, and the brand splash (the new chat's header)
-/// never renders — no splash flash above the title, no one-row shift.
+/// A chat that opens directly into content paints its first frame from the snapshot: the
+/// transcript, the pinned title row, and the dock all ride that same frame, and the brand splash
+/// (the new chat's header) never renders — no splash flash above the title, no one-row shift.
 #[test]
 fn a_direct_open_into_content_never_renders_the_splash() {
     let frames = run_open(&OpeningTranscript::Content);
@@ -365,9 +339,8 @@ fn a_direct_open_into_content_never_renders_the_splash() {
     );
 }
 
-/// The counter-pin: an empty chat keeps its brand splash — TS
-/// `BrandSplashHeader` is the new chat's header, and the suppression is
-/// scoped to opens into content.
+/// The counter-pin: an empty chat keeps its brand splash — TS `BrandSplashHeader` is the new chat's
+/// header, and the suppression is scoped to opens into content.
 #[test]
 fn an_empty_open_keeps_the_brand_splash() {
     let frames = run_open(&OpeningTranscript::Empty);

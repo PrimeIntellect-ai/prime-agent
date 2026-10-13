@@ -1,16 +1,7 @@
-//! The xAI (Grok) OAuth flow — the port of
-//! `packages/ai/src/utils/oauth/xai.ts`: the device-code flow against
-//! the xAI auth endpoints with strict response validation (a
-//! https-only verification URI, validated field types, the bounded
-//! `expires_in`), the `slow_down` backoff, and the token refresh that
-//! keeps the prior refresh token when the endpoint omits one. The
-//! credentials the flow returns carry the TS shape (`access`,
-//! `refresh`, `expires`) and persist under the provider id `xai`.
-//!
-//! Cancellation follows the fleet's cooperative pattern (#2770): the
-//! driving surface marks a shared flag when it exits; the poll loop
-//! checks it between its wait steps and the request wrapper checks it
-//! around every network step.
+//! The xAI (Grok) OAuth flow: the device-code flow with strict response
+//! validation (https-only verification URI, typed fields, bounded
+//! `expires_in`), the `slow_down` backoff, and a refresh that keeps the
+//! prior refresh token when the endpoint omits one.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -21,69 +12,48 @@ use url::Url;
 use super::provider_http::{ProviderHttp, ProviderHttpMethod, ProviderHttpRequest};
 use super::types::OAuthLoginUi;
 
-/// The app registration the TS flow ships (TS `CLIENT_ID`).
 pub const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
-/// TS `SCOPE`.
 const SCOPE: &str = "openid profile email offline_access grok-cli:access api:access";
-/// TS `DEVICE_CODE_URL`.
 const DEVICE_CODE_URL: &str = "https://auth.x.ai/oauth2/device/code";
-/// TS `TOKEN_URL`.
 const TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
-/// TS `REQUEST_TIMEOUT_MS` (the per-request bound).
 pub const REQUEST_TIMEOUT_MS: u64 = 30_000;
-/// TS `REFRESH_SKEW_MS` (the credential's expiry skew, capped at half
-/// the token's lifetime).
+/// The credential's expiry skew, capped at half the token's lifetime.
 const REFRESH_SKEW_MS: i64 = 5 * 60 * 1000;
-/// The device poll's default interval (TS: 5000 when the response
-/// carries none).
+/// The poll interval when the response carries none.
 const DEFAULT_POLL_INTERVAL_MS: u64 = 5000;
-/// The refresh grant's request bound: the refresh runs under the auth
-/// store's file lock, which a peer declares stale after 10 seconds — the
-/// request must fit inside that window so a slow endpoint fails the
-/// refresh (kept for a retry) instead of holding the lock past its
-/// staleness.
+/// The refresh runs under the auth store's file lock, which a peer declares stale after 10 seconds;
+/// the request must fit inside that window.
 pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
-/// The cancel error the driving surface maps to the silent cancelled
-/// outcome.
+/// The cancel error the driving surface maps to the silent cancelled outcome.
 pub const LOGIN_CANCELLED: &str = "Login cancelled";
-/// The poll's cancel-check step (#2770).
 const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// The credentials the flow returns and persist (TS
-/// `OAuthCredentials` for the xAI provider).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XaiCredentials {
     pub access: String,
     pub refresh: String,
-    /// Wall-clock epoch milliseconds (TS `Date.now() + lifetime -
-    /// min(REFRESH_SKEW_MS, lifetime / 2)`).
+    /// Wall-clock epoch milliseconds.
     pub expires: i64,
 }
 
-/// One endpoint response (TS `OAuthResponse`: the status plus the
-/// parsed object — an empty object when the body is not one).
+/// The status plus the parsed body (an empty object when the body is
+/// not one).
 struct XaiResponse {
     ok: bool,
     status: u16,
     body: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Run the login (TS `loginXai`): the device authorization, the user
-/// code, and the token poll with the TS backoff and the strict
-/// validation.
+/// The device authorization, the user code, and the token poll.
 ///
 /// # Errors
 ///
-/// Returns an error when the surface cancelled the login
-/// ([`LOGIN_CANCELLED`]), the device authorization fails, the device
-/// code expires, the authorization is denied, or a token response
-/// fails validation.
+/// Returns an error when the login is cancelled ([`LOGIN_CANCELLED`]), the device
+/// authorization fails, the code expires, or the token response fails validation.
 pub async fn login_xai(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
 ) -> Result<XaiCredentials, String> {
-    // An exited surface never starts: no device request, no browser
-    // launch (the #2770 flag is the seam).
     if ui.is_cancelled() {
         return Err(LOGIN_CANCELLED.to_string());
     }
@@ -181,7 +151,7 @@ pub async fn login_xai(
     Err("xAI device code expired; sign in again".to_string())
 }
 
-/// Refresh an expired credential (TS `refreshXaiToken`).
+/// Refresh an expired credential.
 ///
 /// # Errors
 ///
@@ -208,8 +178,7 @@ pub async fn refresh_xai_token(
     credentials_from_response(&response.body, Some(refresh_token))
 }
 
-/// A surface that never cancels (the refresh runs detached from any
-/// interactive surface).
+/// The refresh runs detached from any interactive surface.
 struct NoCancel;
 
 impl OAuthLoginUi for NoCancel {
@@ -228,9 +197,6 @@ impl OAuthLoginUi for NoCancel {
     }
 }
 
-/// TS `postForm`: the form POST with the TS error taxonomy — the
-/// cancelled surface, the timeout, the failed request, and the
-/// invalid-JSON status line.
 async fn post_form(
     http: &dyn ProviderHttp,
     ui: &dyn OAuthLoginUi,
@@ -286,8 +252,6 @@ async fn post_form(
     })
 }
 
-/// TS `requestFailure`: the action's status line; the
-/// `invalid_grant` suffix names the expired-or-revoked cause.
 fn request_failure(action: &str, response: &XaiResponse) -> String {
     let suffix = if response
         .body
@@ -305,8 +269,6 @@ fn request_failure(action: &str, response: &XaiResponse) -> String {
     )
 }
 
-/// TS `credentialsFromResponse`: the validated fields and the expiry
-/// arithmetic (`lifetime - min(5 minutes, lifetime / 2)`).
 fn credentials_from_response(
     body: &serde_json::Map<String, serde_json::Value>,
     previous_refresh: Option<&str>,
@@ -327,15 +289,13 @@ fn credentials_from_response(
     Ok(XaiCredentials {
         access,
         refresh,
-        // Saturating: a hostile `expires_in` must not overflow the sum
-        // (the NaN/inf gate already answered the field error).
+        // Saturating: a hostile `expires_in` must not overflow the sum.
         expires: now_ms()
             .saturating_add(lifetime_ms)
             .saturating_sub(REFRESH_SKEW_MS.min(lifetime_ms / 2)),
     })
 }
 
-/// TS `requiredString`.
 fn required_string(
     body: &serde_json::Map<String, serde_json::Value>,
     field: &str,
@@ -347,7 +307,6 @@ fn required_string(
         .ok_or_else(|| format!("Invalid xAI OAuth response field: {field}"))
 }
 
-/// TS `positiveSeconds` (the field's own name rides the error).
 // The wire's expires_in is an integer second count read through JSON f64; i64 is the port's unit.
 #[allow(clippy::cast_possible_truncation)]
 fn positive_seconds(value: Option<&serde_json::Value>) -> Result<i64, String> {
@@ -358,8 +317,7 @@ fn positive_seconds(value: Option<&serde_json::Value>) -> Result<i64, String> {
     Ok(seconds as i64)
 }
 
-/// TS `verificationUri`: a parsed https URL without credentials or
-/// control characters.
+/// A parsed https URL without credentials or control characters.
 fn verification_uri(raw: &str) -> Result<String, String> {
     let url = Url::parse(raw)
         .map_err(|_| "Untrusted verification URI in xAI OAuth response".to_string())?;
@@ -377,8 +335,7 @@ fn verification_uri(raw: &str) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-/// One abortable wait (TS `wait`): the cooperative cancel ends it
-/// mid-wait instead of the abort signal.
+/// The cooperative cancel flag ends the wait mid-sleep.
 async fn cancel_aware_sleep(ui: &dyn OAuthLoginUi, total: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + total;
     loop {
@@ -393,8 +350,7 @@ async fn cancel_aware_sleep(ui: &dyn OAuthLoginUi, total: Duration) -> Result<()
     }
 }
 
-/// Wall-clock milliseconds since the epoch (the `expires` convention).
-// Epoch millis fit i64 for ~292 million years; the u128 duration's millis are the i64 convention here.
+// Epoch millis fit i64 for ~292 million years.
 #[allow(clippy::cast_possible_truncation)]
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -411,8 +367,7 @@ mod tests {
 
     type ScriptedResponse = super::super::provider_http::ProviderHttpResponse;
 
-    /// A scripted transport: queued responses per url (popped in
-    /// order); every request is recorded.
+    /// Queued responses per url (popped in order).
     struct ScriptedHttp {
         queued: Mutex<HashMap<String, VecDeque<ScriptedResponse>>>,
         requests: Mutex<Vec<ProviderHttpRequest>>,
@@ -471,8 +426,6 @@ mod tests {
         }
     }
 
-    /// The scripted login surface: the captured auth block and the
-    /// cancel flag.
     struct ScriptedUi {
         auth_url: Mutex<Option<String>>,
         auth_instructions: Mutex<Option<String>>,
@@ -527,8 +480,7 @@ mod tests {
         }
     }
 
-    /// The device authorization step's scripted response (a fast poll:
-    /// interval 0).
+    /// The device authorization response (a fast poll: interval 0).
     fn device_response(body: &str) -> ScriptedResponse {
         let json = serde_json::json!({
             "device_code": "dev-1",
@@ -571,7 +523,6 @@ mod tests {
             .as_millis() as i64;
         let skew = (credentials.expires - now - (3600 * 1000 - 300_000)).abs();
         assert!(skew < 10_000, "the expiry arithmetic: {skew}");
-        // The device request carries the TS body (scope + referrer).
         let device = &http.bodies_for(DEVICE_CODE_URL)[0];
         let body = device.body.as_deref().unwrap();
         assert!(body.contains("client_id=b1a00492-073a-47ea-816f-4c329264a828"));
@@ -582,7 +533,6 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("referrer=pi"));
-        // The poll request carries the device-code grant.
         let poll = &http.bodies_for(TOKEN_URL)[1];
         let body = poll.body.as_deref().unwrap();
         assert!(body.contains("device_code=dev-1"));
@@ -590,7 +540,6 @@ mod tests {
             body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"),
             "{body}"
         );
-        // The auth block: the validated https URI + the user code.
         let (url, instructions) = ui.captured_auth();
         assert_eq!(url, "https://auth.x.ai/activate");
         assert_eq!(instructions.as_deref(), Some("Enter code: GROK-1234"));
@@ -676,7 +625,6 @@ mod tests {
         let ui = ScriptedUi::new();
         let error = login_xai(&http, &ui).await.unwrap_err();
         assert_eq!(error, "Untrusted verification URI in xAI OAuth response");
-        // A URL with credentials is untrusted too.
         let http = ScriptedHttp::new().queue(
             DEVICE_CODE_URL,
             vec![ScriptedHttp::entry(
@@ -739,8 +687,8 @@ mod tests {
             let flow_ui = Arc::clone(&ui);
             tokio::spawn(async move { login_xai(flow_http.as_ref(), flow_ui.as_ref()).await })
         };
-        // Readiness-wait for the URL (bounded: a missing URL fails the
-        // test instead of hanging the cancel flip).
+        // Readiness-wait for the URL (bounded: a missing URL fails
+        // the test).
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while ui.auth_url.lock().unwrap().is_none() {
             assert!(
@@ -833,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_field_token_fails_the_field() {
         // The login path carries no prior refresh token (the refresh
-        // path keeps the stored one — TS `credentialsFromResponse`).
+        // path keeps the stored one).
         let http = ScriptedHttp::new()
             .queue(DEVICE_CODE_URL, vec![device_response("")])
             .queue(

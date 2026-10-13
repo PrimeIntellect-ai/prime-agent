@@ -1,28 +1,19 @@
-//! OSC 133 zone markers (`FinalTerm` shell integration).
-//!
-//! The interactive transcript marks message rows with the standard prompt/
-//! output zone sequences so terminal shell-integration users get working
-//! jumps between turns (TS `user-message.ts` / `assistant-message.ts` /
-//! `slash-command-message.ts` prepend them to the rendered rows):
-//!
-//! - `A` starts a marked row (the first row of a message component),
-//! - `B` then `C` land at the start of the component's last row.
-//!
-//! The sequences are zero-width: `width` skips them, the ratatui paint path
-//! strips them from cell content (ratatui has no escape-sequence support),
-//! and `app::draw` re-emits them per row after the frame is painted.
+//! OSC 133 zone markers (`FinalTerm` shell integration): the transcript marks message rows with the
+//! standard prompt/output zone sequences so shell-integration users get working jumps between turns
+//! — `A` starts a marked row, `B` then `C` land at the start of the component's last row. The
+//! sequences are zero-width: `width` skips them, the ratatui paint path strips them from cell
+//! content. Only the main-screen transcript flush emits them to the terminal.
 
 use crate::Line;
 
 /// Zone start (prompt start): first row of a marked message.
 pub const ZONE_START: &str = "\x1b]133;A\x07";
-/// Zone end (command start) + zone final (output start): last row of a
-/// marked message, in that order.
+/// Zone end (command start) + zone final (output start): last row of a marked message, in that
+/// order.
 pub const ZONE_END: &str = "\x1b]133;B\x07";
 pub const ZONE_FINAL: &str = "\x1b]133;C\x07";
 
-/// The exact end-of-message prefix TS writes (`B` immediately followed by
-/// `C`, prepended to the last row).
+/// The exact end-of-message prefix TS writes (`B` immediately followed by `C`).
 pub const ZONE_END_PREFIX: &str = "\x1b]133;B\x07\x1b]133;C\x07";
 
 /// Prepend the zone-start sequence to a rendered row.
@@ -36,15 +27,17 @@ pub fn mark_end(line: &mut Line) {
 }
 
 /// Which zone sequences a rendered row carries.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RowMarkers {
+pub(crate) struct RowMarkers {
     pub start: bool,
     pub end: bool,
 }
 
 /// Detect the zone sequences at the start of a rendered row.
+#[cfg(test)]
 #[must_use]
-pub fn row_markers(line: &Line) -> RowMarkers {
+pub(crate) fn row_markers(line: &Line) -> RowMarkers {
     let joined: String = line.iter().map(|s| s.content.as_str()).collect();
     let mut markers = RowMarkers::default();
     if joined.starts_with(ZONE_START) {
@@ -69,9 +62,8 @@ pub(crate) fn split_leading_markers(line: &Line) -> (Line, Line) {
     (line[..index].to_vec(), line[index..].to_vec())
 }
 
-/// Strip zone-marker spans from a rendered row. Markers are always inserted
-/// as their own raw spans at the row head, so removal only inspects leading
-/// spans whose content is made of marker sequences.
+/// Strip zone-marker spans from a rendered row: markers are always inserted as their own raw spans
+/// at the row head, so removal only inspects leading spans made of marker sequences.
 pub fn strip(line: &mut Line) {
     line.retain(|span| !markers_only(&span.content));
 }
@@ -89,21 +81,6 @@ fn markers_only(content: &str) -> bool {
         }
     }
     !content.is_empty() && rest.is_empty()
-}
-
-/// Per-frame row marker plan: `(terminal row, markers)` for every marked
-/// row, in row order.
-#[must_use]
-pub fn frame_markers(frame: &[Line]) -> Vec<(usize, RowMarkers)> {
-    frame
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| {
-            let m = row_markers(line);
-            m.start || m.end
-        })
-        .map(|(row, line)| (row, row_markers(line)))
-        .collect()
 }
 
 #[cfg(test)]
@@ -138,7 +115,6 @@ mod tests {
         assert_eq!(markers[0].content, ZONE_START);
         let joined: String = rest.iter().map(|s| s.content.as_str()).collect();
         assert_eq!(joined, "hello world");
-        // An unmarked row splits into nothing + everything.
         let (markers, rest) = split_leading_markers(&row());
         assert!(markers.is_empty());
         assert_eq!(rest.len(), 2);
@@ -155,34 +131,5 @@ mod tests {
         let mut only_marker = vec![Span::raw(ZONE_START)];
         strip(&mut only_marker);
         assert!(only_marker.is_empty());
-    }
-
-    #[test]
-    fn frame_markers_report_marked_rows() {
-        let mut frame = vec![row(), row(), row()];
-        mark_start(&mut frame[0]);
-        mark_end(&mut frame[2]);
-        let plan = frame_markers(&frame);
-        assert_eq!(plan.len(), 2);
-        assert_eq!(
-            plan[0],
-            (
-                0,
-                RowMarkers {
-                    start: true,
-                    end: false
-                }
-            )
-        );
-        assert_eq!(
-            plan[1],
-            (
-                2,
-                RowMarkers {
-                    start: false,
-                    end: true
-                }
-            )
-        );
     }
 }

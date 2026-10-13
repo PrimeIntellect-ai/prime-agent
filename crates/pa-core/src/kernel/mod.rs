@@ -1,12 +1,8 @@
 //! RLM kernel layer: persistent Python REPL lifecycle.
 //!
-//! The kernel is a JSON-lines subprocess (`python -m rlm.repl`): requests on
-//! stdin, events on stdout, stderr kept as a diagnostics tail. The protocol is
-//! documented in `prime-agent-runtime/src/rlm/repl.md` (protocol version 3).
-//!
-//! Ported from the TypeScript product's `core/kernel/` (repl-manager.ts,
-//! bootstrap.ts, shared.ts, state-snapshot.ts, boot-gate.ts) and
-//! `core/rlm-runtime.ts`.
+//! The kernel is a JSON-lines subprocess (`python -m rlm.repl`): requests on stdin,
+//! events on stdout, stderr kept as a diagnostics tail. The protocol is documented in
+//! `prime-agent-runtime/src/rlm/repl.md` (protocol version 3).
 
 pub mod bootstrap;
 pub mod cancellation;

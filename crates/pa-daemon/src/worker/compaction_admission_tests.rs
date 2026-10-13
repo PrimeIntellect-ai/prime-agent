@@ -1,20 +1,15 @@
-//! The compaction admission-gate tests: the racing class a manual
-//! compaction must defer, the post-window delivery that keeps a
-//! mid-window-cleared suspension's parked work from stranding, and the
-//! frozen admission classes the gate must not touch.
+//! The compaction admission-gate tests: the racing class a manual compaction
+//! must defer, the post-window delivery that keeps a mid-window-cleared
+//! suspension's parked work from stranding, and the frozen admission classes the
+//! gate must not touch.
 //!
-//! TS anchor: `_isBusyForSessionInput("pump")` rides
-//! `externalBusy = isCompacting || isRetrying || isBashRunning`
-//! (agent-session.ts), so a resume site that clears the suspension
-//! mid-compaction (`_admitSessionInput`'s `wake: "immediate"` resume)
-//! still cannot dispatch — the pump parks on `isCompacting` until
-//! `compact()`'s `finally` re-schedules it. The runner's admission gate
-//! is the port's pump decision point.
+//! TS anchor: a resume site that clears the suspension mid-compaction still
+//! cannot dispatch — the pump parks on `isCompacting` until `compact()`'s
+//! `finally` re-schedules it.
 use super::*;
 
-/// A created worker over the scripted engine carrying one compaction
-/// script (the `delayMs` sleep IS the mid-compaction window the racing
-/// steer lands in; an empty script never runs one).
+/// A created worker carrying one compaction script (the `delayMs`
+/// sleep IS the mid-compaction window).
 async fn compaction_admission_worker(compaction: Value) -> Arc<Worker> {
     let dir = std::env::temp_dir().join(format!("pa-compacting-gate-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -65,10 +60,9 @@ fn part_text(part: &Value) -> &str {
     part.get("text").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// Whether one session event is a delivered row (a `message_start` or
-/// `message_end` frame) whose message carries `text` — the wire shape a
-/// landed user or assistant row takes (a plain user row carries its
-/// content as the string, an assistant reply as content parts).
+/// Whether one session event is a delivered row whose message carries
+/// `text` (a plain user row carries its content as the string, an
+/// assistant reply as content parts).
 fn delivered_row_with_text(event: &Value, text: &str) -> bool {
     let frame = event
         .get("type")
@@ -102,16 +96,8 @@ async fn wait_for_state(readiness: impl Fn() -> bool) {
     }
 }
 
-/// The racing class: a steer whose resume site fires MID-COMPACTION (the
-/// suspension clears inside the window, TS `_admitSessionInput`'s
-/// `wake: "immediate"` resume) must DEFER, not admit — no turn starts,
-/// the parked item stays in its lane, and no user row reaches the wire
-/// while the compaction holds the context. The steer then delivers
-/// AFTER the window: `compact()`'s `finally` re-schedules the input
-/// pump (the port's tail wake), and the wire order proves it —
-/// `compaction_end` precedes the racing row. Without the wake the
-/// cleared suspension would strand the parked steer forever (the lost
-/// steer is worse than the racing turn).
+/// A steer whose resume site fires MID-COMPACTION must DEFER: it delivers after
+/// the window (the tail wake), `compaction_end` preceding the racing row.
 #[tokio::test]
 async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
     let worker = compaction_admission_worker(json!({
@@ -134,23 +120,20 @@ async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
     wait_for_state(|| worker.core.lock().unwrap().compacting).await;
 
     // The racing steer: a resume site inside the window. It answers
-    // queued (the lane snapshot below), exactly like TS's admitted
-    // action parked behind the busy state.
+    // queued.
     let steered = worker
         .dispatch("steer", &json!({ "message": "racing steer" }))
         .await;
     assert!(steered.success, "the racing steer was refused: {steered:?}");
-    // The resume site cleared the suspension MID-WINDOW (the TS
-    // resume shape): the cleared flag alone must not admit.
+    // The resume site cleared the suspension MID-WINDOW (the TS resume
+    // shape): the cleared flag alone must not admit.
     assert!(
         !worker.core.lock().unwrap().queued_input_suspended,
         "the resume site did not clear the suspension mid-window"
     );
 
-    // The racing class defers: across a bounded observation INSIDE the
-    // window no turn starts, the item stays parked, and no row lands.
-    // The observation accumulates the wire (a row that landed before a
-    // tick must not be drained away from the check).
+    // The racing class defers: no turn starts, the item stays parked, and
+    // no row lands (a row that landed before a tick must not be drained away).
     let mut seen = Vec::new();
     let observation = std::time::Duration::from_millis(300);
     let started = std::time::Instant::now();
@@ -190,9 +173,8 @@ async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
         "the window never closed"
     );
 
-    // Post-window delivery: the parked steer's turn runs (the tail wake
-    // is its only deliverer here — no goal branch, no further resume
-    // site), and the wire order carries it AFTER `compaction_end`.
+    // Post-window delivery: the tail wake is the parked steer's only
+    // deliverer here, and the wire order carries it AFTER `compaction_end`.
     let idle = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         worker.dispatch("wait_for_idle", &json!({})),
@@ -223,11 +205,7 @@ async fn steer_mid_compaction_defers_and_delivers_after_the_window() {
     let _ = std::fs::remove_dir_all(worker.config.recovery_journal_path.parent().unwrap());
 }
 
-/// The frozen admission classes: with no compaction in flight the same
-/// steer and a plain prompt admit exactly as before the gate term —
-/// the compacting term parks only while a compaction actually holds the
-/// context (TS `isCompacting` is a live-run state, not a session
-/// default).
+/// With no compaction in flight the same steer and a plain prompt admit as before.
 #[tokio::test]
 async fn idle_sessions_admit_the_steering_and_plain_prompt_classes() {
     let worker = compaction_admission_worker(json!({})).await;

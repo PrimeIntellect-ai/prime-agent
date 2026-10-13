@@ -1,7 +1,6 @@
-//! The write arm (moved with its concern): the in-memory append family,
-//! the atomic full-file rewrite, the durable append-with-rewrite-bootstrap
-//! persist paths, and the store lease discipline (the leased append arms
-//! and the unleased fallback) that serializes writers onto the file.
+//! The write arm: the in-memory append family, the atomic full-file rewrite, the durable
+//! append-with-rewrite-bootstrap persist paths, and the store lease discipline that
+//! serializes writers onto the file.
 
 use super::{
     fs, json, new_entry_id, Context, HashMap, PathBuf, Result, Serialize, SessionEntry,
@@ -29,6 +28,10 @@ impl SessionEntry {
 impl SessionFile {
     /// Persist only the newly appended creation records on a resumed file.
     pub(crate) fn persist_appended(&self, start: usize) -> Result<()> {
+        anyhow::ensure!(
+            self.child_usage_recovery.pending.is_none(),
+            "confirm unresolved attribution before persisting appended rows"
+        );
         let mut bytes = Vec::new();
         for entry in &self.entries[start..] {
             write_line(&mut bytes, entry)?;
@@ -40,6 +43,9 @@ impl SessionFile {
                 &bytes,
                 pa_core::session::window::AppendOwnership::Unleased,
             )?,
+        }
+        if let Some(traces) = &self.trace_upload {
+            traces.persisted(&self.path);
         }
         Ok(())
     }
@@ -90,19 +96,19 @@ impl SessionFile {
         )
     }
 
-    /// Write the full file atomically (header + every entry), like `_rewriteFile`
-    /// plus the port's session durability strengthening: the temp is fsynced
-    /// before the rename (the TS `_rewriteFile` passes no `fsync` option),
-    /// so rows the durable append path already landed are never regressed by
-    /// a rewrite that a hard crash could zero out.
+    /// Write the full file atomically (header + every entry). The temp is
+    /// fsynced before the rename (TS `_rewriteFile` passes no `fsync` option),
+    /// so a hard crash cannot zero out rows the durable append landed.
     ///
     /// # Errors
     ///
-    /// Returns an error when the store only holds a window (the full
-    /// history is required), or when the session dir, the temp file, the
-    /// write, flush, sync, or the final rename fails; an empty path
-    /// answers `Ok(())` without writing.
+    /// Returns an error when the store only holds a window, or the write,
+    /// flush, sync, or rename fails; an empty path answers `Ok(())`.
     pub fn rewrite(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.child_usage_recovery.pending.is_none(),
+            "confirm unresolved attribution before rewriting session"
+        );
         anyhow::ensure!(
             self.window.is_none(),
             "full history required before rewriting session"
@@ -133,25 +139,46 @@ impl SessionFile {
         }
         pa_core::platform::rename_onto(&temp, path)
             .with_context(|| format!("persist {}", path.display()))?;
+        if let Some(traces) = &self.trace_upload {
+            traces.persisted(&self.path);
+        }
         Ok(())
     }
 
     /// Append one entry line to the file, rewriting first when the file is
-    /// missing. The entry joins the in-memory index only after its line
-    /// reaches the file: a failed write (or rewrite) leaves the store
-    /// exactly as it was, so the next append parents to the last entry
-    /// the file holds. `sync_data` past the flush only enforces
-    /// durability — when it fails the entry stays indexed (a reload of
-    /// the file would load it as the leaf) and the error still surfaces.
+    /// missing. The entry joins the index only after its line reaches the
+    /// file; a failed `sync_data` keeps it indexed (a reload would load it
+    /// as the leaf) and the error still surfaces.
     ///
     /// # Errors
     ///
-    /// Returns an error when the entry cannot be written: the append (or
-    /// the rewriting bootstrap on a missing file) fails, or the
-    /// post-write durability sync fails — the entry stays indexed and
-    /// the error still surfaces.
+    /// Returns an error when the append or the post-write durability sync fails.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
+    }
+
+    /// Durably mark that this session has drawn the Anthropic subscription
+    /// ban-risk warning (the once-per-session-lifecycle gate, operator
+    /// directive 2026-09-29): append the
+    /// [`pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE`] custom row
+    /// and arm the in-memory flag, so a reattach, a resume, or a worker
+    /// replacement rebuild reads the row and the gate holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails; the
+    /// in-memory flag stays unset then, so the next open re-warns (a lost
+    /// marker costs one repeated warning, never a suppressed one).
+    pub fn mark_anthropic_warning_shown(&mut self) -> Result<()> {
+        self.persist_entry(
+            "custom",
+            json!({
+                "customType": pa_core::session::ANTHROPIC_WARNING_SHOWN_CUSTOM_TYPE,
+                "data": { "shown": true },
+            }),
+        )?;
+        self.anthropic_warning_shown = true;
+        Ok(())
     }
 
     /// Append one entry stamped with the given time. The interrupted-
@@ -163,20 +190,14 @@ impl SessionFile {
     ///
     /// # Errors
     ///
-    /// Returns an error when the entry cannot be written: the
-    /// window-backed file is missing, the entry cannot be serialized, or
-    /// the append, the rewriting bootstrap, or the post-write durability
-    /// sync fails.
+    /// Returns an error when the window-backed file is missing or the append
+    /// or durability sync fails.
     pub fn persist_entry_at(
         &mut self,
         entry_type: &str,
         fields: Value,
         timestamp: &str,
     ) -> Result<String> {
-        anyhow::ensure!(
-            self.window.is_none() || self.path.exists(),
-            "window-backed session file is missing"
-        );
         let mut entry = SessionEntry::new(
             entry_type,
             self.leaf_id.clone(),
@@ -184,16 +205,53 @@ impl SessionFile {
             fields,
             timestamp,
         );
-        // A windowed index lacks the pre-window IDs, so the short minted ID
-        // could collide with unloaded history; a UUID cannot (same rule as
-        // `append_entry`).
+        // A windowed index lacks the pre-window IDs, so the short minted ID could
+        // collide with unloaded history; a UUID cannot (same rule as `append_entry`).
         if self.window.is_some() {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
+        self.persist_built_entry(entry)
+    }
+
+    /// The durable-append core [`Self::persist_entry_at`] and the attribution
+    /// append-once share: the entry arrives fully built (its id included),
+    /// its line reaches the file first, and the entry joins the index only
+    /// after, so a failed append leaves no indexed row a reload would
+    /// resurface as the leaf.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store only holds a window without a file,
+    /// or the append, flush, sync, or the bootstrap rewrite fails.
+    pub(super) fn persist_built_entry(&mut self, mut entry: SessionEntry) -> Result<String> {
+        self.confirm_child_usage_write()?;
+        // A preflight recovery can advance the leaf after the caller built its
+        // generic row. Preserve that recovered parent instead of branching it away.
+        entry.parent_id.clone_from(&self.leaf_id);
+        anyhow::ensure!(
+            self.window.is_none() || self.path.exists(),
+            "window-backed session file is missing"
+        );
         let id = entry.id.clone();
         if !self.path.as_os_str().is_empty() && self.path.exists() {
             let mut bytes = Vec::new();
             write_line(&mut bytes, &entry)?;
+            #[cfg(test)]
+            if let Some(cut) = (entry.type_ == "child_usage_attributed")
+                .then(|| super::child_usage_tests::PARTIAL_CHILD_APPEND.with(std::cell::Cell::take))
+                .flatten()
+            {
+                // Isolated unleased fixture only: simulate write_all's partial
+                // prefix + Err postcondition, not a real injected OS failure.
+                anyhow::ensure!(
+                    self.lease.is_none() && cut < bytes.len(),
+                    "invalid partial append fixture"
+                );
+                let mut file = fs::OpenOptions::new().append(true).open(&self.path)?;
+                file.write_all(&bytes[..cut])?;
+                file.flush()?;
+                anyhow::bail!("injected partial attribution append error");
+            }
             match &self.lease {
                 Some(lease) => lease.append(&self.path, &bytes)?,
                 None => pa_core::session::window::append_cached(
@@ -203,17 +261,39 @@ impl SessionFile {
                 )
                 .with_context(|| format!("append to {}", self.path.display()))?,
             }
-            // The line is in the file now: index it so the in-memory leaf
-            // matches what a reload sees (the write left no index state).
+            #[cfg(test)]
+            if entry.type_ == "child_usage_attributed"
+                && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
+                    .with(|fault| fault.replace(false))
+            {
+                anyhow::bail!("injected post-append pre-index error");
+            }
+            // The line is in the file now: index it so the in-memory leaf matches what a
+            // reload sees.
             self.push_index(entry);
+            if let Some(traces) = &self.trace_upload {
+                traces.persisted(&self.path);
+            }
         } else {
-            // The rewrite path serializes the whole index, so the entry must
-            // be indexed first; a failed rewrite rolls the index back. The
-            // live attribution fold is DEFERRED until the rewrite succeeds —
-            // the rolled-back index must leave the target row untouched.
+            // The rewrite path serializes the whole index, so the entry must be
+            // indexed first; a failed rewrite rolls the index back. The live
+            // attribution fold is DEFERRED until the rewrite succeeds.
             let previous_leaf = self.leaf_id.clone();
+            #[cfg(test)]
+            let entry_is_child = entry.type_ == "child_usage_attributed";
             self.push_index_inner(entry, false);
-            if let Err(error) = self.rewrite() {
+            let rewritten = self.rewrite();
+            #[cfg(test)]
+            let rewritten = rewritten.and_then(|()| {
+                if entry_is_child
+                    && super::child_usage_tests::FAIL_AFTER_CHILD_APPEND
+                        .with(|fault| fault.replace(false))
+                {
+                    anyhow::bail!("injected post-bootstrap pre-index error");
+                }
+                Ok(())
+            });
+            if let Err(error) = rewritten {
                 self.by_id.remove(&id);
                 self.entries.pop();
                 self.leaf_id = previous_leaf;
@@ -233,13 +313,10 @@ impl SessionFile {
     }
 }
 
-/// The stored first line: the typed header plus the `session` type tag.
-///
-/// The tag leads the line (TS `SessionHeader` declares `type` first, so the
-/// TS session file's first line starts with `{"type":"session",...}`); the
-/// JSON map preserves insertion order (the workspace's `serde_json` runs
-/// with `preserve_order`), so the tag is rebuilt into the leading slot
-/// instead of appended.
+/// The stored first line: the typed header plus the `session` type tag. The
+/// tag leads the line (TS `SessionHeader` declares `type` first, so the
+/// first line starts with `{"type":"session",...}`); `preserve_order` keeps
+/// the insertion order, so the tag is rebuilt into the leading slot.
 #[must_use]
 pub fn session_header_line(header: &SessionHeader) -> Value {
     let value = serde_json::to_value(header).unwrap_or(Value::Null);

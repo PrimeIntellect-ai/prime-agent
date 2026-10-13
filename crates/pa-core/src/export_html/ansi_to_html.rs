@@ -1,14 +1,7 @@
 //! ANSI escape code to HTML conversion for the export's custom-tool
-//! pre-render: the terminal escape sequences a tool's line-oriented
-//! renderer emits (foreground/background colors, 256-color palette, RGB
-//! true color, bold/dim/italic/underline) become inline-styled `<span>`s
-//! wrapped in `<div class="ansi-line">` rows, ready to embed in the
-//! exported file's `renderedTools` section.
-//!
-//! Public seam: [`ToolHtmlRenderer`](super::tool_render::ToolHtmlRenderer)
-//! implementers render their line-oriented output through
-//! [`ansi_lines_to_html`] before returning it (the TS renderer converts at
-//! the same step, `ansi-to-html.ts` inside the export-html module).
+//! pre-render: terminal escape sequences (fg/bg colors, 256-color, RGB,
+//! bold/dim/italic/underline) become inline-styled `<span>`s wrapped in
+//! `<div class="ansi-line">` rows.
 
 use std::fmt::Write as _;
 
@@ -40,7 +33,6 @@ fn color256_to_hex(index: u64) -> String {
     }
 }
 
-/// Escape HTML special characters.
 fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -52,7 +44,7 @@ fn escape_html(text: &str) -> String {
 /// The SGR state carried across one conversion.
 #[derive(Debug, Default, PartialEq, Eq)]
 // The mirrored TS API shape is deliberate (the booleans are the
-// product's own surface, not a refactor target).
+// product's own surface).
 #[allow(clippy::struct_excessive_bools)]
 struct TextStyle {
     fg: Option<String>,
@@ -96,10 +88,9 @@ impl TextStyle {
     }
 }
 
-/// Apply one SGR parameter list to the style (the subset the TS converter
-/// supports: reset, bold/dim/italic/underline and their resets, standard
-/// and bright fg/bg, 256-color `38;5;N`/`48;5;N`, RGB `38;2;R;G;B`/
-/// `48;2;R;G;B`, and default-fg/bg resets).
+/// Apply one SGR parameter list to the style (the subset the TS converter supports: reset,
+/// bold/dim/italic/underline and resets, standard/bright fg/bg, 256-color `38;5;N`/`48;5;N`, RGB
+/// `38;2;R;G;B`/`48;2;R;G;B`.
 fn apply_sgr(params: &[u64], style: &mut TextStyle) {
     let mut i = 0;
     while i < params.len() {
@@ -168,12 +159,9 @@ fn sgr_params(sequence: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Convert ANSI-escaped text to HTML with inline styles: every escape
-/// closes the open span and reopens with the new style; plain text is
-/// HTML-escaped between escapes. Only complete SGR sequences (ESC `[`
-/// then digits/semicolons then `m`) convert — any other escape byte
-/// passes through as escaped literal text, exactly like the TS regex
-/// converter.
+/// Convert ANSI-escaped text to HTML with inline styles: every escape closes the open span and
+/// reopens with the new style; plain text is HTML-escaped between escapes. Only complete SGR
+/// sequences convert — any other escape byte passes through as escaped literal text.
 #[must_use]
 pub fn ansi_to_html(text: &str) -> String {
     let mut style = TextStyle::default();
@@ -244,28 +232,24 @@ pub fn ansi_lines_to_html(lines: &[String]) -> String {
 mod tests {
     use super::*;
 
-    /// Plain text passes through escaped.
     #[test]
     fn plain_text() {
         assert_eq!(ansi_to_html("hello"), "hello");
         assert_eq!(ansi_to_html("a < b & c"), "a &lt; b &amp; c");
     }
 
-    /// A color escape opens a styled span that the final reset closes.
     #[test]
     fn color_spans() {
         assert_eq!(
             ansi_to_html("\x1b[31mred\x1b[0m"),
             "<span style=\"color:#800000\">red</span>"
         );
-        // Bright variants and backgrounds.
         assert_eq!(
             ansi_to_html("\x1b[91;44mbold red on blue\x1b[0m"),
             "<span style=\"color:#ff0000;background-color:#000080\">bold red on blue</span>"
         );
     }
 
-    /// Style escapes compose into one inline CSS list.
     #[test]
     fn text_styles() {
         assert_eq!(
@@ -279,7 +263,6 @@ mod tests {
         );
     }
 
-    /// 256-color palette and RGB true color.
     #[test]
     fn extended_colors() {
         assert_eq!(
@@ -297,7 +280,6 @@ mod tests {
         );
     }
 
-    /// Default-fg/bg resets (39/49) and a bare escape both clear style.
     #[test]
     fn resets() {
         assert_eq!(
@@ -307,7 +289,6 @@ mod tests {
         assert_eq!(ansi_to_html("\x1b[mplain"), "plain");
     }
 
-    /// A trailing style without a reset still closes its span.
     #[test]
     fn unclosed_span() {
         assert_eq!(
@@ -316,7 +297,6 @@ mod tests {
         );
     }
 
-    /// Lines wrap in ansi-line divs; blank lines become non-breaking spaces.
     #[test]
     fn lines() {
         let lines = vec!["\x1b[1mx\x1b[0m".to_string(), String::new()];

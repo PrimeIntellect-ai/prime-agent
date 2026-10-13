@@ -1,5 +1,4 @@
-//! The python-skill manifest concern (moved with its concern): the recorded
-//! skill shape, the pyproject parsing, and the normalization that
+//! The python-skill manifest concern: the pyproject parsing, and the normalization that
 //! deduplicates and resolves sibling-local dependencies.
 
 use super::{Digest, KernelPythonSkill, Path};

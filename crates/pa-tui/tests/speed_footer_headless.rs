@@ -1,36 +1,22 @@
-//! Headless e2e for the `/speed` footer readout (TS `FooterComponent` under
-//! `setSpeedDisplay`): a mock supervisor serves one attached session and
-//! streams a scripted assistant turn, and the plan drives the command and a
-//! prompt through the same editor submit path a user's keystrokes take.
-//!
-//! Verifies the TS parity contract: `/speed` toggles the dim footer row (the
-//! dock's last row) over the session's completed responses — the status
-//! notes carry the TS wording, the readout appears after the first completed
-//! response with positive usage and span, and turning the display off clears
-//! both the stats and the row.
+//! Headless e2e for the `/speed` footer readout (TS `FooterComponent`):
+//! `/speed` toggles the dim footer row over the session's completed
+//! responses — the readout appears after the first completed response
+//! with positive usage and span; off clears both the stats and the row.
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -54,8 +40,7 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection: attach an empty session, then stream one
-    /// scripted assistant turn per prompt.
+    /// Serve one connection: stream one scripted assistant turn per prompt.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -204,10 +189,8 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// One scripted assistant turn: a streamed start, one delta, and a
-/// completed message carrying usage and a stream-start timestamp (the
-/// `message_end` timestamp is set at provider stream start, so the completed
-/// message spans a real wall-clock window).
+/// One scripted assistant turn: a streamed start, one delta, and a completed message carrying
+/// usage and a stream-start timestamp (`message_end` is set at provider stream start).
 fn stream_turn(writer: &mut UnixStream) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let stream_start_ms = std::time::SystemTime::now()
@@ -299,8 +282,6 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-/// Run the headless plan against a fresh mock supervisor and return the
-/// captured frames.
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -324,10 +305,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
     outcome.frames
 }
 
-/// `/speed` toggles the footer readout over completed responses: the status
-/// note carries the TS wording, the first completed response renders the
-/// dim `tok/s` row (the dock's last row), and `/speed off` clears both the
-/// stats and the row so later frames render no readout.
+/// `/speed` toggles the footer readout over completed responses: the status note carries the TS
+/// wording, and the first completed response renders the dim `tok/s` row (the dock's last row).
 #[test]
 fn speed_command_toggles_the_footer_readout() {
     let steps = vec![
@@ -355,9 +334,8 @@ fn speed_command_toggles_the_footer_readout() {
         all.contains("Speed display off"),
         "the disable note rendered:\n{all}"
     );
-    // The readout row: a dock line that starts with the rate (the dim
-    // footer renders exactly the speed text) — distinct from the status
-    // notes, which carry "tok/s" mid-sentence.
+    // The readout row: a dock line that starts with the rate (the dim footer renders exactly the
+    // speed text) — distinct from the status notes, which carry "tok/s" mid-sentence.
     let readout_row = |frame: &str| {
         frame.lines().any(|line| {
             line.trim_start().starts_with(|c: char| c.is_ascii_digit()) && line.contains("tok/s")
@@ -378,8 +356,6 @@ fn speed_command_toggles_the_footer_readout() {
     );
 }
 
-/// The usage error keeps the TS wording and the editor's submit path stays
-/// usable afterwards.
 #[test]
 fn speed_command_rejects_bad_args() {
     let steps = vec![

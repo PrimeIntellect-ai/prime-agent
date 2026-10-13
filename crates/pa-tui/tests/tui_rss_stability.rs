@@ -1,44 +1,22 @@
-//! TUI RSS stability regression: a long scripted session streamed through the
-//! real interactive loop (headless renderer) must not grow memory
-//! monotonically. The owner-facing watchdog report is TUI processes at 8GB+
-//! RSS during long sessions; the classes under test are transcript/ChatEntry
-//! retention per frame, event-buffer retention in the daemon client, and
-//! snapshot replay copies.
-//!
-//! Method: an in-process mock supervisor speaks the same JSONL wire protocol
-//! (`daemon_hello`, response envelopes, streamed session events) and serves
-//! one long session: many turns, each with streamed assistant deltas, tool
-//! calls with large results, and turn completion. A background sampler
-//! reads `/proc/self/statm` while the interactive loop runs; the assertion
-//! is a plateau: resident memory in the last quarter of the run must sit
-//! within a bounded delta of the warm-up state.
-//!
-//! Linux-only by construction (`/proc/self/statm`, `AF_UNIX` mock sockets);
-//! the whole file compiles to nothing elsewhere (Windows RSS regression
-//! needs its own counter path).
+//! TUI RSS stability regression: a long scripted session through the real
+//! interactive loop must not grow memory monotonically; a sampler reads
+//! `/proc/self/statm` and asserts a plateau in the last quarter. Linux-only
+//! by construction (compiles to nothing elsewhere).
 #![cfg(unix)]
-// Pedantic-gate exceptions (every other pedantic warning in this crate is
-// fixed in place; each exception carries its one-line justification):
-// - the casts: terminal-layout arithmetic narrows structurally bounded
-//   values (screen coordinates, byte counts, timestamps); guarded
-//   conversions would add panic paths the bounds guarantee away.
+// Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-// - the render routes are flat tables (one arm per route); splitting them
-//   would add indirection without changing the flow.
+// Render routes are flat tables (one arm per route); splitting adds indirection.
 #![allow(clippy::too_many_lines)]
-// - widget state structs carry independent flag bits; a nested struct
-//   would add indirection without changing the shape.
+// Widget state structs carry independent flag bits.
 #![allow(clippy::struct_excessive_bools, clippy::fn_params_excessive_bools)]
-// - the futures are bounded by the surface's lifetime; boxing them would
-//   add an allocation to the steady-state loop.
+// Futures are bounded by the surface's lifetime; boxing adds a steady-state allocation.
 #![allow(clippy::large_futures)]
-// - the wrappers preserve a uniform Result-returning API surface; unwrap
-//   removals would ripple through the callers without changing behavior.
+// The wrappers preserve a uniform Result-returning API surface.
 #![allow(clippy::unnecessary_wraps)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -64,8 +42,8 @@ fn resident_bytes() -> u64 {
     pages * 4096
 }
 
-/// The plateau allowance: transient allocator growth plus the headless
-/// harness's own retained frames (one small text per distinct frame).
+/// The plateau allowance: transient allocator growth plus the headless harness's own retained
+/// frames (one small text per distinct frame).
 const PLATEAU_BYTES: u64 = 256 * 1024 * 1024;
 
 struct MockSupervisor {
@@ -79,8 +57,6 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one connection to completion: the interactive loop's requests
-    /// plus the scripted event stream.
     fn serve(self) {
         let (stream, _) = self.listener.accept().expect("accept");
         let write_stream = stream.try_clone().expect("clone mock socket");
@@ -230,21 +206,13 @@ fn attach_data() -> Value {
     })
 }
 
-/// The per-turn pacing floor: the mock streams turns as fast as the loop
-/// can consume them, so on an idle box the whole scripted session finished
-/// in under 0.8s and the 100ms RSS sampler collected fewer than the eight
-/// samples the plateau analysis needs (a load-flake: the session ran
-/// FASTER unloaded). Pacing the producer gives the session a deterministic
-/// minimum duration (40 turns x 50ms = 2s) independent of machine speed,
-/// so the sample count stays far above the floor under any legitimate
-/// load. The plateau assertion itself is unchanged: resident memory in
-/// the last quarter of the run must stay within the allowance of the
-/// warm-up state.
+/// The per-turn pacing floor: unloaded, the scripted session ran faster than the 100ms RSS sampler
+/// could collect the eight samples the plateau analysis needs. Pacing the producer gives a
+/// deterministic minimum duration (40 turns x 50ms = 2s), so the samples stay above the floor.
 const TURN_PACE: Duration = Duration::from_millis(50);
 
-/// One scripted turn: streamed assistant text deltas, a tool call with a
-/// large result, and turn completion. Larger than typical turns on purpose:
-/// any per-frame or per-event retention becomes visible quickly.
+/// One scripted turn: streamed assistant text deltas, a tool call with a large result, and turn
+/// completion. Larger than typical turns on purpose: per-frame retention becomes visible quickly.
 fn stream_turn(writer: &mut UnixStream) {
     const DELTAS: usize = 30;
     std::thread::sleep(TURN_PACE);
@@ -257,7 +225,6 @@ fn stream_turn(writer: &mut UnixStream) {
             "message": { "role": "user", "content": "keep working" },
         })),
     );
-    // Assistant stream: start, deltas, tool call, end.
     write_json(
         writer,
         &event(json!({
@@ -299,7 +266,6 @@ fn stream_turn(writer: &mut UnixStream) {
             },
         })),
     );
-    // Tool execution with partial and final results (large outputs).
     write_json(
         writer,
         &event(json!({
@@ -336,9 +302,8 @@ fn stream_turn(writer: &mut UnixStream) {
     write_json(writer, &event(json!({ "type": "agent_end" })));
 }
 
-/// A long scripted session must not grow the TUI's resident memory without
-/// bound: the transcript grows with the session (as designed), but no
-/// per-frame or per-event class may accumulate.
+/// A long scripted session must not grow the TUI's resident memory without bound: the transcript
+/// grows with the session (as designed), but no per-frame or per-event class may accumulate.
 #[test]
 fn interactive_session_rss_plateaus_over_long_stream() {
     const TURNS: usize = 40;
@@ -393,7 +358,6 @@ fn interactive_session_rss_plateaus_over_long_stream() {
         height: 30,
     };
 
-    // RSS sampler: every 100ms while the session runs.
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
     let samples = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
     let recorded = std::sync::Arc::clone(&samples);
@@ -408,8 +372,6 @@ fn interactive_session_rss_plateaus_over_long_stream() {
         .enable_all()
         .build()
         .expect("tokio runtime");
-    // The mock runs on its own blocking thread; the interactive loop runs
-    // on the runtime.
     let handle = std::thread::spawn(move || supervisor.serve());
     let (outcome_tx, outcome_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -427,7 +389,6 @@ fn interactive_session_rss_plateaus_over_long_stream() {
     let outcome = outcome.expect("interactive run succeeded");
     assert_eq!(outcome.active_session_id, "s1");
 
-    // Plateau analysis on the resident-memory samples.
     let samples = samples.lock().unwrap().clone();
     assert!(
         samples.len() >= 8,

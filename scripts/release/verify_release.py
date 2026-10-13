@@ -31,18 +31,28 @@ from pathlib import Path
 
 # The bundled-catalog gate (same release-scripts directory).
 from bundle_catalog import validate_bundled_catalog_dir
+from native_compat import validate_compatibility_archive
 # The release platform alias the archive name carries (TS parity; the update
 # flow's channel manifest requires alias-named archives).
-from assemble_artifacts import TARGET_ALIASES, RUNTIME_EXCLUDED_NAMES, RUNTIME_EXCLUDED_SUFFIXES
+from assemble_artifacts import (
+    TARGET_ALIASES,
+    RUNTIME_EXCLUDED_NAMES,
+    RUNTIME_EXCLUDED_SUFFIXES,
+    binary_name_for_target,
+)
 
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
-# Continuous builds additionally stage the package.json version manifest.
+# POSIX archives preserve the native TS updater contract. Every archive
+# carries version metadata; Windows never had a native TS installation.
+# The binary entry is the target's name (`prime-agent.exe` on the MSVC
+# Windows target), resolved in `main` via `binary_name_for_target`.
 EXPECTED_TOP_LEVEL = {
     "prime-agent",
     "prime-agent-runtime",
     "skills",
     "LICENSE",
     "README.md",
+    "package.json",
     # The bundled catalog assets (spec §3.2): the installed artifact must
     # contain both, and they must pass the same validation gates the packer
     # enforced at assembly time.
@@ -50,6 +60,7 @@ EXPECTED_TOP_LEVEL = {
     "mcp-services.bundled.json",
 }
 CONTINUOUS_EXTRA_TOP_LEVEL = {"package.json"}
+NATIVE_COMPAT_TOP_LEVEL = {"theme", "export-html", "photon_rs_bg.wasm", "PHOTON-LICENSE.md", "install.sh"}
 
 # Same shape as `continuous_version` in assemble_artifacts.py.
 CONTINUOUS_SUFFIX = "continuous"
@@ -82,12 +93,23 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--sha", default=None,
                          help="commit SHA the tarball must be stamped with")
+    parser.add_argument("--expect-package-json", default=None, metavar="VERSION",
+                        help="the consume-route restamp shape: a package.json "
+                             "carrying exactly this release version")
     args = parser.parse_args()
     if args.sha is not None:
         args.sha = args.sha.lower()
+    if args.expect_package_json and args.sha:
+        fail("--sha (the continuous stamp) and --expect-package-json "
+             "(the restamped release shape) are mutually exclusive")
 
-    expected_top_level = EXPECTED_TOP_LEVEL | (
-        CONTINUOUS_EXTRA_TOP_LEVEL if args.sha else set()
+    binary_name = binary_name_for_target(args.target)
+    expected_top_level = (EXPECTED_TOP_LEVEL - {"prime-agent"}) | {binary_name}
+    if binary_name != "prime-agent.exe":
+        expected_top_level |= NATIVE_COMPAT_TOP_LEVEL
+    expected_top_level |= (
+        CONTINUOUS_EXTRA_TOP_LEVEL if (args.sha or args.expect_package_json)
+        else set()
     )
 
     archive_name = (
@@ -96,6 +118,8 @@ def main() -> int:
     archive = args.dist_dir / archive_name
     if not archive.is_file():
         fail(f"archive {archive} not found; run assemble_artifacts.py first")
+
+    validate_compatibility_archive(archive)
 
     # 1. Deterministic tarball shape: exact top-level payload, no link entries.
     with tarfile.open(archive) as tar:
@@ -158,9 +182,17 @@ def main() -> int:
         # The bundled catalog assets must be present and valid in the
         # installed layout (the full packer gates: no small-fixture waiver).
         catalog_facts = validate_bundled_catalog_dir(scratch)
-        binary = scratch / "prime-agent"
+        if args.expect_package_json is not None:
+            stamped = json.loads((scratch / "package.json").read_text(encoding="utf-8"))
+            if stamped.get("version") != args.expect_package_json:
+                fail(f"package.json version is {stamped.get('version')!r}, "
+                     f"expected the restamped release version "
+                     f"{args.expect_package_json!r}")
+            if not str(stamped.get("commit", "")).strip():
+                fail("the restamped package.json lost its commit provenance")
+        binary = scratch / binary_name
         if not os.access(binary, os.X_OK):
-            fail("staged prime-agent is not executable")
+            fail(f"staged {binary_name} is not executable")
         if entries[archive_name]["executableSha256"] != sha256_file(binary):
             fail("executableSha256 in manifest.json does not match the staged binary")
         env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
@@ -174,6 +206,8 @@ def main() -> int:
         expected_version = (
             f"{args.version}-{CONTINUOUS_SUFFIX}.{args.sha}" if args.sha else args.version
         )
+        if args.expect_package_json is not None:
+            expected_version = args.expect_package_json
         if version_out != expected_version:
             fail(
                 f"staged prime-agent reports {version_out!r}, "

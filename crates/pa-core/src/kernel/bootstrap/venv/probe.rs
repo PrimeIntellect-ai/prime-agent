@@ -1,7 +1,5 @@
-//! The runtime-ready probe concern (moved with its concern): the quiet
-//! interpreter checks, the runtime/extra/skill import labels, and the
-//! two-layer memo (in-process map + the cross-process on-disk verdict)
-//! that skips re-probing a venv nobody damaged.
+//! The runtime-ready probe concern: the two-layer memo (in-process map + the cross-process on-disk
+//! verdict) that skips re-probing a venv nobody damaged.
 
 use super::{
     collect_python_files, Digest, HashMap, KernelPythonSkill, Mutex, Path, PathBuf, Stdio,
@@ -27,7 +25,7 @@ fn run_quiet(command: &str, args: &[&str]) -> bool {
 /// The runtime-ready assertion from the TS product: a current
 /// prime-agent-runtime with the callable RLM surface, harness CRUD, bash
 /// handles, and protocol version 3.
-const RUNTIME_READY_CHECK: &str = "import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ['create_memory', 'update_memory', 'delete_memory', 'create_skill', 'update_skill', 'delete_skill', 'create_subagent', 'update_subagent', 'delete_subagent', 'create_prompt_note', 'update_prompt_note', 'delete_prompt_note', 'record_refinement']; _mcp_discovery_methods = ['list_plugins', 'search_plugins', 'list_connections', 'search_tools', 'describe_tool']; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert all(callable(getattr(mcp, _m, None)) for _m in _mcp_discovery_methods), \"rlm.mcp is missing MCP discovery methods (list_plugins, search_plugins, list_connections, search_tools, describe_tool); the kernel venv needs a current prime-agent-runtime\"; assert callable(rlm.spawn); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm.spawn); assert inspect.signature(rlm.spawn).parameters['name'].default is inspect.Parameter.empty; assert not hasattr(rlm, 'run'); assert not hasattr(rlm.rlm, 'run'); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert callable(rlm.create_session); assert callable(rlm.rlm.create_session); assert callable(rlm.progress_note); assert callable(rlm.rlm.progress_note); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')";
+const RUNTIME_READY_CHECK: &str = "import inspect; import rlm; from rlm import McpIntegration; import rlm.mcp as mcp; from rlm.harness import HarnessEntry; _harness_methods = ['create_memory', 'update_memory', 'delete_memory', 'create_skill', 'update_skill', 'delete_skill', 'create_subagent', 'update_subagent', 'delete_subagent', 'create_prompt_note', 'update_prompt_note', 'delete_prompt_note', 'record_refinement']; _mcp_discovery_methods = ['list_plugins', 'search_plugins', 'list_connections', 'search_tools', 'describe_tool']; assert callable(mcp.list_tools); assert callable(mcp.call_tool); assert all(callable(getattr(mcp, _m, None)) for _m in _mcp_discovery_methods), \"rlm.mcp is missing MCP discovery methods (list_plugins, search_plugins, list_connections, search_tools, describe_tool); the kernel venv needs a current prime-agent-runtime\"; assert callable(rlm.spawn); assert hasattr(rlm, 'rlm'); assert callable(rlm.rlm.spawn); assert inspect.signature(rlm.spawn).parameters['name'].default is inspect.Parameter.empty; assert not hasattr(rlm, 'run'); assert not hasattr(rlm.rlm, 'run'); assert callable(rlm.host_request); assert callable(rlm.find_models); assert callable(rlm.rlm.find_models); assert callable(rlm.create_session); assert callable(rlm.rlm.create_session); assert callable(rlm.progress_note); assert callable(rlm.rlm.progress_note); assert callable(rlm.rename); assert callable(rlm.rlm.rename); assert hasattr(rlm, 'harness'); assert hasattr(rlm, 'get_harness_state'); assert hasattr(rlm.rlm, 'harness'); assert hasattr(rlm.rlm, 'get_harness_state'); assert all(callable(getattr(_harness, _method, None)) for _harness in (rlm.harness, rlm.rlm.harness) for _method in _harness_methods); assert 'reference' in HarnessEntry.__dataclass_fields__; assert 'scope' in HarnessEntry.__dataclass_fields__; assert 'reference' in inspect.signature(rlm.harness.create_skill).parameters; assert 'reference' in inspect.signature(rlm.harness.update_skill).parameters; assert 'global_' in inspect.signature(rlm.harness.create_memory).parameters; assert 'global_' in inspect.signature(rlm.get_harness_state).parameters; assert not hasattr(rlm, 'background'); assert not hasattr(rlm.rlm, 'background'); from rlm.bash import BashHandle, BashResult; assert callable(rlm.bash); assert all(callable(getattr(BashHandle, _m, None)) for _m in ('tail', 'output', 'poll', 'kill')); assert {'exit_code', 'output', 'duration'} <= set(BashResult.__dataclass_fields__); import rlm.repl as _repl; assert callable(_repl.main); assert callable(_repl.emit); assert callable(_repl.host_request); assert callable(_repl.is_active); assert _repl.PROTOCOL_VERSION == 3; assert callable(rlm.emit); assert not hasattr(rlm, 'HOST_COMM_TARGET'); assert not hasattr(mcp, 'install_shutdown_hook')";
 
 pub(crate) fn has_prime_agent_runtime(python: &str) -> bool {
     run_quiet(python, &["-c", RUNTIME_READY_CHECK])
@@ -52,24 +50,10 @@ pub(crate) fn missing_python_skill_import_labels(
         .collect()
 }
 
-/// Process-global memo of a successful runtime-ready probe, tiered above
-/// the cross-process on-disk memo ([`super::super::disk_memo`]): the probe is a
-/// full interpreter start (the `import rlm` chain), and re-running it
-/// before every kernel start re-pays a cost the kernel spawn itself is
-/// about to pay. Memoized on success only: the key carries every input the
-/// probe observes (interpreter identity, runtime identity, the venv's
-/// recorded bootstrap state, and the installed runtime's content), so a
-/// venv rebuilt by anyone — a newer concurrent daemon rewrites
-/// `.bootstrap-version` — or damaged out of band — an uninstalled or
-/// overwritten `rlm`, a replaced interpreter — misses both layers and
-/// revalidates. A failed kernel start drops both layers
-/// ([`invalidate_runtime_probe_cache`]), so the startup retry re-probes
-/// and rebuilds exactly like the uncached flow. The in-process map dies
-/// with the process; the disk layer carries the verdict to the next fresh
-/// worker (every cold open and spawned child boots one) under the same
-/// key, so only the interpreter probes are skipped on a hit — the key
-/// recomputation above (the content walk) is the damage detector, and it
-/// runs on every check.
+/// Process-global memo of a successful runtime-ready probe, tiered above the cross-process on-disk
+/// memo ([`super::super::disk_memo`]): the probe is a full interpreter start. Memoized on success
+/// only: the key carries every input the probe observes; a failed kernel start drops both layers
+/// ([`invalidate_runtime_probe_cache`]).
 static RUNTIME_PROBE_MEMO: Mutex<Option<HashMap<String, PathBuf>>> = Mutex::new(None);
 
 pub(super) fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap<String, PathBuf>>>
@@ -79,13 +63,9 @@ pub(super) fn lock_probe_memo() -> std::sync::MutexGuard<'static, Option<HashMap
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Identity of the runtime as installed in the venv — the state the probe
-/// observes beyond its key inputs: the interpreter binary's stat plus a
-/// content hash of the installed `rlm` package tree under the venv's
-/// site-packages. Out-of-band damage (a package uninstall or overwrite, a
-/// replaced or deleted interpreter) changes this identity, so a memoized
-/// probe result can never mask a mutated install: the next
-/// [`kernel_ready`] re-probes and rebuilds like the uncached flow.
+/// Identity of the runtime as installed in the venv: the interpreter binary's stat plus a content
+/// hash of the installed `rlm` package tree. Out-of-band damage changes this identity, so a
+/// memoized probe result can never mask a mutated install.
 pub(super) fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
     let mut hasher = sha2::Sha256::new();
     match std::fs::metadata(python) {
@@ -109,9 +89,9 @@ pub(super) fn installed_runtime_identity(python: &Path, venv: &Path) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-/// The installed `rlm` package under the venv's site-packages: the
-/// Windows layout `<venv>/Lib/site-packages/rlm` (no python-version
-/// layer) or the Unix layout `<venv>/lib/python*/site-packages/rlm`.
+/// The installed `rlm` package under the venv's site-packages: the Windows layout
+/// `<venv>/Lib/site-packages/rlm` (no python-version layer) or the Unix layout
+/// `<venv>/lib/python*/site-packages/rlm`.
 #[cfg(test)]
 pub(super) fn installed_rlm_dir(venv: &Path) -> Option<PathBuf> {
     installed_package_dir(venv, "rlm")
@@ -169,18 +149,10 @@ pub(super) fn runtime_probe_key(
     )
 }
 
-/// The runtime-ready check, memoized on success across two layers: the
-/// process-global map first, then the on-disk cross-process memo (a fresh
-/// process — every cold open's worker, every spawned child — starts with
-/// an empty map, so the disk layer is what carries the verdict across
-/// process boundaries). `version_raw` is the raw `.bootstrap-version` text
-/// the caller already read; `installed_identity` is the installed-runtime
-/// identity from [`installed_runtime_identity`]. The key is recomputed
-/// fresh on every call — the content walk inside the identity is the
-/// damage detector — so a hit skips only the two interpreter probes.
-/// Managed-venv path only: a caller-owned `PRIME_AGENT_KERNEL_PYTHON`
-/// override never reaches this (it uses the direct probe, the d14
-/// ruling), and no memo file is read or written for it.
+/// The runtime-ready check, memoized on success across two layers: the process-global map first,
+/// then the on-disk cross-process memo. `version_raw` is the raw `.bootstrap-version` text the
+/// caller already read. The key is recomputed fresh on every call so a hit skips only the two
+/// interpreter probes. A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override never reaches this.
 pub(super) fn has_prime_agent_runtime_memoized(
     python: &str,
     runtime_identity: &str,
@@ -218,11 +190,8 @@ pub(super) fn has_prime_agent_runtime_memoized(
     true
 }
 
-/// Drop every memoized runtime-ready result, both layers: the in-process
-/// map dies with this call, and every disk memo this process touched is
-/// dropped (deleted, or atomically overwritten with the empty map when
-/// the delete fails). The next kernel start re-runs the probe (and
-/// rebuilds the venv when the probe finds it broken).
+/// Drop every memoized runtime-ready result, both layers: the in-process map dies with this call.
+/// The next kernel start re-runs the probe.
 pub fn invalidate_runtime_probe_cache() {
     let tracked: Vec<PathBuf> = lock_probe_memo()
         .take()
@@ -234,9 +203,7 @@ pub fn invalidate_runtime_probe_cache() {
 }
 
 /// Drop only the in-process memo layer, leaving the on-disk layer intact:
-/// the fresh-process simulation the disk-memo oracles use (a real fresh
-/// process starts with an empty map and the disk file on disk). Unix
-/// only: its callers are the unix socket-harness tests.
+/// the fresh-process simulation the disk-memo oracles use. Unix only.
 #[cfg(all(test, unix))]
 pub(crate) fn clear_in_process_probe_memo_for_tests() {
     *lock_probe_memo() = None;

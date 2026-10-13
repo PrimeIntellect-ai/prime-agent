@@ -1,8 +1,6 @@
-//! Bedrock authentication and endpoint resolution.
-//!
-//! Ports the `SigV4` request signing used by `@aws-sdk/client-bedrock-runtime`
-//! for `POST /model/{modelId}/converse-stream`, plus the region / endpoint /
-//! credential resolution rules from `packages/ai/src/providers/amazon-bedrock.ts`.
+//! Bedrock authentication and endpoint resolution: the `SigV4` request signing used by
+//! `@aws-sdk/client-bedrock-runtime` for `POST /model/{modelId}/converse-stream`, plus the region /
+//! endpoint / credential resolution rules from the TS provider.
 
 use std::fmt::Write as _;
 
@@ -26,8 +24,8 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
-/// Parse an AWS credentials-style ini file: `[section-name]` headers with
-/// `key = value` pairs (only the two credential lines are needed).
+/// Parse an AWS credentials-style ini file: `[section-name]` headers with `key = value` pairs (only
+/// the two credential lines are needed).
 fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
     let mut in_section = false;
     let mut access_key_id = None;
@@ -64,9 +62,8 @@ fn parse_ini_credentials(text: &str, section: &str) -> Option<AwsCredentials> {
     })
 }
 
-/// Port of the SDK credential chain used by the TS provider: SigV4-skip dummy
-/// keys, static env credentials, then the shared credentials file (default or
-/// `AWS_PROFILE` / `options.profile`).
+/// The SDK credential chain used by the TS provider: SigV4-skip dummy keys, static env credentials,
+/// then the shared credentials file (default or `AWS_PROFILE` / `options.profile`).
 pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
     if std::env::var("AWS_BEDROCK_SKIP_AUTH").as_deref() == Ok("1") {
         return Some(AwsCredentials {
@@ -104,8 +101,8 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
-/// UTC timestamp in `SigV4` formats: `x-amz-date` (20250101T000000Z) and date
-/// stamp (20250101). Uses std time to avoid a chrono dependency.
+/// UTC timestamp in `SigV4` formats: `x-amz-date` (20250101T000000Z) and date stamp (20250101).
+/// Uses std time to avoid a chrono dependency.
 fn now_utc_parts() -> (String, String) {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -143,8 +140,8 @@ fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     )
 }
 
-/// Produce the `SigV4` auth headers for a request.
-/// Returns `(x-amz-date, authorization, x-amz-security-token)`.
+/// Produce the `SigV4` auth headers for a request. Returns `(x-amz-date, authorization,
+/// x-amz-security-token)`.
 pub struct SigV4Params<'a> {
     pub method: &'a str,
     /// Path with query string, starting with `/`.
@@ -157,8 +154,8 @@ pub struct SigV4Params<'a> {
     pub extra_signed_headers: &'a [(String, String)],
 }
 
-/// Produce the `SigV4` auth headers for a request.
-/// Returns `(x-amz-date, authorization, x-amz-security-token)`.
+/// Produce the `SigV4` auth headers for a request. Returns `(x-amz-date, authorization,
+/// x-amz-security-token)`.
 pub fn sigv4_headers(
     params: &SigV4Params<'_>,
     credentials: &AwsCredentials,
@@ -223,7 +220,6 @@ pub fn sigv4_headers(
     (amz_date, authorization, credentials.session_token.clone())
 }
 
-/// Port of `getConfiguredBedrockRegion`.
 pub fn get_configured_bedrock_region(region: Option<&str>) -> Option<String> {
     region
         .map(std::string::ToString::to_string)
@@ -231,12 +227,10 @@ pub fn get_configured_bedrock_region(region: Option<&str>) -> Option<String> {
         .or_else(|| env("AWS_DEFAULT_REGION"))
 }
 
-/// Port of `hasConfiguredBedrockProfile`.
 pub fn has_configured_bedrock_profile() -> bool {
     env("AWS_PROFILE").is_some()
 }
 
-/// Port of `getStandardBedrockEndpointRegion`.
 pub fn get_standard_bedrock_endpoint_region(base_url: &str) -> Option<String> {
     let hostname = url::Url::parse(base_url).ok()?.host_str()?.to_lowercase();
     let suffix_stripped = hostname
@@ -256,7 +250,6 @@ pub fn get_standard_bedrock_endpoint_region(base_url: &str) -> Option<String> {
     Some(region.to_string())
 }
 
-/// Port of `shouldUseExplicitBedrockEndpoint`.
 pub fn should_use_explicit_bedrock_endpoint(
     base_url: &str,
     configured_region: Option<&str>,
@@ -269,8 +262,8 @@ pub fn should_use_explicit_bedrock_endpoint(
     }
 }
 
-/// Resolve the request endpoint and region: explicit model baseUrl (custom
-/// gateways, fips, `GovCloud`) or the standard regional endpoint.
+/// Resolve the request endpoint and region: explicit model baseUrl (custom gateways, fips,
+/// `GovCloud`) or the standard regional endpoint.
 pub(crate) fn resolve_endpoint(model: &Model, options: &BedrockOptions) -> (String, String) {
     let configured_region = get_configured_bedrock_region(options.region.as_deref());
     let has_profile = has_configured_bedrock_profile();
@@ -281,8 +274,8 @@ pub(crate) fn resolve_endpoint(model: &Model, options: &BedrockOptions) -> (Stri
     );
 
     if use_explicit_endpoint && !model.base_url.is_empty() {
-        // Region resolution mirrors the TS: explicit option > env vars >
-        // endpoint hostname > (profile-resolved) > us-east-1.
+        // Region resolution mirrors the TS: explicit option > env vars > endpoint hostname >
+        // (profile-resolved) > us-east-1.
         let region = configured_region
             .or_else(|| {
                 crate::providers::bedrock::auth::get_standard_bedrock_endpoint_region(

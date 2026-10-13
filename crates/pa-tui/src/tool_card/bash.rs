@@ -1,6 +1,4 @@
-//! The `bash` tool-call card, a port of the TS `bash.ts` renderCall /
-//! renderResult components composed inside the `ToolPanel`: a `label \u{00b7}
-//! status` header, the dim `$ command` call row, the command's output
+//! The `bash` tool-call card: the `$ command` call row, the output
 //! (collapsed: the last five visual lines with an `... N earlier lines`
 //! hint; expanded: everything), the truncation warning, and the live
 //! `Took`/`Elapsed` duration row.

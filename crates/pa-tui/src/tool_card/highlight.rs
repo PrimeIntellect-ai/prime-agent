@@ -1,23 +1,15 @@
-//! Python syntax highlighting for expanded ipython cells, a display-side
-//! port of the TS `highlightCode("python")` path (the highlight.js python
-//! grammar through cli-highlight's theme mapping). Cell-level scope coloring
-//! only: cli-highlight's parent-scope wrap is invisible once a child token
-//! colors the same cells, so the render needs one color per cell, matching
-//! the `theme.ts` mapping (keyword -> syntaxKeyword, `built_in/type` ->
-//! syntaxType, literal/number -> syntaxNumber, string -> syntaxString,
-//! comment -> syntaxComment, title -> syntaxFunction, params ->
-//! syntaxVariable, everything else default). F-string substitutions and
+//! Python syntax highlighting for expanded ipython cells, the
+//! highlight.js python grammar's scope coloring. Cell-level scope
+//! coloring only: one color per cell. F-string substitutions and
 //! backslash escapes keep the string color (cli-highlight renders those
-//! scopes with the identity function, leaving them in the parent wrap).
+//! scopes with the identity function).
 
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
 use ratatui::style::Style;
 
-/// The resolved `syntax*` theme colors the scopes render with (TS
-/// `buildCliHighlightTheme`'s mapping of the highlight.js token classes to
-/// the theme's `syntax*` keys). Shared by every surface that renders
-/// highlighted code (the expanded ipython cell, the fenced markdown block).
+/// The resolved `syntax*` theme colors the scopes render with, shared
+/// by every surface that renders highlighted code.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SyntaxPalette {
     pub keyword: Style,
@@ -549,9 +541,8 @@ fn header_mode(
     if !code[i..].starts_with('(') {
         return Some(i);
     }
-    // The opening paren of the params group renders plain (hljs emits it
-    // outside the `params` span; cli-highlight colors only the param
-    // cells, so the paren must reach the stream or the line loses it).
+    // The opening paren renders plain (hljs emits it outside the `params`
+    // span; the paren must reach the stream or the line loses it).
     flush_plain(plain, tokens);
     tokens.push(("(".to_string(), Scope::Plain));
     i += 1;
@@ -652,8 +643,6 @@ mod tests {
 
     #[test]
     fn def_header_line_text_is_lossless() {
-        // The params group's opening paren renders plain but must reach the
-        // stream: dropping it loses text from the rendered line.
         let code = "def gutter_probe(count=7):";
         let lines = highlight_python(code, &SyntaxPalette::from_theme(&theme()));
         assert_eq!(lines.len(), 1);
@@ -690,8 +679,6 @@ mod tests {
         assert!(toks.contains(&("0x1F".into(), Scope::Number)));
         assert!(toks.contains(&("1.5e3j".into(), Scope::Number)));
         assert!(toks.contains(&("'boom'".into(), Scope::String)));
-        // Plain identifiers keep the default color (ValueError is
-        // user-defined, so no token carries it with a non-plain scope).
         assert!(toks
             .iter()
             .filter(|(t, _)| t.contains("ValueError"))

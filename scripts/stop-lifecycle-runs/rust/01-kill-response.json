@@ -1,6 +1,0 @@
-{
-  "id": "stop-kill",
-  "type": "response",
-  "command": "kill",
-  "success": true
-}

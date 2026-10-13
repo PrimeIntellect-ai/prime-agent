@@ -1,10 +1,7 @@
-//! The live model/thinking switches: the worker arms for the daemon
-//! `set_model` and `set_thinking_level` commands (TS daemon-mode
-//! `case "set_model"` / `case "set_thinking_level"`). The engine owns the
-//! runtime switch (agent model, provider target, effective level); this
-//! module owns the wire contract: resolution through the registry, the
-//! durable `model_change` / `thinking_level_change` rows, the settings
-//! defaults the TS session persists on a switch, and the response data.
+//! The live model/thinking switches (`set_model`, `set_thinking_level`).
+//! The engine owns the runtime switch; this module owns the wire
+//! contract: registry resolution, the durable `model_change` /
+//! `thinking_level_change` rows, and the persisted settings defaults.
 
 use serde_json::Value;
 
@@ -16,25 +13,18 @@ use crate::worker::Worker;
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 impl Worker {
-    /// `set_model { provider, modelId }`: resolve the model through the
-    /// registry's available catalog, enforce the daemon model allowlist
-    /// (settings `allowedModels`: a model outside the allowlist fails
-    /// loudly, never a fallback), switch the engine, record the durable
-    /// `model_change` row, and persist the settings default (TS
-    /// `session.setModel`). Unknown models fail with the TS message; a
-    /// model whose provider is not signed in fails with the typed
-    /// sign-in refusal (the client offers the provider's login and
-    /// retries). The engine switch parks the engine's runtime, so it
-    /// runs on the blocking pool like the turn path.
+    /// `set_model { provider, modelId }`: resolve through the registry's
+    /// available catalog, enforce the daemon model allowlist (outside it
+    /// fails loudly, never a fallback), switch the engine, record the
+    /// durable `model_change` row, and persist the settings default. The
+    /// switch parks the runtime, so it runs on the blocking pool.
     pub(crate) async fn handle_set_model(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_model") {
             return response;
         }
-        // Worker commands dispatch concurrently: a model switch (its
-        // durable row, the engine target, and the tier re-clamp) runs
-        // under the replacement gate so a session swap's model restore and
-        // tier re-seed can never interleave with it (one session, one
-        // mutation at a time).
+        // Worker commands dispatch concurrently: a model switch runs under
+        // the replacement gate so a session swap's model restore can never
+        // interleave with it (one session, one mutation at a time).
         let _replacement_gate = self.replacement_gate.lock().await;
         let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
             return response_failure(None, "set_model", "set_model requires a provider", None);
@@ -45,9 +35,8 @@ impl Worker {
         let model = match resolve_available_model(&self.config.agent_dir, provider, model_id) {
             Ok(model) => model,
             // A model whose provider is not signed in is a typed refusal
-            // (`errorInfo.modelProviderUnauthenticated` carries the
-            // provider): the client offers the provider's sign-in flow
-            // and retries the switch, instead of a dead-end error.
+            // (`errorInfo.modelProviderUnauthenticated`): the client offers
+            // the sign-in flow and retries.
             Err(
                 refusal @ pa_core::models::SetModelSelectionError::ProviderUnauthenticated {
                     ..
@@ -69,10 +58,8 @@ impl Worker {
             }
             Err(error) => return response_failure(None, "set_model", &error.to_string(), None),
         };
-        // The daemon model allowlist (settings `allowedModels`): a switch
-        // to a model outside the allowlist fails loudly — the daemon never
-        // falls back to a different route — and the refusal emits the
-        // adoption event (`model refused`) through the worker engine.
+        // The daemon model allowlist (settings `allowedModels`): outside
+        // it fails loudly, never a fallback.
         let selector = format!("{provider}/{model_id}");
         let cwd = {
             let core = self.core.lock().unwrap();
@@ -136,16 +123,11 @@ impl Worker {
                 None,
             );
         }
-        // TS `session.setModel` re-clamps the tier for the switched model
-        // (`_clampServiceTierForModel`): a preference the new model does
-        // not support degrades to `default` and the
-        // `service_tier_changed` event follows the flip.
+        // TS `session.setModel` re-clamps the tier for the switched model:
+        // an unsupported preference degrades to `default`.
         self.clamp_service_tier_for_model();
-        // The switched model (and any level the switch clamps) reaches the
-        // roster surfaces immediately: the TS `set_model` daemon handler
-        // schedules a roster flush after the switch, so the agents view's
-        // Model column never keeps the pre-switch model until the next
-        // turn's busy flip.
+        // The switched model reaches the roster surfaces immediately (TS
+        // schedules a roster flush after the switch).
         self.push_roster_delta();
         response_success(
             None,
@@ -154,12 +136,10 @@ impl Worker {
         )
     }
 
-    /// `set_thinking_level { level }`: apply the requested level through the
-    /// engine (clamped to the model's supported levels) and record the
+    /// `set_thinking_level { level }`: apply the requested level through
+    /// the engine (clamped to the model's supported levels) and record the
     /// durable `thinking_level_change` row only when the effective level
-    /// changed (TS `session.setThinkingLevel`). The settings default
-    /// follows like the TS session's `setDefaultThinkingLevel`. The engine
-    /// switch parks the engine's runtime, so it runs on the blocking pool.
+    /// changed; the settings default follows.
     pub(crate) async fn handle_set_thinking_level(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_thinking_level") {
             return response;
@@ -185,8 +165,7 @@ impl Worker {
         };
         let previous = self.engine.effective_thinking_level();
         // The blocking switch owns the pre-switch level (the durable-row
-        // change gate); the handler keeps its own copy for the roster push
-        // after the await.
+        // change gate); the handler keeps its own copy for the roster push.
         let previous_level = previous.clone();
         let engine = std::sync::Arc::clone(&self.engine);
         let core = std::sync::Arc::clone(&self.core);
@@ -241,12 +220,8 @@ impl Worker {
                 None,
             );
         }
-        // The changed level reaches the roster surfaces immediately: TS
-        // emits the `thinking_level_changed` session event on an effective
-        // change and that event is one of the worker's roster-flush
-        // triggers (daemon-mode.ts `ROSTER_SESSION_EVENT_TRIGGERS`), so
-        // the agents view's Model column reads `model:level` right after
-        // the raise instead of waiting for the next turn's busy flip.
+        // The changed level reaches the roster surfaces immediately (TS
+        // emits `thinking_level_changed`, a roster-flush trigger).
         if applied.as_deref() != previous_level.as_deref() {
             self.push_roster_delta();
         }
@@ -254,11 +229,9 @@ impl Worker {
     }
 }
 
-/// Resolve one `(provider, modelId)` pair against the registry's available
-/// catalog (auth-configured models). The TS `set_model` handler looks the
-/// model up in the refreshed available list; a model that exists without a
-/// signed-in provider is the typed sign-in refusal, and an unavailable or
-/// unknown model fails with the TS message.
+/// Resolve one `(provider, modelId)` pair against the registry's
+/// available catalog (auth-configured models): a model that exists
+/// without a signed-in provider is the typed sign-in refusal.
 fn resolve_available_model(
     agent_dir: &std::path::Path,
     provider: &str,
@@ -316,11 +289,6 @@ mod tests {
         .expect("write models.json");
     }
 
-    /// The daemon model allowlist enforcement point: `set_model` refuses a
-    /// resolvable model outside settings `allowedModels` loudly (never a
-    /// fallback), and an allowing allowlist (or none) keeps the switch
-    /// path — the scripted harness then fails past the gate with its own
-    /// non-switching refusal, proving the gate opened.
     #[tokio::test]
     async fn set_model_refuses_models_outside_the_allowlist() {
         async fn dispatch_set_model(
@@ -338,8 +306,6 @@ mod tests {
                 .await
         }
 
-        // An allowlist that pins a different provider refuses the switch
-        // with the loud message.
         let dir = std::env::temp_dir().join(format!("pa-worker-al-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         models_fixture(&dir);
@@ -361,8 +327,8 @@ mod tests {
             Some("Model \"prime-inference/mock-1\" is blocked by the daemon model allowlist (settings \"allowedModels\"); the daemon never falls back to a different model. Allow it in the settings or pick an allowed model.")
         );
 
-        // An allowing allowlist (a matching glob) opens the gate: the
-        // scripted engine then fails with its own non-switching message.
+        // An allowing allowlist opens the gate: the scripted engine then
+        // fails with its own non-switching message.
         std::fs::write(
             dir.join("agent").join("settings.json"),
             json!({ "allowedModels": ["prime-inference/*"] }).to_string(),
@@ -387,10 +353,6 @@ mod tests {
         );
     }
 
-    /// The `set_model` refusal for a model whose provider is not signed
-    /// in carries the typed `errorInfo` (the provider id), so a client
-    /// offers the provider's sign-in flow instead of a dead-end error;
-    /// a genuinely absent model keeps the TS refusal without `errorInfo`.
     #[tokio::test]
     async fn set_model_refuses_an_unsigned_in_provider_with_the_typed_sign_in_error() {
         let dir = std::env::temp_dir().join(format!("pa-worker-si-{}", uuid::Uuid::new_v4()));
@@ -402,8 +364,6 @@ mod tests {
             .await;
         assert!(created.success, "create failed: {created:?}");
 
-        // A catalog model of a provider without a credential: the typed
-        // sign-in refusal with the provider id on the wire.
         let (provider, model_id) = first_built_in_anthropic_model();
         let response = worker
             .dispatch(
@@ -432,8 +392,6 @@ mod tests {
             )
         );
 
-        // A genuinely absent model keeps the TS refusal: no typed info,
-        // no sign-in class.
         let response = worker
             .dispatch(
                 "set_model",
@@ -454,8 +412,8 @@ mod tests {
 
     #[test]
     fn thinking_levels_wire_names_match_the_enum() {
-        // Every wire name must parse; the list is the exact TS `ThinkingLevel`
-        // vocabulary.
+        // Every wire name must parse; the list is the exact TS
+        // `ThinkingLevel` vocabulary.
         for level in THINKING_LEVELS {
             assert!(
                 pa_ai::models::thinking_level_from_str(level).is_some(),
@@ -465,11 +423,6 @@ mod tests {
         assert!(pa_ai::models::thinking_level_from_str("sideways").is_none());
     }
 
-    /// A catalog model from a provider without a credential resolves to the
-    /// typed sign-in refusal (the client offers the provider's login and
-    /// retries the switch), while a genuinely absent model keeps the TS
-    /// "Model not found" message — the two classes the old path conflated
-    /// into the dead-end error.
     #[test]
     fn resolution_classifies_the_sign_in_refusal() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -480,7 +433,6 @@ mod tests {
             .expect("the signed-in provider resolves");
         assert_eq!(model.id, "mock-1");
 
-        // A built-in provider without a credential: the typed refusal.
         let (provider, model_id) = first_built_in_anthropic_model();
         let error = resolve_available_model(&agent_dir, &provider, &model_id)
             .expect_err("an unsigned provider refuses with the sign-in class");
@@ -496,8 +448,6 @@ mod tests {
             "Provider \"anthropic\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again."
         );
 
-        // A model absent from the catalog keeps the TS refusal, never the
-        // sign-in class.
         let error = resolve_available_model(&agent_dir, &provider, "no-such-model")
             .expect_err("an unknown model fails with the TS message");
         assert_eq!(
@@ -513,17 +463,12 @@ mod tests {
         );
     }
 
-    /// A signed-in provider's unauthorized private Prime Inference model
-    /// (the only `get_available` exclusion besides auth) keeps the TS
-    /// refusal — the switch never reaches a model the account is not
-    /// entitled to.
     #[test]
     fn an_unauthorized_private_model_keeps_the_ts_refusal() {
         let dir = tempfile::tempdir().expect("tempdir");
         models_fixture(dir.path());
         let agent_dir = dir.path().join("agent");
-        // The bundled private table ships `internal/glm-5.2-fast`; the
-        // fixture signs the provider in but grants no private-model
+        // The fixture signs the provider in but grants no private-model
         // authorization (no Prime credential, no explicit ids).
         let error = resolve_available_model(&agent_dir, "prime-inference", "internal/glm-5.2-fast")
             .expect_err("the unauthorized private model refuses");
@@ -537,9 +482,7 @@ mod tests {
     }
 
     /// A stale-auth provider keeps the switch (the TS daemon's
-    /// full-catalog fallback: the lookup never mutates stale state,
-    /// `session.setModel` owns the clear) even though the stale
-    /// credential gates the model out of the available list.
+    /// full-catalog fallback; the lookup never mutates stale state).
     #[test]
     fn stale_auth_keeps_the_set_model_switch() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -567,9 +510,8 @@ mod tests {
         assert_eq!(model.id, model_id);
     }
 
-    /// The first built-in Anthropic catalog model (the fixture-free
-    /// unauthenticated provider: the generated catalog ships its models
-    /// without any credential).
+    /// The first built-in Anthropic catalog model (a fixture-free
+    /// unauthenticated provider).
     fn first_built_in_anthropic_model() -> (String, String) {
         let model = pa_ai::models_generated::get_models("anthropic")
             .first()

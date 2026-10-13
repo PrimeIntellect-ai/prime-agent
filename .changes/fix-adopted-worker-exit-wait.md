@@ -1,0 +1,1 @@
+- The daemon no longer wakes up every second for each session it keeps running across a restart or update: it now waits on the operating system's process-exit notification (kqueue on macOS, pidfd on Linux), which cuts idle battery drain. On macOS this also stops a `ps` process being spawned every second for each such session.

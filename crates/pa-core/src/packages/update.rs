@@ -14,8 +14,7 @@ impl PackageManager {
     ///
     /// # Errors
     ///
-    /// Returns an error when a given source matches no configured package,
-    /// or when a package's update or reinstall fails.
+    /// Error when the source matches no configured package, or the update/reinstall fails.
     pub fn update(&mut self, source: Option<&str>) -> Result<()> {
         let identity = source.map(|source| self.get_source_match_key_for_input(source));
         let mut matched = false;

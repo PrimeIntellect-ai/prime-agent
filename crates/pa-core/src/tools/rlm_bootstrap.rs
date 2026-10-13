@@ -1,7 +1,4 @@
-//! rlm bootstrap code injected into every kernel start (TS:
-//! `buildRlmBootstrapCode` and its constants in
-//! `packages/coding-agent/src/core/tools/ipython.ts`). Split from the
-//! ipython tool module for module-size hygiene.
+//! rlm bootstrap code injected into every kernel start (TS: `buildRlmBootstrapCode`).
 
 const RLM_BOOTSTRAP_HEADER_CODE: &str = r#"
 import asyncio
@@ -56,16 +53,14 @@ pub struct PythonSkillRuntimeInfo {
     pub import_name: String,
 }
 
-/// Bootstrap code that binds `rlm` and the Python skills into the kernel.
-///
-/// Port of `buildRlmBootstrapCode` from ipython.ts: imports the rlm runtime,
-/// substitutes a raising stub when it is missing, and wraps each Python skill
-/// module with a callable wrapper that forwards `__call__` to `run`.
+/// Bootstrap code that binds `rlm` and the Python skills into the kernel:
+/// imports the rlm runtime, substitutes a raising stub when it is missing,
+/// and wraps each Python skill module with a callable wrapper that forwards
+/// `__call__` to `run`.
 ///
 /// # Panics
 ///
-/// Panics if the sorted import-name list cannot be serialized as JSON,
-/// which cannot fail for a list of strings.
+/// Panics if the sorted import-name list cannot be serialized as JSON (cannot fail for strings).
 #[must_use]
 pub fn build_rlm_bootstrap_code(python_skills: &[PythonSkillRuntimeInfo]) -> String {
     let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");

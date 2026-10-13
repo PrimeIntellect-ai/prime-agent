@@ -1,5 +1,5 @@
-//! The id + timestamp mint (moved with its concern): the session id
-//! minters, the session file path, and the ISO-8601 timestamps.
+//! The id + timestamp mint: the session id minters, the session file path, and the ISO-8601
+//! timestamps.
 
 use super::{HashMap, Path, PathBuf};
 
@@ -37,7 +37,6 @@ pub fn format_iso_now() -> String {
     format_iso(millis as i64)
 }
 
-/// Format unix milliseconds as an ISO-8601 UTC timestamp.
 #[must_use]
 pub fn format_iso(millis: i64) -> String {
     let days = millis.div_euclid(86_400_000);

@@ -1,16 +1,8 @@
 //! The bounded open wait through a daemon update restart (TS #2391
-//! `waitThroughDaemonUpdateRestart`): an agents-view open that arrives
-//! while the daemon prepares an update restart — or while the restart
-//! itself takes the socket down — waits and retries against the successor
-//! instead of failing the open.
-//!
-//! The first `Daemon is preparing an update restart` rejection arms the
-//! wait (500ms retry cadence, 240s budget — the same budget attached
-//! sessions get to reconnect after an update). Once armed, only
-//! restart-transient failures stay inside the loop: they are all part of
-//! the same normal update restart. A non-update error before any
-//! update-restart signal propagates unchanged, and a permanent failure
-//! after arming surfaces unmasked instead of hiding behind the wait.
+//! `waitThroughDaemonUpdateRestart`):
+//! an open that arrives while the daemon prepares a restart — or while the restart takes the
+//! socket down — waits and retries against the successor instead of failing the open; only
+//! restart-transient failures stay in the loop, and a permanent failure after arming unmasked.
 
 use std::future::Future;
 
@@ -18,39 +10,29 @@ use anyhow::{anyhow, Result};
 
 use crate::daemon_client::{is_update_restarting_rejection, RequestRejected};
 
-/// TS `DAEMON_UPDATE_RESTART_OPEN_WAIT_MS`: mirrors the update
-/// coordinator's worst case (100s prepare + supervisor stop + 60s
-/// successor startup + session restore), the same budget attached
-/// sessions get to reconnect after an update.
+/// The update coordinator's worst case, the same budget attached
+/// sessions get to reconnect.
 pub(crate) const DAEMON_UPDATE_RESTART_OPEN_WAIT_MS: u64 = 240_000;
 
-/// TS `DAEMON_UPDATE_RESTART_OPEN_RETRY_MS`: the wait's retry cadence.
 pub(crate) const DAEMON_UPDATE_RESTART_OPEN_RETRY_MS: u64 = 500;
 
-/// The notice a waited-through open surfaces (TS `updateRestartWaitNotice`):
-/// the session startup warning row and the agents-view status line.
+/// The notice a waited-through open surfaces (TS `updateRestartWaitNotice`).
 pub(crate) const DAEMON_UPDATE_RESTART_WAIT_NOTICE: &str =
     "Waited for the Prime Agent daemon update restart to finish before opening this agent";
 
-/// True when an open failure is part of the normal update-restart window
-/// rather than a permanent failure (TS `isDaemonUpdateRestartTransientError`):
-/// the preparing-restart rejection itself, transport failures while the
-/// daemon exits and its successor boots (connect/handshake/response
-/// timeouts, the closed-connection failure), and session-not-restored-yet
-/// misses ("Unknown active session" rejections, a recovering session).
-/// Permanent create and attach failures (e.g. a lease-holder refusal)
-/// stay false, so the open fails immediately instead of hiding behind the
-/// bounded update wait.
+/// True when an open failure is part of the normal update-restart
+/// window: the preparing-restart rejection, transport failures while
+/// the daemon exits and boots, and session-not-restored-yet misses;
+/// permanent failures stay false.
 pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
     if is_update_restarting_rejection(error) {
         return true;
     }
     error.chain().any(|cause| {
         if let Some(rejected) = cause.downcast_ref::<RequestRejected>() {
-            // The restart restores sessions from the prepared roster: a
-            // session the successor has not restored yet answers with the
-            // unknown-session refusal, and one still hydrating with the
-            // recovering rejection — both are the same wait.
+            // A session the successor has not restored yet answers with
+            // the unknown-session refusal; one still hydrating, with
+            // the recovering rejection.
             if rejected.message.starts_with("Unknown active session: ") {
                 return true;
             }
@@ -61,12 +43,6 @@ pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
                 return true;
             }
         }
-        // Transport failures while the daemon exits for the restart and
-        // while its successor boots: the socket closes under the request
-        // (the close-reason render, the pending-fail resolution, the dead
-        // writer, and the pre-handshake death), the connect is refused
-        // until the successor listens, and the connect/handshake/response
-        // requests time out in between.
         let text = cause.to_string();
         text.starts_with("Connection to the Prime Agent daemon closed")
             || text.starts_with("the daemon connection closed")
@@ -76,10 +52,8 @@ pub(crate) fn is_update_restart_transient_error(error: &anyhow::Error) -> bool {
     })
 }
 
-/// True when the error is the open wait's deadline failure: the TS loop
-/// catches it and the guidance ("try opening this agent again once the
-/// update finishes") lands on the agents view's status line — never a
-/// process exit.
+/// True when the error is the open wait's deadline failure: the guidance
+/// lands on the status line, never a process exit.
 pub(crate) fn is_update_restart_deadline_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
@@ -88,12 +62,9 @@ pub(crate) fn is_update_restart_deadline_error(error: &anyhow::Error) -> bool {
     })
 }
 
-/// The TS timeout shapes: `Timed out after <n>ms connecting to the Prime
-/// Agent daemon`, `... waiting for the Prime Agent daemon handshake`, and
-/// `... waiting for the Prime Agent daemon response` (TS matches
-/// `response to`; the client's own rendered form is the same prefix).
-/// Case-insensitive: the hello/connect paths capitalize `Timed`, the
-/// session's own bounded requests say `timed out after ...`.
+/// The TS timeout shapes: `Timed out after <n>ms connecting to ...`,
+/// `... handshake`, and `... response`. Case-insensitive (hello/connect
+/// capitalize `Timed`; the session's own requests do not).
 fn is_daemon_transport_timeout(text: &str) -> bool {
     let lowered = text.to_lowercase();
     let Some(rest) = lowered.strip_prefix("timed out after ") else {
@@ -110,8 +81,7 @@ fn is_daemon_transport_timeout(text: &str) -> bool {
         || tail.starts_with("waiting for the prime agent daemon response")
 }
 
-/// TS `daemonUpdateRestartDeadlineError`: the bounded wait's failure —
-/// actionable, and carrying the last error for diagnosis.
+/// The bounded wait's failure, carrying the last error for diagnosis.
 fn update_restart_deadline_error(
     wait_ms: u64,
     last_error: Option<&anyhow::Error>,
@@ -127,19 +97,11 @@ fn update_restart_deadline_error(
     )
 }
 
-/// Run an open attempt, retrying while the daemon is in the update-restart
-/// transient state instead of failing the open (TS
-/// `waitThroughDaemonUpdateRestart`). The first preparing-restart rejection
-/// arms the wait; once armed, only restart-transient failures stay inside
-/// the same bounded loop, while permanent failures propagate immediately
-/// instead of hiding behind the wait. A non-update error before any
-/// update-restart signal propagates unchanged. The wait budget bounds the
-/// whole wait: each attempt is raced against the remaining budget, so an
-/// in-flight attempt (a create with its own request timeout) cannot hold
-/// the open past the deadline — the losing attempt is dropped (its
-/// connection dies with it, the same disposal TS hands the late result).
-/// On success the outcome reports whether the wait armed, so the caller
-/// surfaces the wait notice only when it actually waited.
+/// Run an open attempt, retrying while the daemon is in the
+/// update-restart transient state. The first preparing-restart rejection
+/// arms the wait; each attempt races the remaining budget, so an
+/// in-flight attempt cannot hold the open past the deadline. The outcome
+/// reports whether the wait armed.
 pub(crate) async fn wait_through_update_restart<F, Fut, T>(
     enabled: bool,
     wait_ms: u64,
@@ -158,8 +120,6 @@ where
     let mut armed = false;
     let mut last_error: Option<anyhow::Error> = None;
     loop {
-        // TS races every attempt against the remaining budget so the bound
-        // holds even over an in-flight create.
         let attempt = attempt();
         let result = tokio::select! {
             result = attempt => result,
@@ -190,25 +150,24 @@ where
     }
 }
 
-/// TS `logClientError` for the wait (agents-view open failures): the
-/// record lands in `client-errors.log` — the TUI owns stdout/stderr, so a
-/// rotating log file is the only safe sink.
+/// TS `logClientError` for the wait: the record lands in
+/// `client-errors.log` — the TUI owns stdout/stderr, so a rotating
+/// log file is the only safe sink.
 fn log_update_restart_wait(error: &anyhow::Error) {
     use std::io::Write;
-    // The rotating-log write is synchronous filesystem work, so it runs
-    // on a blocking thread, fire-and-forget: a stalled agent-home
-    // filesystem must never block the wait's retry loop (the select's
-    // deadline arm cannot fire while the task is blocked), and the
-    // record stays best-effort silent either way.
+    // The synchronous filesystem write runs on a blocking thread,
+    // fire-and-forget: a stalled agent-home filesystem must never block
+    // the wait's retry loop (the select's deadline arm cannot fire
+    // while blocked).
     let line = format!(
         "[{}] Waiting for daemon update restart to finish before opening: {error:#}",
         now_iso()
     );
     tokio::task::spawn_blocking(move || {
         let write = || -> std::io::Result<()> {
-            // TS `appendRotatingLog`: the oversize log rolls to `.old`,
-            // then the line appends; every failure stays silent (a broken
-            // log dir must not break the open).
+            // TS `appendRotatingLog`: the oversize log rolls to `.old`;
+            // every failure stays silent (a broken log dir must not
+            // break the open).
             const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
             let Some(agent_dir) = pa_types::platform::agent_dir() else {
                 return Ok(());
@@ -231,8 +190,8 @@ fn log_update_restart_wait(error: &anyhow::Error) {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ` — the TS `new Date().toISOString()` shape
-/// the client-errors log prefix carries (the same algorithm as
-/// pa-daemon's util, which pa-tui cannot depend on).
+/// (the same algorithm as pa-daemon's util, which pa-tui cannot
+/// depend on).
 fn now_iso() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -285,8 +244,6 @@ mod tests {
         )
     }
 
-    /// TS `waitThroughDaemonUpdateRestart`: a non-update error before any
-    /// update-restart signal propagates unchanged (exactly one attempt).
     #[tokio::test]
     async fn a_non_update_failure_before_any_signal_propagates() {
         let mut attempts = 0;
@@ -300,9 +257,6 @@ mod tests {
         assert_eq!(attempts, 1);
     }
 
-    /// Post-arm transient shapes only (arming is pinned at the loop layer
-    /// by the e2e): every restart-transient failure is retried and the
-    /// outcome reports that it waited.
     #[tokio::test]
     async fn retries_every_restart_transient_failure_and_reports_the_wait() {
         let transient_failures: Vec<(&str, anyhow::Error)> = vec![
@@ -310,7 +264,6 @@ mod tests {
                 "the preparing rejection",
                 preparing_rejection(),
             ),
-            // Transport failures while the daemon exits and boots.
             (
                 "connect refused",
                 anyhow!("Failed to connect to the Prime Agent daemon. Socket: /s."),
@@ -319,9 +272,6 @@ mod tests {
                 "closed",
                 anyhow!("Connection to the Prime Agent daemon closed. Socket: /s."),
             ),
-            // The transport's own failure shapes when the daemon exits
-            // mid-request (the pending-fail resolution, the dead writer,
-            // the pre-handshake death).
             (
                 "pending-fail closed",
                 anyhow!("the daemon connection closed"),
@@ -346,7 +296,6 @@ mod tests {
                 "handshake timeout",
                 anyhow!("Timed out after 5000ms waiting for the Prime Agent daemon handshake. Socket: /s."),
             ),
-            // Session-not-restored-yet misses.
             (
                 "unknown session",
                 rejection("Unknown active session: update-restart-session", None),
@@ -381,8 +330,6 @@ mod tests {
         }
     }
 
-    /// A permanent failure after arming surfaces unmasked (no retry
-    /// through the window).
     #[tokio::test]
     async fn a_permanent_failure_after_arming_surfaces_unmasked() {
         let mut attempts = 0;
@@ -406,8 +353,6 @@ mod tests {
         assert_eq!(attempts, 2, "no third attempt");
     }
 
-    /// TS: the deadline races every attempt, so an in-flight attempt
-    /// cannot hold the open past the budget.
     #[tokio::test]
     async fn the_deadline_fails_a_wait_past_its_budget() {
         let mut attempts = 0;
@@ -438,8 +383,6 @@ mod tests {
         assert_eq!(attempts, 2);
     }
 
-    /// A disabled route never waits: the single attempt runs straight
-    /// through, so the CLI open keeps today's hard-failure behavior.
     #[tokio::test]
     async fn a_disabled_route_runs_one_attempt() {
         let mut attempts = 0;
@@ -456,9 +399,6 @@ mod tests {
         );
     }
 
-    /// The transport-timeout shapes classify exactly (the TS prefix set),
-    /// in both capitalizations (the hello/connect paths capitalize
-    /// `Timed`, the session's own bounded requests do not).
     #[test]
     fn the_transport_timeout_shapes_classify_exactly() {
         for text in [
@@ -474,7 +414,6 @@ mod tests {
                 "{text}"
             );
         }
-        // A timeout that is not a daemon transport shape does not.
         assert!(!is_daemon_transport_timeout(
             "Timed out after 10ms waiting for the session response"
         ));
@@ -486,8 +425,6 @@ mod tests {
         ));
     }
 
-    /// The deadline failure's routing predicate: the deadline error (the
-    /// status-line guidance) classifies; an unrelated failure does not.
     #[test]
     fn the_deadline_error_classifies_for_the_handoff() {
         let deadline = update_restart_deadline_error(240_000, Some(&preparing_rejection()));
@@ -505,8 +442,6 @@ mod tests {
         )));
     }
 
-    /// The pinned TS constants: the wait budget mirrors the attached
-    /// session reconnect budget, and the notice is the TS text verbatim.
     #[test]
     fn the_ts_constants_are_pinned() {
         assert_eq!(DAEMON_UPDATE_RESTART_OPEN_WAIT_MS, 240_000);
@@ -520,7 +455,6 @@ mod tests {
         );
     }
 
-    /// The client-errors log prefix is the TS `toISOString()` shape.
     #[test]
     fn the_iso_prefix_shape_is_the_ts_toisostring() {
         let iso = now_iso();
@@ -529,8 +463,6 @@ mod tests {
         assert_eq!(iso.as_bytes()[4], b'-');
         assert_eq!(iso.as_bytes()[10], b'T');
         assert_eq!(iso.as_bytes()[19], b'.');
-        // The civil-from-days conversion round-trips the epoch and a leap
-        // year (the same algorithm the direct transport parses with).
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(20_720), (2026, 9, 24));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));

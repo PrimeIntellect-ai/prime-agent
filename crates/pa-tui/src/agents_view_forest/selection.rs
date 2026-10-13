@@ -2,9 +2,8 @@ use serde_json::Value;
 
 use super::{is_summary_row_identity, AgentsViewRow, RowKind, SelectionKey};
 
-/// Session ids of every ancestor of a nested row, root-most first (TS
-/// `collectSubagentAncestorSessionIds`): the chain the view re-expands
-/// when the drilled-in child returns to it.
+/// Session ids of every ancestor of a nested row, root-most first: the chain the view
+/// re-expands when the drilled-in child returns to it.
 pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str>) -> Vec<String> {
     let mut ancestors: Vec<String> = Vec::new();
     let mut parent = parent_identity;
@@ -34,12 +33,10 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
     ancestors
 }
 
-/// Resolve the selection after a rebuild (TS
-/// `resolveAgentsViewSelectionState`): the row identity wins, then the
-/// active session id, then the session id; an unresolvable anchor keeps
-/// the bounded current index, else the first selectable row. A summary
-/// line identity pins the fallbacks to summary rows, which reuse their
-/// parent's session key.
+/// Resolve the selection after a rebuild: the row identity wins, then the active session id,
+/// then the session id; an unresolvable anchor keeps the bounded current index, else the first
+/// selectable row. A summary line identity pins the fallbacks to summary rows, which reuse
+/// their parent's session key.
 pub fn resolve_selection(
     rows: &[AgentsViewRow],
     current: usize,
@@ -61,9 +58,8 @@ pub fn resolve_selection(
         |row: &AgentsViewRow| !selected_summary_row || row.kind == RowKind::SubagentSummary;
     if let Some(identity) = identity {
         if let Some(index) = find_selectable(rows, |row| row.identity == identity) {
-            // Synthetic nested rows deliberately reuse their parent's
-            // session key, so their exact row identity must win over the
-            // active-runtime fallback.
+            // Synthetic nested rows deliberately reuse their parent's session key, so their
+            // exact row identity must win over the active-runtime fallback.
             if rows[index].kind != RowKind::Agent {
                 return index;
             }

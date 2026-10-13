@@ -1,12 +1,6 @@
-//! Shared truncation utilities for tool outputs.
-//!
-//! Port of `packages/coding-agent/src/core/tools/truncate.ts`.
-//!
-//! Truncation is based on two independent limits - whichever is hit first wins:
-//! - Line limit (default: 2000 lines)
-//! - Byte limit (default: 50KB)
-//!
-//! Never returns partial lines (except bash tail truncation edge case).
+//! Shared truncation utilities for tool outputs: two independent limits, whichever hits first —
+//! line limit (default 2000) and byte limit (default 50KB). Never returns partial lines (except
+//! the bash tail truncation edge case).
 
 /// Max chars per grep match line.
 pub const GREP_MAX_LINE_LENGTH: usize = 500;
@@ -43,33 +37,22 @@ pub enum TruncatedBy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TruncationResult {
-    /// The truncated content.
     pub content: String,
-    /// Whether truncation occurred.
     pub truncated: bool,
     /// Which limit was hit: lines, bytes, or None if not truncated.
     pub truncated_by: Option<TruncatedBy>,
-    /// Total number of lines in the original content.
     pub total_lines: usize,
-    /// Total number of bytes in the original content.
     pub total_bytes: usize,
-    /// Number of complete lines in the truncated output.
     pub output_lines: usize,
-    /// Number of bytes in the truncated output.
     pub output_bytes: usize,
     /// Whether the last line was partially truncated (only for tail truncation edge case).
     pub last_line_partial: bool,
-    /// Whether the first line exceeded the byte limit (for head truncation).
     pub first_line_exceeds_limit: bool,
-    /// The max lines limit that was applied.
     pub max_lines: usize,
-    /// The max bytes limit that was applied.
     pub max_bytes: usize,
 }
 
-/// Default line limit: 2000 lines.
 pub const DEFAULT_MAX_LINES: usize = 2000;
-/// Default byte limit: 50KB.
 pub const DEFAULT_MAX_BYTES: usize = 50 * 1024;
 
 /// Format bytes as human-readable size.
@@ -83,11 +66,9 @@ pub fn format_size(bytes: usize) -> String {
     }
 }
 
-/// Truncate content from the head (keep first N lines/bytes).
-/// Suitable for file reads where you want to see the beginning.
-///
-/// Never returns partial lines. If first line exceeds byte limit,
-/// returns empty content with `first_line_exceeds_limit = true`.
+/// Truncate content from the head (keep first N lines/bytes); suitable for file
+/// reads. Never returns partial lines; a first line over the byte limit returns
+/// empty content with `first_line_exceeds_limit = true`.
 pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationResult {
     let TruncationOptions {
         max_lines,
@@ -168,10 +149,8 @@ pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationRes
     }
 }
 
-/// Truncate content from the tail (keep last N lines/bytes).
-/// Suitable for bash output where you want to see the end (errors, final results).
-///
-/// May return partial first line if the last line of original content exceeds byte limit.
+/// Truncate content from the tail (keep last N lines/bytes); suitable for bash output where you
+/// want to see the end. May return a partial first line when the last line exceeds the byte limit.
 pub fn truncate_tail(content: &str, options: TruncationOptions) -> TruncationResult {
     let TruncationOptions {
         max_lines,

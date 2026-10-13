@@ -10,9 +10,6 @@ fn json(text: &str) -> Value {
     serde_json::from_str(text).expect("fixture json")
 }
 
-/// The info rows the panel windows over: every rendered row pads to
-/// exactly the render width (wide glyphs never overflow a row) and
-/// wraps tighter at a narrow terminal instead of truncating content.
 #[test]
 fn client_text_rows_wrap_and_pad_to_the_width() {
     let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
@@ -21,13 +18,10 @@ fn client_text_rows_wrap_and_pad_to_the_width() {
         vec![raw_span("  ")],
         vec![dim("prefix "), raw_span("wide 界 words words")],
     ];
-    // Sane terminal widths (at a degenerate width-1 terminal a wide
-    // glyph cannot fit a row, so exact-width padding is a width-2+
-    // property).
+    // Sane terminal widths (at a degenerate width-1 terminal a wide glyph
+    // cannot fit a row, so exact-width padding is a width-2+ property).
     for width in [7, 23, 80] {
         let rendered = render_client_text(&rows, &theme, width);
-        // The TS `Spacer(1)` leading blank rides first, unpadded;
-        // every CONTENT row below it pads to exactly the width.
         assert!(!rendered.is_empty(), "the leading spacer always renders");
         assert!(rendered[0].is_empty(), "the leading spacer is the TS blank");
         for row in &rendered[1..] {
@@ -80,7 +74,6 @@ fn session_info_matches_ts_shape() {
             "Use /context for token, cost, and context usage.",
         ]
     );
-    // A session name adds the Name row; a missing file is in-memory.
     let mut with_name = stats;
     with_name["sessionFile"] = Value::Null;
     let rows = plain(&session_info_rows(&with_name, Some("lane work")));
@@ -104,8 +97,6 @@ fn logs_rows_match_ts_shape() {
             String::new(),
             format!("Directory: {}", logs.display()),
             String::new(),
-            // 2048/1024 = 2.0 KB; the 1-byte file rounds to 0.0 KB;
-            // rows sort by name; dot-entries stay hidden.
             "• a-second.log (0.0 KB)".to_string(),
             "• client-errors.log (2.0 KB)".to_string(),
             String::new(),
@@ -113,7 +104,6 @@ fn logs_rows_match_ts_shape() {
                 .to_string(),
         ]
     );
-    // A missing directory renders the empty state (TS catch).
     let missing = dir.path().join("no-such-logs");
     assert_eq!(plain(&logs_rows(&missing))[4], "No logs written yet.");
 }
@@ -277,23 +267,12 @@ fn context_tree_full_shape_matches_ts() {
             "Current: 1,250,000 / 131,072 (95.4%)",
         ]
     );
-    // The per-model breakdown STAYS OFF here: the root and sub-1
-    // carry buckets, but the two billed children without them would
-    // leave lines that do not add up to the displayed total — a
-    // partial breakdown degrades to the plain TS totals.
+    // The per-model breakdown STAYS OFF here: the two billed children
+    // without buckets would leave lines that do not add up to the displayed
+    // total — a partial breakdown degrades to the plain TS totals.
 }
 
-/// The operator's cost question end to end: a session that switches
-/// models mid-conversation (sol -> opus, the switch's first request
-/// re-caching the whole history) plus a subagent on a third model.
-/// Every node's row carries its model, and the Cost section breaks
-/// the total down per model, most expensive first. The fixture's
-/// cost blocks are the provider-computed records (sol turn:
-/// 100k\u{d7}$4/M + 2k\u{d7}$20/M = $0.44; the opus switch burst:
-/// 5k\u{d7}$5/M + 1k\u{d7}$25/M + 104k cache-write\u{d7}$6.25/M =
-/// $0.70; the opus cache-hit turn: 500\u{d7}$5/M + 800\u{d7}$25/M +
-/// 110k cache-read\u{d7}$0.5/M = $0.0775; the glm subagent:
-/// $0.023).
+/// The operator's cost question end to end.
 #[test]
 fn context_tree_shows_per_model_costs_across_a_switch() {
     let tree = json(
@@ -375,20 +354,15 @@ fn context_bar_color_follows_the_percent() {
             }"#,
     );
     let rows = context_tree_rows(&tree, 120, ContextTreeScope::Collapsed);
-    // The root row carries the bar: warning at >= 80 percent.
     let bar = rows[3]
         .iter()
         .find(|span| span.text.contains("\u{2593}"))
         .expect("the bar cell");
     assert_eq!(bar.color, Some(ThemeColor::Warning));
-    // Under 80 the bar is the accent color (fixture A covers it at
-    // 0.5 percent); the token cells are default-foreground.
 }
 
-/// The collapse boundary: a tree of exactly the row budget (root + 9
-/// runners) renders the full TS shape — every row in tree order, no
-/// summary row, no expand hint. The runner usages are deliberately
-/// unsorted, so a leaked ranking would reorder the rows.
+/// The runner usages are deliberately unsorted, so a leaked ranking
+/// would reorder the rows.
 #[test]
 fn context_tree_ten_rows_render_the_full_shape() {
     let tree = json(
@@ -495,13 +469,9 @@ fn context_tree_ten_rows_render_the_full_shape() {
     );
 }
 
-/// The collapsed shape: a fleet tree of 13 agent rows (root + 12
-/// workers) renders its ten highest-usage rows — the root first, then
-/// the workers by own spend — folds the three cheapest into the `...`
-/// summary row (their spend fills the token and cost cells, so the
-/// table still adds up), and names the `/context all` command that
-/// renders the whole tree. The trailing totals still cover all 13
-/// agents.
+/// A fleet tree over the budget: the `...` summary row's spend fills
+/// the token and cost cells, so the table still adds up, and the
+/// trailing totals still cover all 13 rows.
 #[test]
 fn context_tree_collapses_over_the_budget_to_top_usage_rows() {
     let tree = json(
@@ -629,8 +599,6 @@ fn context_tree_collapses_over_the_budget_to_top_usage_rows() {
     );
 }
 
-/// The expanded shape (`/context all`): the same 13-agent tree renders
-/// every row in tree order — no ranking, no summary row, no hint.
 #[test]
 fn context_tree_all_renders_every_row() {
     let tree = json(
@@ -760,10 +728,8 @@ fn context_tree_all_renders_every_row() {
 }
 
 /// The ranking is pure spend: an orchestrator that offloaded everything
-/// to 10 scouts falls out of its own top rows. The summary row folds the
-/// root in ("1 more agent"), the utilization bar leaves the table with
-/// it, and the trailing `Context` section still reports the root's
-/// window.
+/// to 10 scouts falls out of its own top rows; the utilization bar
+/// leaves the table with it.
 #[test]
 fn context_tree_collapse_can_fold_the_root_into_the_summary() {
     let tree = json(
@@ -883,8 +849,6 @@ fn client_text_renders_spacer_then_margined_rows() {
         &theme,
         10,
     );
-    // Spacer(1), then Text(1, 0): one leading margin column, padded to
-    // the full width; a blank source line is a full-width blank row.
     let text: Vec<String> = rows
         .iter()
         .map(|row| row.iter().map(|span| span.content.as_str()).collect())
@@ -900,15 +864,13 @@ fn client_text_wraps_long_rows_at_the_content_width() {
         .iter()
         .map(|row| row.iter().map(|span| span.content.as_str()).collect())
         .collect();
-    // Content width 6: the wrapped rows keep the one-column margins
-    // and pad to the full width.
     assert_eq!(text, vec!["", " aaaa   ", " bb cc  "]);
 }
 
 #[test]
 fn js_to_fixed_matches_the_js_rounding() {
-    // Half-away-from-zero on the decimal expansion (Rust's {:.1} would
-    // round 0.25 to 0.2; JS toFixed gives 0.3).
+    // Half-away-from-zero on the decimal expansion (Rust's {:.1} would round 0.25 to 0.2; JS
+    // toFixed gives 0.3).
     assert_eq!(js_to_fixed(0.25, 1), "0.3");
     assert_eq!(js_to_fixed(0.5, 1), "0.5");
     assert_eq!(js_to_fixed(1.005, 2), "1.00");
@@ -929,7 +891,6 @@ fn grouped_matches_to_locale_string() {
 fn truncate_plain_matches_truncate_to_width() {
     assert_eq!(truncate_plain("short", 10), "short");
     assert_eq!(truncate_plain("truncate me", 8), "trunc...");
-    // The ellipsis clips when the width cannot hold it.
     assert_eq!(truncate_plain("abcdef", 2), "..");
     assert_eq!(truncate_plain("abcdef", 1), ".");
 }

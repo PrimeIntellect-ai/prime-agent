@@ -1,3 +1,9 @@
+<!--
+Pull requests are accepted from maintainers and vouched contributors only.
+If a maintainer has not invited this work, start with a GitHub Discussion:
+https://github.com/PrimeIntellect-ai/prime-agent/discussions
+-->
+
 ## Ownership compliance
 
 <!-- Crate scope/non-goals/public API + dependency direction per AGENTS.md -->
@@ -7,7 +13,7 @@
 ## Parity-diff evidence (merge gate for user-visible surfaces)
 
 <!-- Per the AGENTS.md merge gates: features are not done until diffed against the TS binary. -->
-- [ ] Rendered output: frame-diff vs the TS binary for every touched surface (visual_parity.py / the specific harness)
+- [ ] Rendered output: frame-diff vs the TS binary for every touched surface
 - [ ] Interactive behavior: same input, identical handling (keys/mouse/timing) vs TS
 - [ ] Wire parity: byte-compare TS daemon traffic for protocol changes
 - [ ] User-visible invariants: every user action produces the same visible reaction TS shows; nothing extra TS does not show

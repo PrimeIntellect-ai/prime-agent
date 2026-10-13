@@ -1,6 +1,6 @@
-//! The bash view's unit battery (moved with its concern): the wire
-//! parsing, the pane geometry, the key loop, and the lazy tail window's
-//! scroll, load-more, and retry lifecycle.
+//! The bash view's unit battery: the wire parsing, the pane geometry,
+//! the key loop, and the lazy tail window's scroll, load-more, and
+//! retry lifecycle.
 
 use super::*;
 use crate::keybindings::KeybindingsManager;
@@ -63,10 +63,7 @@ fn parse_reads_the_wire_shape() {
     assert_eq!(rows[0].id, "z");
 }
 
-/// Running shells ride the top (the operator's running-first
-/// ruling, 2026-09-25): a finished row that arrives first in the
-/// registry moves below the live work, and the registry's own order
-/// survives within each side.
+/// The registry's own order survives within each side.
 #[test]
 fn running_shells_ride_the_top_of_the_list() {
     let rows = parse_bash_activities(&json!({"activities": [
@@ -79,8 +76,6 @@ fn running_shells_ride_the_top_of_the_list() {
     assert_eq!(ids, ["live-1", "live-2", "done-1", "done-2"]);
 }
 
-/// The list is a columned table: a dim header naming the columns, the
-/// rows aligned under it, and one bottom hint line.
 #[test]
 fn the_list_renders_columned_rows_and_one_hint() {
     let view = BashView::new(activities(), 24);
@@ -115,9 +110,6 @@ fn the_list_renders_columned_rows_and_one_hint() {
     }
 }
 
-/// An override that empties the back binding drops its key from the
-/// list hint (the hint never advertises a key the handler does not
-/// take); the pane's core keys keep their labels.
 #[test]
 fn the_list_hint_drops_unbound_keys() {
     let mut cfg = crate::keybindings::KeybindingsConfig::new();
@@ -133,11 +125,7 @@ fn the_list_hint_drops_unbound_keys() {
     );
 }
 
-/// The columns distribute across the full TUI width (the operator's
-/// 2026-09-25 ruling): the command column carries the remaining
-/// width, so the header and every row — selected or plain — span
-/// the terminal edge to edge; the fixed fact columns (duration,
-/// pid, status) keep their content-hug geometry inside it.
+/// The command column carries the remaining width; the fixed fact columns hug their content.
 #[test]
 fn the_columns_distribute_across_the_full_width() {
     let view = BashView::new(activities(), 24);
@@ -175,8 +163,6 @@ fn the_columns_distribute_across_the_full_width() {
     assert!(plain.iter().all(|span| span.style.bg.is_none()));
 }
 
-/// The selected row's wash spans the whole terminal width at every
-/// width the pane renders at.
 #[test]
 fn the_selection_wash_spans_the_whole_width() {
     for width in [50usize, 90, 186] {
@@ -197,12 +183,7 @@ fn the_selection_wash_spans_the_whole_width() {
     }
 }
 
-/// The selected row paints the ONE shared selection style (the
-/// operator's 2026-09-28 consistency rule: the shell-runs selection's
-/// background is IDENTICAL to the agents view's and the heartbeats
-/// picker's selected rows and the dock's group band): the hover
-/// band's own color, no modifiers — one style constant
-/// (`Theme::selection_row_style`), not a per-surface copy.
+/// One style constant (`Theme::selection_row_style`), not a per-surface copy.
 #[test]
 fn the_selected_row_paints_the_shared_selection_style() {
     let theme = theme();
@@ -223,11 +204,8 @@ fn the_selected_row_paints_the_shared_selection_style() {
     );
 }
 
-/// The status column color-codes the rows (the operator's
-/// color-coding directive): running green, a nonzero exit red — the
-/// failed state — a clean exit dim. The selected row's wash patches a
-/// background onto its spans, so the color check compares the
-/// foreground only.
+/// The selected row's wash patches a background onto its spans, so
+/// the color check compares the foreground only.
 #[test]
 fn the_status_column_color_codes_the_states() {
     let success = theme().fg_style(ThemeColor::Success).fg;
@@ -249,13 +227,8 @@ fn the_status_column_color_codes_the_states() {
     assert!(failed.iter().all(|span| span.style.fg != success));
 }
 
-/// The pane runs all the way to the bottom of the screen (the
-/// operator's 2026-09-24 directive): no rule rides below the
-/// shortcuts hint — exactly one blank line of spacing rides under
-/// it, the same treatment as the `/model` view. A tall catalog fills
-/// the whole budget (the truncate keeps exactly the viewport rows),
-/// and a short catalog still ends on the blank (the dock's frame
-/// pads the rows above).
+/// No rule rides below the hint — exactly one blank under it, the same treatment as the
+/// `/model` view; a tall catalog fills the whole budget, a short one still ends on the blank.
 #[test]
 fn the_pane_runs_to_the_bottom() {
     let rows: Vec<BashActivity> = (0..20)
@@ -272,8 +245,7 @@ fn the_pane_runs_to_the_bottom() {
     for viewport in [10usize, 16, 24] {
         let view = BashView::new(rows.clone(), viewport);
         let frame = view.render(&theme(), 70, &kb());
-        // The pane never renders past its budget; the hint is its
-        // last content row with exactly one blank below it (the dock
+        // The hint is the last content row with exactly one blank below it (the dock
         // anchors the pane's rows on the screen's bottom).
         assert!(frame.len() <= viewport, "never past the budget");
         let text = frame_text(&frame);
@@ -293,15 +265,12 @@ fn the_pane_runs_to_the_bottom() {
             "the one blank above the hint stays: {third_to_last}"
         );
     }
-    // A short catalog: the pane ends on the blank below the hint,
-    // never on a rule.
     let view = BashView::new(activities(), 24);
     let frame = view.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
     let last_row = text.last().expect("the trailing blank row");
     assert!(last_row.trim().is_empty());
     assert!(!last_row.contains("\u{2500}"));
-    // The detail pane too.
     let mut view = BashView::new(activities(), 16);
     view.handle_key("enter", &kb());
     let frame = view.render(&theme(), 70, &kb());
@@ -311,9 +280,6 @@ fn the_pane_runs_to_the_bottom() {
     assert!(text[text.len() - 2].contains("close"));
 }
 
-/// Enter on a list row opens the detail drill-in and asks the host
-/// for the output tail; Enter in the detail on the cancel action runs
-/// the kill.
 #[test]
 fn enter_opens_the_detail_and_the_cancel_action() {
     let mut view = BashView::new(activities(), 24);
@@ -349,10 +315,7 @@ fn enter_opens_the_detail_and_the_cancel_action() {
     let _ = first_generation;
 }
 
-/// The drill-in is the operator's refined shape: ONE metadata row
-/// (pid, started, duration together with the status), then the exact
-/// command, then the output — no labeled-pair blocks, no section
-/// labels, no duplicated title.
+/// No labeled-pair blocks, no section labels, no duplicated title.
 #[test]
 fn the_detail_is_one_metadata_row_the_command_and_the_output() {
     let mut view = BashView::new(activities(), 40);
@@ -365,8 +328,6 @@ fn the_detail_is_one_metadata_row_the_command_and_the_output() {
     let frame = view.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
     let joined = text.join("\n");
-    // The one metadata row carries pid, started, duration, and the
-    // status together.
     assert!(
         text.iter().any(|row| {
             row.contains("pid 42")
@@ -376,7 +337,6 @@ fn the_detail_is_one_metadata_row_the_command_and_the_output() {
         }),
         "one metadata row with the facts together: {text:?}"
     );
-    // No labeled pairs, no section labels, no duplicate title.
     assert!(!text.iter().any(|row| row.contains("  Command")));
     assert!(!text.iter().any(|row| row.contains("  Output")));
     assert_eq!(
@@ -386,8 +346,6 @@ fn the_detail_is_one_metadata_row_the_command_and_the_output() {
         1,
         "the command renders once, not again as a title: {text:?}"
     );
-    // The output renders under the command, control characters
-    // scrubbed.
     let command_index = text
         .iter()
         .position(|row| row.contains("cargo build --release"))
@@ -402,15 +360,12 @@ fn the_detail_is_one_metadata_row_the_command_and_the_output() {
     );
     assert!(joined.contains("red"));
     assert!(!joined.contains('\x1b'));
-    // The cancel action and the scroll hint.
     assert!(text.iter().any(|row| row.contains("Cancel command")));
     assert!(text.iter().any(|row| row.contains(
         "\u{2191}/\u{2193} scroll \u{b7} Enter run \u{b7} \u{2190} back \u{b7} Esc close"
     )));
 }
 
-/// The metadata row's status rides in its state color: the running
-/// row green, the failed exit red.
 #[test]
 fn the_detail_status_color_codes_the_state() {
     let mut view = BashView::new(activities(), 40);
@@ -430,8 +385,6 @@ fn the_detail_status_color_codes_the_state() {
         .any(|span| span.style == theme().fg_style(ThemeColor::Error)));
 }
 
-/// The finished row's drill-in carries no run key (nothing to run)
-/// and no action row.
 #[test]
 fn the_finished_detail_has_no_action_and_no_run_hint() {
     let mut view = BashView::new(activities(), 40);
@@ -448,8 +401,6 @@ fn the_finished_detail_has_no_action_and_no_run_hint() {
     );
 }
 
-/// A tail for another row never lands in the open pane, and an empty
-/// fetched tail reads as its own note.
 #[test]
 fn stale_and_empty_tails_are_handled() {
     let mut view = BashView::new(activities(), 40);
@@ -475,8 +426,7 @@ fn back_returns_to_the_list_and_escape_closes() {
     assert_eq!(view.handle_key("ctrl+c", &kb()), BashViewAction::Close);
 }
 
-/// A registry refresh keeps the selection on the surviving id and
-/// drops a detail pane whose row vanished.
+/// Drops a detail pane whose row vanished.
 #[test]
 fn a_refresh_keeps_the_surviving_selection() {
     let mut view = BashView::new(activities(), 24);
@@ -487,7 +437,6 @@ fn a_refresh_keeps_the_surviving_selection() {
     ]}));
     view.apply_activities(refreshed);
     assert_eq!(view.selected_id.as_deref(), Some("c"));
-    // The detail pane conforms when its row vanishes.
     view.handle_key("enter", &kb());
     let emptied = parse_bash_activities(&json!({"activities": []}));
     view.apply_activities(emptied);
@@ -499,8 +448,6 @@ fn a_refresh_keeps_the_surviving_selection() {
         .any(|row| row.contains("No background commands")));
 }
 
-/// A short viewport shrinks the panes so they never exceed the
-/// terminal budget.
 #[test]
 fn short_viewports_never_clip_the_panes() {
     for viewport_rows in [9usize, 10, 12, 14] {
@@ -518,8 +465,7 @@ fn short_viewports_never_clip_the_panes() {
     assert!(text.iter().any(|row| row.contains("Cancel command")));
 }
 
-/// A short viewport shrinks the command first, then the output — the
-/// action row and the hint never yield.
+/// The action row and the hint never yield.
 #[test]
 fn a_tight_viewport_keeps_the_output_minimum_over_the_command() {
     let mut catalog = activities();
@@ -534,9 +480,7 @@ fn a_tight_viewport_keeps_the_output_minimum_over_the_command() {
     assert!(text.iter().any(|row| row.contains("Fetching output")));
 }
 
-/// The region's default view is the newest output: a tail taller than
-/// the region drops the OLDEST lines (the leading marker says so),
-/// never the newest.
+/// A tail taller than the region drops the OLDEST lines, never the newest.
 #[test]
 fn the_region_anchors_on_the_newest_output() {
     let mut catalog = activities();
@@ -551,7 +495,6 @@ fn the_region_anchors_on_the_newest_output() {
     let joined = text.join(" ");
     assert!(joined.contains("line-30"), "the newest line renders");
     assert!(!joined.contains("line-01"), "the oldest drops first");
-    // The leading marker rides over the first region row.
     let marker = text
         .iter()
         .position(|row| row.trim() == "\u{2026}")
@@ -563,8 +506,7 @@ fn the_region_anchors_on_the_newest_output() {
     assert!(marker < newest, "the marker rides above the content");
 }
 
-/// Up scrolls the region toward the older lines (a `\u{2193}` marker
-/// rides under the last row), and down walks back to the newest.
+/// A `\u{2193}` marker rides under the last row while scrolled up.
 #[test]
 fn the_region_scrolls_up_and_down() {
     let mut catalog = activities();
@@ -611,10 +553,8 @@ fn the_region_scrolls_up_and_down() {
     );
 }
 
-/// Up at the top of the loaded window lazily loads more of the tail:
-/// the window doubles (50 -> 100 -> 200, the wire's cap), the grown
-/// response anchors the region just above where it stopped, and the
-/// wire cap or a non-growing response ends the loads.
+/// The window doubles (50 -> 100 -> 200, the wire's cap), the grown response anchors the
+/// region where it stopped, and the cap or a non-growing response ends the loads.
 #[test]
 fn up_at_the_loaded_top_lazily_loads_more_of_the_tail() {
     let mut catalog = activities();
@@ -635,8 +575,8 @@ fn up_at_the_loaded_top_lazily_loads_more_of_the_tail() {
             BashViewAction::LoadMore { id, lines, .. } => {
                 assert_eq!(id, "a");
                 assert_eq!(lines, FIRST_TAIL_LINES * 2);
-                // The grown window lands: it holds the same newest
-                // lines plus the older ones prepended.
+                // The grown window: same newest lines plus the older
+                // ones prepended.
                 let mut grown: Vec<String> = (1..=FIRST_TAIL_LINES * 2)
                     .map(|n| format!("line-{n:03}"))
                     .collect();
@@ -688,9 +628,6 @@ fn up_at_the_loaded_top_lazily_loads_more_of_the_tail() {
     }
 }
 
-/// A lazy load that grew nothing (the retained buffer's end, or the
-/// wire's byte cap) completes the tail: no further loads, the window
-/// stays.
 #[test]
 fn a_load_more_that_grew_nothing_completes_the_tail() {
     let mut catalog = activities();
@@ -730,8 +667,6 @@ fn a_load_more_that_grew_nothing_completes_the_tail() {
     }
 }
 
-/// A response shorter than the requested window is the retained
-/// buffer's own end: the tail is complete and the up key never loads.
 #[test]
 fn a_short_window_completes_the_tail() {
     let mut catalog = activities();
@@ -760,14 +695,7 @@ fn a_short_window_completes_the_tail() {
     );
 }
 
-/// A fetch or load error surfaces in the pane, releases the
-/// in-flight load claim for the retry, restores the lazy-load window
-/// to the loaded size (the retry re-issues the same grown request
-/// instead of reading the wire cap as the end), and the retried
-/// load's success supersedes the shown fetch error. A kill error
-/// touches neither the window nor the claim (it knows nothing about
-/// the load's fate) and never clears on a tail landing — only the
-/// registry refresh clears it.
+/// A kill error touches neither the window nor the claim and clears only on the registry refresh.
 #[test]
 fn an_error_releases_the_load_claim_and_a_success_clears_it() {
     let mut catalog = activities();
@@ -852,10 +780,7 @@ fn an_error_releases_the_load_claim_and_a_success_clears_it() {
     assert!(view.error.is_none());
 }
 
-/// A failed FINAL lazy load (the last growth, up to the wire cap)
-/// restores the loaded window, so the retry re-issues the same cap
-/// request instead of reading the window the failed request left
-/// behind as the end: the remaining output stays reachable.
+/// Restores the loaded window, so the retry re-issues the same cap request.
 #[test]
 fn a_failed_final_load_keeps_the_tail_reachable() {
     let mut catalog = activities();
@@ -883,7 +808,6 @@ fn a_failed_final_load_keeps_the_tail_reachable() {
         }
     }
     let _ = view.render(&theme(), 70, &kb());
-    // The final growth (100 -> the 200-line cap) issues and fails.
     let mut failed = false;
     for _ in 0..TAIL_LINES {
         match view.handle_key("up", &kb()) {
@@ -902,9 +826,8 @@ fn a_failed_final_load_keeps_the_tail_reachable() {
         }
     }
     assert!(failed, "the final (cap) load was issued");
-    // The failure restored the loaded window - not the cap the failed
-    // request had set - so the tail is not complete and the retry
-    // re-issues the same cap request.
+    // The failure restored the loaded window, not the failed
+    // request's cap, so the retry re-issues the same cap request.
     assert_eq!(view.tail_window, FIRST_TAIL_LINES * 2);
     assert!(!view.tail_complete, "the failed load never ends the tail");
     assert!(!view.loading_more);
@@ -923,10 +846,7 @@ fn a_failed_final_load_keeps_the_tail_reachable() {
     assert!(retried, "the cap retry re-issues after the failure");
 }
 
-/// A kill error never releases the in-flight load claim: a failed
-/// kill while a lazy load is in flight leaves the claim held, so the
-/// next Up does not stack a duplicate same-generation load; the
-/// still-in-flight load later lands and clears it.
+/// The next Up stacks no duplicate; the still-in-flight load later lands and clears it.
 #[test]
 fn a_kill_error_never_releases_the_load_claim() {
     let mut catalog = activities();
@@ -938,7 +858,6 @@ fn a_kill_error_never_releases_the_load_claim() {
         .collect();
     view.set_output("a", &tail.join("\n"), view.detail_generation);
     let _ = view.render(&theme(), 70, &kb());
-    // Walk to the top and issue a lazy load.
     let mut generation = 0;
     for _ in 0..FIRST_TAIL_LINES {
         match view.handle_key("up", &kb()) {
@@ -969,10 +888,8 @@ fn a_kill_error_never_releases_the_load_claim() {
         FIRST_TAIL_LINES * 2,
         "a kill error never touches the window either"
     );
-    // The next Up does not stack a duplicate load.
     assert_eq!(view.handle_key("up", &kb()), BashViewAction::None);
     assert!(view.loading_more);
-    // The still-in-flight load lands and clears the claim.
     let grown: Vec<String> = (1..=FIRST_TAIL_LINES * 2)
         .map(|n| format!("line-{n:03}"))
         .collect();
@@ -980,18 +897,13 @@ fn a_kill_error_never_releases_the_load_claim() {
     assert!(!view.loading_more);
 }
 
-/// A failed OPEN fetch (nothing loaded yet) is retryable from the
-/// detail view: an Up press re-issues the open fetch under the same
-/// generation, and its success clears the shown error. While the
-/// open fetch is still in flight, Up does nothing.
+/// While the open fetch is still in flight, Up does nothing.
 #[test]
 fn an_up_press_retries_a_failed_open_fetch() {
     let mut view = BashView::new(activities(), 24);
     view.handle_key("enter", &kb());
     let generation = view.detail_generation;
-    // The open fetch is in flight: Up does nothing.
     assert_eq!(view.handle_key("up", &kb()), BashViewAction::None);
-    // The fetch fails.
     view.set_error(
         "Bash output: kernel stalled".to_string(),
         true,
@@ -1015,8 +927,6 @@ fn an_up_press_retries_a_failed_open_fetch() {
             "key repeats never stack duplicate retries"
         );
     }
-    // The retry lands: the claim and the fetch error clear and the
-    // output shows.
     view.set_output("a", "line one", generation);
     assert!(view.error.is_none(), "the retry supersedes the fetch error");
     assert!(!view.open_retry);
@@ -1024,9 +934,8 @@ fn an_up_press_retries_a_failed_open_fetch() {
     let text = frame_text(&frame);
     assert!(text.iter().any(|row| row.contains("line one")));
 
-    // A retry that FAILS releases the claim for the next Up, and a
-    // kill error meanwhile never touches it: back out, reopen, fail
-    // the open fetch, retry, fail the retry, retry again.
+    // A retry that FAILS releases the claim for the next Up, and a kill error meanwhile
+    // never touches it: back out, reopen, fail the open fetch, retry, fail the retry, retry again.
     view.handle_key("left", &kb());
     view.handle_key("enter", &kb());
     let reopened = view.detail_generation;
@@ -1065,10 +974,7 @@ fn an_up_press_retries_a_failed_open_fetch() {
     assert!(view.error.is_none());
 }
 
-/// A one-row output region (the designed minimum under a long
-/// command) always shows the output line itself: a marker renders
-/// only while a content row survives beside it, so scrolling never
-/// underflows the region and never leaves a marker-only row.
+/// Scrolling never underflows the region and never leaves a marker-only row.
 #[test]
 fn a_one_row_region_keeps_the_output_line() {
     let mut catalog = activities();
@@ -1086,7 +992,6 @@ fn a_one_row_region_keeps_the_output_line() {
         text.iter().any(|row| row.contains("line-5")),
         "the one-row region anchors on the newest line: {text:?}"
     );
-    // The recorded region height is exactly one row.
     assert_eq!(view.detail_region_rows.get(), 1);
 
     // Scrolling up never panics and never leaves a marker-only row:
@@ -1100,7 +1005,6 @@ fn a_one_row_region_keeps_the_output_line() {
             "the up press walks to {expected}: {text:?}"
         );
     }
-    // Down walks back to the newest.
     for _ in 0..4 {
         view.handle_key("down", &kb());
     }
@@ -1109,8 +1013,6 @@ fn a_one_row_region_keeps_the_output_line() {
     assert!(text.iter().any(|row| row.contains("line-5")));
 }
 
-/// The exact command renders verbatim: repeated spaces and embedded
-/// newlines stay (the drill-in is the full text, not the summary).
 #[test]
 fn the_detail_renders_the_exact_command_verbatim() {
     let mut catalog = activities();
@@ -1124,8 +1026,6 @@ fn the_detail_renders_the_exact_command_verbatim() {
     assert!(joined.contains("ls  --all"), "the second line stays");
 }
 
-/// Fetched output keeps its own leading spacing (indented logs keep
-/// their shape); only control characters scrub.
 #[test]
 fn fetched_output_keeps_its_leading_spacing() {
     let mut view = BashView::new(activities(), 40);
@@ -1139,19 +1039,15 @@ fn fetched_output_keeps_its_leading_spacing() {
     );
 }
 
-/// A late tail from an earlier open of the same row never overwrites
-/// the newer open's output (the generation token).
 #[test]
 fn a_stale_generation_never_overwrites_the_reopened_detail() {
     let mut view = BashView::new(activities(), 40);
     view.handle_key("enter", &kb());
     let first_generation = view.detail_generation;
     view.set_output("a", "first fetch", first_generation);
-    // Back out and reopen the same row: a new generation.
     view.handle_key("left", &kb());
     view.handle_key("enter", &kb());
     assert_ne!(view.detail_generation, first_generation);
-    // The earlier open's late response is ignored.
     view.set_output("a", "stale fetch", first_generation);
     let frame = view.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
@@ -1159,16 +1055,12 @@ fn a_stale_generation_never_overwrites_the_reopened_detail() {
         !text.iter().any(|row| row.contains("stale fetch")),
         "the stale generation never lands: {text:?}"
     );
-    // The current generation's response lands.
     view.set_output("a", "fresh fetch", view.detail_generation);
     let frame = view.render(&theme(), 70, &kb());
     let text = frame_text(&frame);
     assert!(text.iter().any(|row| row.contains("fresh fetch")));
 }
 
-/// A clipped command block spends exactly its budget: the marker
-/// trails the kept head (the tail is what a clip drops) and the
-/// pane never renders past the viewport.
 #[test]
 fn a_clipped_command_trails_the_marker_inside_the_budget() {
     let mut catalog = activities();
@@ -1197,8 +1089,6 @@ fn a_clipped_command_trails_the_marker_inside_the_budget() {
     assert!(text.iter().any(|row| row.contains("Fetching output")));
 }
 
-/// A terminal shorter than the frame itself never renders past its
-/// allocated rows (the pane degrades by truncation).
 #[test]
 fn a_sub_frame_viewport_never_overflows() {
     for viewport_rows in [1usize, 2, 3, 5, 7] {

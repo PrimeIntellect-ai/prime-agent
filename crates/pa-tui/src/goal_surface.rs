@@ -1,11 +1,10 @@
-//! Thread-goal view state: the `goal_update` surface (TS interactive-mode
-//! `handleGoalUpdate`/`shouldAnnounceGoalUpdate`/`formatGoalStatus`) plus
-//! the tray goal label (`getTrayGoalLabel`/`formatGoalElapsed`). Pure
-//! state and formatting; the session view owns the transcript rows.
+//! Thread-goal view state: the `goal_update` surface plus the tray goal
+//! label. Pure state and formatting; the session view owns the
+//! transcript rows.
 
 use pa_types::goal::{empty_goal_state, GoalState, GoalStatus};
 
-/// The announcement dedupe snapshot (TS `goalAnnouncementSnapshot`).
+/// The announcement dedupe snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GoalAnnouncementSnapshot {
     pub goal_id: Option<String>,
@@ -21,7 +20,6 @@ impl Default for GoalAnnouncementSnapshot {
     }
 }
 
-/// TS `goalAnnouncementSnapshot`.
 #[must_use]
 pub fn announcement_snapshot(goal: &GoalState) -> GoalAnnouncementSnapshot {
     GoalAnnouncementSnapshot {
@@ -33,9 +31,9 @@ pub fn announcement_snapshot(goal: &GoalState) -> GoalAnnouncementSnapshot {
     }
 }
 
-/// TS `shouldAnnounceGoalUpdate`: state changes always announce; a goal-id
-/// change announces unless the new state is idle; within one goal only
-/// reason/error changes re-announce (an active goal never does).
+/// State changes always announce; a goal-id change announces unless the
+/// new state is idle; within one goal only reason/error changes
+/// re-announce (an active goal never does).
 #[must_use]
 pub fn should_announce(
     previous: &GoalAnnouncementSnapshot,
@@ -56,7 +54,7 @@ pub fn should_announce(
     }
 }
 
-/// TS `formatGoalUsage`: the token budget usage, or wall-clock seconds.
+/// The token budget usage, or wall-clock seconds.
 #[must_use]
 pub fn format_goal_usage(goal: &GoalState) -> Option<String> {
     if let Some(budget) = goal.token_budget {
@@ -68,8 +66,7 @@ pub fn format_goal_usage(goal: &GoalState) -> Option<String> {
     Some(format!("{}s", goal.time_used_seconds))
 }
 
-/// TS `formatGoalStatus` + `formatGoalDetailSuffix`: the status-row text for
-/// one goal state at the given terminal width.
+/// The status-row text for one goal state at the given terminal width.
 #[must_use]
 pub fn format_goal_status(goal: &GoalState, columns: usize) -> String {
     let usage_text = format_goal_usage(goal)
@@ -118,8 +115,8 @@ pub fn format_goal_status(goal: &GoalState, columns: usize) -> String {
     }
 }
 
-/// TS `formatGoalDetailSuffix`: `: <collapsed detail>` truncated to the
-/// remaining width (capped at 120 columns; dropped under 8).
+/// `: <collapsed detail>` truncated to the remaining width (capped at
+/// 120 columns; dropped under 8).
 fn goal_detail_suffix(value: &str, prefix_width: usize, columns: usize) -> String {
     let detail: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if detail.is_empty() {
@@ -141,8 +138,8 @@ fn truncate_plain(text: &str, width: usize) -> String {
         .collect::<String>()
 }
 
-/// TS `getTrayGoalLabel`: the tray label while the goal is running;
-/// terminal states (idle/complete/error) carry no label.
+/// The tray label while the goal is running; terminal states
+/// (idle/complete/error) carry no label.
 #[must_use]
 pub fn tray_goal_label(goal: &GoalState) -> Option<String> {
     match goal.status {
@@ -162,7 +159,7 @@ pub fn tray_goal_label(goal: &GoalState) -> Option<String> {
     }
 }
 
-/// TS `formatGoalElapsed`: `45s`, `12m 05s`, `1h 07m`.
+/// `45s`, `12m 05s`, `1h 07m`.
 #[must_use]
 pub fn format_goal_elapsed(seconds: u64) -> String {
     if seconds < 60 {
@@ -178,18 +175,16 @@ pub fn format_goal_elapsed(seconds: u64) -> String {
     format!("{hours}h {remaining_minutes:02}m")
 }
 
-/// The read-only goal panel (the operator's 2026-09-24 directive: the
-/// dock's `Pursuing goal` row opens "what the goal prompt is"): the
-/// objective text wrapped over the frame, the status facts beneath it,
-/// and the same bottom-shortcuts shape as the docked panes — the hint,
-/// one blank line below it, no rule.
+/// The read-only goal panel (the operator's 2026-09-24 directive): the
+/// dock's `Pursuing goal` row opens "what the goal prompt is" — the
+/// wrapped objective, the status facts, the same bottom-shortcuts shape
+/// as the docked panes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GoalPanel {
     pub goal: GoalState,
     /// The panel's row budget (`picker_viewport_rows` at open): the
-    /// objective clips to it instead of growing the dock past the frame
-    /// (a front-crop would hide the title and the prompt's start — the
-    /// content this panel exists to show).
+    /// objective clips to it — a front-crop would hide the title and the
+    /// prompt's start.
     pub viewport_rows: usize,
 }
 
@@ -205,9 +200,7 @@ fn goal_status_word(status: GoalStatus) -> &'static str {
     }
 }
 
-/// Render the goal panel's frame: rule, title, the wrapped objective,
-/// the status facts (status, elapsed, token budget), the hint, and one
-/// blank below it.
+/// Render the goal panel's frame.
 pub fn render_goal_panel(
     panel: &GoalPanel,
     theme: &crate::theme::Theme,
@@ -248,12 +241,10 @@ pub fn render_goal_panel(
     // width): at a narrow terminal the objective wraps tighter rather
     // than rendering rows the frame would silently truncate.
     let objective_width = width.saturating_sub(4).max(1);
-    // The frame's fixed rows outside the objective block: rule, title,
-    // two blanks around it, the three fact rows, the hint block's blank,
-    // the hint, and the trailing blank (10) — the objective renders in
-    // whatever the viewport budget leaves, clipping with a marker so the
-    // panel never grows past its frame (a multi-screen objective keeps
-    // its title and its first lines instead of front-cropping them away).
+    // The frame's fixed rows outside the objective block (10): the objective
+    // renders in whatever the viewport budget leaves, clipping with a marker
+    // (a multi-screen objective keeps its title and first lines instead of
+    // front-cropping them away).
     let fixed = 10;
     let objective_budget = panel.viewport_rows.saturating_sub(fixed).max(1);
     let wrapped = crate::width::wrap_text(&objective, objective_width);
@@ -343,9 +334,8 @@ impl GoalView {
         self.last_status_index = None;
     }
 
-    /// Seed the state from an attach snapshot (TS
-    /// `setGoalAnnouncementBaseline(getGoalState())` on attach): the
-    /// baseline absorbs the state so reattachment never announces.
+    /// Seed the state from an attach snapshot: the baseline absorbs the
+    /// state so reattachment never announces.
     pub fn seed(&mut self, goal: GoalState) {
         self.goal = goal;
         self.last_announcement = announcement_snapshot(&self.goal);
@@ -377,24 +367,18 @@ mod tests {
     #[test]
     fn announce_rules_match_ts() {
         let mut view = GoalView::new();
-        // Baseline seeded empty: an idle update never announces.
         assert!(!view.apply_update(empty_goal_state()));
-        // Status change announces.
         assert!(view.apply_update(goal(GoalStatus::Active)));
-        // Same state (usage churn) stays silent.
         let mut churn = goal(GoalStatus::Active);
         churn.tokens_used = 500;
         assert!(!view.apply_update(churn));
-        // Reason change on a paused goal re-announces.
         let mut paused = goal(GoalStatus::Paused);
         paused.last_reason = Some("Paused by user".to_string());
         assert!(view.apply_update(paused.clone()));
         assert!(!view.apply_update(paused));
-        // Completion announces.
         let mut complete = goal(GoalStatus::Complete);
         complete.last_reason = Some("Goal achieved".to_string());
         assert!(view.apply_update(complete));
-        // Error re-announces only on a new error.
         let mut error = goal(GoalStatus::Error);
         error.last_error = Some("boom".to_string());
         assert!(view.apply_update(error.clone()));
@@ -405,7 +389,6 @@ mod tests {
     fn attach_seed_never_announces() {
         let mut view = GoalView::new();
         view.seed(goal(GoalStatus::Active));
-        // The same state arriving as the first update stays silent.
         assert!(!view.apply_update(goal(GoalStatus::Active)));
     }
 
@@ -436,7 +419,6 @@ mod tests {
             format_goal_status(&empty_goal_state(), 120),
             "No active goal"
         );
-        // Budget-limited rows carry the usage.
         let mut limited = goal(GoalStatus::BudgetLimited);
         limited.token_budget = Some(100);
         limited.tokens_used = 120;
@@ -444,7 +426,6 @@ mod tests {
             format_goal_status(&limited, 120),
             "Goal budget limited (120 / 100 tokens)"
         );
-        // Narrow terminals drop the detail suffix.
         assert_eq!(format_goal_status(&complete, 10), "Goal complete");
     }
 
@@ -475,11 +456,9 @@ mod tests {
         );
     }
 
-    /// The read-only goal panel (the operator's 2026-09-24 directive):
-    /// the dock's `Pursuing goal` row opens "what the goal prompt is" —
-    /// the wrapped objective over the frame, the status facts beneath
-    /// it, the close hint, and one blank line below the hint (never a
-    /// rule — the docked panes' shared shortcuts shape).
+    /// The read-only goal panel (the operator's 2026-09-24 directive): the
+    /// dock's `Pursuing goal` row opens the wrapped objective and the status
+    /// facts.
     #[test]
     fn the_goal_panel_renders_the_objective_and_facts() {
         let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
@@ -507,15 +486,12 @@ mod tests {
             text.iter().any(|row| row.trim() == "Goal"),
             "the title: {joined}"
         );
-        // The objective wraps, never single-lines.
         assert!(joined.contains("ship the rust port"));
         assert!(joined.contains("with all batteries green"));
-        // The status facts.
         assert!(joined.contains("status"), "{joined}");
         assert!(joined.contains("active"), "{joined}");
         assert!(joined.contains("2m 05s"), "{joined}");
         assert!(joined.contains("18000 / 40000 tokens"), "{joined}");
-        // The hint, then exactly one blank below it — no rule.
         let hint = text
             .iter()
             .position(|row| row.contains("close"))
@@ -527,7 +503,6 @@ mod tests {
             "one blank below the hint: {text:?}"
         );
         assert!(text.last().expect("the last row").trim().is_empty());
-        // A goal without an objective degrades to the placeholder.
         let mut bare = goal(GoalStatus::Active);
         bare.objective = None;
         let frame = render_goal_panel(
@@ -549,10 +524,9 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("No objective recorded"), "{joined}");
-        // A multi-screen objective clips to the panel's viewport budget
-        // with an ellipsis marker: the title and the prompt's first lines
-        // stay on the frame (the bot-round fix — the read-only panel has
-        // no scrolling, so a front-cropped dock would hide them forever).
+        // A multi-screen objective clips to the viewport budget with an ellipsis
+        // marker: the title and the prompt's first lines stay (the panel has no
+        // scrolling).
         let mut tall = goal(GoalStatus::Active);
         tall.objective = Some(
             (1..=200)
@@ -591,9 +565,7 @@ mod tests {
             !joined.contains("word-200"),
             "the clipped tail does not render"
         );
-        // A narrow frame wraps the objective inside its width: every
-        // rendered row fits (the bot-round fix — the wrap width follows
-        // the frame, never a floor wider than it).
+        // A narrow frame wraps the objective inside its width: every rendered row fits.
         let mut narrow = goal(GoalStatus::Active);
         narrow.objective = Some("check the narrow wrap path".to_string());
         for width in [4usize, 5, 8, 12] {

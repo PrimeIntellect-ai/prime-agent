@@ -1,15 +1,7 @@
-//! Faux scripted provider used by tests and early integrations.
-//!
-//! Implements the [`crate::stream::ModelStream`] protocol from a script of
-//! turns: each turn is a list of [`AssistantMessageEvent`] steps (with
-//! optional sleeps), a start-time failure, or a stall that resolves as an
-//! aborted stream when the abort signal fires. This mirrors how a real
-//! provider behaves under abort (`proxy.ts` cancels the body read and emits a
-//! terminal `error` event with `stopReason: "aborted"`).
-//!
-//! The script surface is deliberately small: later, the `pa-ai` crate's real
-//! providers replace this; the loop cannot tell the difference because both
-//! implement the same trait.
+//! Faux scripted provider used by tests and early integrations: each turn is
+//! a list of [`AssistantMessageEvent`] steps (with optional sleeps), a
+//! start-time failure, or a stall that resolves as an aborted stream when the
+//! abort signal fires, mirroring how a real provider behaves under abort.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -29,15 +21,12 @@ pub enum ScriptStep {
 /// A scripted provider turn.
 #[derive(Debug, Clone)]
 pub enum ScriptedTurn {
-    /// Full event script; must end with a terminal `done`/`error` event
-    /// (like a well-formed provider stream).
+    /// Full event script; must end with a terminal `done`/`error` event.
     Events(Vec<ScriptStep>),
     /// The stream function call itself fails (violating the TS `StreamFn`
     /// contract; exercises the loop's run-failure path).
     FailStart(String),
-    /// Emit the prelude, then stall until the abort signal fires, then emit a
-    /// terminal `error` event with `stopReason: "aborted"` - how a provider
-    /// stream behaves when the user aborts mid-stream.
+    /// Emit the prelude, then stall until the abort signal fires.
     Stalled { prelude: Vec<ScriptStep> },
 }
 
@@ -59,23 +48,19 @@ impl ScriptedProvider {
         }
     }
 
-    /// Queue a scripted turn.
-    ///
     /// # Panics
     ///
-    /// Panics if the `turns` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `turns` mutex is poisoned.
     pub fn push_turn(&self, turn: ScriptedTurn) {
         self.turns.lock().unwrap().push_back(turn);
     }
 
-    /// Queue a plain-text assistant response turn.
     pub fn push_text_turn(&self, text: &str) {
         self.push_turn(ScriptedTurn::Events(text_turn_steps(&self.model, text)));
     }
 
-    /// Queue an assistant response turn that optionally starts with text and
-    /// then requests tool calls (`reason: toolUse`).
+    /// Queue an assistant response turn that optionally starts with text
+    /// and then requests tool calls.
     pub fn push_tool_call_turn(
         &self,
         text: Option<&str>,
@@ -89,7 +74,7 @@ impl ScriptedProvider {
     }
 
     /// Queue a mid-stream provider failure: text streams, then the stream
-    /// terminates with `stopReason: "error"` and the given message.
+    /// terminates with the given error message.
     pub fn push_stream_failure_turn(&self, partial_text: &str, error_message: &str) {
         self.push_turn(ScriptedTurn::Events(stream_failure_steps(
             &self.model,
@@ -113,17 +98,13 @@ impl ScriptedProvider {
         self.push_turn(ScriptedTurn::Stalled { prelude });
     }
 
-    /// Queue a start-time stream function failure.
     pub fn push_fail_start_turn(&self, message: &str) {
         self.push_turn(ScriptedTurn::FailStart(message.to_string()));
     }
 
-    /// Recorded LLM contexts (one per stream call).
-    ///
     /// # Panics
     ///
-    /// Panics if the `calls` mutex is poisoned (another thread panicked while
-    /// holding it).
+    /// Panics if the `calls` mutex is poisoned.
     pub fn calls(&self) -> Vec<LlmContext> {
         self.calls.lock().unwrap().clone()
     }
@@ -132,8 +113,7 @@ impl ScriptedProvider {
     ///
     /// # Panics
     ///
-    /// The returned stream function panics if the `calls` or `turns` mutex is
-    /// poisoned (another thread panicked while holding one of them).
+    /// The returned stream function panics if the `calls` or `turns` mutex is poisoned.
     pub fn stream_fn(self: &Arc<Self>) -> StreamFn {
         let provider = Arc::clone(self);
         Arc::new(move |_model, context, _options| {
@@ -161,10 +141,6 @@ impl ScriptedProvider {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scripted stream implementation
-// ---------------------------------------------------------------------------
-
 struct ScriptedStreamInner {
     result: Mutex<Option<AssistantMessage>>,
     notify: tokio::sync::Notify,
@@ -173,10 +149,8 @@ struct ScriptedStreamInner {
 enum ScriptedMode {
     Events(VecDeque<ScriptStep>),
     /// After the prelude is exhausted, stall forever: the agent loop races
-    /// `next_event` against its abort signal, so an abort during the stall is
-    /// handled by the loop exactly like the TS reference (the loop synthesizes
-    /// the aborted assistant message; the stream is closed via
-    /// [`ModelStream::close`]).
+    /// `next_event` against its abort signal and synthesizes the aborted
+    /// assistant message, closing the stream via [`ModelStream::close`].
     Stalled(VecDeque<ScriptStep>),
 }
 
@@ -288,10 +262,6 @@ impl ModelStream for ScriptedStream {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Script builders
-// ---------------------------------------------------------------------------
-
 fn empty_partial(model: &Model) -> AssistantMessage {
     AssistantMessage {
         content: Vec::new(),
@@ -353,7 +323,7 @@ fn text_delta_steps(base: &AssistantMessage, content_index: usize, text: &str) -
     steps
 }
 
-/// A complete text response turn (`stopReason: stop`).
+/// A complete text response turn.
 #[must_use]
 pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
     let base = empty_partial(model);
@@ -362,7 +332,7 @@ pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
     }))];
     steps.extend(text_delta_steps(&base, 0, text));
     // The final message carries the accumulated text content from the last
-    // delta partial (the base partial is empty by construction).
+    // delta partial.
     let final_message = steps
         .iter()
         .rev()
@@ -388,7 +358,7 @@ pub fn text_turn_steps(model: &Model, text: &str) -> Vec<ScriptStep> {
     steps
 }
 
-/// A tool-call response turn (`stopReason: toolUse`).
+/// A tool-call response turn.
 #[must_use]
 pub fn tool_call_turn_steps(
     model: &Model,
@@ -448,8 +418,7 @@ pub fn tool_call_turn_steps(
     steps
 }
 
-/// A stream that delivers `partial_text` and then fails mid-turn
-/// (`stopReason: error`).
+/// A stream that delivers `partial_text` and then fails mid-turn.
 #[must_use]
 pub fn stream_failure_steps(
     model: &Model,

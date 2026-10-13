@@ -1,5 +1,4 @@
-//! Classification tests for [`super`] (the TS `incident.test.ts`
-//! unit-level checks).
+//! Classification tests for [`super`] (TS `incident.test.ts`'s unit-level checks).
 
 use super::*;
 
@@ -108,9 +107,7 @@ fn a_later_sighting_never_owns_an_earlier_failure() {
     let worker_b = "/tmp/prime-agent-501/worker-98ed5cb228d2-bbbbbbbbbbbb.sock";
     let entries = vec![
         provider_failure_line("2026-09-10T10:00:00.000Z", 53615),
-        // The pid's only sighting is a worker that starts ten minutes
-        // later; a future sighting is never evidence of ownership at
-        // 10:00.
+        // A future sighting is never evidence of ownership.
         worker_start_line("2026-09-10T10:10:00.000Z", worker_b, 53615),
     ];
     let events = collect_incident_events(&entries, &collect_worker_pid_map(&entries));
@@ -151,8 +148,7 @@ fn classifies_worker_events_for_windows_named_pipe_sockets() {
     let socket_path = r"\\.\pipe\prime-agent-worker-98ed5cb228d2-5b1d3aeb91ee";
     let entries = vec![
         worker_start_line("2026-09-10T20:00:00.000Z", socket_path, 53615),
-        // The worker's own crash line (TS `daemonLine`): the daemon
-        // component with the named-pipe socket path.
+        // The worker's own crash line: the daemon component with the named-pipe path.
         log_line(&[
             ("ts", serde_json::json!("2026-09-10T20:23:24.945Z")),
             ("component", serde_json::json!("coding-agent.daemon")),
@@ -302,8 +298,7 @@ fn command_failures_classify_by_their_error_body() {
 
 #[test]
 fn recovery_breakdown_ranks_and_caps_the_operations() {
-    // The motivating incident's held backlog: 533 uncertain operations
-    // across four kinds (TS `incident.test.ts`'s fixture).
+    // The motivating incident's held backlog (TS `incident.test.ts`'s fixture).
     let operations = std::iter::repeat_n("tool_execution_start", 408)
         .chain(std::iter::repeat_n("auto_retry_end", 62))
         .chain(std::iter::repeat_n("agent_end", 47))
