@@ -309,8 +309,19 @@ pub async fn execute_refinement_with_rows(
     refine_call: crate::refinement::executor::RefinerFn,
     agent_dir: Option<&Path>,
 ) -> anyhow::Result<(RefinementResult, Vec<String>)> {
-    let settings =
-        agent_dir.map(|dir| crate::settings::SettingsManager::create(session.get_cwd(), dir));
+    let settings = match agent_dir {
+        Some(dir) => {
+            let cwd = session.get_cwd().to_path_buf();
+            let dir = dir.to_path_buf();
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    crate::settings::SettingsManager::create(&cwd, &dir)
+                })
+                .await?,
+            )
+        }
+        None => None,
+    };
     anyhow::ensure!(
         settings
             .as_ref()

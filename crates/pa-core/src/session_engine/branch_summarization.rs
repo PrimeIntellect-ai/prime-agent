@@ -149,6 +149,14 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
 /// is hit. File ops are collected from ALL entries (cumulative tracking).
 #[must_use]
 pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> BranchPreparation {
+    prepare_branch_entries_with_refinements(entries, token_budget, /*enabled*/ true)
+}
+
+fn prepare_branch_entries_with_refinements(
+    entries: &[FileEntry],
+    token_budget: u64,
+    enabled: bool,
+) -> BranchPreparation {
     let mut file_ops = FileOperations::default();
     // Cumulative tracking from prior branch summaries (never hooked ones).
     for entry in entries {
@@ -167,6 +175,17 @@ pub fn prepare_branch_entries(entries: &[FileEntry], token_budget: u64) -> Branc
     let mut total_tokens = 0u64;
     for entry in entries.iter().rev() {
         let Some(message) = get_message_from_entry(entry) else {
+            continue;
+        };
+        // Disabled harness content must not consume budget or terminate selection.
+        let message = if enabled {
+            Some(message)
+        } else {
+            super::refinement_gate::without_refinements(vec![message])
+                .into_iter()
+                .next()
+        };
+        let Some(message) = message else {
             continue;
         };
         extract_file_ops_from_message(&message, &mut file_ops);
@@ -221,10 +240,7 @@ fn build_branch_summary_request_with_refinements(
     replace_instructions: bool,
     enabled: bool,
 ) -> (Vec<AgentMessage>, BranchPreparation) {
-    let mut preparation = prepare_branch_entries(entries, token_budget);
-    if !enabled {
-        preparation.messages = super::refinement_gate::without_refinements(preparation.messages);
-    }
+    let preparation = prepare_branch_entries_with_refinements(entries, token_budget, enabled);
     let messages = if preparation.messages.is_empty() {
         Vec::new()
     } else {
@@ -448,7 +464,7 @@ pub async fn generate_branch_summary(
             return BranchSummaryResult {
                 error: Some(format!("{error:#}")),
                 ..Default::default()
-            }
+            };
         }
     };
     if response.stop_reason == pa_types::ai::StopReason::Aborted {
@@ -511,6 +527,42 @@ mod tests {
             timestamp: 0,
             rest: serde_json::Map::default(),
         })
+    }
+
+    #[test]
+    fn disabled_refinement_notices_cannot_exhaust_the_branch_summary_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = crate::session::manager::SessionManager::in_memory(tmp.path());
+        let conversation = user("Earlier conversation about the task");
+        session.append_message(conversation.clone()).unwrap();
+        session
+            .append_custom_message(
+                "refinement_notice",
+                pa_types::ai::UserContent::Text("saved refinement ".repeat(500)),
+                /*display*/ false,
+                None,
+            )
+            .unwrap();
+        let (request, preparation) = build_branch_summary_request_with_refinements(
+            session.retained_entries(),
+            50,
+            None,
+            /*replace_instructions*/ false,
+            /*enabled*/ false,
+        );
+        assert_eq!(preparation.messages, vec![conversation]);
+        assert!(!request.is_empty());
+        let (enabled_request, _) = build_branch_summary_request_with_refinements(
+            session.retained_entries(),
+            50,
+            None,
+            /*replace_instructions*/ false,
+            /*enabled*/ true,
+        );
+        assert!(
+            enabled_request.is_empty(),
+            "the enabled legacy budget path selects no older rows"
+        );
     }
 
     #[test]
