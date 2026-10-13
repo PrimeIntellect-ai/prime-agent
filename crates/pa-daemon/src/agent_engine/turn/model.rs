@@ -142,6 +142,9 @@ impl AgentSessionEngine {
         // Session state restores at successful message_end; request auth
         // stays on the backup until the active run settles.
         let primary_state = std::sync::Arc::new(std::sync::Mutex::new(None::<FailoverPrimary>));
+        let pending_model_changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
+            pa_types::session::ModelChangeEntry,
+        >::new()));
         // The quota-park seam (TS #2375): the retry chain consults the
         // engine at its give-up; a quota failure whose reset exceeds
         // the wait cap parks the session. The weak self keeps the
@@ -175,12 +178,14 @@ impl AgentSessionEngine {
             // captured its serving model, so restoring session state here
             // does not redirect the remaining backup provider requests.
             let primary_state = primary_state.clone();
+            let pending_model_changes = pending_model_changes.clone();
             let agent_weak = std::sync::Arc::downgrade(&agent);
             let core = core.clone();
             let persistence = persistence.clone();
             agent
                 .subscribe(move |event, _signal| {
                     let primary_state = primary_state.clone();
+                    let pending_model_changes = pending_model_changes.clone();
                     let agent_weak = agent_weak.clone();
                     let core = core.clone();
                     let persistence = persistence.clone();
@@ -225,6 +230,15 @@ impl AgentSessionEngine {
                                 .await
                                 .append_model_change(&primary.model.provider, &primary.model.id)?;
                         }
+                        // The later run_once subscriber forwards this after the
+                        // assistant row and before tool execution, matching TS.
+                        pending_model_changes
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(pa_types::session::ModelChangeEntry {
+                                provider: primary.model.provider.clone(),
+                                model_id: primary.model.id.clone(),
+                            });
                         if let Some(primary) = primary_state
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -238,6 +252,7 @@ impl AgentSessionEngine {
                 .await
         });
         let restore_primary = || {
+            let emit_cell = &emit_cell;
             let primary_state = primary_state.clone();
             let agent = agent.clone();
             let persistence = persistence.clone();
@@ -306,6 +321,16 @@ impl AgentSessionEngine {
                         .await
                         .append_model_change(&primary_model.provider, &primary_model.id)?;
                 }
+                if !session_restored
+                    && !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
+                        pa_types::session::ModelChangeEntry {
+                            provider: primary_model.provider.clone(),
+                            model_id: primary_model.id.clone(),
+                        },
+                    ))
+                {
+                    anyhow::bail!("Model restoration persistence was cancelled");
+                }
                 if let Some(primary) = primary_state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -348,6 +373,7 @@ impl AgentSessionEngine {
                                     &prompt,
                                     admit_prompt,
                                     boundary_passed,
+                                    &pending_model_changes,
                                     aborted,
                                     &mut **emit,
                                 )
@@ -470,6 +496,7 @@ impl AgentSessionEngine {
                     }
                 },
                 |next: &pa_types::ai::Model| {
+                    let emit_cell = &emit_cell;
                     let agent = agent.clone();
                     let persistence = persistence.clone();
                     let core = core.clone();
@@ -545,6 +572,14 @@ impl AgentSessionEngine {
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
+                        }
+                        if !(emit_cell.borrow_mut())(EngineEvent::ModelChange(
+                            pa_types::session::ModelChangeEntry {
+                                provider: next.provider.clone(),
+                                model_id: next.id.clone(),
+                            },
+                        )) {
+                            anyhow::bail!("Model switch persistence was cancelled");
                         }
                         Ok(())
                     }

@@ -63,12 +63,18 @@ impl AgentSessionEngine {
     /// parked turn. Returns the final assistant message, `None` when none
     /// was produced, or `Aborted` when the emit cancelled or the cancel flag
     /// raced the admission.
+    // The model-change queue preserves the separate engine and worker stores
+    // at this run boundary; keep it alongside the existing delivery arguments.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_turn_once(
         &self,
         agent: &std::sync::Arc<pa_agent::agent::Agent>,
         prompt: &TurnPrompt,
         first_attempt: bool,
         boundary_passed: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        pending_model_changes: &std::sync::Arc<
+            std::sync::Mutex<Vec<pa_types::session::ModelChangeEntry>>,
+        >,
         aborted: &dyn Fn() -> bool,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> anyhow::Result<TurnOnce> {
@@ -83,6 +89,7 @@ impl AgentSessionEngine {
         let boundary_passed = std::sync::Arc::clone(boundary_passed);
         let subscription = {
             let tx = tx.clone();
+            let pending_model_changes = pending_model_changes.clone();
             let boundary_passed = std::sync::Arc::clone(&boundary_passed);
             let autonomous_state = std::sync::Arc::clone(&self.autonomous);
             let autonomous_driver = std::sync::Arc::clone(
@@ -94,6 +101,7 @@ impl AgentSessionEngine {
             agent
                 .subscribe(move |event, _signal| {
                     let tx = tx.clone();
+                    let pending_model_changes = pending_model_changes.clone();
                     let boundary_passed = std::sync::Arc::clone(&boundary_passed);
                     let autonomous_state = std::sync::Arc::clone(&autonomous_state);
                     let autonomous_driver = std::sync::Arc::clone(&autonomous_driver);
@@ -211,6 +219,11 @@ impl AgentSessionEngine {
                                                 EngineEvent::AssistantMessage(value)
                                             };
                                             let _ = tx.send(event);
+                                            for change in pending_model_changes.lock()
+                                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                .drain(..) {
+                                                let _ = tx.send(EngineEvent::ModelChange(change));
+                                            }
                                         }
                                     }
                                     // An in-run continuation's user row: the

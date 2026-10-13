@@ -283,3 +283,96 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
         "the suppressed-row sighting arms the silence: {events:?}"
     );
 }
+
+/// Engine-only stores cannot persist these transitions: the worker must
+/// commit both rows in the same stream order as the assistant/tool rows.
+#[tokio::test]
+async fn model_transitions_reach_the_worker_owned_session_file() {
+    for abort_suppressed in [None, Some(false), Some(true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let expected = vec![
+            json!({"provider": "backup", "modelId": "model/with/slashes"}),
+            json!({"provider": "primary", "modelId": "model/with/slashes"}),
+        ];
+        let mut frames = vec![
+            EngineEvent::ModelChange(pa_types::session::ModelChangeEntry {
+                provider: "backup".to_string(),
+                model_id: "model/with/slashes".to_string(),
+            }),
+            EngineEvent::AssistantMessage(
+                json!({"role": "assistant", "content": [], "stopReason": "toolUse"}),
+            ),
+            EngineEvent::ModelChange(pa_types::session::ModelChangeEntry {
+                provider: "primary".to_string(),
+                model_id: "model/with/slashes".to_string(),
+            }),
+            EngineEvent::ToolResultMessage(
+                json!({"role": "toolResult", "toolCallId": "probe", "content": []}),
+            ),
+            EngineEvent::Done(Ok(())),
+        ];
+        if abort_suppressed.is_some() {
+            frames.retain(|event| {
+                matches!(event, EngineEvent::ModelChange(_) | EngineEvent::Done(_))
+            });
+        }
+        let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine { frames });
+        let runner = burst_runner(Arc::clone(&engine));
+        let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        store.rewrite().unwrap();
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.store = Some(store);
+            core.abort_requested = abort_suppressed.is_some();
+            core.suppress_aborted_row = abort_suppressed.unwrap_or(false);
+        }
+        runner
+            .run_turn(
+                engine,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "probe".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let rows: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let transitions: Vec<Value> = rows
+            .iter()
+            .filter(|row| row["type"] == "model_change")
+            .map(|row| json!({"provider": row["provider"], "modelId": row["modelId"]}))
+            .collect();
+        assert_eq!(transitions, expected);
+        let relevant: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row["type"].as_str() {
+                Some("model_change") => Some("model"),
+                Some("message") => row["message"]["role"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relevant,
+            if abort_suppressed.is_some() {
+                vec!["model", "model"]
+            } else {
+                vec!["model", "assistant", "model", "toolResult"]
+            }
+        );
+    }
+}
