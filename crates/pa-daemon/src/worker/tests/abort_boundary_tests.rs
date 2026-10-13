@@ -881,3 +881,108 @@ async fn abort_and_send_queued_delivers_the_parked_agent_message() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A held input pause defers, never parks, the abort-and-send funnel: the
+/// abort clears the suspension, the pump holds the delivery while the pause
+/// stands, and the pause release delivers the parked agent message.
+#[tokio::test]
+// the faux registry is process-global: the guard must span the async flow
+#[allow(clippy::await_holding_lock)]
+async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (worker, dir) =
+        held_turn_worker("abort-pause-session", "abort-pause", "agent message reply").await;
+    start_registered_held_turn(
+        &worker,
+        "abort-pause-session",
+        "held turn for the pause abort probe",
+    )
+    .await;
+    // The input pause holds the pump while the abort lands.
+    let pause = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({ "leaseKey": "abort-pause-lease" }),
+        )
+        .await;
+    assert!(
+        pause.success,
+        "acquire_session_input_pause failed: {pause:?}"
+    );
+    let pause_id = pause
+        .data
+        .as_ref()
+        .and_then(|data| data.get("pauseId"))
+        .and_then(Value::as_str)
+        .expect("the pause id")
+        .to_string();
+    queue_agent_message(&worker, "abort-pause-session", "the parked agent body").await;
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    // The aborted turn settles; the pause holds the parked row.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (busy, queued) = {
+            let core = worker.core.lock().unwrap();
+            (core.busy, core.steering.len())
+        };
+        if !busy && queued == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the aborted turn never settled with the agent row parked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (row, _) = agent_message_transcript(&worker).await;
+    assert!(
+        row.is_none(),
+        "the agent message must not deliver while the pause holds"
+    );
+    // The release arms notify the pump; the parked row delivers.
+    let released = worker
+        .dispatch(
+            "release_session_input_pause",
+            &json!({ "pauseId": pause_id }),
+        )
+        .await;
+    assert!(
+        released.success,
+        "release_session_input_pause failed: {released:?}"
+    );
+    let idle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.dispatch("wait_for_idle", &json!({})),
+    )
+    .await;
+    assert!(
+        idle.is_ok(),
+        "the session never went idle after the pause released"
+    );
+    assert!(idle.unwrap().success, "wait_for_idle failed");
+    let (row, replies) = agent_message_transcript(&worker).await;
+    let row = row.expect("the parked agent message delivered after the release");
+    assert_eq!(
+        crate::types::message_text(&row),
+        "[agent-message from source-agent]\n\nthe parked agent body",
+        "the delivered row renders the sender-labeled prompt: {row:?}"
+    );
+    assert!(
+        replies.iter().any(|reply| reply == "agent message reply"),
+        "the agent-message turn ran to its reply: {replies:?}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "the queue must fully drain"
+        );
+        assert!(
+            !core.queued_input_suspended,
+            "the abort must clear the suspension under the pause"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

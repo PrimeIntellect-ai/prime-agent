@@ -313,13 +313,15 @@ impl Worker {
     /// flowing — the armed steering rows co-deliver, then the follow-up drains.
     ///
     /// SANCTIONED DIVERGENCE (operator ruling 2026-09-25): TS parks the queue
-    /// whenever nothing is armable; here the abort resumes. Returns whether
-    /// the queue was resumed.
+    /// whenever nothing is armable; here the abort resumes. The same divergence
+    /// covers a held admission pause: the abort clears the suspension and the
+    /// pump's own pause gate holds the delivery until the release re-notifies
+    /// it. Returns whether the queue was resumed.
     pub(crate) fn abort_and_send_queued(&self) -> bool {
-        // TS `canResume`: no admission pause held — the arm only
-        // fires in the send arm.
-        let can_resume =
-            !self.input_pauses.paused() && !self.core.lock().unwrap().shutdown_requested;
+        // TS `canResume` also parks under an admission pause; the pump's own
+        // pause gate is the one hold that matters, so only a shutting-down
+        // worker (whose queue survives via the restart journal) stays parked.
+        let can_resume = !self.core.lock().unwrap().shutdown_requested;
         if !can_resume {
             self.request_abort();
             return false;
