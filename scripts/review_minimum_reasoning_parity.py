@@ -174,13 +174,17 @@ def run_case(binary, label, scenario, root, observation):
     thread.start()
     (agent / 'models.json').write_text(json.dumps({'providers': {'fixture': {
         'api': 'openai-completions', 'apiKey': 'fixture-only',
+        # Provider-level compat is supported by both loaders. TS also merges
+        # model-level compat; Rust's existing custom loader ignores that field.
+        # Keep this fixture on their common configuration surface and require
+        # the exact zai wire toggle, without accepting another adapter's format.
+        'compat': {'thinkingFormat': 'zai'},
         'baseUrl': 'http://127.0.0.1:%s/v1' % server.server_address[1],
         'models': [{'id': 'mandatory-fixture', 'name': 'Mandatory thinking fixture',
                     'reasoning': True, 'input': ['text'], 'contextWindow': 128000,
                     'maxTokens': 8192,
                     'thinkingLevelMap': {'off': None, 'minimal': None, 'low': 'low',
-                                         'medium': None, 'high': 'high', 'xhigh': None, 'max': 'max'},
-                    'compat': {'thinkingFormat': 'zai'}}]}}}))
+                                         'medium': None, 'high': 'high', 'xhigh': None, 'max': 'max'}}]}}}))
     (agent / 'settings.json').write_text(json.dumps({
         'defaultProvider': 'fixture', 'defaultModel': 'mandatory-fixture',
         'prewarmPythonKernel': False, 'compaction': {'enabled': False, 'keepRecentTokens': 100,
@@ -233,6 +237,7 @@ def main():
     result = {'verified': False, 'runs': {},
               'scope': 'Compaction, branch summary, and refinement auxiliary thinking controls; no frame parity claim.',
               'intended_difference': 'TS v0.9.8 compaction and branch summary requests disable zai thinking; Rust enables mandatory thinking. Refinement enables thinking in both.',
+              'fixture_compat_scope': 'Provider-level zai compat used identically by both custom-model loaders; model-level compat is not relied on.',
               'comparison': 'Both schedule and persist completed outcomes. Every captured auxiliary request must match the exact expected control; request counts and full bodies remain in runs.'}
     try:
         assert sys.platform == 'linux', 'requires Linux hosted CI and pinned Linux TS binary'
