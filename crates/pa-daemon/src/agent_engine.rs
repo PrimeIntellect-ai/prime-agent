@@ -101,6 +101,7 @@ pub(crate) type SettledKernelRelease =
 
 /// A captured prompt boundary: an empty transcript or a stable durable leaf.
 /// The owning slot's None means no worker boundary has been supplied.
+#[derive(Clone, PartialEq, Eq)]
 enum PromptContextBoundary {
     Empty,
     Leaf(String),

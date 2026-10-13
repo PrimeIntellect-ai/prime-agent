@@ -482,7 +482,7 @@ impl AgentSessionEngine {
             .prompt_context_boundary
             .lock()
             .expect("prompt context boundary lock")
-            .take();
+            .clone();
         let entries = pending_branch
             .as_deref()
             .or_else(|| {
@@ -508,9 +508,9 @@ impl AgentSessionEngine {
                 }),
             );
         }
-        let prompt_context = match prompt_context_boundary {
+        let prompt_context = match prompt_context_boundary.as_ref() {
             Some(boundary) => {
-                let mut after_boundary = matches!(&boundary, PromptContextBoundary::Empty);
+                let mut after_boundary = matches!(boundary, PromptContextBoundary::Empty);
                 if let Some(entries) = entries {
                     for entry in entries {
                         if after_boundary {
@@ -525,7 +525,7 @@ impl AgentSessionEngine {
                             }) {
                                 admitted_user_ids.push(id.to_string());
                             }
-                        } else if matches!(&boundary, PromptContextBoundary::Leaf(leaf)
+                        } else if matches!(boundary, PromptContextBoundary::Leaf(leaf)
                             if entry.id() == Some(leaf.as_str()))
                         {
                             after_boundary = true;
@@ -541,7 +541,7 @@ impl AgentSessionEngine {
                         Some(
                             pa_core::session::build_session_context(
                                 entries.expect("a found boundary has entries"),
-                                Some(&leaf),
+                                Some(leaf),
                             )
                             .messages,
                         )
@@ -635,6 +635,7 @@ impl AgentSessionEngine {
             // branch's park armed).
             self.restore_quota_park(built).await;
             self.flush_pending_stale_goal_terminal().await;
+            self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
             return Ok(());
         }
         // Restore the retained context and certified metadata without loading discarded bodies.
@@ -671,7 +672,20 @@ impl AgentSessionEngine {
         // The walk and replay allocated transient trees several times the
         // retained size: release the freed heap.
         pa_types::memory_release::trim_freed_heap();
+        self.finish_prompt_context_adoption(prompt_context_boundary.as_ref());
         Ok(())
+    }
+
+    /// Clear only the boundary this completed adoption observed. A failed
+    /// build keeps it for the demand retry, and a newer captured leaf survives.
+    fn finish_prompt_context_adoption(&self, adopted: Option<&PromptContextBoundary>) {
+        let mut current = self
+            .prompt_context_boundary
+            .lock()
+            .expect("prompt context boundary lock");
+        if current.as_ref() == adopted {
+            *current = None;
+        }
     }
 
     /// Scan the branch entries for the park this branch ended on and re-arm the live park state.

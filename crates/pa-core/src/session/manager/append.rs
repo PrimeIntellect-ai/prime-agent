@@ -72,7 +72,9 @@ impl SessionManager {
     pub fn replay_admitted_user_rows(&mut self, ids: Vec<String>) -> std::io::Result<()> {
         for id in &ids {
             if !matches!(
-                self.get_entry_by_id(id),
+                self.retained_entries()
+                    .iter()
+                    .find(|entry| entry.id() == Some(id.as_str())),
                 Some(FileEntry::Message {
                     message: AgentMessage::User(_),
                     ..
