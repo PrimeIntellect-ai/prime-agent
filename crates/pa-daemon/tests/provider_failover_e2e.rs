@@ -729,10 +729,9 @@ fn read_receipt(client: &mut Client, session_id: &str, receipt: &Path, read_id: 
     serde_json::from_str(&raw).unwrap_or_else(|error| panic!("receipt {raw:?}: {error}"))
 }
 
-/// The failover switch must rebind the kernel's model facts to the model
-/// serving the episode, and the settle restore must rebind the primary
-/// back: the in-episode probe cell answers the backup's facts, the
-/// post-settle probe the primary's.
+/// The first successful backup response restores the session model before
+/// its tool executes, matching the actual TS binary: both probe cells report
+/// primary facts while the in-episode provider requests stay on the backup.
 // Long by design: one failover flow asserted end to end.
 #[allow(clippy::too_many_lines)]
 #[test]
@@ -742,8 +741,8 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     };
     // Two request-failures on the primary drive the failover (initial +
     // one quick retry); the backup serves the in-episode probe, the
-    // recovered primary the restore probe. The backup declares image
-    // input and a smaller window so both facts are observable.
+    // recovered primary the restore probe. Distinct backup input/window
+    // facts catch leaving backup session facts after its first successful response.
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -835,8 +834,8 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     let attached = client.request("a1");
     assert_eq!(attached["success"], true, "attach failed: {attached}");
 
-    // The failover episode: the primary fails its two attempts, the
-    // backup serves the probe cell while it runs.
+    // The primary fails its two attempts. The backup response restores
+    // primary session state before this probe, while its run keeps backup traffic.
     client.send_command(
         "p1",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "probe the episode" }),
@@ -846,15 +845,21 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     let episode = read_receipt(&mut client, &session_id, &episode_receipt, "gm-e");
     assert_eq!(
         episode["model_info"],
-        json!({ "id": "mock-1", "provider": "prime-backup", "input": ["text", "image"] }),
-        "model.info must report the model serving the failover episode: {episode}"
+        json!({ "id": "mock-1", "provider": "prime-inference", "input": ["text"] }),
+        "model.info must report the restored primary session before backup tools execute: {episode}"
     );
     assert_eq!(
-        episode["compact_status"]["context_window"], 64_000,
-        "the backup's context window serves the episode: {episode}"
+        episode["compact_status"]["context_window"], 128_000,
+        "the primary session's context window returns before the backup probe: {episode}"
     );
 
-    // The settle restored the primary; the next turn's probe answers it.
+    assert_eq!(
+        (primary.count(), backup.count()),
+        (2, 2),
+        "the failed primary requests and both successful backup requests remain separate"
+    );
+
+    // Settlement restores the provider target; the next turn runs on the primary.
     client.send_command(
         "p2",
         &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "probe the restore" }),
@@ -870,5 +875,10 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
     assert_eq!(
         restored["compact_status"]["context_window"], 128_000,
         "the primary's context window returns on restore: {restored}"
+    );
+    assert_eq!(
+        (primary.count(), backup.count()),
+        (4, 2),
+        "the next probe uses the primary without another backup request"
     );
 }
