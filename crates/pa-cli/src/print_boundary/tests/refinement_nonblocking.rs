@@ -1,6 +1,29 @@
 use super::*;
 use std::sync::Arc;
 
+/// The planner's reply message: the wire `AssistantMessage` fixture (the
+/// pa-ai provider constructors' initial-assistant shape, built directly).
+fn assistant_fixture(
+    model: &Model,
+    content: Vec<pa_types::ai::AssistantContentBlock>,
+) -> pa_types::ai::AssistantMessage {
+    pa_types::ai::AssistantMessage {
+        content,
+        api: model.api.clone(),
+        provider: model.provider.clone(),
+        model: model.id.clone(),
+        response_model: None,
+        response_id: None,
+        diagnostics: None,
+        usage: pa_types::ai::Usage::default(),
+        stop_reason: pa_types::ai::StopReason::Stop,
+        stop_reason_raw: None,
+        error_message: None,
+        timestamp: 0,
+        rest: serde_json::Map::default(),
+    }
+}
+
 struct HeldPlanner {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -17,14 +40,20 @@ impl pa_ai::registry::Provider for HeldPlanner {
         model: &Model,
         _context: &pa_ai::types::Context,
         _options: Option<&pa_ai::types::StreamOptions>,
-    ) -> pa_ai::event_stream::AssistantMessageEventStream {
-        let (writer, stream) = pa_ai::event_stream::AssistantMessageEventStream::new();
+    ) -> pa_ai::AssistantMessageEventStream {
+        let (writer, stream) = pa_ai::AssistantMessageEventStream::new();
         let started = self.started.clone();
         let release = self.release.clone();
-        let mut message =
-            pa_ai::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
-        message.content =
-            serde_json::from_value(json!([{ "type": "text", "text": self.reply }])).unwrap();
+        let message = assistant_fixture(
+            model,
+            vec![pa_types::ai::AssistantContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: self.reply.to_string(),
+                    text_signature: None,
+                    rest: serde_json::Map::default(),
+                },
+            )],
+        );
         tokio::spawn(async move {
             started.notify_one();
             release.notified().await;
@@ -42,7 +71,7 @@ impl pa_ai::registry::Provider for HeldPlanner {
         model: &Model,
         context: &pa_ai::types::Context,
         _options: Option<&pa_ai::types::SimpleStreamOptions>,
-    ) -> pa_ai::event_stream::AssistantMessageEventStream {
+    ) -> pa_ai::AssistantMessageEventStream {
         self.stream(model, context, None)
     }
 }
@@ -149,13 +178,12 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         engine.session.agent().wait_for_idle().await;
         // A failed assistant retained on disk but dropped from the live retry
         // context must not reappear when the user runs /refine.
-        let mut failed =
-            pa_ai::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        let mut failed = assistant_fixture(&model, Vec::new());
         failed.stop_reason = pa_types::ai::StopReason::Error;
         failed.error_message = Some("discarded retry attempt".to_string());
         engine
             .session
-            .session_handle()
+            .shared_persistence()
             .lock()
             .await
             .append_message(SessionAgentMessage::Assistant(failed))

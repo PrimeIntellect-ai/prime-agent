@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn refinement_row_cannot_broadcast_into_a_replacement_session() {
+#[tokio::test]
+async fn refinement_row_cannot_broadcast_into_a_replacement_session() {
     let dir = tempfile::tempdir().unwrap();
     let worker = Worker::new(
         WorkerConfig {
