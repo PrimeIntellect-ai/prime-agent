@@ -27,6 +27,16 @@ pub(crate) enum AutoCompactionRun {
     Cancelled,
 }
 
+impl AutoCompactionRun {
+    /// Whether in-run threshold checks stay armed after this boundary
+    /// outcome: a summary attempt that failed to commit suppresses the
+    /// rest of the run's checks; a committed summary and a plain
+    /// not-due recheck keep them armed.
+    pub(crate) fn continues_threshold_checks(self) -> bool {
+        !matches!(self, Self::Ran)
+    }
+}
+
 impl AgentSessionEngine {
     /// The TS `_checkCompaction` threshold arm at a turn boundary: check the context against
     /// the reserve headroom; when crossed, run one compaction with the `threshold` event

@@ -247,7 +247,7 @@ impl AgentSessionEngine {
                                 self.run_auto_compaction(&mut **emit)
                             });
                             self.threshold_checks_enabled.store(
-                                outcome == crate::auto_compaction::AutoCompactionRun::Compacted,
+                                outcome.continues_threshold_checks(),
                                 std::sync::atomic::Ordering::SeqCst,
                             );
                             if outcome == crate::auto_compaction::AutoCompactionRun::Cancelled

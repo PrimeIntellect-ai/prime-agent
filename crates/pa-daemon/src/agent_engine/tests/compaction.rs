@@ -1193,3 +1193,24 @@ fn failed_mid_run_compaction_resumes_without_retrying_each_tool_round() {
         .collect();
     assert_eq!(user_prompts, ["seed", "continue task"]);
 }
+
+/// A not-due recheck after a threshold yield keeps the in-run threshold
+/// machinery armed: the suppression is reserved for a summary attempt
+/// that failed to commit (cursor: "Recheck mismatch disables further
+/// compaction").
+#[test]
+fn a_not_due_recheck_keeps_threshold_checks_armed() {
+    use crate::auto_compaction::AutoCompactionRun;
+    assert!(
+        AutoCompactionRun::NotDue.continues_threshold_checks(),
+        "a not-due recheck is not a failed summary"
+    );
+    assert!(
+        AutoCompactionRun::Compacted.continues_threshold_checks(),
+        "a committed summary keeps checking"
+    );
+    assert!(
+        !AutoCompactionRun::Ran.continues_threshold_checks(),
+        "a failed or skipped summary suppresses the rest of the run"
+    );
+}
