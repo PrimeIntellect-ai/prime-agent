@@ -20,14 +20,23 @@ fn default_percentage_preserves_the_current_threshold_and_strict_boundary() {
 
 #[test]
 fn custom_percentages_obey_both_ceilings_as_model_limits_change() {
-    for percent in [1.0, 50.0, 62.5, 80.0, 95.0, 100.0] {
+    for (percent, expected_by_model) in [
+        (1.0, [10_485, 1_310, 655]),
+        (50.0, [524_288, 65_536, 17_152]),
+        (62.5, [655_360, 81_920, 17_152]),
+        (80.0, [838_860, 81_920, 17_152]),
+        (95.0, [996_147, 81_920, 17_152]),
+        (100.0, [1_000_192, 81_920, 17_152]),
+    ] {
         let settings = CompactionSettings {
             threshold_percent: percent,
             ..Default::default()
         };
-        for (window, output) in [(1_048_576, 32_000), (131_072, 32_768), (65_536, 32_000)] {
-            let expected = ((window as f64 * (percent / 100.0)) as u64)
-                .min(window - output - DEFAULT_RESERVE_TOKENS);
+        for ((window, output), expected) in
+            [(1_048_576, 32_000), (131_072, 32_768), (65_536, 32_000)]
+                .into_iter()
+                .zip(expected_by_model)
+        {
             assert_eq!(compaction_threshold(window, output, &settings), expected);
             assert!(!should_compact(expected, window, output, &settings));
             assert!(should_compact(expected + 1, window, output, &settings));
