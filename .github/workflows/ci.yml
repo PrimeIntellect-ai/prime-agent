@@ -374,6 +374,9 @@ jobs:
           for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice socket_pin; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
+              if [ "${scenario}" = "socket_pin" ]; then
+                python3 scripts/test_review_socket_pin_parity.py || comparison_status=1
+              fi
               if [ "${scenario}" = "draft_disconnect" ]; then
                 python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
               fi

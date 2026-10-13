@@ -52,7 +52,8 @@ def install_launcher(binary, root, env):
     payload.mkdir(parents=True)
     (payload / 'prime-agent').symlink_to(binary)
     installer = Path(__file__).resolve().parents[1].joinpath('install-rust.sh').read_text()
-    section = installer.split('# --- the launcher (the takeover lives here)', 1)[1]
+    marker = '# --- the launcher (the takeover lives here)'
+    section = marker + installer.split(marker, 1)[1]
     section = section.split('# The cmd/PowerShell launcher twin', 1)[0]
     script = '''PREFIX="$PRIME_AGENT_RUST_PREFIX"
 bin_dir="$PREFIX/bin"
@@ -62,8 +63,11 @@ WINDOWS=no
 say() { :; }; note() { :; }; die() { echo "$*" >&2; exit 1; }
 trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
 ''' + section
-    subprocess.run(['sh', '-eu'], input=script, env={**env, 'PRIME_AGENT_RUST_PREFIX': str(prefix)},
-                   cwd=root, text=True, capture_output=True, timeout=15, check=True)
+    installed = subprocess.run(['sh', '-eu'], input=script,
+                               env={**env, 'PRIME_AGENT_RUST_PREFIX': str(prefix)},
+                               cwd=root, text=True, capture_output=True, timeout=15)
+    if installed.returncode:
+        raise RuntimeError('launcher extraction failed: ' + installed.stderr)
     return prefix / 'bin/prime-agent'
 
 
