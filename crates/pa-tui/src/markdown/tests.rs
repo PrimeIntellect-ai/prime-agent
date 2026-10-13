@@ -666,7 +666,8 @@ fn escaped_parens_never_open_or_close_the_link_destination() {
     );
     let plain = render_inline("[a](b\\)", &style);
     assert_eq!(plain.len(), 1);
-    assert_eq!(plain[0].content, "[a](b\\)");
+    // Not a link, but marked's escape rule still processes the backslash.
+    assert_eq!(plain[0].content, "[a](b)");
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -1347,4 +1348,71 @@ fn punctuation_after_a_styled_span_never_wraps_alone() {
             );
         }
     }
+}
+
+#[test]
+fn backslash_escapes_render_the_punctuation_literally() {
+    // marked's escape rule: a backslash before ASCII punctuation consumes the
+    // backslash — the punctuation never opens emphasis, code, or a heading.
+    let style = MarkdownStyle::default();
+    let spans = render_inline(
+        r"\*not emphasis\* snake\_case \#five no code via \` here",
+        &style,
+    );
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(
+        joined,
+        r"*not emphasis* snake_case #five no code via ` here"
+    );
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty(), "{joined}");
+    }
+    // A trailing unescaped backslash is a hard break: the paragraph consumes it.
+    let rows = render_markdown("tail\\\nnext", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["tail".to_string(), "next".to_string()]);
+}
+
+#[test]
+fn intraword_underscores_do_not_emphasize() {
+    // CommonMark flanking: `_` between word characters can neither open nor
+    // close emphasis, so snake_case prose keeps its underscores.
+    let style = MarkdownStyle::default();
+    let spans = render_inline("intra_word_underscores and snake_case_name", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "intra_word_underscores and snake_case_name");
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty(), "{joined}");
+    }
+    // Boundary underscores still emphasize.
+    let spans = render_inline("_real italic_ tail", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "real italic tail");
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    // Doubled underscores keep the same flanking rule.
+    let spans = render_inline("__bold__ tail", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "bold tail");
+    assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn a_triple_close_pairs_the_inner_single_delimiter() {
+    // `**outer *inner***`: the closer run's extra star closes the inner em and
+    // the outer keeps the last two — marked renders bold(outer + italic(inner)).
+    let style = MarkdownStyle::default();
+    let spans = render_inline("**bold with *nested italic***", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "bold with nested italic");
+    for s in &spans {
+        assert!(s.style.add_modifier.contains(Modifier::BOLD), "{joined}");
+    }
+    let inner = spans
+        .iter()
+        .find(|s| s.content.contains("nested italic"))
+        .expect("inner span");
+    assert!(inner.style.add_modifier.contains(Modifier::ITALIC));
 }

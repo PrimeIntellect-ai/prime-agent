@@ -365,6 +365,16 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             last_raw = l;
             i += 1;
         }
+        // A trailing unescaped backslash is a hard break (marked consumes it with
+        // the newline); the paragraph's last line has no following row, so its
+        // backslash stays literal.
+        let hard_break_count = para_lines.len().saturating_sub(1);
+        for line in para_lines.iter_mut().take(hard_break_count) {
+            let backslashes = line.chars().rev().take_while(|&c| c == '\\').count();
+            if backslashes % 2 == 1 {
+                line.pop();
+            }
+        }
         let last = para_lines.last_mut().expect("paragraph has a line");
         last.push_str(&last_raw[last_raw.trim_end().len()..]);
         blocks.push(Block {

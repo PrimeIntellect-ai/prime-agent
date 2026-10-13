@@ -71,6 +71,13 @@ fn render_inline_ctx(
 
     while i < bytes.len() {
         let c = bytes[i];
+        // marked's escape rule: a backslash before ASCII punctuation consumes the
+        // backslash, so the punctuation never opens a construct.
+        if c == '\\' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_punctuation() {
+            buf.push(bytes[i + 1]);
+            i += 2;
+            continue;
+        }
         // inline code
         if c == '`' {
             let mut j = i + 1;
@@ -109,31 +116,26 @@ fn render_inline_ctx(
                     // terminal link affordance); `modifier` carries the
                     // emphasis context.
                     let href = crate::hyperlinks::resolve_link_href(&url);
-                    let (mut label_spans, mut label_slots, mut label_codes) =
-                        render_inline_ctx(&label, style, true);
-                    for s in &mut label_spans {
-                        s.style = s.style.add_modifier(modifier | Modifier::UNDERLINED);
+                    let (label_spans, label_slots, label_codes) =
+                    render_inline_ctx(&label, style, true);
+                let mut label_spans = label_spans;
+                if crate::hyperlinks::hyperlinks_enabled() {
+                    // OSC 8: the label stays clickable (TS `hyperlink()`).
+                    let open = crate::hyperlinks::osc8_open(&href);
+                    if let Some(first) = label_spans.first_mut() {
+                        first.content.insert_str(0, &open);
                     }
-                    if crate::hyperlinks::hyperlinks_enabled() {
-                        // OSC 8: the label stays clickable (TS `hyperlink()`).
-                        let open = crate::hyperlinks::osc8_open(&href);
-                        if let Some(first) = label_spans.first_mut() {
-                            first.content.insert_str(0, &open);
-                        }
-                        if let Some(last) = label_spans.last_mut() {
-                            last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                        }
+                    if let Some(last) = label_spans.last_mut() {
+                        last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
                     }
-                    let offset = spans.len();
-                    for slot in &mut label_slots {
-                        *slot += offset;
-                    }
-                    for slot in &mut label_codes {
-                        *slot += offset;
-                    }
-                    url_slots.append(&mut label_slots);
-                    code_slots.append(&mut label_codes);
-                    spans.extend(label_spans);
+                }
+                append_inner(
+                    &mut spans,
+                    &mut url_slots,
+                    &mut code_slots,
+                    (label_spans, label_slots, label_codes),
+                    modifier | Modifier::UNDERLINED,
+                );
                     // The URL rides after the wrap (the OSC 8 region covers the label
                     // only), in the dim `link_url` slot unless the label already is
                     // the URL (mailto stripped for the comparison).
@@ -153,6 +155,14 @@ fn render_inline_ctx(
         }
         // emphasis
         if (c == '*' || c == '_') && i + 1 < bytes.len() {
+            // CommonMark flanking for `_`: a delimiter between word characters
+            // can neither open nor close emphasis (snake_case prose keeps its
+            // underscores); `*` has no intraword restriction.
+            if c == '_' && !underscore_can_open(&bytes, i) {
+                buf.push(c);
+                i += 1;
+                continue;
+            }
             let is_triple = i + 2 < bytes.len() && bytes[i + 1] == c && bytes[i + 2] == c;
             if is_triple {
                 if let Some(close) = find_closing(&bytes, i + 3, c, 3) {
@@ -173,6 +183,34 @@ fn render_inline_ctx(
             let doubled = i + 1 < bytes.len() && bytes[i + 1] == c;
             let (len, close_search) = if doubled { (2, i + 2) } else { (1, i + 1) };
             if let Some(close) = find_closing(&bytes, close_search, c, len) {
+                if c == '_' && !underscore_can_close(&bytes, close, len) {
+                    buf.push(c);
+                    i += 1;
+                    continue;
+                }
+                if doubled {
+                    // A closer run of three (`**outer *inner***`): the extra star
+                    // pairs with the inner single delimiter, the outer keeps the
+                    // last two — marked renders bold(outer + italic(inner)).
+                    let run = run_length(&bytes, close, c);
+                    if run == 3 {
+                        let inner: String = bytes[close_search..=close].iter().collect();
+                        if !inner.trim().is_empty() {
+                            flush!();
+                            bold = !bold;
+                            append_inner(
+                                &mut spans,
+                                &mut url_slots,
+                                &mut code_slots,
+                                render_inline_ctx(&inner, style, in_link),
+                                style.bold,
+                            );
+                            bold = !bold;
+                            i = close + 3;
+                            continue;
+                        }
+                    }
+                }
                 let inner: String = bytes[close_search..close].iter().collect();
                 if inner.trim().is_empty() {
                     buf.push(c);
@@ -182,39 +220,23 @@ fn render_inline_ctx(
                 flush!();
                 if doubled {
                     bold = !bold;
-                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
-                        render_inline_ctx(&inner, style, in_link);
-                    let offset = spans.len();
-                    for slot in &mut inner_slots {
-                        *slot += offset;
-                    }
-                    for slot in &mut inner_codes {
-                        *slot += offset;
-                    }
-                    url_slots.append(&mut inner_slots);
-                    code_slots.append(&mut inner_codes);
-                    for s in &mut inner_spans {
-                        s.style = s.style.add_modifier(style.bold);
-                    }
-                    spans.extend(inner_spans);
+                    append_inner(
+                        &mut spans,
+                        &mut url_slots,
+                        &mut code_slots,
+                        render_inline_ctx(&inner, style, in_link),
+                        style.bold,
+                    );
                     bold = !bold;
                 } else {
                     italic = !italic;
-                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
-                        render_inline_ctx(&inner, style, in_link);
-                    let offset = spans.len();
-                    for slot in &mut inner_slots {
-                        *slot += offset;
-                    }
-                    for slot in &mut inner_codes {
-                        *slot += offset;
-                    }
-                    url_slots.append(&mut inner_slots);
-                    code_slots.append(&mut inner_codes);
-                    for s in &mut inner_spans {
-                        s.style = s.style.add_modifier(style.italic);
-                    }
-                    spans.extend(inner_spans);
+                    append_inner(
+                        &mut spans,
+                        &mut url_slots,
+                        &mut code_slots,
+                        render_inline_ctx(&inner, style, in_link),
+                        style.italic,
+                    );
                     italic = !italic;
                 }
                 i = close + len;
@@ -226,21 +248,13 @@ fn render_inline_ctx(
                 let inner: String = bytes[i + 2..close].iter().collect();
                 if !inner.trim().is_empty() {
                     flush!();
-                    let (mut inner_spans, mut inner_slots, mut inner_codes) =
-                        render_inline_ctx(&inner, style, in_link);
-                    let offset = spans.len();
-                    for slot in &mut inner_slots {
-                        *slot += offset;
-                    }
-                    for slot in &mut inner_codes {
-                        *slot += offset;
-                    }
-                    url_slots.append(&mut inner_slots);
-                    code_slots.append(&mut inner_codes);
-                    for s in &mut inner_spans {
-                        s.style = s.style.add_modifier(style.strikethrough);
-                    }
-                    spans.extend(inner_spans);
+                    append_inner(
+                        &mut spans,
+                        &mut url_slots,
+                        &mut code_slots,
+                        render_inline_ctx(&inner, style, in_link),
+                        style.strikethrough,
+                    );
                     i = close + 2;
                     continue;
                 }
@@ -302,6 +316,32 @@ fn render_inline_ctx(
         spans.push(Span::raw(""));
     }
     (spans, url_slots, code_slots)
+}
+
+/// Recurse into one inline construct's inner text and merge the result into the
+/// outer span stream: the tracked slots remap across the extend, and the
+/// construct's own modifier applies on top of the inner styles.
+fn append_inner(
+    outer: &mut Vec<Span>,
+    url_slots: &mut Vec<usize>,
+    code_slots: &mut Vec<usize>,
+    inner: (Line, Vec<usize>, Vec<usize>),
+    modifier: Modifier,
+) {
+    let (mut spans, mut slots, mut codes) = inner;
+    let offset = outer.len();
+    for slot in &mut slots {
+        *slot += offset;
+    }
+    for slot in &mut codes {
+        *slot += offset;
+    }
+    url_slots.append(&mut slots);
+    code_slots.append(&mut codes);
+    for s in &mut spans {
+        s.style = s.style.add_modifier(modifier);
+    }
+    outer.extend(spans);
 }
 
 /// The `CommonMark` inline-link destination after `[label](` (marked's link rule):
@@ -368,6 +408,34 @@ fn autolink_token_at(rest: &str, angle: bool) -> Option<crate::autolink::Autolin
     } else {
         crate::autolink::bare_token(rest)
     }
+}
+
+/// `CommonMark` flanking for `_` openers: left-flanking and not intraword (the
+/// preceding char is not a word character), so `snake_case` never opens.
+fn underscore_can_open(bytes: &[char], at: usize) -> bool {
+    let next = bytes.get(at + 1);
+    let next_ws = next.is_none_or(|c: &char| c.is_whitespace());
+    let prev_word = at > 0 && (bytes[at - 1].is_alphanumeric() || bytes[at - 1] == '_');
+    !next_ws && !prev_word
+}
+
+/// The `_` closer mirror: right-flanking and not intraword (the char after the
+/// closer run is not a word character).
+fn underscore_can_close(bytes: &[char], at: usize, len: usize) -> bool {
+    let prev = at > 0 && !bytes[at - 1].is_whitespace();
+    let next_word = bytes
+        .get(at + len)
+        .is_some_and(|c| c.is_alphanumeric() || *c == '_');
+    prev && !next_word
+}
+
+/// The length of the run of `delim` starting at `at`.
+fn run_length(bytes: &[char], at: usize, delim: char) -> usize {
+    let mut n = 0;
+    while bytes.get(at + n) == Some(&delim) {
+        n += 1;
+    }
+    n
 }
 
 fn find_closing(chars: &[char], from: usize, delim: char, len: usize) -> Option<usize> {
