@@ -149,9 +149,18 @@ def comparison(results, artifacts):
         if frame != "agents-default" and base != pr:
             errors.append(f"unexpected base-to-PR frame change: {frame}")
         if frame == "agents-default":
-            without_new_row = "\n".join(line for line in pr.splitlines() if "Harness refinements" not in line)
-            if base.rstrip() != without_new_row.rstrip():
-                errors.append("Agents frame changed beyond the intended new row")
+            base_lines = base.splitlines()
+            pr_lines = [line for line in pr.splitlines() if "Harness refinements" not in line]
+            # A bottom-anchored panel grows by one row, consuming exactly one
+            # otherwise empty chat row above its chrome. Retain the raw diff.
+            marker = "mode (Ctrl+O to expand)"
+            base_chrome = next((i for i, line in enumerate(base_lines) if marker in line), None)
+            pr_chrome = next((i for i, line in enumerate(pr_lines) if marker in line), None)
+            if (base_chrome is not None and pr_chrome is not None and
+                    base_chrome == pr_chrome + 1 and not base_lines[base_chrome - 1].strip()):
+                del base_lines[base_chrome - 1]
+            if "\n".join(base_lines).rstrip() != "\n".join(pr_lines).rstrip():
+                errors.append("Agents frame changed beyond the intended row and empty chat gap")
     for frame in ("default-settings", "quiet-before", "quiet-true", "quiet-false"):
         reference = results["ts"]["frames"].get(frame, "")
         base = results["base"]["frames"].get(frame, "")
