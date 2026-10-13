@@ -1017,14 +1017,12 @@ async fn session_header_json(
 async fn select_model(
     registry: &mut pa_core::models::ModelRegistry,
     config: &crate::mode::RuntimeConfig,
-    _session: Option<&pa_core::session::SessionContext>,
+    session: Option<&pa_core::session::SessionContext>,
 ) -> Result<Model, String> {
-    let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
-    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
-    let saved_provider = settings.get_default_provider();
     // Explicit selectors retain the CLI resolver's provider inference and do
     // not inherit an unrelated saved provider.
     if let Some(model_name) = config.model.as_deref() {
+        let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
         let resolved =
             pa_core::models::resolve_cli_model(config.provider.as_deref(), model_name, &available);
         if let Some(error) = resolved.error {
@@ -1034,6 +1032,30 @@ async fn select_model(
             .model
             .ok_or_else(|| "No matching model found.".to_string());
     }
+    // A resumed session with messages restores its own model before the
+    // defaults chain (TS `createAgentSession`), through the daemon restore's
+    // bounded catalog-readiness wait; a miss falls through on the record.
+    if let Some((provider, model_id)) = session
+        .filter(|context| !context.messages.is_empty())
+        .and_then(|context| context.model.as_ref())
+    {
+        if let Some(model) = pa_core::models::find_session_model_with_readiness_wait(
+            registry,
+            provider,
+            model_id,
+            pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+        )
+        .await
+        {
+            return Ok(model);
+        }
+        eprintln!("Could not restore model {provider}/{model_id}");
+    }
+    // A missed restore's readiness window may have refreshed the catalog, so
+    // the defaults chain resolves against the refreshed view.
+    let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
+    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+    let saved_provider = settings.get_default_provider();
     let provider = config.provider.as_deref().or(saved_provider);
     let saved_model = settings.get_default_model().filter(|_| {
         config.provider.as_deref().is_none_or(|provider| {
