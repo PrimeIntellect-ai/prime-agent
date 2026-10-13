@@ -3128,10 +3128,11 @@ else
 fi
 
 # --- verify: the launcher must answer --version -----------------------------------
-# Tried once. The common failure on a fresh install is the first-run kernel
-# venv bootstrap (the sidecar provisions itself on first launch), so the
-# failure must fail installation: a published payload alone does not certify
-# a working command. Kernel pre-warm remains best-effort above.
+# Tried once. The probe prints the compiled-in version and does not run the
+# first-run kernel venv bootstrap (the pre-warm above stays best-effort; the
+# first session retries it), so a failure here is a broken payload and must
+# fail installation: a published payload alone does not certify a working
+# command.
 if version_out="$("$install_probe_launcher" --version 2>&1)"; then
   say "installed: ${version_out}"
 else
