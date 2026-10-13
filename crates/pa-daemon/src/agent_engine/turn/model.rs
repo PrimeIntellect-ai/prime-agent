@@ -112,15 +112,16 @@ impl AgentSessionEngine {
         // user message, so its turn starts as a continuation (TS
         // `agent.continue()`); ordinary turns start fresh.
         let first_attempt = std::cell::Cell::new(matches!(admission, TurnAdmission::FreshPrompt));
-        // Failover switch/restore re-bind the live agent's model and
-        // append the model-change row. The primary (model + thinking
-        // level) is captured at the first switch, restored on settle.
-        let persistence = {
+        // Failover switch/restore re-bind the live agent's model, append
+        // the model-change row, and re-bind the turn-boundary model facts
+        // (`model.info` follows the model actually serving the turn). The
+        // primary (model + thinking level) is captured at the first
+        // switch, restored on settle.
+        let core = {
             let guard = self.session.blocking_lock();
-            guard
-                .as_ref()
-                .map(|engine| engine.session.shared_persistence())
+            guard.as_ref().cloned()
         };
+        let persistence = core.as_ref().map(|core| core.session.shared_persistence());
         // Retry/failover adoption telemetry (TS `auto_retry_start` counting):
         // retries increment `retry_count`, provider switches `failover_count`.
         // The semantic-edge recorder rides the same snapshot (TS
@@ -321,6 +322,7 @@ impl AgentSessionEngine {
                 |next: &pa_types::ai::Model| {
                     let agent = agent.clone();
                     let persistence = persistence.clone();
+                    let core = core.clone();
                     {
                         let mut primary = primary_state.borrow_mut();
                         // Capture the primary state once (TS `_backupModel`), restored when the
@@ -382,6 +384,9 @@ impl AgentSessionEngine {
                         }
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(map_thinking_level(clamped)).await;
+                        if let Some(core) = &core {
+                            core.update_model_facts(&next);
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
@@ -392,6 +397,7 @@ impl AgentSessionEngine {
                 || {
                     let agent = agent.clone();
                     let persistence = persistence.clone();
+                    let core = core.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
                         let Some(FailoverPrimary {
@@ -444,6 +450,9 @@ impl AgentSessionEngine {
                         }
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(thinking_level).await;
+                        if let Some(core) = &core {
+                            core.update_model_facts(&primary_model);
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session

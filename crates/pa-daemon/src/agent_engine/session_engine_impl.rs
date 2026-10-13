@@ -443,6 +443,10 @@ impl SessionEngine for AgentSessionEngine {
                 core.session
                     .set_model_and_thinking_level(&model, &provider, &model_id, level),
             );
+            // The turn-boundary model facts follow the switch: `model.info`
+            // and the usage estimate's context window report the model now
+            // running. A core that is not built yet rebinds at its build.
+            core.update_model_facts(&model);
         }
         if let Some(children) = &self.children {
             children.set_model(format!("{}/{}", model.provider, model.id));
