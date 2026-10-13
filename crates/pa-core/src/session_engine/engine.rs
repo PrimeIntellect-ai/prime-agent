@@ -1055,6 +1055,10 @@ impl SessionEngine {
     /// The session's cached Codex WebSocket closes with it (TS `cleanupSessionResources` on
     /// dispose), so a worker that replaces its session does not hold the old socket until the
     /// idle expiry.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the refinement-cancellation mutex is poisoned.
     pub async fn dispose_kernel(&self) {
         self.session
             .refinement_cancel

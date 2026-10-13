@@ -520,19 +520,20 @@ async fn reserve_refinement_commit<'a>(
     compaction_flight: Option<&'a tokio::sync::Mutex<()>>,
 ) -> anyhow::Result<RefinementCommitGuards<'a>> {
     tokio::fs::create_dir_all(&target_dir).await?;
-    let state_path = crate::refinement::get_harness_state_path(&target_dir);
+    let state_path = crate::refinement::get_harness_state_path(target_dir);
     let mut attempts = 0;
     let guards = loop {
         let admission = agent.reserve_idle().await;
         let flight = match compaction_flight {
-            Some(flight) => match flight.try_lock() {
-                Ok(guard) => Some(guard),
-                Err(_) => {
+            Some(flight) => {
+                if let Ok(guard) = flight.try_lock() {
+                    Some(guard)
+                } else {
                     drop(admission);
                     drop(flight.lock().await);
                     continue;
                 }
-            },
+            }
             None => None,
         };
         let Ok(session_guard) = session.try_lock() else {
