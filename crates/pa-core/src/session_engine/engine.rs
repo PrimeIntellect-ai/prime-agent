@@ -209,6 +209,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     };
     let (settings, trace_consent) =
         crate::agent_traces::ContinuousTraceUpload::load_settings(&cwd, &config.agent_dir);
+    // Resolve the kernel shell once, before any side effects: an invalid
+    // `shellPath` must fail session creation with a clear config error
+    // naming the setting, not every kernel `bash()` call later.
+    let kernel_shell_path = crate::platform::shell::resolve_kernel_bash_shell(
+        settings.settings().shell_path.as_deref(),
+    )?
+    .map(std::path::PathBuf::from);
     let traces = session_manager
         .is_persisted()
         .then(|| {
@@ -429,6 +436,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         python_skills,
         cwd.clone(),
         &config.agent_dir,
+        kernel_shell_path,
         session_artifact_dir,
         on_restore,
         config.on_background_work_settled.clone(),

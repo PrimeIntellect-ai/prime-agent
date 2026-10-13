@@ -210,6 +210,8 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// plus the pre-imported skills. The session's agent dir is propagated into the kernel env
 /// (`PRIME_AGENT_CODING_AGENT_DIR`): an embedding host whose ambient env differs must not
 /// leak its own paths into the kernel (#109). `cwd` is the SESSION's working directory.
+/// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
+/// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
 #[must_use]
 pub fn kernel_provisioner(
@@ -218,6 +220,7 @@ pub fn kernel_provisioner(
     python_skills: Vec<KernelPythonSkill>,
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
+    shell_path: Option<std::path::PathBuf>,
     snapshot_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -235,7 +238,7 @@ pub fn kernel_provisioner(
             python: None,
             env,
             command_prefix: None,
-            shell_path: None,
+            shell_path,
             session_id: Some(session_id),
             host_handlers: handlers,
             python_skills,

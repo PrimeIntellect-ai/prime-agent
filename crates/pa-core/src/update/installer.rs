@@ -583,7 +583,7 @@ fn trusted_shell() -> PathBuf {
     PathBuf::from("/bin/sh")
 }
 
-/// On Windows the kernel shell resolver's TRUSTED Git Bash roots -
+/// On Windows the kernel shell default's TRUSTED Git Bash roots -
 /// hardcoded install-dir literals, never PATH and never `where bash.exe`
 /// (the `get_shell_config` fallback that serves the kernel shell would
 /// let a repo-controlled `PATH` place the interpreter that receives the
@@ -593,7 +593,7 @@ fn trusted_shell() -> PathBuf {
 /// Returns the failure when no trusted Git Bash root exists.
 #[cfg(windows)]
 fn trusted_shell() -> std::result::Result<std::path::PathBuf, UpdateFailure> {
-    crate::platform::shell::resolve_kernel_bash_shell(None)
+    crate::platform::shell::default_kernel_bash_shell()
         .map(std::path::PathBuf::from)
         .ok_or_else(|| UpdateFailure {
             // No shellPath guidance here: the funnel, like its unix side
