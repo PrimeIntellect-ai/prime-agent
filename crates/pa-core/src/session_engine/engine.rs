@@ -216,6 +216,12 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         settings.settings().shell_path.as_deref(),
     )?
     .map(std::path::PathBuf::from);
+    // TS injects the prefix only when truthy (an empty string stays unset).
+    let kernel_command_prefix = settings
+        .settings()
+        .shell_command_prefix
+        .clone()
+        .filter(|prefix| !prefix.is_empty());
     let traces = session_manager
         .is_persisted()
         .then(|| {
@@ -437,6 +443,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         cwd.clone(),
         &config.agent_dir,
         kernel_shell_path,
+        kernel_command_prefix,
         session_artifact_dir,
         on_restore,
         config.on_background_work_settled.clone(),

@@ -1362,6 +1362,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_settings_reach_the_kernel_command_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "shellCommandPrefix": "shopt -s expand_aliases" }).to_string(),
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(
+            engine.provisioner.inner.options.command_prefix.as_deref(),
+            Some("shopt -s expand_aliases")
+        );
+    }
+
+    #[tokio::test]
     async fn session_settings_reject_a_missing_shell_path() {
         let dir = tempfile::tempdir().unwrap();
         let agent_dir = dir.path().join("agent");

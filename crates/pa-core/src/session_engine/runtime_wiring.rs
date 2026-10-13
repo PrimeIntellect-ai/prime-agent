@@ -223,6 +223,7 @@ pub fn kernel_provisioner(
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
     shell_path: Option<std::path::PathBuf>,
+    command_prefix: Option<String>,
     session_artifact_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -250,7 +251,7 @@ pub fn kernel_provisioner(
         IpythonKernelProvisionerOptions {
             python: None,
             env,
-            command_prefix: None,
+            command_prefix,
             shell_path,
             session_id: Some(session_id),
             host_handlers: handlers,
