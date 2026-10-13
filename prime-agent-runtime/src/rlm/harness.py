@@ -453,7 +453,6 @@ class HarnessState:
             return None
 
     def _sync_from_disk(self) -> None:
-        _require_refinements_enabled()
         """Reload if another process rewrote the state file since we last touched it.
 
         The kernel keeps a long-lived ``HarnessState`` in memory while the host
@@ -462,6 +461,7 @@ class HarnessState:
         stale snapshot. We re-read whenever the on-disk mtime no longer matches the
         value recorded at our last load/save.
         """
+        _require_refinements_enabled()
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 

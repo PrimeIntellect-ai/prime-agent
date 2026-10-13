@@ -46,12 +46,30 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           cargo fmt --all --check
       - name: Python harness regressions
+        id: python_harness
         run: PYTHONPATH=prime-agent-runtime/src python3 -m unittest discover -s prime-agent-runtime/test -p test_harness.py
+      - name: Compare failing Python suite against the base
+        if: ${{ failure() && steps.python_harness.outcome == 'failure' }}
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags origin "$BASE_SHA"
+          mkdir -p "$RUNNER_TEMP/harness-python-base"
+          git archive "$BASE_SHA" prime-agent-runtime | tar -x -C "$RUNNER_TEMP/harness-python-base"
+          PYTHONPATH="$RUNNER_TEMP/harness-python-base/prime-agent-runtime/src" python3 -m unittest discover -s "$RUNNER_TEMP/harness-python-base/prime-agent-runtime/test" -p test_harness.py
       - name: Workspace lint gate
+        id: lint
+        if: ${{ !cancelled() }}
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build sibling test binaries
+        id: bins
+        if: ${{ !cancelled() && steps.lint.outcome == 'success' }}
         run: cargo build --locked --workspace --bins
       - name: Bootstrap kernel before integration tests
+        id: bootstrap
+        if: ${{ !cancelled() && steps.bins.outcome == 'success' }}
         run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Workspace test gate
+        if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         run: cargo test --locked --workspace
