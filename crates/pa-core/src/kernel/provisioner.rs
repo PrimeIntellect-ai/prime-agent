@@ -1292,6 +1292,102 @@ pub fn provisioner_for_path(
 mod tests {
     use super::*;
 
+    /// A shell file the resolver accepts: existing, and executable on unix.
+    fn executable_shell(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    /// The scripted session both shell-setting tests build: a model and
+    /// `stream_fn` the settings validation never reaches, no kernel prewarm.
+    async fn shell_test_session(
+        cwd: PathBuf,
+        agent_dir: PathBuf,
+    ) -> anyhow::Result<crate::session_engine::engine::SessionEngine> {
+        use crate::session_engine::engine::{create_session, SessionEngineConfig};
+
+        let model = pa_agent::types::Model {
+            id: "shell-test".into(),
+            name: "Shell test".into(),
+            api: "test".into(),
+            provider: "test".into(),
+            base_url: "http://localhost".into(),
+            reasoning: false,
+            cost: pa_agent::types::UsageCost::default(),
+            context_window: 1_000,
+            max_tokens: 100,
+            max_tokens_explicit: false,
+        };
+        let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
+        create_session(SessionEngineConfig {
+            cwd,
+            agent_dir,
+            model: Some(model),
+            stream_fn: Some(provider.stream_fn()),
+            prewarm_ipython_kernel: Some(false),
+            ..Default::default()
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn session_settings_reach_the_kernel_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        // Project settings override the global setting before the session captures it.
+        let global = executable_shell(dir.path(), "global-bash");
+        let project = executable_shell(dir.path(), "project-bash");
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "shellPath": global.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellPath": format!("  {}  ", project.to_string_lossy()) })
+                .to_string(),
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(engine.provisioner.inner.options.shell_path, Some(project));
+    }
+
+    #[tokio::test]
+    async fn session_settings_reject_a_missing_shell_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        let missing = cwd.join("no-such-shell");
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellPath": missing.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        let Err(err) = shell_test_session(cwd, agent_dir).await else {
+            panic!("create_session must reject a missing shellPath");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("shellPath"),
+            "error names the setting: {message}"
+        );
+        assert!(
+            message.contains(missing.to_string_lossy().as_ref()),
+            "error names the path: {message}"
+        );
+    }
+
     #[test]
     fn a_spent_stop_arm_releases_only_its_own_boot() {
         let provisioner = IpythonKernelProvisioner::new(

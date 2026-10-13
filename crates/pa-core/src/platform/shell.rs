@@ -3,7 +3,6 @@
 //! the canonical install dirs, then `where bash.exe` (System32 candidates
 //! demoted to last — the WSL launcher), never PATH for the kernel shell.
 
-#[cfg(any(unix, windows))]
 use std::path::Path;
 
 /// Shell program plus the fixed argument list used to run a command string.
@@ -13,21 +12,44 @@ pub struct ShellConfig {
     pub args: Vec<String>,
 }
 
+/// One predicate for every explicit `shellPath` consumer (the user-bash
+/// [`get_shell_config`] and the kernel [`resolve_kernel_bash_shell`]):
+/// the same setting fails the same way everywhere, naming the setting.
+///
+/// # Errors
+///
+/// Error when the path does not exist or (on unix) is not an executable
+/// regular file.
+fn check_custom_shell_path(path: &str) -> anyhow::Result<()> {
+    if !Path::new(path).exists() {
+        anyhow::bail!("Custom shell path not found: {path} (shellPath setting)");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0);
+        if !executable {
+            anyhow::bail!("Custom shell path is not executable: {path} (shellPath setting)");
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the shell to run commands with, honoring an explicit custom path.
 ///
 /// # Errors
 ///
-/// Error when the explicit custom shell path does not exist; built-ins never fail.
+/// Error when the explicit custom shell path fails [`check_custom_shell_path`];
+/// the built-ins never fail.
 #[cfg(unix)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {
-        if Path::new(path).exists() {
-            return Ok(ShellConfig {
-                shell: path.to_string(),
-                args: vec!["-c".to_string()],
-            });
-        }
-        return Err(anyhow::anyhow!("Custom shell path not found: {path}"));
+        check_custom_shell_path(path)?;
+        return Ok(ShellConfig {
+            shell: path.to_string(),
+            args: vec!["-c".to_string()],
+        });
     }
 
     if Path::new("/bin/bash").exists() {
@@ -56,15 +78,13 @@ pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<Shell
 ///
 /// # Errors
 ///
-/// Error when the explicit path does not exist; the fallbacks otherwise
-/// resolve or name the classes searched.
+/// Error when the explicit path fails [`check_custom_shell_path`]; the
+/// fallbacks otherwise resolve or name the classes searched.
 #[cfg(windows)]
 pub fn get_shell_config(custom_shell_path: Option<&str>) -> anyhow::Result<ShellConfig> {
     if let Some(path) = custom_shell_path {
-        if Path::new(path).exists() {
-            return Ok(bash_config(path));
-        }
-        return Err(anyhow::anyhow!("Custom shell path not found: {path}"));
+        check_custom_shell_path(path)?;
+        return Ok(bash_config(path));
     }
 
     let paths = windows_git_bash_search_paths();
@@ -172,14 +192,12 @@ fn windows_git_bash_search_paths() -> Vec<String> {
     paths
 }
 
-/// Absolute default shell for the kernel's `bash()`: explicit path wins;
-/// POSIX uses `/bin/bash` else `/bin/sh`. `None` when no shell resolves
-/// (kernel startup must not fail; `bash()` raises its teaching error).
+/// Absolute default shell for the kernel's `bash()` when no `shellPath` is
+/// configured: POSIX uses `/bin/bash` else `/bin/sh`. `None` when no shell
+/// resolves (kernel startup must not fail; `bash()` raises its teaching error).
 #[cfg(unix)]
-pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<String> {
-    if let Some(explicit) = custom_shell_path.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(explicit.to_string());
-    }
+#[must_use]
+pub fn default_kernel_bash_shell() -> Option<String> {
     if Path::new("/bin/bash").exists() {
         Some("/bin/bash".to_string())
     } else {
@@ -187,19 +205,17 @@ pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<Stri
     }
 }
 
-/// Windows: canonical Git Bash install paths only, never PATH (TS
-/// `resolveKernelBashShell` win32): a repo-controlled PATH must not pick
-/// the kernel shell, and hardcoded candidates avoid ambient attacker-
+/// Windows default: the canonical Git Bash install paths only, never PATH
+/// (TS `resolveKernelBashShell` win32): a repo-controlled PATH must not
+/// pick the kernel shell, and hardcoded candidates avoid ambient attacker-
 /// influenceable `ProgramFiles` input. `None`: `bash()` raises its teaching error.
 #[cfg(windows)]
-pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<String> {
+#[must_use]
+pub fn default_kernel_bash_shell() -> Option<String> {
     const WINDOWS_GIT_BASH_PATHS: [&str; 2] = [
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
     ];
-    if let Some(explicit) = custom_shell_path.map(str::trim).filter(|s| !s.is_empty()) {
-        return Some(explicit.to_string());
-    }
     WINDOWS_GIT_BASH_PATHS
         .into_iter()
         .find(|path| Path::new(path).exists())
@@ -207,11 +223,31 @@ pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<Stri
 }
 
 #[cfg(not(any(unix, windows)))]
-pub fn resolve_kernel_bash_shell(custom_shell_path: Option<&str>) -> Option<String> {
-    custom_shell_path
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+#[must_use]
+pub fn default_kernel_bash_shell() -> Option<String> {
+    None
+}
+
+/// Resolve the absolute shell for the kernel's `bash()` from an explicit
+/// `shellPath`, validated here so a bad setting fails session creation
+/// once instead of every kernel `bash()` call: a trimmed non-empty
+/// explicit path must be absolute and pass [`check_custom_shell_path`];
+/// anything else falls back to [`default_kernel_bash_shell`].
+///
+/// # Errors
+///
+/// Error naming the path and the `shellPath` setting when the explicit
+/// path is relative, missing, or (on unix) not executable. The default
+/// never fails.
+pub fn resolve_kernel_bash_shell(custom: Option<&str>) -> anyhow::Result<Option<String>> {
+    if let Some(path) = custom.map(str::trim).filter(|s| !s.is_empty()) {
+        if !Path::new(path).is_absolute() {
+            anyhow::bail!("Custom shell path must be absolute: {path} (shellPath setting)");
+        }
+        check_custom_shell_path(path)?;
+        return Ok(Some(path.to_string()));
+    }
+    Ok(default_kernel_bash_shell())
 }
 
 #[cfg(all(test, windows))]
@@ -246,22 +282,63 @@ mod windows_tests {
         assert_eq!(order_windows_bash_candidates(&candidates, None), candidates);
     }
 
-    /// The kernel shell candidates are the hardcoded Git Bash paths, not
-    /// PATH-derived (a repo-controlled PATH must not pick the kernel
-    /// shell); an explicit path always wins.
+    /// An explicit path is validated (it must exist) and wins over the
+    /// hardcoded Git Bash candidates; without one the resolution is the
+    /// platform default.
     #[test]
     fn kernel_shell_prefers_explicit_then_hardcoded_git_bash() {
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("bash.exe");
+        std::fs::write(&explicit, b"").unwrap();
+        let explicit = explicit.to_string_lossy().to_string();
         assert_eq!(
-            resolve_kernel_bash_shell(Some("  C:/my/bash.exe  ")),
-            Some("C:/my/bash.exe".to_string())
+            resolve_kernel_bash_shell(Some(format!("  {explicit}  ").as_str())).unwrap(),
+            Some(explicit)
         );
-        // Hardcoded candidates are environment-independent: absent on a
-        // clean CI runner, the resolution is None (bash() raises its
-        // teaching error, kernel startup still succeeds).
-        let clean = !Path::new(r"C:\Program Files\Git\bin\bash.exe").exists()
-            && !Path::new(r"C:\Program Files (x86)\Git\bin\bash.exe").exists();
-        if clean {
-            assert_eq!(resolve_kernel_bash_shell(None), None);
+        assert_eq!(
+            resolve_kernel_bash_shell(None).unwrap(),
+            default_kernel_bash_shell()
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A rejected explicit shell: the error names the path and the
+    /// `shellPath` setting, whatever the validation failure was.
+    #[test]
+    fn explicit_shell_paths_are_validated() {
+        for path in ["relative/bash", "/no/such/shell"] {
+            let message = resolve_kernel_bash_shell(Some(path))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("shellPath"), "{path}: {message}");
+            assert!(message.contains(path), "{path}: {message}");
         }
+        let dir = tempfile::tempdir().unwrap();
+        let not_executable = dir.path().join("shell");
+        std::fs::write(&not_executable, b"").unwrap();
+        let path = not_executable.to_string_lossy().to_string();
+        let message = resolve_kernel_bash_shell(Some(path.as_str()))
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("shellPath"), "not executable: {message}");
+        assert!(message.contains(&path), "not executable: {message}");
+    }
+
+    #[test]
+    fn padded_executable_shell_resolves_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("bash");
+        std::fs::write(&shell, b"").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let padded = format!("  {}  ", shell.to_string_lossy());
+        assert_eq!(
+            resolve_kernel_bash_shell(Some(padded.as_str())).unwrap(),
+            Some(shell.to_string_lossy().to_string())
+        );
     }
 }
