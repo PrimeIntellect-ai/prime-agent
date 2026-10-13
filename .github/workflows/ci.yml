@@ -348,7 +348,7 @@ jobs:
       # and only synthetic loopback providers/state. One leg avoids 8 downloads.
       - name: Compare the lifecycle binaries (pinned TS reference)
         id: lifecycle_parity
-        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        if: matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '' || hashFiles('scripts/review_restore_notice_parity.py') != '')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -371,7 +371,7 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect; do
+          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
               if [ "${scenario}" = "draft_disconnect" ]; then
@@ -382,7 +382,7 @@ jobs:
           done
           exit "${comparison_status}"
       - name: Upload the binary comparison receipts
-        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '')
+        if: always() && matrix.shard == 1 && steps.selection.outputs.units != '0' && (hashFiles('scripts/review_graceful_shutdown_parity.py') != '' || hashFiles('scripts/review_goal_backoff_parity.py') != '' || hashFiles('scripts/review_draft_disconnect_parity.py') != '' || hashFiles('scripts/review_restore_notice_parity.py') != '')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: lifecycle-parity-receipts-attempt-${{ github.run_attempt }}

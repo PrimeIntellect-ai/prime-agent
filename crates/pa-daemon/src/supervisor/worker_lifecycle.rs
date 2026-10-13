@@ -279,7 +279,11 @@ impl Supervisor {
             process_start_id: None,
             socket_path: worker_socket.to_string_lossy().to_string(),
             recovery_journal_path: recovery_journal_path.to_string_lossy().to_string(),
-            orphan_process_journal_path: None,
+            orphan_process_journal_path: Some(
+                crate::journal::orphan_journal_path(&self.descriptor_dir, &worker_id)
+                    .to_string_lossy()
+                    .to_string(),
+            ),
             supervisor_socket_path: self.options.socket_path.to_string_lossy().to_string(),
             authentication_token: uuid::Uuid::new_v4().to_string(),
             worker_instance_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -461,7 +465,7 @@ impl Supervisor {
         // now be routed to this worker — nothing overtakes the session's create.
         resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
-        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid));
+        self.spawn_monitor(Arc::clone(&resident), Some(child), u64::from(pid), None);
         Ok((resident, create_summary))
     }
 
@@ -776,6 +780,10 @@ impl Supervisor {
                 ));
             }
             _ => {
+                // The worker is provably gone, so its kernels can no longer
+                // run their teardown reap: kill the `bash()` groups they
+                // journaled before the descriptor dies with its files.
+                self.reap_dead_worker_orphans(resident).await;
                 // Metadata retirement historically treats failed liveness probes
                 // as gone. Journal deletion needs positive owner-death evidence:
                 // an unobservable process may still be writing durable work.
@@ -790,14 +798,58 @@ impl Supervisor {
                 // The identity-pending side record dies with the descriptor it shadows
                 // (an orphaned pending would shadow the next identity).
                 let _ = crate::descriptor::clear_identity_pending(&resident.descriptor_path);
+                // The reaper alone owns orphan-journal removal. A read or
+                // identity-verified kill failure must preserve its retry records.
             }
         }
+    }
+
+    /// Kill the `bash()` process groups a provably-dead worker's kernels
+    /// journaled (TS `recoverUncertainWorkerOperations`' orphan sweep):
+    /// a worker killed without its shutdown hook leaves them behind, and
+    /// only the supervisor still knows the journal's path.
+    pub(super) async fn reap_dead_worker_orphans(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        // Capture one generation: a concurrent retry or registration may
+        // replace the descriptor while the blocking identity probe runs.
+        let (pid, start_id, orphan_path) = {
+            let descriptor = resident.descriptor.lock().await;
+            (
+                descriptor.pid,
+                descriptor.process_start_id.clone(),
+                descriptor.orphan_process_journal_path.clone(),
+            )
+        };
+        let Some(orphan_path) = orphan_path else {
+            return;
+        };
+        let Ok(worker_pid) = i32::try_from(pid) else {
+            return;
+        };
+        // The reap is blocking file I/O and kill signals (and on macOS a
+        // `ps` probe): keep it off the async executor, as the adoption
+        // identity probes do.
+        let _ = tokio::task::spawn_blocking(move || {
+            // Stop escalation and adopted-process watch failures do not
+            // prove death. The proof and reap must use the same owner pid.
+            if !recovery_journal_owner_is_gone(
+                crate::lease::is_process_alive(worker_pid as u32).ok(),
+                start_id.as_deref(),
+                crate::lease::get_process_start_id(worker_pid as u32).as_deref(),
+            ) {
+                return;
+            }
+            pa_core::kernel::orphan_journal::reap_worker_orphan_processes(
+                Path::new(&orphan_path),
+                worker_pid,
+            );
+        })
+        .await;
     }
 }
 
 /// A dead process or a verified replacement identity proves the old writer
 /// is gone. Failed probes and missing live identities preserve the journal.
-fn recovery_journal_owner_is_gone(
+pub(super) fn recovery_journal_owner_is_gone(
     process_alive: Option<bool>,
     expected_start_id: Option<&str>,
     current_start_id: Option<&str>,
@@ -1002,7 +1054,12 @@ mod tests {
         std::fs::write(&unknown_journal, retained).expect("unknown journal");
         std::fs::write(descriptor_dir.join("w-unknown.json"), "not json")
             .expect("unverifiable descriptor");
+        // A failed journal read must survive descriptor retirement for retry.
+        let orphan_path = descriptor_dir.join("w-gone.orphans.jsonl");
+        let unreadable = [0xff, 0xfe];
+        std::fs::write(&orphan_path, unreadable).expect("orphan journal");
         let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "orphanProcessJournalPath": orphan_path.to_string_lossy(),
             "version": 2,
             "workerId": "w-gone",
             "pid": pid,
@@ -1030,7 +1087,39 @@ mod tests {
             "the journal dies with the descriptor"
         );
         assert!(!descriptor_path.exists());
+        assert_eq!(std::fs::read(orphan_path).unwrap(), unreadable);
         assert_eq!(std::fs::read(unowned_journal).unwrap(), retained);
         assert_eq!(std::fs::read(unknown_journal).unwrap(), retained);
+    }
+    #[tokio::test]
+    async fn a_live_worker_keeps_its_orphan_journal() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = supervisor_in(dir.path());
+        let orphan_path = supervisor.descriptor_dir.join("w-live.orphans.jsonl");
+        std::fs::write(&orphan_path, "").expect("orphan journal");
+        let descriptor: DaemonWorkerDescriptor = serde_json::from_value(json!({
+            "version": 2,
+            "workerId": "w-live",
+            "pid": std::process::id(),
+            "socketPath": "/tmp/w-live.sock",
+            "recoveryJournalPath": "/tmp/w-live.recovery.jsonl",
+            "orphanProcessJournalPath": orphan_path.to_string_lossy(),
+            "supervisorSocketPath": supervisor.options.socket_path.to_string_lossy(),
+            "authenticationToken": "token",
+            "rootActiveSessionId": "w-live",
+            "createdAt": "2026-10-07T00:00:00Z",
+            "updatedAt": "2026-10-07T00:00:00Z",
+            "lifecycle": "ready",
+            "createCommand": {},
+            "consecutiveFailures": 0,
+        }))
+        .expect("descriptor");
+        let resident = ResidentWorker::new(
+            "w-live".to_string(),
+            descriptor,
+            supervisor.descriptor_dir.join("w-live.json"),
+        );
+        supervisor.reap_dead_worker_orphans(&resident).await;
+        assert_eq!(std::fs::read(orphan_path).unwrap(), b"");
     }
 }

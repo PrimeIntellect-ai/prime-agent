@@ -3,11 +3,10 @@
 //! `collect`, `rename`) over the supervisor's child-sessions registry,
 //! with the spawn-admission helpers only this surface uses.
 use super::{
-    assert_thinking_supported, bail, create_default_rlm_subagent_session_name,
-    create_rlm_child_terminal_notice, json, now_ms, resolve_child_model, rlm_child_label,
-    rlm_depth_limit_error, spawn_name_unavailable_error, Arc, ChildCloseReason, ChildRecord,
-    Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf, Result, RlmChildResult,
-    RlmChildTerminalNotice, RlmCreateSessionHandle, RlmCreateSessionRequest,
+    assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
+    resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
+    ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
+    Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
     RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
     RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
     SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
@@ -137,8 +136,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     prompt_admitted: false,
                     error: None,
                     closed_by_parent: false,
+                    retirement_finished: false,
+                    retirement_notified: false,
+                    retirement_roster_emitted: false,
+                    usage_registration_forgotten: false,
                     session_file: created.session_file.clone(),
                     attributed_rows: Some(0),
+                    pending_usage_report: None,
                     usage_watch_live: false,
                     usage_rearm: false,
                     emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
@@ -347,6 +351,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
     fn delete_subagent(&self, target: String) -> RlmHostFuture<RlmDeleteSubagentResult> {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
+            if !this.replay_retired_usage(Some(&target)).await {
+                bail!("RLM child usage remains owed after retirement; retry deletion");
+            }
             // Selector errors surface unwrapped (the TS message is the
             // product surface); only the kill below gets a delete context.
             let record = match this.resolve_record(&target, "subagent").await {
@@ -400,9 +407,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             let rename_lock = record.lock().await.rename_lock.clone();
             let _rename_guard = rename_lock.lock().await;
+            let already_terminated = this.has_retired_usage(&record);
             let no_longer_matches = {
                 let record = record.lock().await;
-                record.closed_by_parent || !record.matches(&target)
+                (record.closed_by_parent && !already_terminated) || !record.matches(&target)
             };
             if no_longer_matches {
                 bail!("No direct RLM subagent matches \"{target}\" in the current parent session");
@@ -424,83 +432,28 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let was_running = record.lock().await.settled_status.is_none();
             // Capture before the kill: a deleted running child's durable
             // rows are its last observable spend on the parent side.
-            this.emit_child_usage(&record).await;
-            this.command(&command, KILL_TIMEOUT_MS)
-                .await
-                .with_context(|| format!("kill RLM child \"{target}\""))?;
-            // Rows can land between the pre-kill capture and the kill
-            // reaching the worker: the post-kill walk is the LAST observation
-            // (the cursor keeps it free of double-billing).
-            this.emit_child_usage(&record).await;
-            // The final observation landed: the registration drops.
-            this.forget_child_usage(&record).await;
-            // The watcher owns an Arc to this record; deleting the roster
-            // row alone cannot stop its polling loop.
-            {
-                let mut record = record.lock().await;
-                record.closed_by_parent = true;
-                if was_running {
-                    record.settled_status = Some("cancelled");
-                    record.error = Some("Deleted by parent orchestrator".to_string());
-                }
+            if !already_terminated {
+                this.emit_child_usage(&record).await;
+                this.command(&command, KILL_TIMEOUT_MS)
+                    .await
+                    .with_context(|| format!("kill RLM child \"{target}\""))?;
+                this.retain_retired_usage(&record, super::RetirementIntent::Delete { was_running });
+                // Observe any rows that landed before the acknowledged kill.
+                this.emit_child_usage(&record).await;
             }
+            // The final observation landed: the registration drops.
+            let usage_persisted = this.forget_child_usage(&record).await;
+            this.finish_retirement(&record).await;
             let entry = {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
-            // The tombstone keeps the identity behind the registry so a
-            // just-deleted selector still answers `collect`.
-            {
-                let record = record.lock().await;
-                this.remember_deleted_child(&record);
+            if usage_persisted {
+                this.remove_retired_usage(&record);
             }
-            if was_running {
-                this.emit_child_update(&record).await;
-            } else {
-                this.emit_child_removal(&record).await;
+            if !usage_persisted {
+                bail!("RLM child usage remains owed after retirement; retry deletion");
             }
-            // The deletion commits BEFORE the best-effort terminal
-            // notice: the notice's supervisor delivery can ride its full
-            // timeout, and a deleted child must leave the registry and the
-            // cached context tree immediately, not after it.
-            this.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
-            // A deleted subagent leaves `/context` immediately (the
-            // background refresh would otherwise resurrect it).
-            if let Some(notify) = this
-                .delete_notifier
-                .lock()
-                .expect("delete notifier lock")
-                .clone()
-            {
-                notify(&entry.rlm_child_id);
-            }
-            // A still-running child was cut short by the delete: the
-            // parent receives the cancelled terminal notice.
-            if was_running {
-                let notice = {
-                    let mut record = record.lock().await;
-                    let claimed = !record.notice_delivered;
-                    record.notice_delivered = true;
-                    claimed.then(|| RlmChildTerminalNotice::Cancelled {
-                        child_id: record.rlm_child_id.clone(),
-                        session_name: record.session_name.clone(),
-                        reason: Some("Deleted by parent orchestrator".to_string()),
-                    })
-                };
-                if let Some(notice) = notice {
-                    this.deliver_terminal_notice(create_rlm_child_terminal_notice(
-                        &notice,
-                        now_ms(),
-                    ))
-                    .await;
-                }
-            }
-            // The deletion settles the run: a parked barrier re-reads a removed
-            // record as settled.
-            this.fire_settle_hook(&record).await;
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),
@@ -536,11 +489,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .collect::<Vec<_>>();
                         match matches.len() {
                             0 => return Err(miss),
-                            1 => deleted_results.push(
-                                SupervisorChildSessions::deleted_collect_result(
-                                    &matches[0],
-                                ),
-                            ),
+                            1 => deleted_results
+                                .push(SupervisorChildSessions::deleted_collect_result(&matches[0])),
                             _ => bail!(
                                 "RLM child selector \"{target}\" is ambiguous in the current parent session"
                             ),
@@ -646,7 +596,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             if let Some(record) = &record {
                 if record.lock().await.closed_by_parent {
-                    bail!("rlm.rename can only rename the current session or one of its direct children");
+                    bail!(
+                        "rlm.rename can only rename the current session or one of its direct children"
+                    );
                 }
             }
             // The rename itself is daemon-owned: the supervisor's live

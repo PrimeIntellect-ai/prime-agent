@@ -28,6 +28,10 @@ mod stream_tests;
 mod window_tests;
 
 // The index concern lives in session_store::index; the facade re-imports keep the callers in scope.
+mod child_usage;
+#[cfg(test)]
+#[path = "session_store/child_usage_tests.rs"]
+mod child_usage_tests;
 mod index;
 
 use index::fold_child_usage_attributions;
@@ -103,6 +107,13 @@ pub struct SessionEntry {
     pub fields: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct WindowedTranscript {
+    pub messages: Vec<Value>,
+    pub omitted: usize,
+    pub last_user_prompt_ms: Option<u64>,
+}
+
 /// The windowed sequence's summary scalars (newest timestamp, message count),
 /// from [`SessionFile::scan_message_scalars`] without materializing the fold.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
@@ -124,6 +135,7 @@ pub struct SessionFile {
     pub(crate) window: Option<SessionWindow>,
     pub(crate) trace_upload: Option<std::sync::Arc<pa_core::agent_traces::ContinuousTraceUpload>>,
     pub(crate) lease: Option<std::sync::Arc<crate::lease::SessionLease>>,
+    child_usage_recovery: child_usage::ChildUsageRecovery,
     /// Rows the full reader skipped as unparsable (the TS loader's
     /// lenient skip): zero on a healthy file. A reopen that found damage
     /// logs this count (silent skips are how a torn session degraded
