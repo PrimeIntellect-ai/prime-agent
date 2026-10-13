@@ -245,3 +245,60 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         pa_ai::registry::unregister_api_providers("test-held-refinement-host");
     }
 }
+
+/// The disposal drain owns finishing pending refinement work: a held
+/// refinement still in flight when the print runtime disposes the session
+/// must land its durable outcome rows through the drain — returning first
+/// would let the session drop abort the planning.
+#[tokio::test]
+async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    let (engine, dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed"}] }),
+        json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+        None,
+    )
+    .await;
+    engine
+        .session
+        .prompt("seed", Default::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: started.clone(),
+            release: release.clone(),
+            reply: r#"{"summary":"background note","edits":[]}"#,
+        }),
+        Some("test-held-refinement-host"),
+    );
+    let mut planner_model = model.clone();
+    planner_model.api = "test-held-refinement-host".to_string();
+    let mut boundary = TurnBoundary::new(false);
+    let global_dir = dir.path().join("global-refinement");
+    // The last turn's requested refinement: the boundary owns its report.
+    let _pending = Origin::Requested
+        .schedule(&engine, &planner_model, &mut boundary, global_dir.clone())
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("planner entered");
+    let mut drain = std::pin::pin!(async {
+        boundary
+            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None, global_dir)
+            .await;
+    });
+    // While the planner is held the drain must stay pending: the session
+    // drops the moment the drain returns, and the drop aborts refinement
+    // planning, losing the outcome rows.
+    assert!(futures::poll!(drain.as_mut()).is_pending());
+    release.notify_one();
+    drain.await;
+    let rows = refine_rows(&engine).await;
+    assert_eq!(rows.len(), 1, "the durable outcome row landed");
+    assert_eq!(rows[0].custom_type, "refinement_outcome");
+    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+}

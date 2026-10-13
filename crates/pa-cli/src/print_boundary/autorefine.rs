@@ -83,7 +83,6 @@ impl TurnBoundary {
         }));
     }
 
-    #[cfg(test)]
     pub(super) async fn wait_for_refinement_reports(&mut self) {
         for pending in self.refinement_reports.drain(..) {
             pending.await.expect("refinement reporting task");
@@ -118,7 +117,14 @@ impl TurnBoundary {
     /// The disposal drain: a serialized compaction can finish without another model
     /// turn — drain its pending review here so disposal does not lose the
     /// trigger. The subscription is already torn down; only durable rows and
-    /// harness state persist. Best-effort.
+    /// harness state persist.
+    ///
+    /// The drain owns finishing the pending refinement work: the session drops
+    /// as soon as its caller returns, and that drop aborts in-flight refinement
+    /// planning, so a report already running — and the review this drain starts
+    /// off a retained trigger — must land its rows first. Awaiting the running
+    /// reports before the consume also keeps the coalescing gate inside it from
+    /// retiring the trigger at disposal, the last boundary that can service it.
     pub(crate) async fn drain_compact_auto_refine_at_disposal(
         &mut self,
         engine: &SessionEngine,
@@ -126,6 +132,7 @@ impl TurnBoundary {
         api_key: Option<String>,
         global_harness_dir: PathBuf,
     ) {
+        self.wait_for_refinement_reports().await;
         let _ = self
             .consume_compact_auto_refine(
                 engine,
@@ -135,6 +142,7 @@ impl TurnBoundary {
                 RefineSurface::Dispose,
             )
             .await;
+        self.wait_for_refinement_reports().await;
     }
 
     /// The compact-trigger auto-refine consumption: gates first — the refine
