@@ -3,6 +3,7 @@ use super::*;
 use pa_agent::scripted::ScriptedProvider;
 
 struct PromptCase {
+    custom_system: bool,
     global: Option<&'static str>,
     project: Option<&'static str>,
     explicit: Vec<String>,
@@ -19,7 +20,9 @@ async fn assert_prompt_case(case: PromptCase) {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(cwd.join("AGENTS.md"), "PROJECT_CONTEXT_SENTINEL").unwrap();
         std::fs::write(agent_dir.join("AGENTS.md"), "GLOBAL_CONTEXT_SENTINEL").unwrap();
-        std::fs::write(agent_dir.join("SYSTEM.md"), "CUSTOM_SYSTEM_SENTINEL").unwrap();
+        if case.custom_system {
+            std::fs::write(agent_dir.join("SYSTEM.md"), "CUSTOM_SYSTEM_SENTINEL").unwrap();
+        }
         if let Some(content) = case.global {
             std::fs::write(agent_dir.join("APPEND_SYSTEM.md"), content).unwrap();
         }
@@ -61,7 +64,11 @@ async fn assert_prompt_case(case: PromptCase) {
         assert_eq!(calls.len(), 1);
         let prompt = calls[0].system_prompt.as_deref().unwrap();
         assert_eq!(prompt, engine.system_prompt);
-        assert!(prompt.starts_with("CUSTOM_SYSTEM_SENTINEL"));
+        if case.custom_system {
+            assert!(prompt.starts_with("CUSTOM_SYSTEM_SENTINEL"));
+        } else {
+            assert!(prompt.starts_with("# prime-agent harness"));
+        }
         for context in ["PROJECT_CONTEXT_SENTINEL", "GLOBAL_CONTEXT_SENTINEL"] {
             assert_eq!(prompt.matches(context).count(), 1);
         }
@@ -87,6 +94,7 @@ async fn assert_prompt_case(case: PromptCase) {
 #[tokio::test]
 async fn append_system_global_reaches_provider() {
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("Always end replies with the token ZULU"),
         project: None,
         explicit: vec![],
@@ -98,6 +106,7 @@ async fn append_system_global_reaches_provider() {
 #[tokio::test]
 async fn append_system_project_overrides_global() {
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("GLOBAL_APPEND_SENTINEL"),
         project: Some("PROJECT_APPEND_SENTINEL"),
         explicit: vec![],
@@ -109,6 +118,7 @@ async fn append_system_project_overrides_global() {
 #[tokio::test]
 async fn append_system_explicit_overrides_files() {
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("GLOBAL_APPEND_SENTINEL"),
         project: Some("PROJECT_APPEND_SENTINEL"),
         explicit: vec!["EXPLICIT_ONE".into(), "EXPLICIT_TWO".into()],
@@ -123,6 +133,7 @@ async fn append_system_explicit_file_is_resolved() {
     let path = tmp.path().join("override.md");
     std::fs::write(&path, "EXPLICIT_FILE_SENTINEL").unwrap();
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("GLOBAL_APPEND_SENTINEL"),
         project: Some("PROJECT_APPEND_SENTINEL"),
         explicit: vec![path.display().to_string()],
@@ -134,6 +145,7 @@ async fn append_system_explicit_file_is_resolved() {
 #[tokio::test]
 async fn append_system_empty_project_suppresses_global() {
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("GLOBAL_APPEND_SENTINEL"),
         project: Some(""),
         explicit: vec![],
@@ -145,10 +157,23 @@ async fn append_system_empty_project_suppresses_global() {
 #[tokio::test]
 async fn append_system_empty_explicit_suppresses_files() {
     assert_prompt_case(PromptCase {
+        custom_system: true,
         global: Some("GLOBAL_APPEND_SENTINEL"),
         project: Some("PROJECT_APPEND_SENTINEL"),
         explicit: vec![String::new()],
         expected: "",
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn append_system_preserves_default_system_layers() {
+    assert_prompt_case(PromptCase {
+        custom_system: false,
+        global: Some("Always end replies with the token ZULU"),
+        project: None,
+        explicit: vec![],
+        expected: "Always end replies with the token ZULU",
     })
     .await;
 }

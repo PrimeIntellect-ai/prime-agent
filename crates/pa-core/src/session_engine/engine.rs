@@ -32,6 +32,7 @@ pub struct SessionEngineConfig {
     pub stream_fn: Option<StreamFn>,
     pub tools: Vec<Arc<dyn pa_agent::types::AgentTool>>,
     pub custom_system_prompt: Option<String>,
+    /// Explicit append-system-prompt sources from the host; overrides file discovery.
     pub prompt_guidelines: Vec<String>,
     pub generic_mcp_servers: Vec<String>,
     pub allow_recursion: Option<bool>,
@@ -270,7 +271,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         no_prompt_templates: false,
         no_context_files: false,
         system_prompt: config.custom_system_prompt.clone(),
-        append_system_prompt: Vec::new(),
+        append_system_prompt: config.prompt_guidelines.clone(),
         ..Default::default()
     })?;
 
@@ -479,8 +480,6 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         });
     }
 
-    let prompt_guidelines = config.prompt_guidelines.clone();
-
     let prompt_model_selector = format!("{}/{}", model_info.provider, model_info.id);
     let prompt_vision_capable = Some(model_info.input.contains(&pa_types::ai::ModelInput::Image));
     let model_prompts = crate::prompts::model_prompts::load_model_prompts(
@@ -521,7 +520,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             daemonless: config.daemonless,
             can_spawn: config.rlm_subagent_host.is_some(),
             generic_mcp_servers,
-            prompt_guidelines: Some(prompt_guidelines),
+            append_system_prompt: Some(resources.append_system_prompt.join("\n\n")),
             ..Default::default()
         },
     );
