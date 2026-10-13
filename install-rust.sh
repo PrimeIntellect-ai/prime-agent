@@ -1609,7 +1609,7 @@ rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 # The launcher pins /tmp when the TMPDIR path exceeds the non-Linux
 # 103-byte sun_path limit (pa-daemon socket_dir() owns the rule); the
 # stop probe must look where the launcher actually pinned.
-if [ "$OS" != "Linux" ] && [ "${#rust_socket}" -gt 103 ]; then
+if [ "$OS" != "Linux" ] && [ "$(printf '%s' "$rust_socket" | wc -c)" -gt 103 ]; then
   rust_socket="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
 fi
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
@@ -2857,7 +2857,7 @@ else
     # Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
     # socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
     PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
-    if [ "${#PRIME_AGENT_DAEMON_SOCKET}" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
+    if [ "$(printf '%s' "$PRIME_AGENT_DAEMON_SOCKET" | wc -c)" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
       PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
     fi
     export PRIME_AGENT_DAEMON_SOCKET

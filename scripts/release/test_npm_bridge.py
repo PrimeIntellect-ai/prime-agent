@@ -396,6 +396,40 @@ trap '[ -z "${launcher_tmp:-}" ] || rm -f "$launcher_tmp"' EXIT
                 self.assertEqual(probe.stdout.strip(),
                                  f"{root}/prime-agent-rust-{os.getuid()}/daemon.sock")
 
+    def test_utf8_socket_limit_applies_to_launcher_and_stop_probe(self):
+        result = self.install_real_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        command = self.npm_prefix / "bin/prime-agent"
+        installer = (Path(__file__).resolve().parents[2] / "install-rust.sh").read_text()
+        stop_probe = installer.split('rust_socket="${TMPDIR:-/tmp}', 1)[1]
+        stop_probe = 'rust_socket="${TMPDIR:-/tmp}' + stop_probe.split('env_socket=', 1)[0]
+        shim_dir = self.root / "utf8-uname-shim"
+        shim_dir.mkdir()
+        tmp = "/tmp/" + "é" * 40
+        pin = f"{tmp}/prime-agent-rust-{os.getuid()}/daemon.sock"
+        self.assertLessEqual(len(pin), 103)
+        self.assertGreater(len(pin.encode()), 103)
+        for system in ("Darwin", "Linux"):
+            with self.subTest(system=system):
+                (shim_dir / "uname").write_text(f"#!/bin/sh\necho {system}\n")
+                (shim_dir / "uname").chmod(0o755)
+                env = {**self.env, "OS": system, "TMPDIR": tmp,
+                       "LC_ALL": "en_US.UTF-8",
+                       "PATH": str(shim_dir) + os.pathsep + self.env["PATH"]}
+                env.pop("PRIME_AGENT_DAEMON_SOCKET", None)
+                expected = f"/tmp/prime-agent-rust-{os.getuid()}/daemon.sock" if system == "Darwin" else pin
+                for shell in ("sh", "bash"):
+                    with self.subTest(shell=shell):
+                        probe = subprocess.run([shell, str(command), "socket"], env=env,
+                                               text=True, capture_output=True, timeout=10)
+                        self.assertEqual(probe.returncode, 0, probe.stderr)
+                        self.assertEqual(probe.stdout.strip(), expected)
+                        stop = subprocess.run([shell, "-eu"], env=env,
+                                              input=stop_probe + '\nprintf "%s" "$rust_socket"\n',
+                                              text=True, capture_output=True, timeout=10)
+                        self.assertEqual(stop.returncode, 0, stop.stderr)
+                        self.assertEqual(stop.stdout, expected)
+
     def test_stale_bridge_does_not_downgrade_newer_native_without_receipt(self):
         payload = self.prefix / "share/prime-agent"
         payload.mkdir(parents=True)
