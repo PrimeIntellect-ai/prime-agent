@@ -6,7 +6,8 @@ switches. The first cell builds the kernel; later probes must use its surviving
 namespace, exercising the daemon's live-core rebind rather than fresh startup.
 All provider requests and daemon responses are saved. Model facts and context
 windows must match exactly. Other usage fields are reported, never normalized;
-this verifier does not claim token-estimator parity or provider-failover coverage.
+this verifier does not claim token-estimator parity. A retryable primary failure
+then exercises backup-provider facts and automatic primary restoration.
 """
 import argparse
 import http.server
@@ -35,7 +36,8 @@ MODELS = [
     {'id': 'facts-vision', 'name': 'Facts vision', 'reasoning': False,
      'input': ['text', 'image'], 'contextWindow': 256000, 'maxTokens': 4096},
 ]
-SEQUENCE = [MODELS[0], MODELS[1], MODELS[0]]
+BACKUP = {**MODELS[1], 'id': 'facts-text', 'name': 'Facts backup'}
+SEQUENCE = [MODELS[0], MODELS[1], MODELS[0], BACKUP, MODELS[0]]
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -53,11 +55,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.path != '/v1/chat/completions':
+        if self.path not in ('/primary/v1/chat/completions', '/backup/v1/chat/completions'):
             self.send_error(404)
             return
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        self.server.requests.append({'phase': self.server.phase, 'body': body})
+        self.server.requests.append({'phase': self.server.phase, 'path': self.path, 'body': body})
+        if self.server.phase == 3 and self.path.startswith('/primary/'):
+            wire = json.dumps({'error': {'message': 'Fixture primary temporarily unavailable', 'type': 'server_error'}}).encode()
+            self.send_response(503)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(wire)))
+            self.end_headers()
+            self.wfile.write(wire)
+            return
         self.server.phase_requests += 1
         if self.server.phase_requests == 1:
             offered = {tool.get('function', {}).get('name') for tool in body.get('tools', [])}
@@ -91,21 +101,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
-def latest_probe(request):
+def latest_probe(request, tool_call_id):
     found = []
     for message in request.get('messages', []):
-        if message.get('role') == 'tool':
+        if message.get('role') == 'tool' and message.get('tool_call_id') == tool_call_id:
             for text in texts(message.get('content')):
                 for line in text.splitlines():
                     if line.startswith(MARKER):
                         found.append(json.loads(line[len(MARKER):]))
-    assert found, 'No actual REPL result in provider request'
-    return found[-1]
+    assert len(found) == 1, 'Expected one actual REPL result for ' + tool_call_id
+    return found[0]
 
 
-def verify_probe(probe, model, count):
+def verify_probe(probe, model, count, provider='fixture'):
     assert probe['kernel_probe_count'] == count, probe
-    assert probe['model_info'] == {'provider': 'fixture', 'id': model['id'],
+    assert probe['model_info'] == {'provider': provider, 'id': model['id'],
                                    'input': model['input']}, probe
     assert probe['compact_status']['context_window'] == model['contextWindow'], probe
     assert probe['compact_status']['scheduled'] is False, probe
@@ -161,10 +171,15 @@ def run_case(binary, label, root, observation):
     thread.start()
     (root / 'agent/models.json').write_text(json.dumps({'providers': {'fixture': {
         'api': 'openai-completions', 'apiKey': 'fixture-only',
-        'baseUrl': 'http://127.0.0.1:%s/v1' % server.server_address[1], 'models': MODELS}}}))
+        'baseUrl': 'http://127.0.0.1:%s/primary/v1' % server.server_address[1], 'models': MODELS},
+        'fixture-backup': {'api': 'openai-completions', 'apiKey': 'fixture-only',
+        'baseUrl': 'http://127.0.0.1:%s/backup/v1' % server.server_address[1], 'models': [BACKUP]}}}))
     (root / 'agent/settings.json').write_text(json.dumps({
         'defaultProvider': 'fixture', 'defaultModel': 'facts-text',
         'prewarmPythonKernel': False, 'compaction': {'agentCallable': True},
+        'providerBackupModel': 'fixture-backup/facts-text',
+        'retry': {'enabled': True, 'maxRetries': 1, 'baseDelayMs': 1,
+                  'failover': {'enabled': True, 'maxRetries': 0, 'baseDelayMs': 1, 'maxDelayMs': 1}},
         'onboardingCompleted': True, 'telemetry': {'noticeShown': True}}))
     path = root / 'daemon.sock'
     process = client = None
@@ -192,18 +207,34 @@ def run_case(binary, label, root, observation):
             assert session_id, created
             observation['probes'] = []
             for phase, model in enumerate(SEQUENCE):
-                if phase:
+                if phase in (1, 2):
                     client.request({'type': 'set_model', 'activeSessionId': session_id,
                                     'provider': 'fixture', 'modelId': model['id']})
                 server.phase, server.phase_requests = phase, 0
                 client.request({'type': 'prompt_and_wait', 'activeSessionId': session_id,
                                 'message': 'Observe the model facts.'})
-                requests = [row['body'] for row in server.requests if row['phase'] == phase]
+                rows = [row for row in server.requests if row['phase'] == phase]
+                if phase == 3:
+                    primary = [row for row in rows if row['path'].startswith('/primary/')]
+                    assert primary, 'No actual retryable primary request'
+                    assert all(row['body']['model'] == 'facts-text' for row in primary), primary
+                    rows = [row for row in rows if row['path'].startswith('/backup/')]
+                else:
+                    assert all(row['path'].startswith('/primary/') for row in rows), rows
+                requests = [row['body'] for row in rows]
                 assert len(requests) == 2, requests
                 assert all(body['model'] == model['id'] for body in requests), requests
-                probe = latest_probe(requests[-1])
+                probe = latest_probe(requests[-1], 'call_facts_%s' % phase)
                 observation['probes'].append(probe)
-                verify_probe(probe, model, phase + 1)
+                if phase == 3:
+                    # Observe before asserting cross-runtime parity: TS restores session
+                    # facts at assistant message_end, before this backup tool executes.
+                    # The Rust failover driver restores at turn settlement. Retain the
+                    # actual facts; compare() must expose any difference.
+                    assert probe['kernel_probe_count'] == phase + 1, probe
+                    assert probe['compact_status']['scheduled'] is False, probe
+                else:
+                    verify_probe(probe, model, phase + 1)
     finally:
         observation['provider_requests'] = server.requests
         if client is not None:
@@ -218,7 +249,7 @@ def run_case(binary, label, root, observation):
 
 def compare(result):
     ts, rust = result['runs']['ts']['probes'], result['runs']['rust']['probes']
-    assert len(ts) == len(rust) == 3
+    assert len(ts) == len(rust) == len(SEQUENCE)
     result['complete_compact_status_equal'] = [
         a['compact_status'] == b['compact_status'] for a, b in zip(ts, rust)]
     for a, b in zip(ts, rust):
@@ -233,7 +264,8 @@ def main():
     args = parser.parse_args()
     result = {'verified': False, 'runs': {}, 'scope':
               'Actual daemon set_model, surviving kernel, model.info and compact.status context_window. '
-              'Full compact.status values retained; token/percent estimator parity and failover are not claimed.'}
+              'Retryable primary failure -> backup-provider probe -> automatic primary restoration probe. '
+              'Full compact.status values retained; token/percent estimator parity is not claimed.'}
     try:
         assert sys.platform == 'linux', 'Requires hosted Linux binaries and kernel'
         archive_hash = sha256(os.environ['PA_TS_ARCHIVE'])
