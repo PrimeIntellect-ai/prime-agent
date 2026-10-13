@@ -46,17 +46,24 @@ class VerifierTests(unittest.TestCase):
             function = event['choices'][0]['delta']['tool_calls'][0]['function']
             self.assertEqual(function, {'name': 'python_repl', 'arguments': json.dumps({'code': parity.CELL})})
             with self.assertRaises(AssertionError):
-                parity.probe_from(server.requests['before'], parity.MARKER)
+                parity.latest_probe(server.requests['before'])
             actual = self.observation()['before']
             second = {'messages': [{'role': 'tool', 'content': parity.MARKER + json.dumps(actual)}]}
             connection.request('POST', '/v1/chat/completions', json.dumps(second), {'Content-Type': 'application/json'})
             connection.getresponse().read()
-            self.assertEqual(parity.probe_from(server.requests['before'], parity.MARKER), actual)
+            self.assertEqual(parity.latest_probe(server.requests['before']), actual)
             connection.close()
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_after_probe_selects_latest_result_in_history(self):
+        before, after = self.observation()['before'], self.observation()['after']
+        old = {'role': 'tool', 'content': parity.MARKER + json.dumps(before)}
+        new = {'role': 'tool', 'content': [{'type': 'text', 'text': parity.MARKER + json.dumps(after)}]}
+        requests = [{'messages': [old]}, {'messages': [old, new]}]
+        self.assertEqual(parity.latest_probe(requests), after)
 
     def test_jsonl_client_preserves_fragmented_frames_and_protocol(self):
         errors = []

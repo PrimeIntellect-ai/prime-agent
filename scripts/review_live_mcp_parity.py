@@ -20,7 +20,7 @@ import threading
 import time
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
-from review_restore_notice_parity import probe_from
+from review_restore_notice_parity import texts
 
 MARKER = 'LIVE_MCP_PARITY_RESULT='
 CELL = """import os, json
@@ -31,6 +31,20 @@ for live_mcp_name in ['fixture-before', 'fixture-after']:
 print('LIVE_MCP_PARITY_RESULT=' + json.dumps(live_mcp_result))"""
 BEFORE = {'type': 'stdio', 'command': 'python3', 'args': ['-c', 'print("before")']}
 AFTER = {'type': 'stdio', 'command': 'python3', 'args': ['-c', 'print("after")']}
+
+
+def latest_probe(requests):
+    # Later turns carry earlier tool results in history. The final request
+    # must contain this phase's newly executed cell, not the old marker.
+    assert requests, 'missing provider requests'
+    for message in reversed(requests[-1].get('messages', [])):
+        if message.get('role') != 'tool':
+            continue
+        for text in reversed(list(texts(message.get('content')))):
+            for line in reversed(text.splitlines()):
+                if line.startswith(MARKER):
+                    return json.loads(line[len(MARKER):])
+    raise AssertionError('missing actual tool result ' + MARKER)
 
 
 class Server(http.server.ThreadingHTTPServer):
@@ -212,7 +226,7 @@ def run_case(binary, label, root, observation):
                 client.request({'type': 'prompt', 'activeSessionId': active,
                                 'message': 'Probe live MCP configuration: ' + phase})
                 client.request({'type': 'wait_for_idle', 'activeSessionId': active})
-                observation[phase] = probe_from(server.requests[phase], MARKER)
+                observation[phase] = latest_probe(server.requests[phase])
             assert not server.errors, server.errors
             assert {k: len(v) for k, v in server.requests.items()} == {'before': 2, 'after': 2}
             validate_observation(observation, label)
