@@ -163,6 +163,16 @@ mod tests {
                 super::super::messages::loop_convert_to_llm(live).len(),
                 usize::from(resumed)
             );
+            // Re-enable without a reload (the busy-session case): the next admission loads state.
+            settings.set_harness_refinements(true).unwrap();
+            assert!(engine.session.auto_refine_allowed());
+            assert!(engine
+                .session
+                .pending_digest_prompt_row()
+                .await
+                .unwrap()
+                .is_some());
+            settings.set_harness_refinements(false).unwrap();
             // The history remains inspectable even though it is absent from model context.
             if resumed {
                 assert!(engine.session.entries().await.iter().any(|entry| matches!(entry,

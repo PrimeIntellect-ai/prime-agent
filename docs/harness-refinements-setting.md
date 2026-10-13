@@ -18,7 +18,9 @@ resume, tool continuations and retries; dedicated digest fields in compaction
 summaries are removed. Compaction and branch summarizers omit those typed rows
 while disabled. A compaction that finishes after disabling drops its captured
 digest before committing. The menu also reloads the session inputs so enabling
-can refresh the digest through the normal cold-boundary path.
+can refresh the digest through the normal cold-boundary path. If the session is
+busy and reload cannot run, digest delivery stays deferred until the next admitted
+turn with refinements enabled.
 
 This does not erase history. A provider request already sent cannot be recalled.
 Earlier assistant replies, tool outputs and summary prose may already reflect a
