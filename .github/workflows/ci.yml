@@ -371,11 +371,14 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
+          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice live_mcp; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
               if [ "${scenario}" = "draft_disconnect" ]; then
                 python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
+              fi
+              if [ "${scenario}" = "live_mcp" ]; then
+                python3 scripts/test_review_live_mcp_parity.py || comparison_status=1
               fi
               python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
             fi
