@@ -225,6 +225,7 @@ impl SessionUi {
         };
         // A missing settings seam keeps the TS defaults.
         if let Some(settings) = &settings {
+            values.compaction_threshold_percent = settings.compaction_threshold_percent();
             values.show_images = settings.show_images();
             values.auto_resize_images = settings.image_auto_resize();
             values.block_images = settings.block_images();
@@ -309,6 +310,17 @@ impl SessionUi {
     /// the settings seam for persisted preferences.
     async fn apply_settings_change(&mut self, id: &str, value: &str, view: &mut AgentView) {
         match id {
+            "autocompact-threshold" => {
+                if let Some(settings) = &self.client_settings {
+                    let result = value
+                        .parse::<f64>()
+                        .map_err(anyhow::Error::from)
+                        .and_then(|percent| settings.set_compaction_threshold_percent(percent));
+                    if let Err(error) = result {
+                        self.error_row(&format!("{error:#}"), view);
+                    }
+                }
+            }
             "autocompact" => {
                 self.daemon_switch(
                     DaemonCommand::SetAutoCompaction {

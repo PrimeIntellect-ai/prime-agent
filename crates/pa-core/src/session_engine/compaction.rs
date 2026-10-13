@@ -5,12 +5,17 @@
 use pa_types::session::{AgentMessage, FileEntry};
 use std::fmt::Write as _;
 
+#[cfg(test)]
+#[path = "compaction_threshold_tests.rs"]
+mod threshold_tests;
+
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 
 /// The percentage of the context window past which a threshold compaction
 /// always fires (guards estimate drift on large windows).
 pub const COMPACT_THRESHOLD_RATIO: f64 = 0.95;
+pub const DEFAULT_THRESHOLD_PERCENT: f64 = COMPACT_THRESHOLD_RATIO * 100.0;
 
 /// The smallest headroom kept under the combined input+output ceiling (the
 /// chars/4 estimate error); `reserve_tokens` raises it when larger.
@@ -19,6 +24,8 @@ pub const COMBINED_LIMIT_HEADROOM_FLOOR: u64 = 4_096;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSettings {
     pub enabled: bool,
+    /// Requested percentage ceiling; output and reserve headroom can trigger earlier.
+    pub threshold_percent: f64,
     /// Headroom under the combined input+output ceiling (a floor of
     /// [`COMBINED_LIMIT_HEADROOM_FLOOR`]): combined-limit providers reject
     /// `input + requested output > contextWindow`.
@@ -30,6 +37,7 @@ impl Default for CompactionSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            threshold_percent: DEFAULT_THRESHOLD_PERCENT,
             reserve_tokens: DEFAULT_RESERVE_TOKENS,
             keep_recent_tokens: DEFAULT_KEEP_RECENT_TOKENS,
         }
@@ -142,7 +150,7 @@ fn div4(chars: u64) -> u64 {
 }
 
 /// The effective compaction threshold: the earlier of two ceilings.
-/// PERCENTAGE: `context_window * COMPACT_THRESHOLD_RATIO` (estimate drift on
+/// PERCENTAGE: `context_window * threshold_percent / 100` (estimate drift on
 /// large windows). COMBINED-LIMIT: `context_window - max_output_tokens -
 /// max(reserve_tokens, COMBINED_LIMIT_HEADROOM_FLOOR)`: the output budget
 /// must still fit. TS checks only `contextWindow - reserveTokens`; reserving
@@ -154,7 +162,14 @@ pub fn compaction_threshold(
     max_output_tokens: u64,
     settings: &CompactionSettings,
 ) -> u64 {
-    let percentage = (context_window as f64 * COMPACT_THRESHOLD_RATIO) as u64;
+    let percent = if settings.threshold_percent.is_finite()
+        && (1.0..=100.0).contains(&settings.threshold_percent)
+    {
+        settings.threshold_percent
+    } else {
+        DEFAULT_THRESHOLD_PERCENT
+    };
+    let percentage = (context_window as f64 * (percent / 100.0)) as u64;
     let headroom = settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR);
     let combined = context_window
         .saturating_sub(max_output_tokens)
@@ -598,6 +613,7 @@ mod tests {
         // 126_010 tokens on a 128k window with a 127_500 reserve leaves
         // a 500-token combined ceiling — the crossing fires.
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
@@ -615,6 +631,7 @@ mod tests {
         ];
         assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
         let disabled = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: false,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
@@ -682,6 +699,7 @@ mod tests {
         // A tiny reserve still keeps the 4_096 estimate-error floor:
         // 131_072 - 32_768 - 4_096 = 94_208 < the 95% ceiling.
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 1,
             keep_recent_tokens: 10,
@@ -704,6 +722,7 @@ mod tests {
     #[test]
     fn stale_pre_compaction_usage_never_retriggers() {
         let settings = CompactionSettings {
+            threshold_percent: 95.0,
             enabled: true,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,

@@ -371,7 +371,7 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
+          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice autocompact_settings; do
             verifier="scripts/review_${scenario}_parity.py"
             if [ -f "${verifier}" ]; then
               if [ "${scenario}" = "draft_disconnect" ]; then

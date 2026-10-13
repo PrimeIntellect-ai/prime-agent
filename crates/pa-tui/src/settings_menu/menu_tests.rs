@@ -52,7 +52,8 @@ fn tabs_partition_the_settings_rows() {
                     "steering-mode",
                     "follow-up-mode",
                     "quiet-startup",
-                    "warnings"
+                    "warnings",
+                    "autocompact-threshold"
                 ]
             ),
             (
@@ -416,8 +417,12 @@ fn a_paste_types_into_the_search_query_without_spaces() {
     let mut menu = menu();
     menu.paste("auto comp");
     assert_eq!(menu.tabs[menu.tab].search.value(), "autocomp");
-    assert_eq!(menu.tabs[menu.tab].filtered.len(), 1);
+    assert_eq!(menu.tabs[menu.tab].filtered.len(), 2);
     assert_eq!(menu.rows[menu.tabs[menu.tab].filtered[0]].id, "autocompact");
+    assert_eq!(
+        menu.rows[menu.tabs[menu.tab].filtered[1]].id,
+        "autocompact-threshold"
+    );
 }
 
 #[test]
@@ -640,5 +645,32 @@ fn space_activates_instead_of_typing_into_the_query() {
     assert_eq!(
         field_before, field_after,
         "the sanitized Space never types into the search field"
+    );
+}
+
+#[test]
+fn threshold_row_retains_custom_values_and_cycles_at_the_boundaries() {
+    let values = SettingsCurrentValues {
+        compaction_threshold_percent: 62.5,
+        ..Default::default()
+    };
+    let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+    menu.tabs[0].selected = menu.tabs[0].rows.len() - 1;
+    assert!(render_text(&menu).iter().any(|row| row.contains("62.5")));
+    assert_eq!(
+        menu.handle_key("right", &kb()),
+        SettingsMenuAction::Change {
+            id: "autocompact-threshold",
+            value: "63".to_string()
+        }
+    );
+    let index = menu.tabs[0].rows[menu.tabs[0].selected];
+    menu.rows[index].current = "100".into();
+    assert_eq!(
+        menu.handle_key("right", &kb()),
+        SettingsMenuAction::Change {
+            id: "autocompact-threshold",
+            value: "1".to_string()
+        }
     );
 }

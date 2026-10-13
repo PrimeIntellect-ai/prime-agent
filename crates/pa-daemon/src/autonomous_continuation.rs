@@ -193,6 +193,10 @@ impl AgentSessionEngine {
             .iter()
             .filter_map(json_round_trip::<_, pa_types::session::AgentMessage>)
             .collect();
+        let mut compaction = mirror.compaction;
+        compaction.threshold_percent =
+            pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir)
+                .get_compaction_threshold_percent();
         pa_core::session_engine::compaction::threshold_compaction_due(
             &messages,
             model.context_window,
@@ -202,7 +206,7 @@ impl AgentSessionEngine {
                     state.thinking_level,
                 ),
             ),
-            &mirror.compaction,
+            &compaction,
         )
     }
 

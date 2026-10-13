@@ -7,6 +7,34 @@ use anyhow::{anyhow, Result};
 use super::manager::SettingsManager;
 
 impl SettingsManager {
+    /// The percentage ceiling for automatic compaction (default 95%).
+    #[must_use]
+    pub fn get_compaction_threshold_percent(&self) -> f64 {
+        self.settings()
+            .compaction
+            .as_ref()
+            .and_then(|settings| settings.threshold_percent)
+            .filter(|percent| percent.is_finite() && (1.0..=100.0).contains(percent))
+            .unwrap_or(crate::session_engine::compaction::DEFAULT_THRESHOLD_PERCENT)
+    }
+
+    /// Persist the requested percentage without changing reserve or summary budgets.
+    ///
+    /// # Errors
+    /// Returns an error for values outside 1–100%, non-finite values, or a failed save.
+    pub fn set_compaction_threshold_percent(&mut self, percent: f64) -> Result<()> {
+        if !percent.is_finite() || !(1.0..=100.0).contains(&percent) {
+            return Err(anyhow!(
+                "Auto-compact threshold must be a number from 1 to 100 percent"
+            ));
+        }
+        self.global_mut()
+            .compaction
+            .get_or_insert_with(Default::default)
+            .threshold_percent = Some(percent);
+        self.save_global_scope(&["compaction.thresholdPercent"])
+    }
+
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.
