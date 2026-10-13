@@ -522,6 +522,49 @@ async fn retry_cancellation_marker_comes_from_the_outcome_not_the_error_text() {
     }
 }
 
+#[tokio::test]
+async fn retry_cancellation_passes_the_armed_abort_gate_unless_rows_are_suppressed() {
+    let cancelled = EngineEvent::AutoRetryEnd {
+        aborted: true,
+        success: false,
+        attempt: 1,
+        final_error: Some("Retry cancelled".to_string()),
+        restored_model: None,
+    };
+    let events = gate_sighting_events(
+        vec![
+            EngineEvent::TurnEnd {
+                message: json!({ "role": "assistant", "stopReason": "error" }),
+                tool_results: Vec::new(),
+            },
+            cancelled.clone(),
+        ],
+        /*abort_requested*/ true,
+        /*suppress_aborted_row*/ false,
+    )
+    .await;
+    let ends = positions_of(&events, "auto_retry_end");
+    assert_eq!(
+        ends.len(),
+        1,
+        "the real abort gate must forward cancellation: {events:?}"
+    );
+    assert_eq!(
+        events[ends[0]],
+        json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": true })
+    );
+    let suppressed = gate_sighting_events(
+        vec![cancelled],
+        /*abort_requested*/ true,
+        /*suppress_aborted_row*/ true,
+    )
+    .await;
+    assert!(
+        positions_of(&suppressed, "auto_retry_end").is_empty(),
+        "suppression remains authoritative: {suppressed:?}"
+    );
+}
+
 /// A run that settled on its own keeps the TS `agent_end` shape — the marker
 /// rides aborted runs only.
 #[tokio::test]
