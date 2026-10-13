@@ -56,10 +56,16 @@ impl ClientSettings for CliClientSettings {
     fn set_harness_refinements(&self, enabled: bool) -> Result<()> {
         let mut manager = self.manager();
         manager.set_harness_refinements(enabled)?;
-        let client = pa_core::session_engine::telemetry::build_client(&manager, &self.agent_dir);
-        let mut properties = pa_telemetry::Properties::new();
-        properties.set("enabled", serde_json::json!(enabled));
-        client.track("harness refinements changed", properties);
+        // Adoption bookkeeping stays off the UI input/paint path.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let agent_dir = self.agent_dir.clone();
+            runtime.spawn_blocking(move || {
+                let client = pa_core::session_engine::telemetry::build_client(&manager, &agent_dir);
+                let mut properties = pa_telemetry::Properties::new();
+                properties.set("enabled", serde_json::json!(enabled));
+                client.track("harness refinements changed", properties);
+            });
+        }
         Ok(())
     }
 

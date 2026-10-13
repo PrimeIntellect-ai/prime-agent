@@ -51,5 +51,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Build sibling test binaries
         run: cargo build --locked --workspace --bins
+      - name: Bootstrap kernel before integration tests
+        run: ./target/debug/prime-agent --prime-agent-bootstrap
       - name: Workspace test gate
         run: cargo test --locked --workspace
