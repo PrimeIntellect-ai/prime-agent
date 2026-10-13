@@ -1056,31 +1056,36 @@ async fn select_model(
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     let saved_provider = settings.get_default_provider();
-    let provider = config.provider.as_deref().or(saved_provider);
+    let flag_provider = config.provider.as_deref();
     let saved_model = settings.get_default_model().filter(|_| {
-        config.provider.as_deref().is_none_or(|provider| {
+        flag_provider.is_none_or(|provider| {
             saved_provider.is_some_and(|saved| provider.eq_ignore_ascii_case(saved))
         })
     });
     if let Some(saved_model) = saved_model {
         // Saved IDs must exist in the authenticated catalog. Do not synthesize
         // a fallback model, especially an unauthorized private Prime model.
+        // The lookup is scoped like TS findInitialModel's saved default: the
+        // flag, when given, has already matched the saved provider above.
+        let scope = flag_provider.or(saved_provider);
         return available.iter().find(|model| {
-            provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+            scope.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
                 && (model.id.eq_ignore_ascii_case(saved_model)
                     || format!("{}/{}", model.provider, model.id).eq_ignore_ascii_case(saved_model))
         }).cloned().ok_or_else(|| format!("Configured default model \"{saved_model}\" is unavailable. Check settings.json, models.json, and provider authentication."));
     }
+    // A settings defaultProvider without a defaultModel does not scope the
+    // no-flag choice (TS reads the two keys together); only the flag does.
     let candidates: Vec<Model> = available
         .into_iter()
         .filter(|model| {
-            provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
+            flag_provider.is_none_or(|provider| model.provider.eq_ignore_ascii_case(provider))
         })
         .collect();
     pa_core::models::find_preferred_default_model(&candidates)
         .or_else(|| candidates.first())
         .cloned()
-        .ok_or_else(|| match provider {
+        .ok_or_else(|| match flag_provider {
             Some(provider) => format!("No available models for provider \"{provider}\". Check models.json and provider authentication."),
             None => "No authenticated models available. Configure a provider or select a model explicitly.".to_string(),
         })
