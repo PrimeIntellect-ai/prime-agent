@@ -1,6 +1,6 @@
-# Draft-only validation for the harness setting: the normal CI deliberately
-# skips drafts. Keep exact-head evidence without marking the feature ready.
-name: harness refinements draft validation
+# Exact-head validation supplements the native merge-candidate CI and also
+# runs while the PR is draft. Publication state remains a separate user action.
+name: harness refinements validation
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -9,6 +9,7 @@ on:
       - '.github/workflows/harness-refinements-draft.yml'
       - 'crates/pa-core/src/session_engine/refinement_gate.rs'
       - 'docs/harness-refinements-setting.md'
+      - 'scripts/review_harness_settings_parity.py'
 permissions:
   contents: read
 concurrency:
@@ -17,7 +18,7 @@ concurrency:
 jobs:
   exact-head:
     # Match the repository's collaborator trust boundary; no secrets or write token.
-    if: github.event.pull_request.draft && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -73,3 +74,57 @@ jobs:
       - name: Workspace test gate
         if: ${{ !cancelled() && steps.bootstrap.outcome == 'success' }}
         run: cargo test --locked --workspace
+
+  settings-parity:
+    name: settings binary comparison
+    if: contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_INCREMENTAL: 0
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: test-shards
+          save-if: false
+      - name: Build and bind the exact PR binary
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          cargo build --locked -p pa-cli --bin prime-agent
+          cp target/debug/prime-agent "$RUNNER_TEMP/pr-prime-agent"
+      - name: Build the base binary in an isolated reference worktree
+        run: |
+          git fetch --no-tags origin "$BASE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/settings-base" "$BASE_SHA"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/settings-base/Cargo.toml" -p pa-cli --bin prime-agent
+          cp target/debug/prime-agent "$RUNNER_TEMP/base-prime-agent"
+      - name: Download and verify the pinned TS release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/settings-ts/package"
+          gh release download v0.9.8 --repo "$GITHUB_REPOSITORY" --pattern prime-agent-0.9.8-linux-x64.tar.gz --dir "$RUNNER_TEMP/settings-ts"
+          echo "83fb09129bf78e3e60268212cd70932166591b15188caa70c1b0efbcc76235e2  $RUNNER_TEMP/settings-ts/prime-agent-0.9.8-linux-x64.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/settings-ts/prime-agent-0.9.8-linux-x64.tar.gz" -C "$RUNNER_TEMP/settings-ts/package"
+      - name: Capture real settings frames and key behavior
+        run: |
+          export PA_TS_ARCHIVE="$RUNNER_TEMP/settings-ts/prime-agent-0.9.8-linux-x64.tar.gz"
+          export PA_TS_BINARY="$RUNNER_TEMP/settings-ts/package/prime-agent"
+          export PI_PACKAGE_DIR="$RUNNER_TEMP/settings-ts/package"
+          export PA_RUST_BINARY="$RUNNER_TEMP/pr-prime-agent"
+          export PA_BASE_BINARY="$RUNNER_TEMP/base-prime-agent"
+          python3 scripts/review_harness_settings_parity.py --receipt "$RUNNER_TEMP/settings-parity/receipt.json"
+      - name: Upload frames, raw terminal output and comparison receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: harness-settings-parity-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/settings-parity/
+          if-no-files-found: error
