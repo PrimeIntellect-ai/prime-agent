@@ -1258,12 +1258,21 @@ jobs:
           # bootstrap), so it is validated up front: a tag the strict nightly
           # regex rejects fails closed here instead of publishing a nightly
           # that later refreshes refuse to parse.
-          python3 <<'PY_RELEASE'
-          import os, re
+          built_commit="$(python3 <<'PY_RELEASE'
+          import json, os, re
           version = os.environ["RELEASE_VERSION"]
           if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+", version):
               raise SystemExit(f"invalid nightly version: {version!r}")
+          manifest = json.load(open("release-out/manifest.json"))
+          channel = json.load(open("release-out/beta.json"))
+          if manifest.get("version") != version or channel.get("version") != version:
+              raise SystemExit("nightly payload manifests do not match the release version")
+          commit = manifest.get("commit")
+          if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+              raise SystemExit(f"invalid nightly build commit: {commit!r}")
+          print(commit)
           PY_RELEASE
+          )"
           # Only an explicit API 404 permits bootstrap. Authentication, network,
           # rate-limit, and malformed-response errors must not bypass the guard.
           state="$(mktemp -d)"
@@ -1350,6 +1359,7 @@ jobs:
               exit 1
             fi
             gh release create nightly \
+              --target "$built_commit" \
               --title "nightly" \
               --notes "The rolling nightly channel (beta builds). Assets are overwritten per -beta* tag; beta.json names the current build." \
               --prerelease \
@@ -1359,3 +1369,13 @@ jobs:
               release-out/SHA256SUMS \
               release-out/*.json
           fi
+          # Publish first: a failed or partial asset upload must not advance
+          # the source tag. This stays inside the serialized newest-wins guard.
+          # The manifest records the verified build source, which can differ
+          # from both the version-only tag commit and today's main HEAD.
+          gh api "repos/${GH_REPO}/git/refs/tags/nightly" --method PATCH \
+            -f sha="$built_commit" -F force=true >/dev/null
+          printf 'Current build: %s\n\nSource commit: https://github.com/%s/commit/%s\n\nUpdated: %s\n\nThe rolling nightly channel. beta.json names the current build; older versioned assets may remain.\n' \
+            "$RELEASE_VERSION" "$GH_REPO" "$built_commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$state/notes.md"
+          gh release edit nightly --title "nightly ($RELEASE_VERSION)" \
+            --notes-file "$state/notes.md" --prerelease --latest=false

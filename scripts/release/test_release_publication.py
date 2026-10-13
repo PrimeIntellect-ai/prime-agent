@@ -48,9 +48,22 @@ elif args[:2] == ['release', 'download']:
     path = pathlib.Path(args[args.index('--dir') + 1]) / 'beta.json'
     path.write_text(json.dumps({'version': os.environ['CURRENT']}))
 elif args[:2] in (['release', 'upload'], ['release', 'create']):
+    if os.environ.get('FAIL_PUBLISH') == '1': sys.exit(1)
+    pathlib.Path('published').write_text('yes')
     for arg in args:
         if arg.startswith('release-out/'):
             assert pathlib.Path(arg).is_file(), arg
+elif args[:2] == ['release', 'edit']:
+    assert pathlib.Path('published').exists()
+    if os.environ.get('FAIL_METADATA') == '1': sys.exit(1)
+    pathlib.Path('release-notes').write_text(pathlib.Path(args[args.index('--notes-file') + 1]).read_text())
+elif args[0] == 'api' and '--method' in args and args[args.index('--method') + 1] == 'PATCH':
+    assert args[1].endswith('/git/refs/tags/nightly')
+    assert pathlib.Path('published').exists()
+    if os.environ.get('FAIL_TAG') == '1': sys.exit(1)
+    sha = next(a.removeprefix('sha=') for a in args if a.startswith('sha='))
+    pathlib.Path('nightly-tag').write_text(sha)
+    print(json.dumps({'object': {'sha': sha}}))
 elif args[0] == 'api':
     if '--include' in args:
         status = '404 Not Found' if mode == 'absent' else '503 Service Unavailable'
@@ -86,10 +99,11 @@ class PublicationTests(unittest.TestCase):
             path.write_text(script)
             path.chmod(0o755)
         self.version = 'v0.10.1-beta.10'
+        self.commit = 'a' * 40
         self.env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
                         RELEASE_VERSION=self.version, CURRENT='v0.10.1-beta.9',
                         GH_REPO='owner/repo', GITHUB_REPOSITORY='owner/repo',
-                        GITHUB_REF_NAME=self.version, R2_BUCKET='bucket',
+                        GITHUB_REF_NAME=self.version, GITHUB_SHA='b' * 40, R2_BUCKET='bucket',
                         R2_ENDPOINT_URL='https://invalid.example',
                         R2_PUBLIC_BASE_URL='https://invalid.example')
         self.out = self.root / 'release-out'
@@ -100,6 +114,8 @@ class PublicationTests(unittest.TestCase):
                   'manifest.json', 'beta.json', 'sbom-spdx-linux.json']
         for name in names:
             (self.out / name).write_text('{}')
+        (self.out / 'manifest.json').write_text(json.dumps({'version': self.version, 'commit': self.commit}))
+        (self.out / 'beta.json').write_text(json.dumps({'version': self.version}))
         self.sums = ''.join(f'{hashlib.sha256(b"{}").hexdigest()}  {name}\n'
                             for name in names if name.endswith(('.gz', '.tgz')))
         (self.out / 'SHA256SUMS').write_text(self.sums)
@@ -191,6 +207,78 @@ class PublicationTests(unittest.TestCase):
                 result = self.refresh(MODE=mode, RELEASE_VERSION='v0.10.1-beta2')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.mutations(), [])
+
+    def test_tag_and_metadata_follow_the_published_manifest_commit(self):
+        result = self.refresh()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'nightly-tag').read_text(), self.commit)
+        notes = (self.root / 'release-notes').read_text()
+        self.assertIn(self.version, notes)
+        self.assertIn(self.commit, notes)
+        calls = list(map(json.loads, (self.root / 'calls.jsonl').read_text().splitlines()))
+        upload = next(i for i, a in enumerate(calls) if a[:2] == ['release', 'upload'])
+        patch = next(i for i, a in enumerate(calls) if a[0] == 'api' and 'PATCH' in a)
+        edit = next(i for i, a in enumerate(calls) if a[:2] == ['release', 'edit'])
+        self.assertLess(upload, patch)
+        self.assertLess(patch, edit)
+        self.assertIn('force=true', calls[patch])
+        self.assertIn('--latest=false', calls[edit])
+
+    def test_bootstrap_targets_the_manifest_commit(self):
+        result = self.refresh(MODE='absent')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = self.mutations()[0]
+        self.assertEqual(create[create.index('--target') + 1], self.commit)
+        self.assertEqual((self.root / 'nightly-tag').read_text(), self.commit)
+
+    def test_invalid_payload_provenance_never_publishes(self):
+        for document in ({'version': self.version},
+                         {'version': self.version, 'commit': 'main'},
+                         {'version': self.version, 'commit': 'a' * 39},
+                         {'version': self.version, 'commit': None},
+                         {'version': 'v0.10.1-beta.9', 'commit': self.commit}):
+            with self.subTest(document=document):
+                (self.out / 'manifest.json').write_text(json.dumps(document))
+                result = self.refresh()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.mutations(), [])
+                self.assertFalse((self.root / 'nightly-tag').exists())
+
+    def test_mismatched_channel_manifest_never_publishes(self):
+        (self.out / 'beta.json').write_text(json.dumps({'version': 'v0.10.1-beta.9'}))
+        result = self.refresh()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.mutations(), [])
+
+    def test_failed_asset_publication_never_advances_tag_or_metadata(self):
+        for mode in ('existing', 'absent'):
+            with self.subTest(mode=mode):
+                result = self.refresh(MODE=mode, FAIL_PUBLISH='1')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / 'nightly-tag').exists())
+                self.assertFalse((self.root / 'release-notes').exists())
+
+    def test_failed_tag_update_stops_metadata_and_same_version_retry_repairs_it(self):
+        result = self.refresh(FAIL_TAG='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'release-notes').exists())
+        result = self.refresh(CURRENT=self.version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'nightly-tag').read_text(), self.commit)
+
+    def test_stale_refresh_never_moves_tag_or_metadata(self):
+        result = self.refresh(CURRENT='v0.10.1-beta.11')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / 'nightly-tag').exists())
+        self.assertFalse((self.root / 'release-notes').exists())
+
+    def test_metadata_failure_fails_run_and_same_version_retry_repairs_it(self):
+        result = self.refresh(FAIL_METADATA='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / 'nightly-tag').read_text(), self.commit)
+        result = self.refresh(CURRENT=self.version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(self.commit, (self.root / 'release-notes').read_text())
 
     def test_superseded_beta_archives_every_file_without_advancing_pointers(self):
         result = self.run_step('Publish the R2 channel (the channel serves no GitHub URL)')
