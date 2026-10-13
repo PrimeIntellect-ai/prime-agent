@@ -1,0 +1,55 @@
+# Draft-only validation for the harness setting: the normal CI deliberately
+# skips drafts. Keep exact-head evidence without marking the feature ready.
+name: harness refinements draft validation
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - '.github/workflows/harness-refinements-draft.yml'
+      - 'crates/pa-core/src/session_engine/refinement_gate.rs'
+      - 'docs/harness-refinements-setting.md'
+permissions:
+  contents: read
+concurrency:
+  group: harness-refinements-draft-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  exact-head:
+    # Match the repository's collaborator trust boundary; no secrets or write token.
+    if: github.event.pull_request.draft && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: test-shards
+          save-if: false
+      - name: Install kernel bootstrap tooling
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Verify exact head and formatting
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          cargo fmt --all --check
+      - name: Python harness regressions
+        run: PYTHONPATH=prime-agent-runtime/src python3 -m unittest discover -s prime-agent-runtime/test -p test_harness.py
+      - name: Workspace lint gate
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Build sibling test binaries
+        run: cargo build --locked --workspace --bins
+      - name: Workspace test gate
+        run: cargo test --locked --workspace

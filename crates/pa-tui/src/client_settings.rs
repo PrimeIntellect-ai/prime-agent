@@ -6,6 +6,18 @@
 use anyhow::Result;
 
 pub trait ClientSettings: Send + Sync {
+    /// Master harness refinement switch, enabled by default.
+    fn harness_refinements(&self) -> bool {
+        true
+    }
+    /// Persist the master harness refinement switch.
+    ///
+    /// # Errors
+    /// Returns an error if the settings store fails or is unavailable.
+    fn set_harness_refinements(&self, _enabled: bool) -> Result<()> {
+        anyhow::bail!("Harness refinement settings are unavailable")
+    }
+
     /// `theme` (TS `getTheme`/`setTheme`).
     fn theme(&self) -> Option<String>;
     /// Persists `theme` to the global scope.

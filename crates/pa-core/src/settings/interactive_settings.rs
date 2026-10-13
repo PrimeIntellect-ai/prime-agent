@@ -7,6 +7,21 @@ use anyhow::{anyhow, Result};
 use super::manager::SettingsManager;
 
 impl SettingsManager {
+    /// Whether harness refinements may be created or loaded into context (default on).
+    #[must_use]
+    pub fn get_harness_refinements(&self) -> bool {
+        self.settings().harness_refinements.unwrap_or(true)
+    }
+
+    /// Persist the master harness switch to the global settings scope.
+    ///
+    /// # Errors
+    /// Returns an error when the global scope cannot be saved.
+    pub fn set_harness_refinements(&mut self, enabled: bool) -> Result<()> {
+        self.global_mut().harness_refinements = Some(enabled);
+        self.save_global_scope(&["harnessRefinements"])
+    }
+
     /// # Errors
     ///
     /// Returns an error when the global settings scope cannot be saved.

@@ -130,3 +130,47 @@ fn resource_save_survives_an_unrelated_later_save() {
         json!({"packages":["second"],"theme":"dark"})
     );
 }
+
+#[test]
+fn harness_refinements_persist_without_clobbering_other_settings() {
+    let (storage, mut manager) =
+        fixture(r#"{"theme":"light","autoRefine":{"turnInterval":3},"future":{"keep":true}}"#);
+    assert!(manager.get_harness_refinements());
+    manager.set_harness_refinements(false).unwrap();
+    assert!(!manager.reopen().get_harness_refinements());
+    assert_eq!(
+        document(storage.as_ref()),
+        json!({
+            "theme":"light", "autoRefine":{"turnInterval":3}, "future":{"keep":true}, "harnessRefinements":false
+        })
+    );
+    manager.set_harness_refinements(true).unwrap();
+    assert!(manager.reopen().get_harness_refinements());
+}
+
+#[test]
+fn harness_refinements_resolve_project_overrides_and_wrong_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent_dir = dir.path().join("agent");
+    let project_dir = dir.path().join(".prime/agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"harnessRefinements":false}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("settings.json"),
+        r#"{"harnessRefinements":true}"#,
+    )
+    .unwrap();
+    let manager = SettingsManager::create(dir.path(), &agent_dir);
+    assert!(manager.get_harness_refinements());
+    std::fs::write(
+        project_dir.join("settings.json"),
+        r#"{"harnessRefinements":"false"}"#,
+    )
+    .unwrap();
+    assert!(!manager.reopen().get_harness_refinements());
+}

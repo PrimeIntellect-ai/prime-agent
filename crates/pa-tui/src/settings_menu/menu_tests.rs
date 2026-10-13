@@ -84,6 +84,7 @@ fn tabs_partition_the_settings_rows() {
                 vec![
                     "skill-commands",
                     "builtin-skills",
+                    "harness-refinements",
                     "idle-eviction-minutes",
                     "tree-filter-mode"
                 ]

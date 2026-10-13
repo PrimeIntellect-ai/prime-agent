@@ -49,6 +49,20 @@ macro_rules! str_setting {
 }
 
 impl ClientSettings for CliClientSettings {
+    fn harness_refinements(&self) -> bool {
+        self.manager().get_harness_refinements()
+    }
+
+    fn set_harness_refinements(&self, enabled: bool) -> Result<()> {
+        let mut manager = self.manager();
+        manager.set_harness_refinements(enabled)?;
+        let client = pa_core::session_engine::telemetry::build_client(&manager, &self.agent_dir);
+        let mut properties = pa_telemetry::Properties::new();
+        properties.set("enabled", serde_json::json!(enabled));
+        client.track("harness refinements changed", properties);
+        Ok(())
+    }
+
     fn theme(&self) -> Option<String> {
         self.manager().get_theme().map(str::to_string)
     }

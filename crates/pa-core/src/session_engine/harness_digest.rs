@@ -477,6 +477,9 @@ impl super::AgentSession {
     /// relevance terms. `None` when the session carries no harness state; the
     /// disk read stays deferred to render time, so a snapshot reads fresh state.
     pub(crate) async fn harness_digest_inputs(&self) -> Option<HarnessDigestInputs> {
+        if !self.harness_refinements_enabled() {
+            return None;
+        }
         let context = self.harness_digest.clone()?;
         let recent_texts = self.recent_message_texts_newest_first().await;
         let goal = {

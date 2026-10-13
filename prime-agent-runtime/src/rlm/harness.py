@@ -133,6 +133,21 @@ def _agent_dir() -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def _require_refinements_enabled() -> None:
+    """Read the same global/project master switch as the host, without caching it."""
+    enabled = True
+    for settings in (_agent_dir() / "settings.json", Path.cwd() / ".prime" / "agent" / "settings.json"):
+        try:
+            document = json.loads(settings.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        value = document.get("harnessRefinements") if isinstance(document, dict) else None
+        if isinstance(value, bool):
+            enabled = value
+    if not enabled:
+        raise RuntimeError("Harness refinements are disabled in /settings")
+
+
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
     extra = dict(extra or {})
     if "global" in extra:
@@ -421,6 +436,7 @@ class HarnessState:
         self.load()
 
     def _ensure_local_writable(self) -> None:
+        _require_refinements_enabled()
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
 
@@ -433,6 +449,7 @@ class HarnessState:
             return None
 
     def _sync_from_disk(self) -> None:
+        _require_refinements_enabled()
         """Reload if another process rewrote the state file since we last touched it.
 
         The kernel keeps a long-lived ``HarnessState`` in memory while the host
@@ -522,6 +539,7 @@ class HarnessState:
                 self._held_lock = None
 
     def load(self) -> "HarnessState":
+        _require_refinements_enabled()
         if self.file_path is None or not self.file_path.exists():
             self._loaded_mtime = None
             return self
@@ -608,6 +626,7 @@ class HarnessState:
         return target
 
     def save(self) -> "HarnessState":
+        _require_refinements_enabled()
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self

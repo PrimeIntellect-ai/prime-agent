@@ -205,7 +205,26 @@ pub fn build_branch_summary_request(
     custom_instructions: Option<&str>,
     replace_instructions: bool,
 ) -> (Vec<AgentMessage>, BranchPreparation) {
-    let preparation = prepare_branch_entries(entries, token_budget);
+    build_branch_summary_request_with_refinements(
+        entries,
+        token_budget,
+        custom_instructions,
+        replace_instructions,
+        /*enabled*/ true,
+    )
+}
+
+fn build_branch_summary_request_with_refinements(
+    entries: &[FileEntry],
+    token_budget: u64,
+    custom_instructions: Option<&str>,
+    replace_instructions: bool,
+    enabled: bool,
+) -> (Vec<AgentMessage>, BranchPreparation) {
+    let mut preparation = prepare_branch_entries(entries, token_budget);
+    if !enabled {
+        preparation.messages = super::refinement_gate::without_refinements(preparation.messages);
+    }
     let messages = if preparation.messages.is_empty() {
         Vec::new()
     } else {
@@ -371,11 +390,24 @@ pub async fn generate_branch_summary(
         128_000
     };
     let token_budget = context_window.saturating_sub(reserve_tokens);
-    let (request_messages, preparation) = build_branch_summary_request(
+    let enabled = match auxiliary {
+        Some(context) => {
+            let context = context.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir)
+                    .get_harness_refinements()
+            })
+            .await
+            .unwrap_or(false)
+        }
+        None => true,
+    };
+    let (request_messages, preparation) = build_branch_summary_request_with_refinements(
         entries,
         token_budget,
         custom_instructions,
         replace_instructions,
+        enabled,
     );
     if request_messages.is_empty() {
         let (read_files, modified_files) = compute_file_lists(&preparation.file_ops);

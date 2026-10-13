@@ -1,0 +1,122 @@
+//! The live master switch and model-boundary filtering. Durable history is untouched.
+
+use pa_types::session::AgentMessage;
+
+impl super::AgentSession {
+    pub(crate) fn harness_refinements_enabled(&self) -> bool {
+        self.refinement_settings
+            .as_ref()
+            .is_none_or(|settings| settings.reopen().get_harness_refinements())
+    }
+}
+
+/// Remove only typed harness rows; never interpret a user's quoted text as metadata.
+pub(crate) fn without_refinements(messages: Vec<AgentMessage>) -> Vec<AgentMessage> {
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            AgentMessage::Custom(custom)
+                if matches!(
+                    custom.custom_type.as_str(),
+                    "harness_digest" | "refinement_notice" | "refinement_outcome"
+                ) =>
+            {
+                None
+            }
+            AgentMessage::CompactionSummary(mut summary) => {
+                summary.harness_digest = None;
+                summary.harness_state_fingerprint = None;
+                Some(AgentMessage::CompactionSummary(summary))
+            }
+            message => Some(message),
+        })
+        .collect()
+}
+
+/// Resolve at every provider request, including tool continuations and retries.
+/// I/O runs off the async worker. Filtering precedes conversion while provenance is typed.
+pub(crate) fn convert_to_llm(
+    settings: crate::settings::SettingsManager,
+) -> pa_agent::agent_loop::ConvertToLlmFn {
+    std::sync::Arc::new(move |messages| {
+        let settings = settings.clone();
+        Box::pin(async move {
+            let enabled =
+                tokio::task::spawn_blocking(move || settings.reopen().get_harness_refinements())
+                    .await?;
+            let messages = if enabled {
+                messages
+            } else {
+                messages
+                    .into_iter()
+                    .filter_map(|message| match message {
+                        pa_agent::types::AgentMessage::Custom(custom) => {
+                            let typed =
+                                serde_json::from_value(serde_json::to_value(custom).ok()?).ok()?;
+                            without_refinements(vec![typed])
+                                .into_iter()
+                                .next()
+                                .and_then(|row| super::session_message_to_loop(&row))
+                        }
+                        message => Some(message),
+                    })
+                    .collect()
+            };
+            Ok(super::messages::loop_convert_to_llm(messages))
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::SettingsManager;
+    use pa_types::ai::{UserContent, UserMessage};
+
+    fn user(text: &str) -> AgentMessage {
+        AgentMessage::User(UserMessage {
+            content: UserContent::Text(text.to_string()),
+            timestamp: 0,
+            rest: Default::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn live_request_gate_filters_saved_rows_and_preserves_quoted_user_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut settings = SettingsManager::create(tmp.path(), &tmp.path().join("agent"));
+        let convert = convert_to_llm(settings.reopen());
+        let digest =
+            super::super::harness_digest::harness_digest_prompt_row("saved memory", 1, "fp");
+        let quote =
+            super::super::session_message_to_loop(&user("[harness-digest] quoted user content"))
+                .unwrap();
+        let messages = vec![digest.clone(), quote.clone()];
+        assert_eq!(convert(messages.clone()).await.unwrap().len(), 2);
+        settings.set_harness_refinements(false).unwrap();
+        let expected = super::super::messages::loop_convert_to_llm(vec![quote]);
+        assert_eq!(convert(messages.clone()).await.unwrap(), expected);
+        settings.set_harness_refinements(true).unwrap();
+        assert_eq!(convert(messages).await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn disabled_context_removes_compaction_digest_but_keeps_the_summary() {
+        let summary = pa_types::session::CompactionSummaryMessage {
+            summary: "Earlier decisions still apply".to_string(),
+            tokens_before: 10,
+            retained_message_count: None,
+            custom_instructions: None,
+            harness_digest: Some("saved memory".to_string()),
+            harness_state_fingerprint: Some("fp".to_string()),
+            timestamp: 0,
+        };
+        let mut expected = summary.clone();
+        expected.harness_digest = None;
+        expected.harness_state_fingerprint = None;
+        assert_eq!(
+            without_refinements(vec![AgentMessage::CompactionSummary(summary)]),
+            vec![AgentMessage::CompactionSummary(expected)]
+        );
+    }
+}

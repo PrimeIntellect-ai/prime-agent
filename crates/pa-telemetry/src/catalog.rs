@@ -1219,10 +1219,17 @@ const UPDATE_EVENTS: &[EventRule] = &[
     },
 ];
 
+const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
+    name: "harness refinements changed",
+    since: 2,
+    properties: &[("enabled", required(boolean()))],
+};
+
 /// Every catalogued event, flattened.
 #[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
+        &HARNESS_REFINEMENTS_CHANGED,
         &AGENT_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,

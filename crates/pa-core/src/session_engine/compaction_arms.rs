@@ -262,6 +262,11 @@ impl AgentSession {
             // once before the loop would rank the abandoned branch's
             // terms. The capture takes the session lock itself, so it
             // runs off the prepare hold.
+            if !self.harness_refinements_enabled() {
+                attempt.history = super::refinement_gate::without_refinements(attempt.history);
+                attempt.turn_prefix_messages =
+                    super::refinement_gate::without_refinements(attempt.turn_prefix_messages);
+            }
             let digest_inputs = self.harness_digest_inputs().await;
             compaction_trace::trace("compact.digest_captured", &serde_json::Value::Null);
             let attempt_options = crate::session_engine::compact_session::CompactOptions {
@@ -275,11 +280,16 @@ impl AgentSession {
                 summary_delta: options.summary_delta.clone(),
                 semantic_edges: options.semantic_edges.clone(),
             };
-            let prepared = crate::session_engine::compact_session::summarize_attempt(
+            let mut prepared = crate::session_engine::compact_session::summarize_attempt(
                 &attempt,
                 &attempt_options,
             )
             .await?;
+            // A toggle during the summarizer request must not re-inject the captured digest.
+            if !self.harness_refinements_enabled() {
+                prepared.entry.harness_digest = None;
+                prepared.entry.harness_state_fingerprint = None;
+            }
             let committed = {
                 let mut session = self.session.lock().await;
                 crate::session_engine::compact_session::commit_attempt(
@@ -413,6 +423,10 @@ impl AgentSession {
         // not interleave with a replace (duplicating in the rebuilt view
         // or vanishing under it).
         let _flight = self.compaction_flight.lock().await;
+        anyhow::ensure!(
+            self.harness_refinements_enabled(),
+            "Harness refinements are disabled in /settings"
+        );
         // The transcript's consumed artifacts are extracted under this first
         // lock straight from the retained rows: no second clone of the rows.
         let parts = self.session.lock().await.refine_transcript_parts();

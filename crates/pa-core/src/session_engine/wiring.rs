@@ -147,7 +147,7 @@ impl AgentSession {
 
     /// Whether the session may run auto-refinement.
     pub fn auto_refine_allowed(&self) -> bool {
-        self.auto_refine_allowed
+        self.auto_refine_allowed && self.harness_refinements_enabled()
     }
 
     /// The resolved auto-refine gates.

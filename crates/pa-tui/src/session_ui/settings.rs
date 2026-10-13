@@ -230,6 +230,7 @@ impl SessionUi {
             values.block_images = settings.block_images();
             values.skill_commands = settings.enable_skill_commands();
             values.builtin_skills = settings.enable_builtin_skills();
+            values.harness_refinements = settings.harness_refinements();
             values.hardware_cursor = settings.show_hardware_cursor();
             values.editor_padding = settings.editor_padding_x();
             values.autocomplete_max_visible = settings.autocomplete_max_visible();
@@ -248,6 +249,7 @@ impl SessionUi {
             values.auto_resize_images = true;
             values.skill_commands = true;
             values.builtin_skills = true;
+            values.harness_refinements = true;
             values.idle_eviction_minutes = "90".to_string();
             values.mermaid = "streaming".to_string();
             values.tree_filter_mode = "user-only".to_string();
@@ -364,6 +366,14 @@ impl SessionUi {
                 };
                 view.editor.set_autocomplete_skill_commands(skills);
                 self.dirty = true;
+            }
+            "harness-refinements" => {
+                self.persist_bool_setting(
+                    |settings, enabled| settings.set_harness_refinements(enabled),
+                    value,
+                    view,
+                );
+                let _ = self.handle_reload_command(view);
             }
             "builtin-skills" => {
                 self.persist_bool_setting(

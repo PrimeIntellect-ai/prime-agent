@@ -176,6 +176,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             submenu: None,
         },
         SettingsMenuRow {
+            id: "harness-refinements",
+            label: "Harness refinements",
+            description: "Create and load harness refinements; prior replies and summaries retain their influence",
+            current: current.harness_refinements.to_string(),
+            values: Some(bool_value()),
+            submenu: None,
+        },
+        SettingsMenuRow {
             id: "builtin-skills",
             label: "Built-in skills",
             description: "Load built-in skills shipped with prime-agent (takes effect after reload)",
@@ -328,6 +336,7 @@ pub struct SettingsCurrentValues {
     pub block_images: bool,
     pub skill_commands: bool,
     pub builtin_skills: bool,
+    pub harness_refinements: bool,
     pub hardware_cursor: bool,
     pub editor_padding: u64,
     pub autocomplete_max_visible: u64,

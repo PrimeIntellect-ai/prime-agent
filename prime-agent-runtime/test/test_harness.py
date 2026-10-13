@@ -1502,8 +1502,6 @@ class HarnessStateTest(unittest.TestCase):
                 state.list("tool")
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class HarnessSearchTest(unittest.TestCase):
@@ -1631,3 +1629,24 @@ class HarnessSearchTest(unittest.TestCase):
             state.entries["memory"]["rare"].updated_at = "2026-07-01T00:00:00+00:00"
             self.assertEqual([entry.id for entry in state.search("session quantum")], ["rare", "zz_newer", "aa_older", "solo"])
 
+
+
+class HarnessRefinementsSettingTests(unittest.TestCase):
+    def test_disable_blocks_cached_reads_and_writes_without_deleting_state(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            settings = Path(tmp) / "settings.json"
+            settings.write_text('{"harnessRefinements":true}')
+            state = HarnessState(Path(tmp) / "harness_state.json", scope="global")
+            state.create_memory("Note", "Saved memory", id="note")
+            before = state.file_path.read_bytes()
+            settings.write_text('{"harnessRefinements":false}')
+            for action in (lambda: state.get("memory", "note"), lambda: state.create_memory("New", "New memory"), state.load, state.save):
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    action()
+            self.assertEqual(state.file_path.read_bytes(), before)
+            settings.write_text('{"harnessRefinements":true}')
+            self.assertEqual(state.get("memory", "note").content, "Saved memory")
+
+
+if __name__ == "__main__":
+    unittest.main()
