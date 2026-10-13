@@ -428,8 +428,10 @@ fn replay_admitted_user_rows_stays_windowed_and_reuses_only_registered_ids() {
     }));
     let bytes = rows
         .iter()
-        .map(|row| format!("{row}\n"))
-        .collect::<String>();
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
     std::fs::write(&path, &bytes).unwrap();
     let window = super::super::window::WindowedSessionStore::open(&path)
         .unwrap()
