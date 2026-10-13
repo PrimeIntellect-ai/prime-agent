@@ -14,8 +14,8 @@ The request-output calculation also accounts for thinking-budget folding on Anth
 Bedrock models without adaptive thinking. All decisions use the current serving model's limits.
 
 `compaction.thresholdPercent` accepts finite numbers from 1 through 100, including fractions.
-The `/settings` General tab offers whole percentages and preserves a configured fractional
-value in its choices. Unset, malformed or out-of-range loaded values use 95; invalid writes
+The `/settings` General tab offers five-point presets (5, 10, …, 100) and preserves a
+configured off-grid value in its choices; one click selects the neighbouring preset. Unset, malformed or out-of-range loaded values use 95; invalid writes
 fail without mutating settings. The nested global write preserves unknown sibling keys and
 other writers' changes; project settings retain normal precedence. A saved percentage is read
 at threshold decision boundaries so existing sessions observe it. These reads occur off the
@@ -58,7 +58,7 @@ frames, a frame diff, commands and binary hashes in the lifecycle parity artifac
 that the existing auto-compaction toggle renders the same row and sends the same canonical
 payload. The percentage row is an explicit requested addition, absent in TS; Rust's previously
 introduced tab layout is preserved in the full frame diff, rather than claimed identical.
-It also changes the Rust percentage from 95 to 96 and verifies both visible feedback and the
+It also changes the Rust percentage from 95 to 100 and verifies both visible feedback and the
 actual saved settings document. This client comparison does not establish engine parity;
 Rust tests cover the deliberate output-headroom difference and custom threshold policy.
 CI results and receipts must be reviewed before merging; this PR remains a draft.

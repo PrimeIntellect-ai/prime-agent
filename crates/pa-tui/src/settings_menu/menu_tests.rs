@@ -649,28 +649,57 @@ fn space_activates_instead_of_typing_into_the_query() {
 }
 
 #[test]
-fn threshold_row_retains_custom_values_and_cycles_at_the_boundaries() {
+fn threshold_control_uses_five_point_steps_and_wraps_at_preset_boundaries() {
     let values = SettingsCurrentValues {
-        compaction_threshold_percent: 62.5,
+        compaction_threshold_percent: 95.0,
         ..Default::default()
     };
     let mut menu = SettingsMenu::new(settings_menu_rows(&values));
-    menu.tabs[0].selected = menu.tabs[0].rows.len() - 1;
-    assert!(render_text(&menu).iter().any(|row| row.contains("62.5")));
-    assert_eq!(
-        menu.handle_key("right", &kb()),
-        SettingsMenuAction::Change {
-            id: "autocompact-threshold",
-            value: "63".to_string()
+    menu.paste("threshold");
+    for (key, expected) in [
+        ("left", "90"),
+        ("left", "85"),
+        ("right", "90"),
+        ("right", "95"),
+        ("right", "100"),
+        ("right", "5"),
+        ("left", "100"),
+    ] {
+        assert_eq!(
+            menu.handle_key(key, &kb()),
+            SettingsMenuAction::Change {
+                id: "autocompact-threshold",
+                value: expected.into()
+            }
+        );
+    }
+}
+
+#[test]
+fn threshold_control_retains_off_grid_values_and_selects_neighbouring_presets() {
+    for (saved, lower, upper) in [
+        (62.5, "60", "65"),
+        (63.0, "60", "65"),
+        (1.0, "100", "5"),
+        (99.0, "95", "100"),
+    ] {
+        for (key, expected) in [("left", lower), ("right", upper)] {
+            let values = SettingsCurrentValues {
+                compaction_threshold_percent: saved,
+                ..Default::default()
+            };
+            let mut menu = SettingsMenu::new(settings_menu_rows(&values));
+            menu.paste("threshold");
+            assert!(render_text(&menu)
+                .iter()
+                .any(|row| row.contains(&saved.to_string())));
+            assert_eq!(
+                menu.handle_key(key, &kb()),
+                SettingsMenuAction::Change {
+                    id: "autocompact-threshold",
+                    value: expected.into()
+                }
+            );
         }
-    );
-    let index = menu.tabs[0].rows[menu.tabs[0].selected];
-    menu.rows[index].current = "100".into();
-    assert_eq!(
-        menu.handle_key("right", &kb()),
-        SettingsMenuAction::Change {
-            id: "autocompact-threshold",
-            value: "1".to_string()
-        }
-    );
+    }
 }

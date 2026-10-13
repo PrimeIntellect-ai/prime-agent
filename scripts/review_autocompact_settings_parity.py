@@ -42,14 +42,14 @@ def observe(binary, kind, root):
         result['toggle_payloads'] = [json.dumps({k: c[k] for k in ('type', 'activeSessionId', 'enabled')}, sort_keys=True)
                                      for c in server.commands if c.get('type') == 'set_auto_compaction']
         if kind == 'rust':
-            # General's added row follows the five existing settings; preserve their key order.
-            terminal.send('\x1b[B' * 5)
+            # Search for the added row so other General settings can evolve independently.
+            terminal.send('threshold')
             terminal.wait('percentage focused', lambda: any(row.strip().startswith('› Auto-compact threshold (%)') for row in terminal.screen.text().splitlines()), server)
             result['percentage_frame'] = terminal.screen.text()
             terminal.send('\r')
             path = root / 'agent/settings.json'
-            terminal.wait('percentage persisted', lambda: json.loads(path.read_text()).get('compaction', {}).get('thresholdPercent') == 96, server)
-            terminal.wait('percentage rendered', lambda: any('threshold (%)' in row and '96' in row for row in terminal.screen.text().splitlines()), server)
+            terminal.wait('percentage persisted', lambda: json.loads(path.read_text()).get('compaction', {}).get('thresholdPercent') == 100, server)
+            terminal.wait('percentage rendered', lambda: any('threshold (%)' in row and '100' in row for row in terminal.screen.text().splitlines()), server)
             result['changed_percentage_frame'] = terminal.screen.text()
             result['saved_percentage'] = json.loads(path.read_text())['compaction']['thresholdPercent']
         result['executed'] = True
@@ -81,7 +81,7 @@ def main():
     receipt['frame_diff'] = list(difflib.unified_diff(ts.get('settings_frame', '').splitlines(), rust.get('settings_frame', '').splitlines(), fromfile='TS', tofile='Rust'))
     receipt['toggle_wire_equal'] = ts.get('toggle_payloads') == rust.get('toggle_payloads') and bool(ts.get('toggle_payloads'))
     receipt['toggle_rows_equal'] = ts.get('toggle_rows') == rust.get('toggle_rows') and bool(ts.get('toggle_rows'))
-    receipt['passed'] = all(result.get('executed') and not result['fixture_errors'] for result in (ts, rust)) and receipt['toggle_wire_equal'] and receipt['toggle_rows_equal'] and rust.get('saved_percentage') == 96
+    receipt['passed'] = all(result.get('executed') and not result['fixture_errors'] for result in (ts, rust)) and receipt['toggle_wire_equal'] and receipt['toggle_rows_equal'] and rust.get('saved_percentage') == 100
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps({key: receipt[key] for key in ('passed', 'toggle_wire_equal', 'toggle_rows_equal')}))

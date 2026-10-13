@@ -139,7 +139,7 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
     } else {
         95.0
     };
-    let mut thresholds: Vec<f64> = (1..=100).map(f64::from).collect();
+    let mut thresholds: Vec<f64> = (5..=100).step_by(5).map(f64::from).collect();
     if !thresholds.contains(&percent) {
         thresholds.push(percent);
         thresholds.sort_by(f64::total_cmp);

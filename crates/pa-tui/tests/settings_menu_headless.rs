@@ -742,8 +742,8 @@ fn a_no_match_query_backspaces_away_and_space_still_cycles() {
 #[test]
 fn threshold_percentage_cycles_through_the_persistence_seam() {
     let mut steps = open_settings();
-    for _ in 0..5 {
-        steps.push(HeadlessStep::Key(key(KeyCode::Down)));
+    for character in "threshold".chars() {
+        steps.push(HeadlessStep::Key(key(KeyCode::Char(character))));
     }
     steps.push(HeadlessStep::Key(key(KeyCode::Right)));
     steps.push(HeadlessStep::WaitRender {
@@ -751,9 +751,9 @@ fn threshold_percentage_cycles_through_the_persistence_seam() {
         timeout_ms: 5000,
     });
     let (frames, settings) = run_plan(steps);
-    assert_eq!(settings.log(), vec!["threshold=96"]);
+    assert_eq!(settings.log(), vec!["threshold=100"]);
     let rows = frame_with(&frames, "› Auto-compact threshold (%)");
     assert!(rows
         .iter()
-        .any(|row| row.contains("Auto-compact threshold (%)") && row.contains("96")));
+        .any(|row| row.contains("Auto-compact threshold (%)") && row.contains("100")));
 }
