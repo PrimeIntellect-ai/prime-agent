@@ -380,3 +380,103 @@ async fn attach_response_wire_bytes_keep_the_ts_key_order() {
         }
     }
 }
+
+/// `clear_queue` bounces each dropped agent-message row to its sender over
+/// the supervisor `send_message` route; the cleared user prompt sends
+/// nothing (unix: the link endpoint is an `AF_UNIX` socket).
+#[cfg(unix)]
+#[tokio::test]
+async fn clear_queue_bounces_dropped_agent_messages_to_their_senders() {
+    let dir = std::env::temp_dir().join(format!("pa-worker-am-bounce-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket = dir.join("supervisor.sock");
+    let (sends, _server) = crate::worker::tests::fake_supervisor(&socket);
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: socket,
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: "target-session".to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": ["ack"] })),
+    };
+    let worker = Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    // Busy parks both rows in their lanes.
+    worker.core.lock().unwrap().busy = true;
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": "target-session",
+                "message": "please review the plan",
+                "sender": {
+                    "activeSessionId": "source-session",
+                    "sessionName": "source-agent",
+                },
+            }),
+        )
+        .await;
+    assert!(delivered.success, "deliver failed: {delivered:?}");
+    let queued = worker
+        .dispatch("follow_up", &json!({ "message": "plain queued prompt" }))
+        .await;
+    assert!(queued.success, "follow_up failed: {queued:?}");
+    let cleared = worker.dispatch("clear_queue", &json!({})).await;
+    assert!(cleared.success, "clear_queue failed: {cleared:?}");
+    let data = cleared.data.expect("the clear data");
+    assert_eq!(
+        data["steering"],
+        json!(["[agent-message from source-agent]\n\nplease review the plan"]),
+        "the response shape is unchanged: {data}"
+    );
+    assert_eq!(
+        data["followUp"],
+        json!(["plain queued prompt"]),
+        "the response shape is unchanged: {data}"
+    );
+    // Exactly one bounce leaves for the agent row's sender; the cleared
+    // user prompt sends nothing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let sends = loop {
+        let recorded: Vec<Value> = sends
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| command["type"] == "send_message")
+            .cloned()
+            .collect();
+        if !recorded.is_empty() {
+            break recorded;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bounce never reached the supervisor link"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        sends.len(),
+        1,
+        "one bounce per agent row, none for the prompt: {sends:?}"
+    );
+    let command = &sends[0];
+    assert_eq!(command["type"], "send_message");
+    assert_eq!(command["targetActiveSessionId"], "source-session");
+    assert_eq!(command["fromActiveSessionId"], "target-session");
+    assert_eq!(command["agentOrigin"], true);
+    assert_eq!(
+        command["message"],
+        "Your agent message was cleared from target's queue before delivery: please review the plan",
+        "the bounce names the receiver and quotes the dropped body: {command}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

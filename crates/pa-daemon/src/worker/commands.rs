@@ -529,18 +529,25 @@ impl Worker {
             return response;
         }
         let mut core = self.core.lock().unwrap();
-        let drain_lane = |lane: &mut VecDeque<QueuedItem>| -> Vec<String> {
-            lane.drain(..)
-                .map(|item| {
-                    if let Some(id) = item.admission_id.as_deref() {
-                        self.prompt_admissions.clear(id);
-                    }
-                    item.message
-                })
-                .collect()
-        };
-        let steering: Vec<String> = drain_lane(&mut core.steering);
-        let follow_up: Vec<String> = drain_lane(&mut core.follow_up);
+        // The dropped agent-message rows bounce to their senders: a queued
+        // row's sender otherwise never learns its message will not deliver.
+        let mut dropped_agent_rows = Vec::new();
+        let drain_lane =
+            |lane: &mut VecDeque<QueuedItem>, dropped_agent_rows: &mut Vec<Value>| -> Vec<String> {
+                lane.drain(..)
+                    .map(|item| {
+                        if let Some(id) = item.admission_id.as_deref() {
+                            self.prompt_admissions.clear(id);
+                        }
+                        if item.agent_message.is_some() {
+                            dropped_agent_rows.extend(item.custom_message);
+                        }
+                        item.message
+                    })
+                    .collect()
+            };
+        let steering: Vec<String> = drain_lane(&mut core.steering, &mut dropped_agent_rows);
+        let follow_up: Vec<String> = drain_lane(&mut core.follow_up, &mut dropped_agent_rows);
         clear_withdrawn_progress_note(&core, self.engine.as_ref());
         let snapshot = Self::snapshot_locked(&core);
         drop(core);
@@ -550,11 +557,62 @@ impl Worker {
             operation: "queue_cleared",
         });
         let _ = self.emit_action_update(&snapshot);
+        for row in &dropped_agent_rows {
+            self.bounce_cleared_agent_message(row);
+        }
         response_success(
             None,
             "clear_queue",
             Some(json!({ "steering": steering, "followUp": follow_up })),
         )
+    }
+
+    /// One dropped agent-message row's sender notice: the row's own
+    /// `details` name the sender and the body, and the bounce rides the
+    /// supervisor `send_message` route from this session. Spawned off the
+    /// clear's response path — a failed bounce is logged, never retried.
+    fn bounce_cleared_agent_message(&self, row: &Value) {
+        let Some(details) = row.get("details") else {
+            return;
+        };
+        let sender = details
+            .get("from")
+            .and_then(|from| from.get("activeSessionId"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty());
+        let Some(sender) = sender else {
+            // CLI-origin senders carry no session to bounce to.
+            return;
+        };
+        let message = details
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // The cleared queue is this worker's own; its identity — not the
+        // row's delivery-time copy — names the receiver.
+        let receiver = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .and_then(|store| store.session_name().map(str::to_string))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| self.config.active_session_id.clone())
+        };
+        let command = json!({
+            "type": "send_message",
+            "targetActiveSessionId": sender,
+            "message": cleared_agent_message_bounce_text(&receiver, message),
+            "fromActiveSessionId": self.config.active_session_id,
+            "agentOrigin": true,
+        });
+        let link = std::sync::Arc::clone(&self.roster_link);
+        let sender = sender.to_string();
+        let timeout = std::time::Duration::from_millis(crate::messaging::WORKER_REQUEST_TIMEOUT_MS);
+        tokio::spawn(async move {
+            if let Err(error) = link.request_success(command, timeout).await {
+                eprintln!("pa-daemon: cleared agent-message bounce to {sender} failed: {error:#}");
+            }
+        });
     }
 
     fn handle_abort_and_clear_queue(&self) -> DaemonResponse {
@@ -783,4 +841,16 @@ impl Worker {
             Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
         )
     }
+}
+
+/// The bounce body: the receiver label, the fact, and the dropped body —
+/// truncated so the whole notice stays inside the delivery size limit the
+/// receiving `worker_deliver_message` enforces.
+fn cleared_agent_message_bounce_text(receiver: &str, message: &str) -> String {
+    let prefix =
+        format!("Your agent message was cleared from {receiver}'s queue before delivery: ");
+    let budget = pa_core::session_engine::agent_messaging::DEFAULT_AGENT_MESSAGE_MAX_CHARS
+        .saturating_sub(prefix.chars().count());
+    let body: String = message.chars().take(budget).collect();
+    format!("{prefix}{body}")
 }
