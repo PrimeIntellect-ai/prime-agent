@@ -165,11 +165,7 @@ pub async fn complete_summary_call(
             headers: headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
-    // Keep the provider default unless the model explicitly requires thinking.
-    // Omitted reasoning disables thinking on toggle-based provider routes.
-    let minimum = pa_types::ai::clamp_thinking_level(model, pa_types::ai::ModelThinkingLevel::Off);
-    stream_options.reasoning =
-        (minimum != pa_types::ai::ModelThinkingLevel::Off).then_some(minimum);
+    stream_options.reasoning = pa_types::ai::minimum_reasoning(model);
     let assistant = match on_delta {
         None => pa_ai::complete_simple(model, &context, Some(stream_options)).await?,
         Some(on_delta) => {

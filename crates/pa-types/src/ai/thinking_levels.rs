@@ -93,6 +93,16 @@ pub fn clamp_thinking_level(model: &Model, level: ModelThinkingLevel) -> ModelTh
         .unwrap_or(ModelThinkingLevel::Off)
 }
 
+/// The weakest reasoning a request may send: `None` (the provider default)
+/// when the model can run with thinking off, else its lowest supported level.
+/// Toggle-based routes read omitted reasoning as "thinking off", which
+/// mandatory-thinking models reject.
+#[must_use]
+pub fn minimum_reasoning(model: &Model) -> Option<ModelThinkingLevel> {
+    let minimum = clamp_thinking_level(model, ModelThinkingLevel::Off);
+    (minimum != ModelThinkingLevel::Off).then_some(minimum)
+}
+
 /// Identity compare (`modelsAreEqual`): provider plus id.
 #[must_use]
 pub fn models_are_equal(a: Option<&Model>, b: Option<&Model>) -> bool {
