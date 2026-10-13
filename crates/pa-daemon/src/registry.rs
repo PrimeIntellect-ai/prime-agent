@@ -200,6 +200,20 @@ impl ResidentWorker {
         })
     }
 
+    /// Set the client-forwarded launch env (the in-memory lifetime is
+    /// documented on the field).
+    pub(crate) fn set_launch_env(&self, env: Option<std::collections::BTreeMap<String, String>>) {
+        *self
+            .launch_env
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = env;
+    }
+
+    /// Drop the stored launch env (the ready-time and promotion clears).
+    pub(crate) fn clear_launch_env(&self) {
+        self.set_launch_env(None);
+    }
+
     pub(crate) fn route_state(&self) -> WorkerRouteState {
         *self.route_state_tx.borrow()
     }

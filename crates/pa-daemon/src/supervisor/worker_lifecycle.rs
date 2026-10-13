@@ -127,12 +127,8 @@ impl Supervisor {
             .map(crate::herdr::filter_client_env)
             .filter(|env| !env.is_empty());
         // The client's launch env (TS `launchEnv`) re-filtered on receipt
-        // (the socket peer is untrusted): held in memory on the resident
-        // ONLY — never the descriptor, never the durable create command —
-        // and merged into the worker's spawn env under the internal
-        // identity overrides. A resident worker's copy clears once its
-        // create completes; an owned worker keeps it for the owner-driven
-        // recovery relaunch (the TS `launchWorker` lifetime).
+        // (the socket peer is untrusted). In-memory only; the lifetime is
+        // documented on the `ResidentWorker::launch_env` field.
         let client_launch_env = launch_env
             .clone()
             .map(pa_types::daemon::launch_env::collect_launch_env)
@@ -353,13 +349,8 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
-        // The launch env rides the resident before the spawn (TS stores
-        // `worker.launchEnv` before `launchWorker` spawns): the spawn
-        // merges it, nothing else ever sees it.
-        *resident
-            .launch_env
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = client_launch_env;
+        // TS stores `worker.launchEnv` before the spawn.
+        resident.set_launch_env(client_launch_env);
         // Register the resident before spawning: the worker's boot self-registration must
         // find its identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
@@ -481,15 +472,10 @@ impl Supervisor {
         {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-            // The create completed: a resident worker's crash relaunch
-            // runs on the daemon's own env (TS clears `launchEnv` at
-            // ready), while an owned worker keeps the owner's env for its
-            // recovery relaunch until ownership clears.
+            // TS clears `launchEnv` at ready; an owned worker keeps it
+            // for its recovery relaunch until ownership clears.
             if descriptor.owner_client_id.is_none() {
-                *resident
-                    .launch_env
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                resident.clear_launch_env();
             }
             descriptor.root_session_id = create_summary
                 .get("sessionId")

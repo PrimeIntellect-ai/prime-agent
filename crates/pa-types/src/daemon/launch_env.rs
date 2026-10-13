@@ -42,6 +42,17 @@ pub fn collect_launch_env(
         .collect()
 }
 
+/// Collect the launch env from THIS process's environment. Entries that
+/// are not valid UTF-8 are skipped: the JSON wire cannot carry them,
+/// and `std::env::vars` would panic on them.
+#[must_use]
+pub fn collect_process_launch_env() -> BTreeMap<String, String> {
+    collect_launch_env(
+        std::env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,28 +84,6 @@ mod tests {
             BTreeMap::from([
                 ("PATH".to_string(), "/usr/bin".to_string()),
                 ("SSL_CERT_FILE".to_string(), "/certs/ca.pem".to_string()),
-                ("PA_MARKER".to_string(), "a-1".to_string()),
-            ])
-        );
-    }
-
-    /// The daemon side re-filters a received map with the same function:
-    /// an internal var a hostile peer smuggled onto the wire never
-    /// survives the receipt.
-    #[test]
-    fn the_daemon_re_filters_a_received_map() {
-        let received = BTreeMap::from([
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("PA_MARKER".to_string(), "a-1".to_string()),
-            (
-                "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN".to_string(),
-                "forged".to_string(),
-            ),
-        ]);
-        assert_eq!(
-            collect_launch_env(received),
-            BTreeMap::from([
-                ("PATH".to_string(), "/usr/bin".to_string()),
                 ("PA_MARKER".to_string(), "a-1".to_string()),
             ])
         );

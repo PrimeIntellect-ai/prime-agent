@@ -20,6 +20,20 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+/// Remove one env var at scope end: a test that must run with a var in
+/// its own process env (the parent-worker stand-in) restores the
+/// process to its pre-test state (the supervisor tests'
+/// save-and-restore pattern).
+#[cfg(target_os = "linux")]
+struct RemoveEnvVarAtDrop(&'static str);
+
+#[cfg(target_os = "linux")]
+impl Drop for RemoveEnvVarAtDrop {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
+}
+
 struct Daemon {
     child: Child,
 }
@@ -459,8 +473,10 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
     // The test process stands in for the parent worker: its env is what
     // the spawn arm forwards. The daemon itself was scrubbed of the
     // marker at boot, so the ONLY way the child can see it is the
-    // spawn arm's forward.
+    // spawn arm's forward. The var never leaks past this test: the
+    // guard removes it at scope end.
     std::env::set_var("PA_MARKER", &marker);
+    let _marker_guard = RemoveEnvVarAtDrop("PA_MARKER");
     let children = SupervisorChildSessions::new(
         std::sync::Arc::new(SupervisorLink::new(socket.clone())),
         agent_dir.clone(),
@@ -540,11 +556,11 @@ async fn an_rlm_spawn_child_inherits_the_parent_worker_env() {
         environ.contains(&format!("PA_MARKER={marker}")),
         "the spawned child's worker never received the parent worker's env:\n{environ}"
     );
-    // The parent worker's env carried RLM_DEPTH (this test binary "runs
-    // inside an agent" through the hostile boot env): the child strips it.
+    // The supervisor itself "runs inside an agent" (the hostile boot
+    // env): the child must not inherit that stale recursion marker.
     assert!(
         !environ.contains("RLM_DEPTH="),
-        "the spawned child inherited RLM_DEPTH:\n{environ}"
+        "the spawned child inherited the supervisor's RLM_DEPTH:\n{environ}"
     );
     let _ = children.delete_subagent(handle.rlm_child_id.clone()).await;
 }

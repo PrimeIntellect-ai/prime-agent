@@ -141,18 +141,12 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         request.spawned_by_request_id.as_deref(),
                         Some(runtime_metadata),
                         &identity,
-                        // TS runs an `rlm.spawn` child in-process inside
-                        // the parent worker, so the child implicitly
-                        // shares its environment — which includes the
-                        // client env the parent's own create carried.
-                        // The Rust child is a separate worker process:
-                        // forwarding the parent worker's whole env
-                        // (minus the internal identity, which the
-                        // supervisor re-stamps for the child) is the
-                        // parity restore.
-                        Some(pa_types::daemon::launch_env::collect_launch_env(
-                            std::env::vars(),
-                        )),
+                        // TS runs `rlm.spawn` children in-process
+                        // inside the parent worker, so they share its
+                        // env; the Rust child is a separate worker
+                        // process, so the spawn forwards the parent
+                        // worker's env (filtered) instead.
+                        Some(pa_types::daemon::launch_env::collect_process_launch_env()),
                     )
                     .await?;
                 let record = ChildRecord {
@@ -348,14 +342,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     &sessions_dir,
                     None,
                     &identity,
-                    // TS `createRlmRootSession` launches the new depth-0
-                    // root with a minimal env: `PATH`, the provider's
-                    // env API-key var when the parent's credential is
-                    // environment-sourced, and `PRIME_TEAM_ID` for
-                    // prime-inference (daemon-mode.ts). The worker has
-                    // no auth-source lookup at this seam; the provider's
-                    // env-key var is forwarded whenever it is set (the
-                    // deviation is stated in the PR).
+                    // The TS minimal map for a depth-0 root (the
+                    // env-key heuristic is stated in the PR).
                     Some(create_session_launch_env(&model)),
                 )
                 .await?;

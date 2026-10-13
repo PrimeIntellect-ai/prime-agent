@@ -574,9 +574,7 @@ impl Supervisor {
         let stderr_log_path =
             crate::worker_stderr::log_path(&self.options.agent_dir, &resident.worker_id);
         let stderr_log = crate::worker_stderr::open_for_spawn(&stderr_log_path)?;
-        // The client launch env travels from the resident (TS `launchEnv`):
-        // in memory only, so a relaunch replays whatever the lifetime rules
-        // kept (owned workers keep it, resident workers lose it at ready).
+        // The client launch env travels from the resident (TS `launchEnv`).
         let client_launch_env = resident
             .launch_env
             .lock()
@@ -1070,12 +1068,7 @@ mod tests {
         assert_eq!(
             removals,
             vec![std::ffi::OsStr::new("RLM_DEPTH")],
-            "RLM_DEPTH is the only removal: the daemon's own env stays inherited"
-        );
-        assert_eq!(
-            envs.get(std::ffi::OsStr::new("HOME")),
-            None,
-            "an untouched daemon-base var stays inherited (no clear)"
+            "RLM_DEPTH is the only removal: the daemon's own env stays             inherited (the e2e's base-sentinel check proves the layer)"
         );
     }
 

@@ -518,7 +518,7 @@ pub(super) async fn create_session(
     // environment of the terminal that opened it, not the daemon's
     // boot environment.
     let launch_env = {
-        let env = pa_types::daemon::launch_env::collect_launch_env(std::env::vars());
+        let env = pa_types::daemon::launch_env::collect_process_launch_env();
         (!env.is_empty()).then_some(env)
     };
     let data = match client
