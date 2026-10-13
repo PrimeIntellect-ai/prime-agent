@@ -450,7 +450,12 @@ fn list_level_geometry(depth: usize, outer: usize) -> (usize, usize) {
 
 /// One item line's wrap budget: the first line shares its row with the level
 /// indent and the bullet; later lines carry `indent + "  "`.
-fn list_line_budget(width: usize, indent_len: usize, bullet_width: usize, first_line: bool) -> usize {
+fn list_line_budget(
+    width: usize,
+    indent_len: usize,
+    bullet_width: usize,
+    first_line: bool,
+) -> usize {
     let used = if first_line {
         indent_len + bullet_width
     } else {
@@ -738,6 +743,111 @@ fn render_block(
     }
 }
 
+/// One wrap token: a run of spaces, or a word run whose pieces may cross span
+/// boundaries — TS `splitIntoTokensWithAnsi` never splits a word at an ANSI
+/// boundary, so a styled span's trailing punctuation stays glued to the word.
+#[derive(Debug)]
+pub(super) enum WrapToken {
+    Gap(String, Style),
+    Word(Vec<(String, Style)>),
+}
+
+/// Split styled spans into wrap tokens: words and space runs, with words that
+/// touch across a span boundary glued into one token.
+#[must_use]
+pub(super) fn tokenize_spans(spans: &[Span]) -> Vec<WrapToken> {
+    let mut tokens: Vec<WrapToken> = Vec::new();
+    for span in spans {
+        let mut word = String::new();
+        for ch in span.content.chars() {
+            if ch == ' ' {
+                if !word.is_empty() {
+                    push_word(&mut tokens, std::mem::take(&mut word), span.style);
+                }
+                match tokens.last_mut() {
+                    Some(WrapToken::Gap(text, _)) => text.push(' '),
+                    _ => tokens.push(WrapToken::Gap(" ".to_string(), span.style)),
+                }
+            } else {
+                word.push(ch);
+            }
+        }
+        if !word.is_empty() {
+            push_word(&mut tokens, word, span.style);
+        }
+    }
+    tokens
+}
+
+/// Place one piece of a glued word unit, breaking overlong pieces across rows;
+/// escape sequences copy through atomically at zero width (OSC 8 sequences must
+/// never split mid-sequence).
+///
+/// The remaining width is tracked arithmetically: measured once (the caller's
+/// `w`), decremented by each row's emitted width, with `rest` sliced — never
+/// re-measured per row (an unbroken token longer than the wrap width would
+/// otherwise wrap in `O(token_len * rows)` time). For content whose per-char
+/// widths sum to its grapheme width — every printable-ASCII/escape/tab token,
+/// the catastrophic class — the arithmetic is exact; a row split inside a
+/// multi-char grapheme cluster is the one non-additive case, so a tentative
+/// exit is confirmed against one true measure before the leftover is pushed
+/// (the correctness backstop, never the hot path).
+fn push_word_piece(
+    text: &str,
+    style: Style,
+    width: usize,
+    col: &mut usize,
+    out: &mut geometry::WrapOutput<'_>,
+) {
+    let mut rest: &str = text;
+    let mut rest_width = str_width(rest);
+    loop {
+        if rest_width + *col <= width {
+            if str_width(rest) + *col <= width {
+                break;
+            }
+            // A non-additive cluster split drifted the arithmetic: re-sync from the
+            // true measure and keep breaking.
+            rest_width = str_width(rest);
+        }
+        let mut take = String::new();
+        let mut tw = 0usize;
+        let mut taken = 0usize;
+        while taken < rest.len() {
+            if let Some(len) = crate::width::escape_len(&rest[taken..]) {
+                take.push_str(&rest[taken..taken + len]);
+                taken += len;
+                continue;
+            }
+            let c = rest[taken..].chars().next().expect("char at boundary");
+            let cw = crate::width::char_width(c);
+            if tw + cw + *col > width {
+                break;
+            }
+            take.push(c);
+            tw += cw;
+            taken += c.len_utf8();
+        }
+        if take.is_empty() {
+            break;
+        }
+        out.push(&take, style);
+        out.finish_row(/*trim*/ false);
+        *col = 0;
+        rest = &rest[taken..];
+        rest_width -= tw;
+    }
+    *col += str_width(rest);
+    out.push(rest, style);
+}
+
+fn push_word(tokens: &mut Vec<WrapToken>, text: String, style: Style) {
+    match tokens.last_mut() {
+        Some(WrapToken::Word(pieces)) => pieces.push((text, style)),
+        _ => tokens.push(WrapToken::Word(vec![(text, style)])),
+    }
+}
+
 /// Wrap styled spans to `width`. Words break at whitespace; leading spaces are
 /// dropped after a wrap break. Adjacent same-style output pieces merge.
 pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>) {
@@ -769,97 +879,42 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         out.finish_row(/*trim*/ false);
         return;
     }
-    // tokens: (text, style); alternating words and whitespace-run gaps. TS
-    // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a span boundary
-    // joins the previous gap token), never collapsing it to a single space.
-    let mut tokens: Vec<(String, Style)> = Vec::new();
-    for span in spans {
-        let mut word = String::new();
-        for ch in span.content.chars() {
-            if ch == ' ' {
-                if !word.is_empty() {
-                    tokens.push((std::mem::take(&mut word), span.style));
-                }
-                match tokens.last_mut() {
-                    Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
-                    _ => tokens.push((" ".to_string(), span.style)),
-                }
-            } else {
-                word.push(ch);
-            }
-        }
-        if !word.is_empty() {
-            tokens.push((word, span.style));
-        }
-    }
+    let tokens = tokenize_spans(spans);
 
     let mut col = 0usize;
     let mut i = 0usize;
     while i < tokens.len() {
-        let (text, style) = &tokens[i];
-        let w = str_width(text);
-        if col + w > width && out.has_content {
-            // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the boundary
-            // space, so the styled content ends at the last word and the plain padding follows.
-            out.finish_row(/*trim*/ true);
-            col = 0;
-            // drop leading whitespace at the new line start
-            if text.trim().is_empty() {
-                i += 1;
-                continue;
+        match &tokens[i] {
+            WrapToken::Word(pieces) => {
+                // The glued unit wraps as one word: it moves to the next row
+                // together, never splitting at a span boundary.
+                let w: usize = pieces.iter().map(|(t, _)| str_width(t)).sum();
+                if col + w > width && out.has_content {
+                    // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the
+                    // boundary space, so the styled content ends at the last word.
+                    out.finish_row(/*trim*/ true);
+                    col = 0;
+                }
+                for (piece, style) in pieces {
+                    push_word_piece(piece, *style, width, &mut col, out);
+                }
+            }
+            WrapToken::Gap(text, style) => {
+                let w = str_width(text);
+                if col + w > width && out.has_content {
+                    // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the
+                    // boundary space, so the styled content ends at the last word.
+                    out.finish_row(/*trim*/ true);
+                    col = 0;
+                    // drop leading whitespace at the new line start
+                    if text.trim().is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                }
+                push_word_piece(text, *style, width, &mut col, out);
             }
         }
-        // break overlong words; escape sequences copy through atomically
-        // at zero width (OSC 8 sequences must never split mid-sequence)
-        let style = *style;
-        let mut rest: &str = text.as_str();
-        // The remaining width is tracked arithmetically: measured once (the caller's `w`),
-        // decremented by each row's emitted width, with `rest` sliced — never re-measured per row
-        // (an unbroken token longer than the wrap width would otherwise wrap in O(token_len * rows)
-        // time). For content whose per-char widths sum to its grapheme width — every
-        // printable-ASCII/escape/tab token, the catastrophic class — the arithmetic is exact; a row
-        // split inside a multi-char grapheme cluster is the one non-additive case, so a tentative
-        // exit is confirmed against one true measure before the leftover is pushed (the correctness
-        // backstop, never the hot path).
-        let mut rest_width = w;
-        loop {
-            if rest_width + col <= width {
-                if str_width(rest) + col <= width {
-                    break;
-                }
-                // A non-additive cluster split drifted the arithmetic: re-sync from the
-                // true measure and keep breaking.
-                rest_width = str_width(rest);
-            }
-            let mut take = String::new();
-            let mut tw = 0usize;
-            let mut taken = 0usize;
-            while taken < rest.len() {
-                if let Some(len) = crate::width::escape_len(&rest[taken..]) {
-                    take.push_str(&rest[taken..taken + len]);
-                    taken += len;
-                    continue;
-                }
-                let c = rest[taken..].chars().next().expect("char at boundary");
-                let cw = crate::width::char_width(c);
-                if tw + cw + col > width {
-                    break;
-                }
-                take.push(c);
-                tw += cw;
-                taken += c.len_utf8();
-            }
-            if take.is_empty() {
-                break;
-            }
-            out.push(&take, style);
-            out.finish_row(/*trim*/ false);
-            col = 0;
-            rest = &rest[taken..];
-            rest_width -= tw;
-        }
-        col += str_width(rest);
-        out.push(rest, style);
         i += 1;
     }
     out.finish_row(/*trim*/ false);

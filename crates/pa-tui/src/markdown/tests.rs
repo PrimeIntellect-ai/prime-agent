@@ -1319,3 +1319,32 @@ fn list_item_continuation_lines_render_as_their_own_rows() {
         );
     }
 }
+
+#[test]
+fn punctuation_after_a_styled_span_never_wraps_alone() {
+    // TS `splitIntoTokensWithAnsi` never splits a word at an ANSI boundary: the
+    // text after a bold/code close stays glued to the preceding word when the
+    // row wraps, so a trailing period can never land alone on its own row.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("alpha beta **gamma**.", 16, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["alpha beta".to_string(), "gamma.".to_string()]);
+    let rows = render_markdown("alpha beta `code`.", 12, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["alpha beta".to_string(), "code.".to_string()]);
+    for width in 1..40 {
+        for text in ["alpha beta **gamma**.", "alpha beta `code`."] {
+            assert_eq!(
+                markdown_row_count(text, width, &style),
+                render_markdown(text, width, &style).len(),
+                "count==paint at width {width}"
+            );
+        }
+    }
+}
