@@ -436,6 +436,26 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         )
             as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
+    // TS resolves the serper credential on the host: `!command` key refs
+    // cannot run in-kernel (the websearch skill's auth.json fallback reads
+    // literals and env-var names, not commands). The credential is read
+    // under the auth lock, then resolved off the async runtime (a `!command`
+    // key can block).
+    let serper_api_key = {
+        let credential = {
+            let auth = mcp_manager.lock().unwrap().auth_storage_handle();
+            let guard = auth.lock().await;
+            guard
+                .get_all()
+                .credential(crate::auth::SERPER_CREDENTIAL_ID)
+        };
+        let skills = resources.skills.clone();
+        tokio::task::spawn_blocking(move || {
+            super::runtime_wiring::websearch_api_key(&skills, credential)
+        })
+        .await
+        .map_err(|join| anyhow::anyhow!("websearch key resolve join failed: {join}"))?
+    };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
         handlers,
@@ -444,6 +464,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         kernel_shell_path,
         kernel_command_prefix,
+        serper_api_key,
         session_artifact_dir,
         on_restore,
         config.on_background_work_settled.clone(),
