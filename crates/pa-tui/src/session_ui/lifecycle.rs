@@ -2,13 +2,13 @@
 //! §10 reattach, the attach fold, and the transcript rebuild it feeds),
 //! the stats refresh, and the detach/exit request helpers.
 use super::{
-    attach_data_from_response, create_session, mpsc, reconstruct, resume_hint_from_stats,
-    ActivityUpdates, AgentView, BTreeMap, ChatEntry, CompactionAbortNote, Context, DaemonClient,
-    DaemonCommand, DockFold, Duration, GoalView, HashSet, InteractiveOptions, LoaderTokenTracker,
-    Map, MessageBlock, ModelCatalogUpdate, PromptOrder, PromptSubmitNote, ReattachOutcome,
-    RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash, SessionSelection, SessionUi,
-    ShareNote, UpdateNote, Value, EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS,
-    UI_REQUEST_TIMEOUT_MS,
+    attach_capabilities, attach_data_from_response, create_session, last_assistant_text_of, mpsc,
+    reconstruct, resume_hint_from_stats, ActivityUpdates, AgentView, BTreeMap, ChatEntry,
+    CompactionAbortNote, Context, DaemonClient, DaemonCommand, DockFold, Duration, GoalView,
+    HashSet, InteractiveOptions, LoaderTokenTracker, Map, ModelCatalogUpdate, PromptOrder,
+    PromptSubmitNote, ReattachOutcome, RebuildKind, RecoveryKind, ReloadNote, Result, ResyncBash,
+    SessionSelection, SessionUi, ShareNote, TranscriptBackfillNote, UpdateNote, Value,
+    EXIT_DETACH_TIMEOUT_MS, EXIT_STATS_TIMEOUT_MS, UI_REQUEST_TIMEOUT_MS,
 };
 
 impl SessionUi {
@@ -27,6 +27,7 @@ impl SessionUi {
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
         auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
+        backfill_notes: mpsc::UnboundedSender<TranscriptBackfillNote>,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -168,6 +169,13 @@ impl SessionUi {
             input_submission_generation: 0,
             prompt_in_flight: 0,
             transcript_stale: false,
+            transcript_epoch: 0,
+            backfill_compaction_count: None,
+            backfill_leaf_id: None,
+            transcript_backfill: None,
+            pending_backfill: None,
+            backfill_seam: crate::snapshot::BackfillSeam::Preserve,
+            backfill_notes,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
@@ -341,12 +349,7 @@ impl SessionUi {
             client_id: None,
             // `elide_snapshot_images`: the transcript arrives without the base64 image payloads, so
             // an image-heavy session's attach stops transferring megabytes.
-            capabilities: Some(vec![
-                "attach_snapshot".to_string(),
-                "event_sequence".to_string(),
-                "slim_attach".to_string(),
-                "elide_snapshot_images".to_string(),
-            ]),
+            capabilities: Some(attach_capabilities()),
             resume_cursor: None,
             telemetry_disabled: self.telemetry_disabled.filter(|disabled| *disabled),
             recovery_config: None,
@@ -482,19 +485,7 @@ impl SessionUi {
         // or compaction settles): the rebuild below re-syncs it into the
         // chrome exactly like the other reconstructed session fields.
         self.context = reconstructed.context_usage;
-        self.last_assistant_text = reconstructed
-            .chat
-            .iter()
-            .rev()
-            .find_map(|entry| match entry {
-                ChatEntry::Assistant(message) => {
-                    message.blocks.iter().rev().find_map(|block| match block {
-                        MessageBlock::Text(text) => Some(text.clone()),
-                        MessageBlock::Thinking(_) => None,
-                    })
-                }
-                _ => None,
-            });
+        self.last_assistant_text = last_assistant_text_of(&reconstructed.chat);
         self.pending_queue = Some(reconstructed.queued);
         self.pending_snapshot = Some(reconstructed.chat);
         self.loader_anchor_ms = reconstructed.last_user_prompt_ms;
@@ -526,6 +517,15 @@ impl SessionUi {
         // The rebuild's first frame materializes the visible window; arm the
         // post-frame trim so its wrap/render churn returns too.
         self.trim_after_frame = true;
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        self.transcript_backfill = None;
+        self.backfill_seam = reconstructed.backfill_seam;
+        self.backfill_compaction_count = attach.snapshot["state"]["compactionCount"].as_u64();
+        self.backfill_leaf_id = attach.snapshot["state"]["leafId"]
+            .as_str()
+            .map(str::to_owned);
+        self.pending_backfill =
+            Some(reconstructed.history_before).filter(|history_before| *history_before > 0);
         Ok(())
     }
 
@@ -775,5 +775,105 @@ impl SessionUi {
         )
         .await;
         resume_hint_from_stats(&stats.ok()?.ok()?)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod backfill_tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn a_rebuild_rejects_an_already_queued_backfill_note() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("backfill.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            write.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[],\"clientId\":\"mock\"}\n").await.unwrap();
+            let mut lines = BufReader::new(read).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let kind = request["command"]["type"].as_str().unwrap();
+                let data = match kind {
+                    "attach" => json!({
+                        "activeSessionId": "s1", "snapshot": {
+                            "activeSessionId": "s1", "summary": {"id": "s1", "cwd": "/tmp"},
+                            "state": {"sessionId": "s1", "cwd": "/tmp", "isStreaming": false},
+                            "messages": [], "historyBefore": 1, "lastEventSequence": 0,
+                        }, "replay": {"status": "complete", "toSequence": 0},
+                        "lastEventSequence": 0,
+                    }),
+                    "get_messages" => {
+                        json!({"messages": [{"role": "user", "content": "rebuilt transcript", "timestamp": 1}]})
+                    }
+                    _ => json!({}),
+                };
+                let mut reply = serde_json::to_vec(&json!({
+                    "type": "response", "id": request["id"], "command": kind,
+                    "success": true, "data": data,
+                }))
+                .unwrap();
+                reply.push(b'\n');
+                write.write_all(&reply).await.unwrap();
+            }
+        });
+            let mut options =
+                crate::interactive::tests::options(crate::interactive::ModelSelection::default());
+        options.socket_path = socket.clone();
+        options.session = SessionSelection::Attach("s1".to_string());
+        let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
+        let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel();
+        let mut session = SessionUi::open(
+            client,
+            &options,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            ActivityUpdates {
+                heartbeats: mpsc::unbounded_channel().0,
+                bash: mpsc::unbounded_channel().0,
+                factory: mpsc::unbounded_channel().0,
+                commands: mpsc::unbounded_channel().0,
+            },
+            backfill_tx.clone(),
+        )
+        .await
+        .unwrap();
+        let old_epoch = session.transcript_epoch;
+        assert!(backfill_tx
+            .send(TranscriptBackfillNote {
+                epoch: old_epoch,
+                entries: Ok(crate::snapshot::transcript_to_entries(&[
+                    json!({"role": "user", "content": "stale history", "timestamp": 0}),
+                ])),
+            })
+            .is_ok());
+        let mut view = AgentView::new(crate::theme::Theme::builtin(
+            "prime",
+            crate::theme::ColorMode::TrueColor,
+        ));
+        session.rebuild_transcript(&mut view).await;
+        assert_ne!(session.transcript_epoch, old_epoch);
+        assert_eq!(view.chat.len(), 1, "rebuild applied the current transcript");
+        let expected = view.chat.clone();
+        // Deliver the note that was demonstrably queued before the real rebuild.
+        session.apply_transcript_backfill(backfill_rx.try_recv().unwrap(), &mut view);
+        assert_eq!(
+            view.chat, expected,
+            "an obsolete queued page cannot prepend rows after rebuild"
+        );
+        drop(session);
+        server.abort();
+        }).await.expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
     }
 }
