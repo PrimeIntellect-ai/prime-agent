@@ -1416,3 +1416,123 @@ fn a_triple_close_pairs_the_inner_single_delimiter() {
         .expect("inner span");
     assert!(inner.style.add_modifier.contains(Modifier::ITALIC));
 }
+
+#[test]
+fn tilde_fences_render_as_code_blocks() {
+    // marked accepts `~~~` fences exactly like ```` ``` ```` (same language rule).
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("~~~\nplain code\n~~~", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat.len(), 1, "rows: {flat:?}");
+    assert_eq!(flat[0].trim(), "plain code");
+    // The fence rows render in the code_block style, and count==paint holds.
+    let code_spans: Vec<&crate::Span> = rows[0]
+        .iter()
+        .filter(|s| !s.content.trim().is_empty())
+        .collect();
+    assert!(code_spans.iter().all(|s| s.style.fg == style.code_block.fg));
+    for width in 1..40 {
+        assert_eq!(
+            markdown_row_count("~~~\nplain code\n~~~", width, &style),
+            render_markdown("~~~\nplain code\n~~~", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
+
+#[test]
+fn images_render_their_alt_text_only() {
+    // marked's image token: the custom TS renderer falls through to the alt text —
+    // no `!`, no link affordance, no URL bracket.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("An image ![alt text](https://x.dev/i.png) here", 40, &style);
+    let flat: String = rows[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(flat, "An image alt text here");
+    for s in &rows[0] {
+        assert!(
+            !s.style.add_modifier.contains(Modifier::UNDERLINED),
+            "{flat}"
+        );
+    }
+    let spans = render_markdown("![only](https://x.dev/b.png)", 40, &style);
+    let flat: String = spans[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(flat, "only");
+}
+
+#[test]
+fn reference_links_resolve_and_definitions_stay_hidden() {
+    // marked collects `[label]: url` definitions document-wide (they render
+    // nothing) and resolves `[text][label]`, `[label][]`, and the `[label]`
+    // shortcut through them.
+    let style = MarkdownStyle::default();
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let text = "See [docs][d1], the [d1][] and [d2] itself.\n\n[d1]: https://x.dev/docs\n[d2]: https://x.dev/";
+    let rows = render_markdown(text, 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "See docs (https://x.dev/docs), the d1 (https://x.dev/docs)".to_string(),
+            "and d2 (https://x.dev/) itself.".to_string(),
+        ]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn a_bare_hash_renders_an_empty_heading_row() {
+    // marked: `#` alone is an h1 with empty text — a blank row plus the
+    // heading's trailing spacing.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("#\n\nafter", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![String::new(), String::new(), "after".to_string()]
+    );
+}
+
+#[test]
+fn reference_definitions_invalidate_the_block_cache() {
+    // A streamed definition changes how EARLIER blocks render (marked resolves
+    // document-wide): the block cache must key on the definitions, not only
+    // the block's own raw text.
+    let style = MarkdownStyle::default();
+    let mut cache = MarkdownBlockCache::default();
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    // A settled (non-final) paragraph renders through the cache; the same
+    // paragraph must re-render once a definition arrives later in the stream.
+    let first =
+        render_markdown_tagged("See [docs][d1].\n\nTail paragraph.", 60, &style, "", &mut cache);
+    let flat: String = first[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(flat, "See [docs][d1].");
+    let second = render_markdown_tagged(
+        "See [docs][d1].\n\nTail paragraph.\n\n[d1]: https://x.dev/docs",
+        60,
+        &style,
+        "",
+        &mut cache,
+    );
+    let flat: Vec<String> = second
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "See docs (https://x.dev/docs).".to_string(),
+            String::new(),
+            "Tail paragraph.".to_string(),
+        ]
+    );
+    crate::hyperlinks::set_hyperlinks_override(None);
+}

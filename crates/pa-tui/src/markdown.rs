@@ -10,6 +10,10 @@ mod inline;
 mod tests;
 
 pub use inline::render_inline;
+pub(crate) use inline::render_inline_tracked;
+
+/// The document-wide reference definitions collected at parse time (`[label]: url`).
+pub(crate) type LinkDefs = std::collections::BTreeMap<String, String>;
 
 use crate::width::str_width;
 use crate::{Line, Span};
@@ -102,7 +106,7 @@ pub fn render_markdown_tagged(
     }
     let normalized = text.replace('\t', "   ");
     let mut lines: Vec<Line> = Vec::new();
-    let blocks = parse_blocks(&normalized);
+    let (blocks, defs) = parse_blocks(&normalized);
     for (i, block) in blocks.iter().enumerate() {
         let next = blocks.get(i + 1);
         // A blank source line separates blocks: TS's lexer emits one `space` token per blank
@@ -111,7 +115,7 @@ pub fn render_markdown_tagged(
         if block.sep_blank {
             lines.push(Vec::new());
         }
-        let key = block_cache_key(style_tag, &blocks, i, content_width);
+        let key = block_cache_key(style_tag, &blocks, i, content_width, &defs);
         if let Some(cached) = key.as_ref().and_then(|key| cache.0.get(key)) {
             lines.extend_from_slice(cached);
             continue;
@@ -119,13 +123,13 @@ pub fn render_markdown_tagged(
         match key {
             Some(key) => {
                 let mut rendered = Vec::new();
-                render_block(block, next, content_width, style, &mut rendered);
+                render_block(block, next, content_width, style, &defs, &mut rendered);
                 lines.extend_from_slice(&rendered);
                 rendered.shrink_to_fit();
                 cache.0.insert(key, rendered);
             }
             // The final block renders into the caller's buffer: every render path only appends.
-            None => render_block(block, next, content_width, style, &mut lines),
+            None => render_block(block, next, content_width, style, &defs, &mut lines),
         }
     }
     lines
@@ -152,6 +156,10 @@ struct BlockKey {
     width: usize,
     kind: BlockKind,
     lines: Vec<String>,
+    /// The document's reference definitions: a streamed definition changes how
+    /// EARLIER blocks render (marked resolves document-wide), so it keys the
+    /// cache alongside the block's own text.
+    defs: LinkDefs,
     /// `render_block`'s only reads of the next block: `[blank_after(next, false), blank_after(next,
     /// true)]`.
     blank_after: [bool; 2],
@@ -164,6 +172,7 @@ fn block_cache_key(
     blocks: &[Block],
     index: usize,
     width: usize,
+    defs: &LinkDefs,
 ) -> Option<BlockKey> {
     if index + 1 == blocks.len() {
         return None;
@@ -175,6 +184,7 @@ fn block_cache_key(
         width,
         kind: block.kind.clone(),
         lines: block.lines.clone(),
+        defs: defs.clone(),
         blank_after: [
             geometry::blank_after(next, false),
             geometry::blank_after(next, true),
@@ -225,14 +235,20 @@ struct Block {
     lines: Vec<String>,
 }
 
-fn parse_blocks(text: &str) -> Vec<Block> {
-    let mut blocks = Vec::new();
+fn parse_blocks(text: &str) -> (Vec<Block>, LinkDefs) {
     let src_lines: Vec<&str> = text.lines().collect();
+    let mut defs = LinkDefs::new();
+    let mut blocks = Vec::new();
     let mut i = 0usize;
     while i < src_lines.len() {
         let line = src_lines[i];
         let trimmed = line.trim();
         if trimmed.is_empty() {
+            i += 1;
+            continue;
+        }
+        if let Some((label, url)) = link_definition(trimmed) {
+            defs.insert(label, url);
             i += 1;
             continue;
         }
@@ -243,7 +259,12 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 .take_while(|l| l.trim().is_empty())
                 .count()
                 > 0;
-        if let Some(fence) = trimmed.strip_prefix("```") {
+        if let Some(fence) = trimmed
+            .strip_prefix("```")
+            .map(|rest| (rest, "```"))
+            .or_else(|| trimmed.strip_prefix("~~~").map(|rest| (rest, "~~~")))
+        {
+            let (fence, closer) = fence;
             let lang = if fence.is_empty() {
                 None
             } else {
@@ -251,7 +272,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             };
             let mut code = Vec::new();
             i += 1;
-            while i < src_lines.len() && !src_lines[i].trim().starts_with("```") {
+            while i < src_lines.len() && !src_lines[i].trim().starts_with(closer) {
                 code.push(src_lines[i].to_string());
                 i += 1;
             }
@@ -265,10 +286,13 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         }
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
         if heading_marker(trimmed) && hashes <= 6 {
+            let content = trimmed
+                .get(hashes + 1..)
+                .map_or_else(String::new, std::string::ToString::to_string);
             blocks.push(Block {
                 kind: BlockKind::Heading { depth: hashes },
                 sep_blank,
-                lines: vec![trimmed[hashes + 1..].to_string()],
+                lines: vec![content],
             });
             i += 1;
             continue;
@@ -383,14 +407,37 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             lines: para_lines,
         });
     }
-    blocks
+    (blocks, defs)
+}
+
+/// A link definition (marked's `def` rule): `[label]: url "title"?` — collected
+/// document-wide, rendered as nothing, with the title dropped like the inline
+/// link's.
+/// Link labels match case-insensitively with inner whitespace collapsed
+/// (marked's reference-label rule).
+fn normalize_label(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn link_definition(t: &str) -> Option<(String, String)> {
+    let rest = t.strip_prefix('[')?;
+    let close = rest.find(']')?;
+    let tail = rest[close + 1..].strip_prefix(':')?;
+    let label = normalize_label(&rest[..close]);
+    let mut parts = tail.split_whitespace();
+    let url = parts.next()?.to_string();
+    match parts.next() {
+        None => Some((label, url)),
+        Some(title) if title.starts_with('"') && title.ends_with('"') => Some((label, url)),
+        _ => None,
+    }
 }
 
 /// A heading line start: `#`s followed by a space (the depth cap lives where the
 /// heading is parsed).
 pub(crate) fn heading_marker(t: &str) -> bool {
     let hashes = t.chars().take_while(|&c| c == '#').count();
-    hashes > 0 && t.len() > hashes && t.as_bytes()[hashes] == b' '
+    hashes > 0 && (t.len() == hashes || t.as_bytes()[hashes] == b' ')
 }
 
 pub(crate) fn is_hr(t: &str) -> bool {
@@ -405,6 +452,7 @@ pub(crate) fn is_hr(t: &str) -> bool {
 /// continuation.
 fn interrupts_paragraph(t: &str, next: Option<&&str>) -> bool {
     t.starts_with("```")
+        || t.starts_with("~~~")
         || t.starts_with('>')
         || t.starts_with('#')
         || list_marker(t).is_some()
@@ -634,8 +682,13 @@ fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Li
 /// collide) tapers to the heading color like any other span. Shared by
 /// the paint path and the row count, so a wrapped heading counts
 /// exactly what it paints.
-fn heading_spans(text: &str, depth: usize, style: &MarkdownStyle) -> Vec<Span> {
-    let (mut spans, url_slots, code_slots) = inline::render_inline_tracked(text, style);
+fn heading_spans(
+    text: &str,
+    depth: usize,
+    style: &MarkdownStyle,
+    links: &LinkDefs,
+) -> Vec<Span> {
+    let (mut spans, url_slots, code_slots) = inline::render_inline_tracked(text, style, links);
     // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic,
     // all over the heading color. The heading modifiers close around an inline-code
     // span and a link's URL bracket — both keep their own colors (tracked by origin);
@@ -673,13 +726,14 @@ fn render_block(
     next: Option<&Block>,
     width: usize,
     style: &MarkdownStyle,
+    links: &LinkDefs,
     out: &mut Vec<Line>,
 ) {
     let blank_after = |exclude_lists| geometry::blank_after(next, exclude_lists);
     match &block.kind {
         BlockKind::Heading { depth } => {
             let text = block.lines.first().cloned().unwrap_or_default();
-            let spans = heading_spans(&text, *depth, style);
+            let spans = heading_spans(&text, *depth, style, links);
             wrap_spans(&spans, width, style.heading, out);
             if blank_after(false) {
                 out.push(Vec::new());
@@ -689,7 +743,7 @@ fn render_block(
             // Each soft-break line renders and wraps on its own (TS's paragraph token
             // carries the newlines through the width pass).
             for text in &block.lines {
-                let spans = render_inline(text, style);
+                let spans = inline::render_inline_tracked(text, style, links).0;
                 wrap_spans(&spans, width, style.body, out);
             }
             if blank_after(true) {
@@ -713,7 +767,7 @@ fn render_block(
             }
         }
         BlockKind::List(list) => {
-            render_list_level(list, 0, 0, width, style, out);
+            render_list_level(list, 0, 0, width, style, links, out);
             if blank_after(true) {
                 out.push(Vec::new());
             }
@@ -724,7 +778,8 @@ fn render_block(
             // spans and link URL brackets keep their own colors, and emphasis
             // modifiers ride on top.
             for line in &block.lines {
-                let (spans, url_slots, code_slots) = inline::render_inline_tracked(line, style);
+                let (spans, url_slots, code_slots) =
+                    inline::render_inline_tracked(line, style, links);
                 let mut quote_spans: Vec<Span> = Vec::new();
                 for (i, mut s) in spans.into_iter().enumerate() {
                     if s.content.is_empty() {
@@ -939,6 +994,7 @@ fn list_row_count(
     outer: usize,
     width: usize,
     style: &MarkdownStyle,
+    links: &LinkDefs,
 ) -> usize {
     let (indent_len, child_outer) = list_level_geometry(depth, outer);
     let mut count = 0;
@@ -947,10 +1003,11 @@ fn list_row_count(
         let mut item_count = 0;
         for (j, text) in item.lines.iter().enumerate() {
             let budget = list_line_budget(width, indent_len, bullet_width, j == 0);
-            item_count += wrapped_span_count(&render_inline(text, style), budget);
+            item_count +=
+                wrapped_span_count(&inline::render_inline_tracked(text, style, links).0, budget);
         }
         for child in &item.children {
-            item_count += list_row_count(child, depth + 1, child_outer, width, style);
+            item_count += list_row_count(child, depth + 1, child_outer, width, style, links);
         }
         count += item_count.max(1);
     }
@@ -967,6 +1024,7 @@ fn render_list_level(
     outer: usize,
     width: usize,
     style: &MarkdownStyle,
+    links: &LinkDefs,
     out: &mut Vec<Line>,
 ) {
     let (indent_len, child_outer) = list_level_geometry(depth, outer);
@@ -976,7 +1034,7 @@ fn render_list_level(
         let bullet_width = str_width(&bullet);
         let mut item_rows: Vec<Line> = Vec::new();
         for (j, text) in item.lines.iter().enumerate() {
-            let spans = render_inline(text, style);
+            let spans = inline::render_inline_tracked(text, style, links).0;
             let mut wrapped: Vec<Line> = Vec::new();
             if j == 0 {
                 let budget = list_line_budget(width, indent_len, bullet_width, true);
@@ -1006,7 +1064,15 @@ fn render_list_level(
             }
         }
         for child in &item.children {
-            render_list_level(child, depth + 1, child_outer, width, style, &mut item_rows);
+            render_list_level(
+                child,
+                depth + 1,
+                child_outer,
+                width,
+                style,
+                links,
+                &mut item_rows,
+            );
         }
         if item_rows.is_empty() {
             let mut row: Line = Vec::new();

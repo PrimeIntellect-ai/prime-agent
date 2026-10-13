@@ -1,6 +1,7 @@
 //! GFM table rendering for the chat markdown (TS `markdown.ts renderTable`): pipe tables with a
 //! header row, an alignment/delimiter row, and data rows, sized so every column fits the available
-//! width.
+//! width. Cells render inline without the document's reference definitions, so
+//! reference links in cells stay literal.
 
 use crate::markdown::{render_inline, wrap_spans, wrapped_span_count, MarkdownStyle};
 use crate::width::str_width;
