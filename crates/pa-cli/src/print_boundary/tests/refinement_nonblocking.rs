@@ -219,7 +219,10 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             engine
                 .session
-                .prompt("next user input", pa_core::session_engine::PromptOptions::default())
+                .prompt(
+                    "next user input",
+                    pa_core::session_engine::PromptOptions::default(),
+                )
                 .await
                 .unwrap();
             engine.session.agent().wait_for_idle().await;
@@ -289,6 +292,79 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
     // drops the moment the drain returns, and the drop aborts refinement
     // planning, losing the outcome rows.
     assert!(futures::poll!(drain.as_mut()).is_pending());
+    release.notify_one();
+    drain.await;
+    let rows = refine_rows(&engine).await;
+    assert_eq!(rows.len(), 1, "the durable outcome row landed");
+    assert_eq!(rows[0].custom_type, "refinement_outcome");
+    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+}
+
+/// The print `/refine` command's pending refinement is tracked by the same
+/// disposal drain: a detached reporter would be aborted by the session drop
+/// the drain cannot wait for.
+#[tokio::test]
+async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    let (engine, dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed"}] }),
+        json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+        None,
+    )
+    .await;
+    let engine = Arc::new(engine);
+    engine
+        .session
+        .prompt("seed", pa_core::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: started.clone(),
+            release: release.clone(),
+            reply: r#"{"summary":"background note","edits":[]}"#,
+        }),
+        Some("test-held-refinement-host"),
+    );
+    let mut planner_model = model.clone();
+    planner_model.api = "test-held-refinement-host".to_string();
+    let mut boundary = TurnBoundary::new(false);
+    let global_dir = dir.path().join("global-refinement");
+    let goal = Arc::new(crate::print_goal::PrintGoalSurface::new(false));
+    let autonomous = Arc::new(tokio::sync::Mutex::new(
+        pa_core::autonomous::create_autonomous_runtime_state(None, None),
+    ));
+    let command = pa_core::session_engine::slash_commands::SessionSlashCommand {
+        name: "refine",
+        args: String::new(),
+        text: "/refine".to_string(),
+    };
+    crate::print_session_command::execute_prompt_session_command(
+        &engine,
+        &goal,
+        &planner_model,
+        None,
+        global_dir.clone(),
+        &autonomous,
+        &mut boundary,
+        &command,
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("planner entered");
+    let mut drain = std::pin::pin!(async {
+        boundary
+            .drain_compact_auto_refine_at_disposal(&engine, &planner_model, None, global_dir)
+            .await;
+    });
+    assert!(
+        futures::poll!(drain.as_mut()).is_pending(),
+        "the /refine report must be inside the boundary's tracked reports"
+    );
     release.notify_one();
     drain.await;
     let rows = refine_rows(&engine).await;

@@ -22,7 +22,7 @@ pub(super) enum RefineSurface {
 }
 
 impl TurnBoundary {
-    pub(super) fn report_background_refinement(
+    pub(crate) fn report_background_refinement(
         &mut self,
         pending: tokio::task::JoinHandle<anyhow::Result<pa_core::refinement::RefinementResult>>,
         source: pa_core::session_engine::refine::RefinementSource,
@@ -119,12 +119,11 @@ impl TurnBoundary {
     /// trigger. The subscription is already torn down; only durable rows and
     /// harness state persist.
     ///
-    /// The drain owns finishing the pending refinement work: the session drops
-    /// as soon as its caller returns, and that drop aborts in-flight refinement
-    /// planning, so a report already running — and the review this drain starts
-    /// off a retained trigger — must land its rows first. Awaiting the running
-    /// reports before the consume also keeps the coalescing gate inside it from
-    /// retiring the trigger at disposal, the last boundary that can service it.
+    /// Awaits in-flight refinement reports before and after consuming the
+    /// trigger: the session drops as soon as its caller returns, and that drop
+    /// aborts the refinement planning behind any report the drain leaves
+    /// running (the first wait also clears the coalescing gate so a retained
+    /// trigger is serviced at this, its last, boundary).
     pub(crate) async fn drain_compact_auto_refine_at_disposal(
         &mut self,
         engine: &SessionEngine,
