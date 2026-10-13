@@ -513,7 +513,10 @@ impl MockSupervisor {
                 // (the settle landed, the next turn has not started) —
                 // the differential flicker check's shape. One state
                 // change per interaction keeps every report a
-                // deterministic needle.
+                // deterministic needle. Typed route messages must not
+                // contain a doubled character: the TUI's kitty-printable
+                // dedup collapses an identical adjacent pair within one
+                // pty write.
                 "prompt" => {
                     write_json(
                         &mut writer,
@@ -547,8 +550,8 @@ impl MockSupervisor {
                         command.get("message").and_then(Value::as_str),
                         Some(
                             "provider-failure"
-                                | "fallback-failure"
-                                | "fallback-abort"
+                                | "terminal-failure"
+                                | "terminal-abort"
                                 | "retry-failure"
                                 | "retry-cancel"
                         )
@@ -559,8 +562,12 @@ impl MockSupervisor {
                         let events = if kind.starts_with("retry-") {
                             // Identical text for failure and cancellation proves the
                             // client consumes typed provenance, not error wording.
+                            // The prompt ACK arms a turn; the bare close frames end
+                            // it, and the outcome rides auto_retry_end alone.
                             vec![
                                 json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": aborted }),
+                                json!({ "type": "turn_end" }),
+                                json!({ "type": "agent_end" }),
                             ]
                         } else if kind == "provider-failure" {
                             vec![

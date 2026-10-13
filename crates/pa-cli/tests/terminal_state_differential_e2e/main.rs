@@ -333,10 +333,10 @@ fn program_status_failure_and_cancellation_have_distinct_outcomes() {
             b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
         ),
         (
-            "fallback-failure",
+            "terminal-failure",
             b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
         ),
-        ("fallback-abort", STATUS_IDLE),
+        ("terminal-abort", STATUS_IDLE),
         (
             "retry-failure",
             b"\x1b]7501;state=error:app=prime-agent\x1b\\".as_slice(),
