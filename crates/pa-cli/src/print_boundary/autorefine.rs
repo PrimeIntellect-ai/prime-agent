@@ -76,7 +76,7 @@ impl TurnBoundary {
                 }
                 Ok(_) => {}
                 Err(error) if json_mode => {
-                    sink(&json!({ "type": "refine_failed", "error": format!("{error:#}") }))
+                    sink(&json!({ "type": "refine_failed", "error": format!("{error:#}") }));
                 }
                 Err(error) => eprintln!("pa-cli: refinement failed: {error:#}"),
             }
@@ -133,15 +133,13 @@ impl TurnBoundary {
         global_harness_dir: PathBuf,
     ) {
         self.wait_for_refinement_reports().await;
-        let _ = self
-            .consume_compact_auto_refine(
-                engine,
-                model,
-                api_key,
-                global_harness_dir,
-                RefineSurface::Dispose,
-            )
-            .await;
+        self.consume_compact_auto_refine(
+            engine,
+            model,
+            api_key,
+            global_harness_dir,
+            RefineSurface::Dispose,
+        );
         self.wait_for_refinement_reports().await;
     }
 
@@ -150,32 +148,32 @@ impl TurnBoundary {
     /// an approving review runs the refinement. The checkpoint preserves the
     /// trigger through the cooldown; disposal clears it; each attempt stamps
     /// the cooldown and resets the counter.
-    pub(super) async fn consume_compact_auto_refine(
+    pub(super) fn consume_compact_auto_refine(
         &mut self,
         engine: &SessionEngine,
         model: &Model,
         api_key: Option<String>,
         global_harness_dir: PathBuf,
         surface: RefineSurface,
-    ) -> Result<(), String> {
+    ) {
         if !self.compact_auto_refine_pending {
-            return Ok(());
+            return;
         }
         if self.refinement_reports.iter().any(|job| !job.is_finished()) {
             // Coalesce triggers while a review or requested refinement is still
             // running. The next boundary can service the retained trigger.
-            return Ok(());
+            return;
         }
         // Sessions without the refine surface drop the trigger
         // outright.
         if !engine.session.auto_refine_allowed() {
             self.compact_auto_refine_pending = false;
-            return Ok(());
+            return;
         }
         let gates = engine.session.auto_refine_gates();
         if !gates.enabled || !gates.compact {
             self.compact_auto_refine_pending = false;
-            return Ok(());
+            return;
         }
         let under_cooldown = self
             .last_auto_refine_review_at
@@ -183,13 +181,13 @@ impl TurnBoundary {
         if under_cooldown && surface == RefineSurface::Checkpoint {
             // Preserve the compact trigger for a later boundary while
             // the cooldown is active.
-            return Ok(());
+            return;
         }
         self.compact_auto_refine_pending = false;
         if under_cooldown {
             // The disposal drain clears a cooled-down trigger without a
             // review.
-            return Ok(());
+            return;
         }
         let turns = self.assistant_turns_since_review;
         let pending = engine.session.start_auto_refine_after_compaction(
@@ -208,6 +206,5 @@ impl TurnBoundary {
             pa_core::session_engine::refine::RefinementSource::Auto,
             surface == RefineSurface::Checkpoint,
         );
-        Ok(())
     }
 }

@@ -140,8 +140,7 @@ impl TurnBoundary {
             api_key.clone(),
             global_harness_dir.clone(),
             RefineSurface::Checkpoint,
-        )
-        .await?;
+        );
         let arm_finished = loop {
             let outcome = self
                 .overflow_recovery_attempt(
@@ -158,8 +157,7 @@ impl TurnBoundary {
                     api_key.clone(),
                     global_harness_dir.clone(),
                     RefineSurface::Checkpoint,
-                )
-                .await?;
+                );
             } else {
                 break matches!(outcome, OverflowOutcome::Finished);
             }

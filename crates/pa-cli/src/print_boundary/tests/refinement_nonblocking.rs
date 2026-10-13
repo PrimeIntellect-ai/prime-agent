@@ -31,7 +31,7 @@ struct HeldPlanner {
 }
 
 impl pa_ai::registry::Provider for HeldPlanner {
-    fn api(&self) -> &str {
+    fn api(&self) -> &'static str {
         "test-held-refinement-host"
     }
 
@@ -140,19 +140,13 @@ impl Origin {
             }
             Origin::Auto => {
                 boundary.compact_auto_refine_pending = true;
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    boundary.consume_compact_auto_refine(
-                        engine,
-                        planner_model,
-                        None,
-                        global_dir,
-                        RefineSurface::Checkpoint,
-                    ),
-                )
-                .await
-                .expect("auto review must leave the boundary")
-                .unwrap();
+                boundary.consume_compact_auto_refine(
+                    engine,
+                    planner_model,
+                    None,
+                    global_dir,
+                    RefineSurface::Checkpoint,
+                );
             }
         }
         pending
@@ -172,7 +166,7 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         ).await;
         engine
             .session
-            .prompt("seed", Default::default())
+            .prompt("seed", pa_core::session_engine::PromptOptions::default())
             .await
             .unwrap();
         engine.session.agent().wait_for_idle().await;
@@ -225,7 +219,7 @@ async fn held_refinement_planning_never_blocks_the_next_prompt_or_rebuilds_its_p
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             engine
                 .session
-                .prompt("next user input", Default::default())
+                .prompt("next user input", pa_core::session_engine::PromptOptions::default())
                 .await
                 .unwrap();
             engine.session.agent().wait_for_idle().await;
@@ -261,7 +255,7 @@ async fn disposal_drain_awaits_a_held_refinement_before_the_session_drops() {
     .await;
     engine
         .session
-        .prompt("seed", Default::default())
+        .prompt("seed", pa_core::session_engine::PromptOptions::default())
         .await
         .unwrap();
     engine.session.agent().wait_for_idle().await;
