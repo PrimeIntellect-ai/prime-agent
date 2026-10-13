@@ -1292,50 +1292,26 @@ pub fn provisioner_for_path(
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_kernel_resolves_default_and_configured_shells() {
-        let dir = tempfile::tempdir().unwrap();
-        for shell_path in [None, Some("  /custom/git/bin/bash  "), Some(" ")] {
-            let provisioner = crate::session_engine::runtime_wiring::kernel_provisioner(
-                "shell-wiring-test".into(),
-                HostRequestHandlers::default(),
-                Vec::new(),
-                dir.path().to_path_buf(),
-                dir.path(),
-                shell_path,
-                None,
-                None,
-                None,
-                None,
-                None,
-            );
-            assert_eq!(
-                provisioner.inner.options.shell_path,
-                crate::platform::shell::resolve_kernel_bash_shell(shell_path).map(PathBuf::from),
-            );
+    /// A shell file the resolver accepts: existing, and executable on unix.
+    fn executable_shell(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        path
     }
 
-    #[tokio::test]
-    async fn session_settings_reach_the_kernel_shell() {
+    /// The scripted session both shell-setting tests build: a model and
+    /// `stream_fn` the settings validation never reaches, no kernel prewarm.
+    async fn shell_test_session(
+        cwd: PathBuf,
+        agent_dir: PathBuf,
+    ) -> anyhow::Result<crate::session_engine::engine::SessionEngine> {
         use crate::session_engine::engine::{create_session, SessionEngineConfig};
 
-        let dir = tempfile::tempdir().unwrap();
-        let agent_dir = dir.path().join("agent");
-        let cwd = dir.path().join("project");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
-        // Project settings override the global setting before the session captures it.
-        std::fs::write(
-            agent_dir.join("settings.json"),
-            r#"{"shellPath":"/global/bash"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            cwd.join(".prime/agent/settings.json"),
-            r#"{"shellPath":"  /project/git/bin/bash  "}"#,
-        )
-        .unwrap();
         let model = pa_agent::types::Model {
             id: "shell-test".into(),
             name: "Shell test".into(),
@@ -1349,7 +1325,7 @@ mod tests {
             max_tokens_explicit: false,
         };
         let provider = Arc::new(pa_agent::scripted::ScriptedProvider::new(model.clone()));
-        let engine = create_session(SessionEngineConfig {
+        create_session(SessionEngineConfig {
             cwd,
             agent_dir,
             model: Some(model),
@@ -1358,10 +1334,57 @@ mod tests {
             ..Default::default()
         })
         .await
+    }
+
+    #[tokio::test]
+    async fn session_settings_reach_the_kernel_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        // Project settings override the global setting before the session captures it.
+        let global = executable_shell(dir.path(), "global-bash");
+        let project = executable_shell(dir.path(), "project-bash");
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({ "shellPath": global.to_string_lossy() }).to_string(),
+        )
         .unwrap();
-        assert_eq!(
-            engine.provisioner.inner.options.shell_path,
-            Some(PathBuf::from("/project/git/bin/bash")),
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellPath": format!("  {}  ", project.to_string_lossy()) })
+                .to_string(),
+        )
+        .unwrap();
+        let engine = shell_test_session(cwd, agent_dir).await.unwrap();
+        assert_eq!(engine.provisioner.inner.options.shell_path, Some(project));
+    }
+
+    #[tokio::test]
+    async fn session_settings_reject_a_missing_shell_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let cwd = dir.path().join("project");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::create_dir_all(cwd.join(".prime/agent")).unwrap();
+        let missing = cwd.join("no-such-shell");
+        std::fs::write(
+            cwd.join(".prime/agent/settings.json"),
+            serde_json::json!({ "shellPath": missing.to_string_lossy() }).to_string(),
+        )
+        .unwrap();
+        let Err(err) = shell_test_session(cwd, agent_dir).await else {
+            panic!("create_session must reject a missing shellPath");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("shellPath"),
+            "error names the setting: {message}"
+        );
+        assert!(
+            message.contains(missing.to_string_lossy().as_ref()),
+            "error names the path: {message}"
         );
     }
 
