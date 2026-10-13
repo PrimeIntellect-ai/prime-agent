@@ -235,6 +235,15 @@ def run_case(binary, label, root, observation):
                     assert probe['compact_status']['scheduled'] is False, probe
                 else:
                     verify_probe(probe, model, phase + 1)
+            session_rows = [json.loads(line) for path in (root / 'agent/sessions').rglob('*.jsonl')
+                            for line in path.read_text().splitlines()]
+            changes = [{'provider': row['provider'], 'modelId': row['modelId']}
+                       for row in session_rows if row.get('type') == 'model_change']
+            observation['persisted_model_changes'] = changes
+            backup_changes = [i for i, row in enumerate(changes) if row['provider'] == 'fixture-backup']
+            assert len(backup_changes) == 1, changes
+            assert changes[backup_changes[0] + 1:] == [
+                {'provider': 'fixture', 'modelId': 'facts-text'}], 'Duplicate or missing persisted primary restore: %s' % changes
     finally:
         observation['provider_requests'] = server.requests
         if client is not None:
