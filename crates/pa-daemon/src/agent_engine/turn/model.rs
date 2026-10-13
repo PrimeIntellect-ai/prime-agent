@@ -358,6 +358,7 @@ impl AgentSessionEngine {
                     let agent = agent.clone();
                     let prompt = prompt.clone();
                     let model = model.clone();
+                    let pending_model_changes = pending_model_changes.clone();
                     async move {
                         // A retry re-issues the failed turn: the failed
                         // assistant message leaves the loop context first

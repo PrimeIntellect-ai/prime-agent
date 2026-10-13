@@ -590,7 +590,7 @@ impl TurnRunner {
                                 }),
                             )
                         }) {
-                            tracing::error!(%error, "model-change persistence failed");
+                            eprintln!("pa-daemon: model-change persistence failed: {error:#}");
                             return false;
                         }
                     }
