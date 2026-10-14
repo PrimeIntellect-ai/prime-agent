@@ -305,7 +305,7 @@ fn the_switch_query_can_only_match_switch_b() {
 /// would otherwise retire corpus sessions out from under the manifest
 /// baseline (the defaults keep 200 files / 30 days).
 #[test]
-fn the_archive_policy_is_off_and_the_mtime_spread_fits_the_age_rule() {
+fn the_archive_policy_is_off() {
     let dir = tempfile::tempdir().expect("temp dir");
     let options = tiny(Profile::Small, dir.path());
     let manifest = generate(&options).expect("generate");
@@ -320,29 +320,6 @@ fn the_archive_policy_is_off_and_the_mtime_spread_fits_the_age_rule() {
     assert_eq!(
         settings["sessionArchiveMaxSessions"],
         serde_json::json!("off")
-    );
-    // The mtime spread spans under the product's 30-day rule width (the
-    // fixed generation base ages over time; the "off" settings are the
-    // sweep guard, the spread width is the belt).
-    let mut newest = 0;
-    let mut oldest = u64::MAX;
-    for file in &manifest.files {
-        let path = std::path::PathBuf::from(file);
-        if path.parent() == Some(&manifest.paths.sessions_dir) {
-            let millis = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|mtime| mtime.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|age| age.as_millis() as u64)
-                .unwrap_or(0);
-            newest = newest.max(millis);
-            oldest = oldest.min(millis);
-        }
-    }
-    let span_days = (newest - oldest) / 86_400_000;
-    assert!(
-        span_days <= 21,
-        "the corpus mtime span is {span_days}d; the archive age rule is 30d"
     );
 }
 

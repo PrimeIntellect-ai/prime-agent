@@ -88,10 +88,11 @@ records (`parentSession`/`child` are canonical paths).
 - `pa-perf run` generates BOTH corpora (cold for the cold scenarios, warm
   for warm-start/warm-ready) — every scenario runs on the state it needs.
 - The corpus settings disable BOTH archive rules (`sessionArchiveMaxAgeDays`
-  / `sessionArchiveMaxSessions` "off") and the mtime spread stays inside the
-  30-day age rule: the daemon's boot sweep would otherwise retire corpus
-  sessions out from under the manifest baseline (the defaults keep 200
-  files / 30 days).
+  / `sessionArchiveMaxSessions` "off"): the product's defaults sweep the
+  live store down to 200 unarchived sessions (the operator's real store:
+  196 live + 211 archived), so large/xl with archiving off are scaling
+  stress profiles, not typical stores, and the boot sweep itself is not
+  measured.
 
 ## The bench harness
 

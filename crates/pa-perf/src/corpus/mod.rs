@@ -124,9 +124,8 @@ const TASKS: [&str; 16] = [
 /// own `at` stamps come from the product writer; see README's determinism
 /// note.)
 const BASE_MS: u64 = 1_790_000_000_000;
-/// The mtime step between sessions (roster order is mtime-desc; 12-minute
-/// steps keep even the xl profile's 2500 sessions inside the product's
-/// 30-day archive age rule).
+/// The mtime step between sessions (roster order is mtime-desc; the
+/// spread is realism only — the archive-off settings are the sweep guard).
 const MTIME_STEP_MS: u64 = 720_000;
 /// The header-timestamp hour step (a session's rows spread over an hour).
 const HOUR_MS: u64 = 3_600_000;

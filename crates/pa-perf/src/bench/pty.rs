@@ -127,11 +127,14 @@ impl PtyChild {
         deadline: Instant,
     ) -> anyhow::Result<Instant> {
         // Search only the bytes that arrived since the last check (plus the
-        // needle overlap): a fresh full-stream scan per read is quadratic,
-        // and the harness must never out-CPU the product it measures.
+        // needle overlap, never reaching before the mark): a fresh
+        // full-stream scan per read is quadratic, and the harness must
+        // never out-CPU the product it measures.
         let mut scanned = mark;
         loop {
-            let from = scanned.saturating_sub(needle.len().saturating_sub(1));
+            let from = scanned
+                .saturating_sub(needle.len().saturating_sub(1))
+                .max(mark);
             if find(&self.output[from..], needle).is_some() {
                 return Ok(Instant::now());
             }
