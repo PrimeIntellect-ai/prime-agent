@@ -171,6 +171,42 @@ fn edge_is_live_reflects_tombstones_and_files() {
     assert!(!ledger.edge_is_live("sub-none", &child_path));
 }
 
+/// A respawned child id: the tombstoned edge at the old path stays dead,
+/// the new path's edge is live, and a later respawn on the old path's key
+/// re-lives that edge in place (the fold keeps one edge per key).
+#[test]
+fn a_respawned_child_id_on_a_new_path_is_live_and_the_old_one_is_not() {
+    let dir = temp_dir("respawn");
+    let ledger = ledger_for(&dir);
+    let parent = dir.join("p.jsonl");
+    let a = dir.join("a.jsonl");
+    let b = dir.join("b.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    fs::write(&a, "{}").unwrap();
+    fs::write(&b, "{}").unwrap();
+    let spawn = |child: &Path, name: &str| {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: child.to_string_lossy().into_owned(),
+                depth: 1,
+                name: name.into(),
+            })
+            .unwrap();
+    };
+    spawn(&a, "first");
+    ledger
+        .append_delete("sub-1", &a.to_string_lossy(), RlmLedgerDeleteReason::User)
+        .unwrap();
+    spawn(&b, "second");
+    assert!(!ledger.edge_is_live("sub-1", &a.to_string_lossy()));
+    assert!(ledger.edge_is_live("sub-1", &b.to_string_lossy()));
+    spawn(&a, "third");
+    assert!(ledger.edge_is_live("sub-1", &a.to_string_lossy()));
+    assert!(ledger.edge_is_live("sub-1", &b.to_string_lossy()));
+}
+
 #[test]
 fn dead_child_or_parent_drops_from_live_edges() {
     let dir = temp_dir("live");
