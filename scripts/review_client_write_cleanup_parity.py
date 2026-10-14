@@ -122,6 +122,18 @@ def canonical(value):
     return value
 
 
+def pause_released(client, active, pause_id):
+    """A non-owner cannot release this lease; success means cleanup removed it."""
+    try:
+        client.call('release_session_input_pause', activeSessionId=active, pauseId=pause_id)
+        return True
+    except AssertionError:
+        response = client.wire[-1]
+        assert response.get('command') == 'release_session_input_pause' and response.get('success') is False, response
+        assert response.get('error') == 'Session input pause is owned by another client: ' + pause_id, response
+        return False
+
+
 def run_case(binary, kind, root, observed):
     env = env_for(root, kind)
     provider = Provider()
@@ -162,11 +174,29 @@ def run_case(binary, kind, root, observed):
         responses['acquire_pause'] = a.call('acquire_session_input_pause',
             activeSessionId=active, leaseKey='write-cleanup-gate')
         assert isinstance(responses['acquire_pause']['pauseId'], str), responses
-        # The write half remains open: no read EOF can trigger the ordinary
-        # disconnect tail. B's enqueue must publish an event whose write fails.
-        a.sock.shutdown(socket.SHUT_RD)
         b = WireClient(path, process)
         clients.append(b)
+        pause_id = responses['acquire_pause']['pauseId']
+        before = b.call('get_state', activeSessionId=active)
+        assert before['attachedClients'] == 1, before
+        assert not pause_released(b, active, pause_id), 'pause was not held before disconnect'
+        # TS rejects new input while a pause is held. A rename is a legal
+        # non-input action and publishes the attached event that must fail its
+        # write to A; A keeps its write half open, so no read EOF can clean up.
+        a.sock.shutdown(socket.SHUT_RD)
+        responses['trigger_write'] = b.call('set_session_name',
+            activeSessionId=active, name='Write cleanup fixture')
+        deadline = time.monotonic() + LIMIT
+        observations = observed['disconnect_observations'] = []
+        while True:
+            state = b.call('get_state', activeSessionId=active)
+            detached = state['attachedClients'] == 0
+            released = pause_released(b, active, pause_id)
+            observations.append({'attachedClients': state['attachedClients'], 'pause_released': released})
+            if detached and released:
+                break
+            assert time.monotonic() < deadline, 'failed write did not detach A and release its pause'
+            threading.Event().wait(0.025)
         responses['enqueue_second_client'] = b.call('prompt',
             activeSessionId=active, message=SECOND, streamingBehavior='followUp')
         observed['before_provider_release'] = b.call('get_queue', activeSessionId=active)
@@ -231,7 +261,8 @@ def main():
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     receipt = {'scenario': 'client_write_cleanup', 'verified': False, 'cases': {},
-        'scope': 'real attached-client read-half-close, held pause release, second-client queue drain',
+        'scope': 'real attached-client read-half-close, rename triggers failed write, observed detach and non-owner pause-release probe, then second-client queue drain',
+        'preexisting_admission_difference': 'TS rejects new prompt admission while a pause is held; fixture submits followUp only after disconnect cleanup, without redesigning Rust policy',
         'normalization': 'only generated pauseId in compared action response data; raw JSONL preserved',
         'not_covered': 'admission cancellation races or direct worker attach-state introspection'}
     try:
