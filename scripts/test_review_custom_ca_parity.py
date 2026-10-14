@@ -16,13 +16,16 @@ class ReceiptParsingTests(unittest.TestCase):
         ]
         self.assertEqual(completed_messages('\n'.join(map(json.dumps, rows))), [rows[-1]['message']])
 
-    def test_request_projection_keeps_every_user_message(self):
+    def test_duplicate_current_prompt_is_not_normalized_away(self):
         request = {'path': '/v1/chat/completions', 'authorization': 'Bearer fixture-only',
                    'body': {'model': 'ca-fixture', 'stream': True,
                             'messages': [{'role': 'system', 'content': 'fixture system'},
                                          {'role': 'user', 'content': PROMPT},
                                          {'role': 'user', 'content': PROMPT}]}}
-        self.assertEqual(request_contract(request)['users'], [PROMPT, PROMPT])
+        with self.assertRaises(AssertionError):
+            request_contract(request)
+        request['body']['messages'][1]['content'] = '[harness-digest] actual runtime digest'
+        self.assertEqual(request_contract(request)['current_prompt_count'], 1)
 
     def test_malformed_json_is_a_failure(self):
         with self.assertRaises(json.JSONDecodeError):

@@ -37,6 +37,23 @@ def certificate(root, name):
     return key, cert
 
 
+def server_certificate(root, ca_key, ca_cert):
+    key, csr, cert = root / 'server.key', root / 'server.csr', root / 'server.pem'
+    extensions = root / 'server.extensions'
+    extensions.write_text('basicConstraints=critical,CA:FALSE\n'
+                          'keyUsage=critical,digitalSignature,keyEncipherment\n'
+                          'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n')
+    subprocess.run(['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
+                    '-keyout', str(key), '-out', str(csr), '-subj', '/CN=Prime Agent TLS fixture'],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    subprocess.run(['openssl', 'x509', '-req', '-in', str(csr), '-CA', str(ca_cert),
+                    '-CAkey', str(ca_key), '-CAcreateserial', '-out', str(cert),
+                    '-days', '1', '-sha256', '-extfile', str(extensions)],
+                   check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    key.chmod(0o600)
+    return key, cert
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass
@@ -94,17 +111,23 @@ def completed_messages(stdout):
 
 def request_contract(request):
     body = request['body']
+    users = ['\n'.join(texts(row.get('content'))) for row in body.get('messages', [])
+             if row.get('role') == 'user']
+    count = users.count(PROMPT)
+    assert count == 1, 'expected current fixture prompt exactly once'
+    # Harness digests and unrelated prompt layers are outside the TLS contract.
+    # Every raw message remains in the receipt's captured provider request.
     return {'path': request['path'], 'authorization': request['authorization'],
             'model': body.get('model'), 'stream': body.get('stream'),
-            'users': ['\n'.join(texts(row.get('content'))) for row in body.get('messages', [])
-                      if row.get('role') == 'user']}
+            'current_prompt': PROMPT, 'current_prompt_count': count}
 
 
-def run_case(binary, label, root, trusted, key, cert, unrelated, observation):
+def run_case(binary, label, root, trusted, key, cert, ca_cert, unrelated, observation):
     for name in ('home', 'agent', 'sessions', 'work', 'tmp'):
         (root / name).mkdir(parents=True)
     agent, sessions, cwd = root / 'agent', root / 'sessions', root / 'work'
-    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TZ') if key in os.environ}
+    env = {key: os.environ[key] for key in ('PATH', 'LANG', 'LC_ALL', 'TZ',
+           'PRIME_AGENT_KERNEL_PYTHON', 'PA_E2E_KERNEL_PYTHON') if key in os.environ}
     if label == 'ts':
         env['PI_PACKAGE_DIR'] = os.environ['PI_PACKAGE_DIR']
     env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
@@ -112,7 +135,7 @@ def run_case(binary, label, root, trusted, key, cert, unrelated, observation):
                PI_SESSION_DIR=str(sessions), PRIME_AGENT_SESSION_DIR=str(sessions),
                XDG_CONFIG_HOME=str(root / 'config'), XDG_CACHE_HOME=str(root / 'cache'),
                XDG_DATA_HOME=str(root / 'data'), NO_PROXY='127.0.0.1,localhost',
-               no_proxy='127.0.0.1,localhost', NODE_EXTRA_CA_CERTS=str(cert if trusted else unrelated))
+               no_proxy='127.0.0.1,localhost', NODE_EXTRA_CA_CERTS=str(ca_cert if trusted else unrelated))
     server = Server(key, cert)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -150,7 +173,8 @@ def run_case(binary, label, root, trusted, key, cert, unrelated, observation):
             assert len(server.requests) == 1, 'expected one actual provider request'
             contract = request_contract(server.requests[0])
             assert contract == {'path': '/v1/chat/completions', 'authorization': 'Bearer fixture-only',
-                                'model': 'ca-fixture', 'stream': True, 'users': [PROMPT]}, contract
+                                'model': 'ca-fixture', 'stream': True, 'current_prompt': PROMPT,
+                                'current_prompt_count': 1}, contract
             return {'outcome': 'completed', 'answer': answer, 'request': contract}
         assert server.handshake_attempts > 0, 'binary never attempted TLS'
         assert not server.requests, 'untrusted CA allowed an HTTP request'
@@ -171,6 +195,7 @@ def main():
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     result = {'verified': False, 'runs': {}, 'scope': __doc__,
+              'prompt_scope': 'Compare current fixture prompt once, auth, model, stream and outcome. Harness digests/unrelated layers excluded; raw messages retained.',
               'cache_scope': 'Each case starts a fresh actual process. No assertion about in-process native-store refresh or TS native-root caching.'}
     try:
         assert sys.platform == 'linux', 'requires hosted Linux CI'
@@ -183,7 +208,8 @@ def main():
                                 for label, path in binaries.items()})
         with tempfile.TemporaryDirectory(prefix='custom-ca-parity-') as temporary:
             root = Path(temporary)
-            key, cert = certificate(root, 'trusted')
+            ca_key, ca_cert = certificate(root, 'trusted')
+            key, cert = server_certificate(root, ca_key, ca_cert)
             _, unrelated = certificate(root, 'unrelated')
             for scenario, trusted in [('trusted_custom_ca', True), ('untrusted_custom_ca', False)]:
                 runs = result['runs'][scenario] = {}
@@ -191,7 +217,7 @@ def main():
                     observation = runs[label] = {}
                     try:
                         observation['contract'] = run_case(binary, label, root / scenario / label,
-                                                           trusted, key, cert, unrelated, observation)
+                                                           trusted, key, cert, ca_cert, unrelated, observation)
                     except Exception as error:
                         observation['error'] = str(error)
                 errors = {label: run['error'] for label, run in runs.items() if 'error' in run}
