@@ -171,6 +171,57 @@ fn edge_is_live_reflects_tombstones_and_files() {
     assert!(!ledger.edge_is_live("sub-none", &child_path));
 }
 
+// File changes do not invalidate the ledger's stat-identity cache. A
+// canonical path recorded at spawn can later become a symlink, so the
+// replay index alone cannot establish that no live edge matches a path.
+#[cfg(unix)]
+#[test]
+fn edge_is_live_revalidates_paths_without_a_ledger_append() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_dir("liveness-retarget");
+    let ledger = ledger_for(&dir);
+    let parent = dir.join("p.jsonl");
+    let child = dir.join("a.jsonl");
+    let target = dir.join("b.jsonl");
+    for path in [&parent, &child, &target] {
+        fs::write(path, "{}").unwrap();
+    }
+    for path in [&child, &target] {
+        ledger
+            .append_spawn(&RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: path.to_string_lossy().into_owned(),
+                depth: 1,
+                name: "child".into(),
+            })
+            .unwrap();
+    }
+    ledger
+        .append_delete("sub-1", &target.to_string_lossy(), RlmLedgerDeleteReason::User)
+        .unwrap();
+    let child_path = child.to_string_lossy();
+    let target_path = target.to_string_lossy();
+    assert!(ledger.edge_is_live("sub-1", &child_path));
+    assert!(!ledger.edge_is_live("sub-1", &target_path));
+    let cached = ledger.replay_cached().unwrap();
+    let identity = file_identity(&ledger.path).unwrap();
+
+    fs::remove_file(&child).unwrap();
+    symlink(&target, &child).unwrap();
+    assert_eq!(file_identity(&ledger.path).unwrap(), identity);
+    assert!(Arc::ptr_eq(&cached, &ledger.replay_cached().unwrap()));
+    // The query now hits the target's tombstoned index entry, but the
+    // original live edge resolves to the same path and must still count.
+    assert!(ledger.edge_is_live("sub-1", &child_path));
+    assert!(ledger.edge_is_live("sub-1", &target_path));
+
+    fs::remove_file(&target).unwrap();
+    assert!(!ledger.edge_is_live("sub-1", &child_path));
+    assert!(!ledger.edge_is_live("sub-1", &target_path));
+}
+
 /// A respawned child id: the tombstoned edge at the old path stays dead,
 /// the new path's edge is live, and a later respawn on the old path's key
 /// re-lives that edge in place (the fold keeps one edge per key).
