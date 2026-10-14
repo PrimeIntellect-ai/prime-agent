@@ -2,9 +2,11 @@
 import unittest
 from pathlib import Path
 import tempfile
+import json
+import threading
 from unittest.mock import Mock, patch
 
-from review_dock_events_parity import run_case, running_visible
+from review_dock_events_parity import DockSupervisor, run_case, running_visible
 from review_dock_screen import DockScreen
 
 
@@ -104,6 +106,14 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(screen.feed(b'u'), [b'\x1b[?0u'])
         self.assertEqual(screen.feed(b'\x1b[>9;0m'), [])
         self.assertEqual(screen.unsupported_terminal, ['\x1b[>9;0m'])
+
+    def test_dock_hello_advertises_implemented_roster_capability(self):
+        server = DockSupervisor.__new__(DockSupervisor)
+        server.write_lock = threading.Lock()
+        sock = Mock()
+        server.send(sock, {'type': 'daemon_hello', 'serverCapabilities': ['session_input_admission']})
+        wire = json.loads(sock.sendall.call_args.args[0])
+        self.assertEqual(wire['serverCapabilities'], ['session_input_admission', 'agent_roster'])
 
 
 if __name__ == '__main__':

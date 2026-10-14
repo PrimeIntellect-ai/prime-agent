@@ -40,13 +40,19 @@ def child(ident, status, cost):
 
 class DockSupervisor(Supervisor):
     def __init__(self, path, hello, root):
+        assert 'agent_roster' in hello.get('serverCapabilities', []), 'actual binary does not advertise roster protocol'
         self.roster = [parent(), child('c1', 'running', 0.42)]
         self.write_lock = threading.Lock()
         self.emitted = []
         super().__init__(path, hello, 'dock', root)
 
     def send(self, sock, data):
-        if data.get('type') == 'response' and data.get('command') == 'roster_subscribe':
+        if data.get('type') == 'daemon_hello':
+            # The inherited draft fixture advertises only prompt admission.
+            # This fixture also implements roster snapshot/deltas; TS gates
+            # both on agent_roster (pinned daemon-protocol.ts:798,1214).
+            data = dict(data, serverCapabilities=['session_input_admission', 'agent_roster'])
+        elif data.get('type') == 'response' and data.get('command') == 'roster_subscribe':
             data = dict(data, data={'roster': self.roster})
         elif data.get('type') == 'response' and data.get('command') == 'attach':
             data['data']['snapshot']['state']['sessionName'] = 'Dock fixture'
