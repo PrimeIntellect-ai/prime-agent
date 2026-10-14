@@ -229,7 +229,10 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
         }
         let result = build_result(&cold_ctx, scenario, samples);
         let name = crate::report::key_of(scenario);
-        write_result(&result, &results_dir.join(format!("{name}.json")))?;
+        // Per-profile unique names: the CI legs merge their artifacts into
+        // one results dir, and same-named files would overwrite each other.
+        let profile = crate::report::profile_key(options.profile);
+        write_result(&result, &results_dir.join(format!("{profile}-{name}.json")))?;
         println!(
             "scenario={name} profile={} median={:.1}ms p95={:.1}ms",
             crate::report::profile_key(options.profile),

@@ -62,14 +62,15 @@ pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
         } else if median > entry.median_ms * REGRESSION_FACTOR {
             regressions.push(key.clone());
             "REGRESSION".to_string()
-        } else if delta >= 0.0 {
-            format!("+{delta:.0}%")
         } else {
-            format!("{delta:.0}%")
+            format!("{:+.0}%", delta * 100.0)
         };
         rows.push(format!(
-            "| {} | {median:.1} | {:.1} | {:.1} | {delta:+.0}% | {verdict} |",
-            key, result.p95_ms, entry.median_ms
+            "| {} | {median:.1} | {:.1} | {:.1} | {:+.0}% | {verdict} |",
+            key,
+            result.p95_ms,
+            entry.median_ms,
+            delta * 100.0
         ));
     }
     let markdown = format!(
