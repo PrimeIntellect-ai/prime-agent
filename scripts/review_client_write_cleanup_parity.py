@@ -124,6 +124,7 @@ def run_case(binary, kind, root, observed):
     clients = []
     process = None
     log = None
+    primary_error = None
     try:
         models = {'providers': {'parity-local': {'api': 'openai-completions',
             'apiKey': 'fixture-only', 'baseUrl': f'http://127.0.0.1:{provider.server_port}/v1',
@@ -161,7 +162,7 @@ def run_case(binary, kind, root, observed):
         b = WireClient(path, process)
         clients.append(b)
         responses['enqueue_second_client'] = b.call('prompt',
-            activeSessionId=active, message=SECOND)
+            activeSessionId=active, message=SECOND, streamingBehavior='followUp')
         observed['before_provider_release'] = b.call('get_queue', activeSessionId=active)
         queued = observed['before_provider_release']
         assert SECOND in queued['steering'] + queued['followUp'], queued
@@ -175,6 +176,10 @@ def run_case(binary, kind, root, observed):
         observed['canonical_action_responses'] = canonical(responses)
         observed['hello'] = observer.hello
         observed['provider_requests'] = provider.requests
+    except Exception as error:
+        primary_error = error
+        observed['primary_error'] = str(error)
+        raise
     finally:
         cleanup_error = None
         provider.release.set()
@@ -205,7 +210,9 @@ def run_case(binary, kind, root, observed):
             cleanup_error = cleanup_error or error
         if cleanup_error:
             observed['verified'] = False
-            raise RuntimeError('fixture cleanup failed: ' + str(cleanup_error)) from cleanup_error
+            observed['cleanup_error'] = str(cleanup_error)
+            if primary_error is None:
+                raise RuntimeError('fixture cleanup failed: ' + str(cleanup_error)) from cleanup_error
     observed['verified'] = True
 
 
