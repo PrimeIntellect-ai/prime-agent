@@ -372,3 +372,73 @@ async fn a_print_refine_command_is_tracked_by_the_disposal_drain() {
     assert_eq!(rows[0].custom_type, "refinement_outcome");
     pa_ai::registry::unregister_api_providers("test-held-refinement-host");
 }
+
+/// One `refine.status` round trip through the engine's turn-boundary
+/// handler registration.
+async fn refine_status(engine: &SessionEngine) -> serde_json::Value {
+    let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+    engine.turn_boundary.register_refine_handlers(&mut handlers);
+    let status = handlers
+        .get("refine.status")
+        .expect("the refine surface registered")
+        .clone();
+    status(pa_core::kernel::shared::HostRequestPayload { data: json!({}) })
+        .await
+        .expect("refine.status answers")
+}
+
+/// `refine.status` answers `in_flight` for a user-run `/refine` too: the
+/// flight counts every refinement run at its one shared start, not only
+/// the model-requested boundary consumption.
+#[tokio::test]
+async fn refine_status_reports_a_user_refine_in_flight() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    let (engine, dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed"}] }),
+        json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+        None,
+    )
+    .await;
+    engine
+        .session
+        .prompt("seed", pa_core::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: started.clone(),
+            release: release.clone(),
+            reply: r#"{"summary":"background note","edits":[]}"#,
+        }),
+        Some("test-held-refinement-host"),
+    );
+    let mut planner_model = model.clone();
+    planner_model.api = "test-held-refinement-host".to_string();
+    let mut boundary = TurnBoundary::new(false);
+    let global_dir = dir.path().join("global-refinement");
+    let pending = Origin::Slash
+        .schedule(&engine, &planner_model, &mut boundary, global_dir)
+        .await
+        .expect("the user /refine scheduled its refinement");
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("planner entered");
+    // Planning is held: the user-scheduled run is in flight.
+    let status = refine_status(&engine).await;
+    assert_eq!(status["pending"], false, "{status}");
+    assert_eq!(
+        status["in_flight"], true,
+        "a held user refinement must answer in flight: {status}"
+    );
+    release.notify_one();
+    pending.await.unwrap().unwrap();
+    let status = refine_status(&engine).await;
+    assert_eq!(
+        status["in_flight"], false,
+        "the settled run clears the flight: {status}"
+    );
+    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+}

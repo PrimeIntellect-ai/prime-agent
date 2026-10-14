@@ -334,11 +334,31 @@ pub async fn execute_refinement_with_rows(
     .await
 }
 
+/// Counts the refinement runs currently planning or committing — the
+/// counter `refine.status` answers `in_flight` from. The guard spans a
+/// run's whole body, so every source reports its flight at the one
+/// shared start.
+struct RefinementFlightGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl RefinementFlightGuard {
+    fn enter(in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(in_flight)
+    }
+}
+
+impl Drop for RefinementFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_refinement(
     session: std::sync::Arc<tokio::sync::Mutex<SessionManager>>,
     agent: std::sync::Arc<pa_agent::agent::Agent>,
     compaction_flight: std::sync::Arc<tokio::sync::Mutex<()>>,
+    refinements_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     cancel: pa_agent::abort::AbortSignal,
     agent_dir: Option<PathBuf>,
     options: RefineOptions,
@@ -347,6 +367,7 @@ pub(crate) async fn run_refinement(
     refine_call: crate::refinement::executor::RefinerFn,
     global_harness_dir: PathBuf,
 ) -> anyhow::Result<RefinementResult> {
+    let _flight = RefinementFlightGuard::enter(refinements_in_flight);
     let ready = pa_agent::abort::race_with_abort(
         async {
             // The transcript's consumed artifacts are extracted under this first
@@ -919,6 +940,7 @@ impl AgentSession {
         let session = self.session.clone();
         let agent = self.agent.clone();
         let flight = self.compaction_flight.clone();
+        let in_flight = self.refinements_in_flight.clone();
         let branch_state = self.compact_auto_refine.clone();
         let auxiliary = self.auxiliary_model.clone();
         let agent_dir = self.agent_dir.clone();
@@ -958,6 +980,7 @@ impl AgentSession {
                 session,
                 agent,
                 flight,
+                in_flight,
                 cancel,
                 agent_dir,
                 options,
@@ -1038,6 +1061,7 @@ impl AgentSession {
             self.session.clone(),
             self.agent.clone(),
             self.compaction_flight.clone(),
+            self.refinements_in_flight.clone(),
             cancel,
             self.agent_dir.clone(),
             options,

@@ -454,6 +454,7 @@ impl AgentSession {
         let session = self.session.clone();
         let agent = self.agent.clone();
         let flight = self.compaction_flight.clone();
+        let in_flight = self.refinements_in_flight.clone();
         let cancel = self.refinement_signal();
         let agent_dir = self.agent_dir.clone();
         let auxiliary = self.auxiliary_model.clone();
@@ -467,6 +468,7 @@ impl AgentSession {
                 session,
                 agent,
                 flight,
+                in_flight,
                 cancel,
                 agent_dir,
                 options,
@@ -493,6 +495,7 @@ impl AgentSession {
             self.session.clone(),
             self.agent.clone(),
             self.compaction_flight.clone(),
+            self.refinements_in_flight.clone(),
             self.refinement_signal(),
             self.agent_dir.clone(),
             options.clone(),

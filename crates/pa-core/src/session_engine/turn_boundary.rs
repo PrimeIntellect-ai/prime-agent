@@ -73,15 +73,11 @@ pub struct TurnBoundaryRequests {
     runtime: std::sync::RwLock<Option<Arc<TurnBoundaryRuntime>>>,
     compaction: Mutex<Option<PendingCompaction>>,
     refine: Mutex<Option<PendingRefine>>,
-    refinements_in_flight: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-struct RefinementFlightGuard(Arc<std::sync::atomic::AtomicUsize>);
-
-impl Drop for RefinementFlightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-    }
+    /// The assembled session's refinement-flight counter — the same Arc
+    /// every `refine::run_refinement` holds its flight guard on. Bound
+    /// once when the session assembles; an unset cell (a session that
+    /// never assembled) answers `in_flight: false`.
+    refinements_in_flight: std::sync::OnceLock<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl TurnBoundaryRequests {
@@ -107,6 +103,12 @@ impl TurnBoundaryRequests {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Bind the assembled session's refinement-flight counter (first bind
+    /// wins): `refine.status` answers from the runs it counts.
+    pub fn bind_refinements_in_flight(&self, in_flight: Arc<std::sync::atomic::AtomicUsize>) {
+        let _ = self.refinements_in_flight.set(in_flight);
     }
 
     /// Re-bind the model facts after a live model switch (the agent and
@@ -321,8 +323,10 @@ impl TurnBoundaryRequests {
                     let pending = requests.refine_pending().await;
                     let in_flight = requests
                         .refinements_in_flight
-                        .load(std::sync::atomic::Ordering::Acquire)
-                        > 0;
+                        .get()
+                        .is_some_and(|in_flight| {
+                            in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
+                        });
                     Ok(json!({ "pending": pending, "in_flight": in_flight }))
                 })
             }),
@@ -432,7 +436,7 @@ impl SessionEngine {
         global_harness_dir: std::path::PathBuf,
     ) -> Option<tokio::task::JoinHandle<anyhow::Result<crate::refinement::RefinementResult>>> {
         let pending = self.turn_boundary.take_refine().await?;
-        let pending = self.session.start_refinement(
+        Some(self.session.start_refinement(
             super::refine::RefineOptions {
                 global: pending.global,
                 instructions: pending.instructions,
@@ -442,16 +446,7 @@ impl SessionEngine {
             model.clone(),
             api_key,
             global_harness_dir,
-        );
-        let in_flight = self.turn_boundary.refinements_in_flight.clone();
-        in_flight.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        let guard = RefinementFlightGuard(in_flight);
-        Some(tokio::spawn(async move {
-            let _guard = guard;
-            pending
-                .await
-                .map_err(|error| anyhow::anyhow!("refinement task failed: {error}"))?
-        }))
+        ))
     }
 
     /// Consume a pending model-requested refinement at a turn boundary;

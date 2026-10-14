@@ -168,6 +168,9 @@ pub struct AgentSession {
     /// in-flight run and prepares against its result; reads and writes
     /// keep using the session lock meanwhile.
     compaction_flight: Arc<tokio::sync::Mutex<()>>,
+    /// Refinement runs currently planning or committing (`refine.status`'s
+    /// `in_flight`): every run holds its flight guard for its whole body.
+    refinements_in_flight: Arc<std::sync::atomic::AtomicUsize>,
     refinement_cancel: std::sync::Mutex<pa_agent::abort::AbortController>,
     /// The session's semantic-edge recorder (TS
     /// `AgentSession._semanticEdges`): `None` in sessions the engine
@@ -262,6 +265,7 @@ impl AgentSession {
             side_question_stream_fn: std::sync::Mutex::new(None),
             agent_dir: None,
             compaction_flight: Arc::new(tokio::sync::Mutex::new(())),
+            refinements_in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             refinement_cancel: std::sync::Mutex::default(),
             usage_store,
         };
