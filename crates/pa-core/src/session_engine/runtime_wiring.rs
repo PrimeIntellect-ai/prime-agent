@@ -280,7 +280,7 @@ pub fn kernel_provisioner(
 /// caller reads the credential and runs this off the async runtime, because
 /// a `!command` key can block.
 #[must_use]
-pub fn websearch_api_key(
+pub(crate) fn websearch_api_key(
     skills: &[Skill],
     credential: Option<crate::auth::AuthCredential>,
 ) -> Option<String> {
