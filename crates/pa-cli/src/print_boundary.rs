@@ -172,10 +172,7 @@ impl TurnBoundary {
             .start_pending_refinement(model, api_key, global_harness_dir)
             .await
         {
-            self.report_background_refinement(
-                pending,
-                pa_core::session_engine::refine::RefinementSource::SelfRefine,
-            );
+            self.report_background_refinement(pending);
         }
         Ok(())
     }

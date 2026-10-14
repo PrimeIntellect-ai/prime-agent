@@ -24,8 +24,9 @@ pub(super) enum RefineSurface {
 impl TurnBoundary {
     pub(crate) fn report_background_refinement(
         &mut self,
-        pending: tokio::task::JoinHandle<anyhow::Result<pa_core::refinement::RefinementResult>>,
-        source: pa_core::session_engine::refine::RefinementSource,
+        pending: tokio::task::JoinHandle<
+            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+        >,
     ) {
         let pending = tokio::spawn(async move {
             pending
@@ -33,15 +34,14 @@ impl TurnBoundary {
                 .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")))
                 .map(Some)
         });
-        self.report_optional_refinement(pending, source, /*emit*/ true);
+        self.report_optional_refinement(pending, /*emit*/ true);
     }
 
     fn report_optional_refinement(
         &mut self,
         pending: tokio::task::JoinHandle<
-            anyhow::Result<Option<pa_core::refinement::RefinementResult>>,
+            anyhow::Result<Option<pa_core::session_engine::refine::CommittedRefinement>>,
         >,
-        source: pa_core::session_engine::refine::RefinementSource,
         emit: bool,
     ) {
         let sink = self.sink.clone();
@@ -55,24 +55,14 @@ impl TurnBoundary {
                 return;
             }
             match outcome {
-                Ok(Some(result)) if json_mode => {
-                    let mut rows = vec![
-                        pa_core::session_engine::refine::create_refinement_outcome_message(&result),
-                    ];
-                    if result.applied_edits.iter().any(|edit| edit.applied) {
-                        rows.push(
-                            pa_core::session_engine::refine::create_refinement_notice_message(
-                                &result, source,
-                            ),
-                        );
-                    }
-                    for row in rows {
+                Ok(Some(committed)) if json_mode => {
+                    for row in committed.rows {
                         let value = crate::headless_autonomous::custom_row_wire_value(&row);
                         for event_type in ["message_start", "message_end"] {
                             sink(&json!({ "type": event_type, "message": value }));
                         }
                     }
-                    sink(&json!({ "type": "refine_complete", "result": result }));
+                    sink(&json!({ "type": "refine_complete", "result": committed.result }));
                 }
                 Ok(_) => {}
                 Err(error) if json_mode => {
@@ -200,10 +190,6 @@ impl TurnBoundary {
         // at every user turn while its provider call remains in flight.
         self.last_auto_refine_review_at = Some(now_millis());
         self.assistant_turns_since_review = 0;
-        self.report_optional_refinement(
-            pending,
-            pa_core::session_engine::refine::RefinementSource::Auto,
-            surface == RefineSurface::Checkpoint,
-        );
+        self.report_optional_refinement(pending, surface == RefineSurface::Checkpoint);
     }
 }

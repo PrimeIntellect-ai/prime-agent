@@ -434,7 +434,7 @@ impl SessionEngine {
         model: &pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
-    ) -> Option<tokio::task::JoinHandle<anyhow::Result<crate::refinement::RefinementResult>>> {
+    ) -> Option<tokio::task::JoinHandle<anyhow::Result<super::refine::CommittedRefinement>>> {
         let pending = self.turn_boundary.take_refine().await?;
         Some(self.session.start_refinement(
             super::refine::RefineOptions {

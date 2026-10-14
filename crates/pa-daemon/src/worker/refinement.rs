@@ -12,7 +12,7 @@ pub(super) fn completion_sink(
     events: Arc<EventPump>,
 ) -> crate::agent_engine::RefinementCompletionSink {
     let runtime = tokio::runtime::Handle::current();
-    Arc::new(move |pending, source| {
+    Arc::new(move |pending| {
         let origin = {
             let core = core.lock().unwrap();
             core.store
@@ -29,18 +29,8 @@ pub(super) fn completion_sink(
                 return;
             };
             match result {
-                Ok(result) => {
-                    let mut rows = vec![
-                        pa_core::session_engine::refine::create_refinement_outcome_message(&result),
-                    ];
-                    if result.applied_edits.iter().any(|edit| edit.applied) {
-                        rows.push(
-                            pa_core::session_engine::refine::create_refinement_notice_message(
-                                &result, source,
-                            ),
-                        );
-                    }
-                    for row in rows {
+                Ok(committed) => {
+                    for row in committed.rows {
                         if let Ok(value) =
                             serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
                         {
@@ -58,7 +48,7 @@ pub(super) fn completion_sink(
                         &events,
                         &session_id,
                         Some(&generation),
-                        refine_complete_event(&result),
+                        refine_complete_event(&committed.result),
                     );
                 }
                 Err(error) => {

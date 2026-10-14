@@ -90,8 +90,11 @@ impl Origin {
         planner_model: &Model,
         boundary: &mut TurnBoundary,
         global_dir: std::path::PathBuf,
-    ) -> Option<tokio::task::JoinHandle<anyhow::Result<pa_core::refinement::RefinementResult>>>
-    {
+    ) -> Option<
+        tokio::task::JoinHandle<
+            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+        >,
+    > {
         let mut pending = None;
         match self {
             Origin::Slash => {
@@ -440,5 +443,85 @@ async fn refine_status_reports_a_user_refine_in_flight() {
         status["in_flight"], false,
         "the settled run clears the flight: {status}"
     );
+    pa_ai::registry::unregister_api_providers("test-held-refinement-host");
+}
+
+/// The background completion reporter replays the rows the commit
+/// persisted — outcome then notice — instead of rebuilding them with a
+/// fresh timestamp after the fact.
+#[tokio::test]
+async fn background_completion_replays_the_persisted_refinement_rows() {
+    let _faux = FAUX_TEST_LOCK.lock().await;
+    let (engine, dir, model) = faux_engine_with_settings(
+        json!({ "responses": [{"text": "seed"}] }),
+        json!({ "compaction": {"enabled": false}, "autoRefine": {"enabled": true, "compact": true, "cooldownMs": 0} }),
+        None,
+    )
+    .await;
+    engine
+        .session
+        .prompt("seed", pa_core::session_engine::PromptOptions::default())
+        .await
+        .unwrap();
+    engine.session.agent().wait_for_idle().await;
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    pa_ai::registry::register_api_provider(
+        Arc::new(HeldPlanner {
+            started: started.clone(),
+            release: release.clone(),
+            reply: r#"{"summary":"background note","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#,
+        }),
+        Some("test-held-refinement-host"),
+    );
+    let mut planner_model = model.clone();
+    planner_model.api = "test-held-refinement-host".to_string();
+    let (sink, events) = capture_sink();
+    let mut boundary = TurnBoundary::with_sink(true, sink);
+    let global_dir = dir.path().join("global-refinement");
+    let pending = Origin::Slash
+        .schedule(&engine, &planner_model, &mut boundary, global_dir)
+        .await
+        .expect("the user /refine scheduled its refinement");
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .expect("planner entered");
+    release.notify_one();
+    // Let the run settle on its own; the handle stays unawaited so the
+    // reporter consumes the completed result.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !pending.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refinement run never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // Force the wall clock past the commit's row timestamps: a reporter
+    // rebuilding the rows would stamp a later now_millis().
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    boundary.report_background_refinement(pending);
+    boundary.wait_for_refinement_reports().await;
+    let durable = refine_rows(&engine).await;
+    assert_eq!(durable.len(), 2, "the outcome and notice rows landed");
+    let streamed: Vec<serde_json::Value> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event["type"] == "message_end")
+        .map(|event| event["message"].clone())
+        .filter(|message| {
+            message["customType"] == "refinement_outcome"
+                || message["customType"] == "refinement_notice"
+        })
+        .collect();
+    assert_eq!(streamed.len(), 2, "the reporter streamed both rows");
+    for (streamed, durable) in streamed.iter().zip(durable.iter()) {
+        assert_eq!(
+            streamed,
+            &serde_json::to_value(SessionAgentMessage::Custom(durable.clone())).unwrap(),
+            "the streamed row must equal the durable transcript row, timestamp included"
+        );
+    }
     pa_ai::registry::unregister_api_providers("test-held-refinement-host");
 }

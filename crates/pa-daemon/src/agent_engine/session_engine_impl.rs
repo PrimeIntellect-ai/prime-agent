@@ -1250,7 +1250,7 @@ impl SessionEngine for AgentSessionEngine {
             .blocking_lock()
             .clone()
             .expect("session built by ensure_core_session");
-        let result = self.runtime.block_on(async {
+        let committed = self.runtime.block_on(async {
             let pending = core.session.start_refinement(
                 options,
                 pa_core::session_engine::refine::RefinementSource::User,
@@ -1263,7 +1263,7 @@ impl SessionEngine for AgentSessionEngine {
                 .await
                 .map_err(|error| anyhow::anyhow!("refinement task failed: {error}"))?
         })?;
-        serde_json::to_value(&result)
+        serde_json::to_value(&committed.result)
             .map_err(|error| anyhow::anyhow!("refinement result conversion failed: {error}"))
     }
 

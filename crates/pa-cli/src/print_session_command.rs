@@ -144,10 +144,7 @@ pub(crate) async fn execute_prompt_session_command(
         goal.emit_stream_event(&end);
     }
     if let Some(pending) = execution.pending_refinement.take() {
-        boundary.report_background_refinement(
-            pending,
-            pa_core::session_engine::refine::RefinementSource::User,
-        );
+        boundary.report_background_refinement(pending);
     }
     // `/goal`: the state change publishes unconditionally, before the queue frame of a scheduled
     // continuation.

@@ -69,7 +69,7 @@ pub struct SessionCommandExecution {
     /// Background planning and the eventual idle-boundary commit. Hosts await this
     /// off their command runner and surface the durable result when it settles.
     pub pending_refinement:
-        Option<tokio::task::JoinHandle<anyhow::Result<crate::refinement::RefinementResult>>>,
+        Option<tokio::task::JoinHandle<anyhow::Result<super::refine::CommittedRefinement>>>,
 }
 
 impl SessionCommandExecution {

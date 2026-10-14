@@ -65,10 +65,7 @@ pub(crate) fn run_session_command(
         }
     };
     if let Some(pending) = execution.pending_refinement.take() {
-        engine.report_background_refinement(
-            pending,
-            pa_core::session_engine::refine::RefinementSource::User,
-        );
+        engine.report_background_refinement(pending);
     }
     // The post-compaction kernel notice goes out between the compaction start
     // and its settled end (the `message_start`/`message_end` pair precedes

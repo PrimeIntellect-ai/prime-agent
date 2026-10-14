@@ -170,29 +170,16 @@ async fn run_session_command(
                 return;
             }
             match result {
-                Ok(result) => {
-                    write_command_row(
-                        &state,
-                        &pa_core::session_engine::refine::create_refinement_outcome_message(
-                            &result,
-                        ),
-                    )
-                    .await;
-                    if result.applied_edits.iter().any(|edit| edit.applied) {
-                        write_command_row(
-                            &state,
-                            &pa_core::session_engine::refine::create_refinement_notice_message(
-                                &result,
-                                pa_core::session_engine::refine::RefinementSource::User,
-                            ),
-                        )
-                        .await;
+                Ok(committed) => {
+                    for row in committed.rows {
+                        write_command_row(&state, &row).await;
                     }
                     state
                         .session
-                        .write_connection_output(
-                            serde_json::json!({ "type": "refine_complete", "result": result }),
-                        )
+                        .write_connection_output(serde_json::json!({
+                            "type": "refine_complete",
+                            "result": committed.result,
+                        }))
                         .await;
                 }
                 Err(error) => {

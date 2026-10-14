@@ -515,12 +515,12 @@ async fn refine(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, 
     );
     drop(handle);
     drop(engine);
-    let result = pending
+    let committed = pending
         .await
         .map_err(|error| format!("refinement task failed: {error}"))?
         .map_err(|error| format!("{error:#}"))?;
     Ok(ResponseData::Present(
-        serde_json::to_value(result).unwrap_or(Value::Null),
+        serde_json::to_value(committed.result).unwrap_or(Value::Null),
     ))
 }
 

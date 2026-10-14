@@ -11,12 +11,13 @@ use crate::agent_engine::AgentSessionEngine;
 impl AgentSessionEngine {
     pub(crate) fn report_background_refinement(
         &self,
-        pending: tokio::task::JoinHandle<anyhow::Result<RefinementResult>>,
-        source: pa_core::session_engine::refine::RefinementSource,
+        pending: tokio::task::JoinHandle<
+            anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+        >,
     ) {
         let sink = self.refinement_completion_sink.lock().unwrap().clone();
         if let Some(sink) = sink {
-            sink(pending, source);
+            sink(pending);
         } else {
             // Non-worker hosts can omit the stream sink; durable core rows still
             // persist. Observe errors instead of silently discarding the task.
@@ -465,8 +466,8 @@ mod tests {
                 trigger_engine(&json!({ "responses": [{"text": reply}] }), 1, true);
             let (send, receive) = std::sync::mpsc::channel();
             *engine.refinement_completion_sink.lock().unwrap() =
-                Some(std::sync::Arc::new(move |pending, source| {
-                    send.send((pending, source)).unwrap();
+                Some(std::sync::Arc::new(move |pending| {
+                    send.send(pending).unwrap();
                 }));
             let mut events = Vec::new();
             let execution = crate::session_commands::run_session_command(
@@ -480,21 +481,17 @@ mod tests {
             )
             .expect("slash command returns after scheduling");
             assert!(execution.error.is_none());
-            let (pending, source) = receive
+            let pending = receive
                 .try_recv()
                 .expect("completion handed to background sink");
-            assert_eq!(
-                source,
-                pa_core::session_engine::refine::RefinementSource::User
-            );
-            let result = engine.runtime.block_on(pending).unwrap();
+            let committed = engine.runtime.block_on(pending).unwrap();
             if succeeds {
-                let result = result.unwrap();
-                assert_eq!(result.summary, "one edit");
-                assert!(result.applied_edits[0].applied);
+                let result = committed.unwrap();
+                assert_eq!(result.result.summary, "one edit");
+                assert!(result.result.applied_edits[0].applied);
             } else {
                 assert_eq!(
-                    result.unwrap_err().to_string(),
+                    committed.unwrap_err().to_string(),
                     "Refiner did not return a JSON object"
                 );
             }

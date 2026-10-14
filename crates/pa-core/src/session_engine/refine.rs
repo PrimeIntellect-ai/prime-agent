@@ -102,6 +102,16 @@ impl RefinementSource {
     }
 }
 
+/// One committed refinement: the result plus the live-context rows the
+/// commit persisted (the TUI outcome row, then the model-facing notice
+/// only when an edit applied), selected from the durable entries so
+/// background reporters replay the persisted rows byte for byte.
+#[derive(Debug)]
+pub struct CommittedRefinement {
+    pub result: RefinementResult,
+    pub rows: Vec<CustomMessage>,
+}
+
 pub(crate) fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -162,7 +172,7 @@ pub fn create_refinement_notice_message(
 
 /// This run's live-context rows (the outcome, plus the notice only when any
 /// edit applied), selected BY ID so interleaved runs never select each other's rows.
-pub(crate) fn context_rows_by_ids(entries: &[FileEntry], ids: &[String]) -> Vec<AgentMessage> {
+pub(crate) fn context_rows_by_ids(entries: &[FileEntry], ids: &[String]) -> Vec<CustomMessage> {
     entries
         .iter()
         .filter_map(|entry| {
@@ -171,7 +181,7 @@ pub(crate) fn context_rows_by_ids(entries: &[FileEntry], ids: &[String]) -> Vec<
                 .position(|wanted| wanted == id)
                 .map(|_| match entry {
                     FileEntry::CustomMessage { payload, .. } => {
-                        AgentMessage::Custom(crate::session::create_custom_message(payload, entry))
+                        crate::session::create_custom_message(payload, entry)
                     }
                     _ => unreachable!("refinement context rows are custom-message rows"),
                 })
@@ -254,6 +264,16 @@ pub struct RefinementTranscript<'a> {
 /// session, when the refinement plan (LLM or rollback) fails, when applying
 /// or persisting the refined harness state fails, or when appending the
 /// audit, outcome, or notice entries fails.
+///
+/// `agent_dir` is the session's settings root: its settings.json holds
+/// the `factory.enabled` opt-in (default off), re-read immediately before
+/// the plan applies — after the (long) model request, never snapshotted
+/// before it — so the gate decides on the CURRENT setting. While it is
+/// off, factory create/update edits refuse with the one disabled message —
+/// the same gate the kernel-side factory writers raise
+/// (`rlm.factory.require_factory_enabled`), so a refinement cannot
+/// author factories the user has not opted into. `None` (a session
+/// without a wired agent dir) keeps the fail-closed disabled default.
 // One refine funnel: the transcript, the store dirs, the model seam, the
 // options, the source, and the resolved gates ride the same call
 // (same style as the daemon's too_many_arguments seams).
@@ -269,49 +289,6 @@ pub async fn execute_refinement(
     refine_call: crate::refinement::executor::RefinerFn,
     agent_dir: Option<&Path>,
 ) -> anyhow::Result<RefinementResult> {
-    Ok(execute_refinement_with_rows(
-        session,
-        agent,
-        transcript,
-        global_harness_dir,
-        model,
-        options,
-        source,
-        refine_call,
-        agent_dir,
-    )
-    .await?
-    .0)
-}
-
-/// [`execute_refinement`] plus the ids of the live-context rows this
-/// run appended, so interleaved runs never select each other's rows.
-///
-/// # Errors
-///
-/// Returns the same errors as [`execute_refinement`].
-///
-/// `agent_dir` is the session's settings root: its settings.json holds
-/// the `factory.enabled` opt-in (default off), re-read immediately before
-/// the plan applies — after the (long) model request, never snapshotted
-/// before it — so the gate decides on the CURRENT setting. While it is
-/// off, factory create/update edits refuse with the one disabled message —
-/// the same gate the kernel-side factory writers raise
-/// (`rlm.factory.require_factory_enabled`), so a refinement cannot
-/// author factories the user has not opted into. `None` (a session
-/// without a wired agent dir) keeps the fail-closed disabled default.
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_refinement_with_rows(
-    session: &tokio::sync::Mutex<SessionManager>,
-    agent: &pa_agent::agent::Agent,
-    transcript: RefinementTranscript<'_>,
-    global_harness_dir: &Path,
-    model: &pa_types::ai::Model,
-    options: &RefineOptions,
-    source: RefinementSource,
-    refine_call: crate::refinement::executor::RefinerFn,
-    agent_dir: Option<&Path>,
-) -> anyhow::Result<(RefinementResult, Vec<String>)> {
     let ready = prepare_refinement(
         session,
         agent_dir,
@@ -322,7 +299,7 @@ pub async fn execute_refinement_with_rows(
         refine_call,
     )
     .await?;
-    commit_refinement(
+    Ok(commit_refinement(
         session,
         agent,
         ready,
@@ -331,7 +308,8 @@ pub async fn execute_refinement_with_rows(
         /*compaction_flight*/ None,
         &pa_agent::abort::AbortSignal::never(),
     )
-    .await
+    .await?
+    .result)
 }
 
 /// Counts the refinement runs currently planning or committing — the
@@ -366,7 +344,7 @@ pub(crate) async fn run_refinement(
     model: pa_types::ai::Model,
     refine_call: crate::refinement::executor::RefinerFn,
     global_harness_dir: PathBuf,
-) -> anyhow::Result<RefinementResult> {
+) -> anyhow::Result<CommittedRefinement> {
     let _flight = RefinementFlightGuard::enter(refinements_in_flight);
     let ready = pa_agent::abort::race_with_abort(
         async {
@@ -394,7 +372,7 @@ pub(crate) async fn run_refinement(
         &cancel,
     )
     .await??;
-    let (result, _) = commit_refinement(
+    commit_refinement(
         &session,
         &agent,
         ready,
@@ -403,8 +381,7 @@ pub(crate) async fn run_refinement(
         Some(&compaction_flight),
         &cancel,
     )
-    .await?;
-    Ok(result)
+    .await
 }
 
 /// An ephemeral plan: no persistence or run reservation is held while planning.
@@ -599,7 +576,7 @@ pub(crate) async fn commit_refinement(
     agent_dir: Option<&Path>,
     compaction_flight: Option<&tokio::sync::Mutex<()>>,
     cancel: &pa_agent::abort::AbortSignal,
-) -> anyhow::Result<(RefinementResult, Vec<String>)> {
+) -> anyhow::Result<CommittedRefinement> {
     let ReadyRefinement {
         plan,
         core_options,
@@ -693,7 +670,7 @@ pub(crate) async fn commit_refinement(
     let rows = context_rows_by_ids(session.retained_entries(), &context_row_ids);
     let loop_rows = rows
         .iter()
-        .filter_map(super::session_message_to_loop)
+        .filter_map(|row| super::session_message_to_loop(&AgentMessage::Custom(row.clone())))
         .collect();
     agent.append_messages(loop_rows).await;
     let failures: Vec<String> = [
@@ -714,7 +691,7 @@ pub(crate) async fn commit_refinement(
             failures.join("; ")
         );
     }
-    Ok((result, context_row_ids))
+    Ok(CommittedRefinement { result, rows })
 }
 
 /// `/refine` request options (session layer).
@@ -936,7 +913,7 @@ impl AgentSession {
         global_harness_dir: PathBuf,
         turns_since_last_review: u32,
         branch_version: u64,
-    ) -> tokio::task::JoinHandle<anyhow::Result<Option<RefinementResult>>> {
+    ) -> tokio::task::JoinHandle<anyhow::Result<Option<CommittedRefinement>>> {
         let session = self.session.clone();
         let agent = self.agent.clone();
         let flight = self.compaction_flight.clone();
@@ -1071,6 +1048,7 @@ impl AgentSession {
             global_harness_dir,
         )
         .await
+        .map(|committed| committed.result)
     }
 }
 
