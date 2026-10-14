@@ -5,7 +5,7 @@ if [[ "${CI:-}" != true ]]; then
   echo 'Run this regression check in hosted CI, not on the local Mac.' >&2
   exit 2
 fi
-baseline="${1:-5f8ad0c85}"
+baseline="${1:-5f8ad0c85f4f5678175e9921307d42441df2c67e}"
 source_file=crates/pa-cli/src/daemon_discovery/mod.rs
 test_name=a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers
 receipt_dir="${RUNNER_TEMP:-/tmp}/shutdown-scope-review-regression"
@@ -18,6 +18,9 @@ restore_source() {
 trap 'restore_source; rm -rf "$backup_dir"' EXIT
 # The baseline and fixed source differ only in worker-directory filtering and
 # its comments. The new test file stays untouched throughout the mutation.
+if ! git cat-file -e "$baseline^{commit}"; then
+  git fetch --no-tags --depth=1 origin "$baseline"
+fi
 git show "$baseline:$source_file" > "$source_file"
 if cargo test --locked -p pa-cli --test daemon_discovery_e2e "$test_name" -- --exact > "$receipt_dir/red.log" 2>&1; then
   echo "Regression did not fail before the fix: $test_name" >&2
