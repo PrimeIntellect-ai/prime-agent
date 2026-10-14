@@ -1464,8 +1464,8 @@ dependencies = [
  "http",
  "pa-types",
  "rand 0.8.8",
- "regex",
  "rcgen",
+ "regex",
  "reqwest",
  "rsa",
  "rustls",
@@ -1600,6 +1600,21 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "pa-perf"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "nix",
+ "pa-core",
+ "pa-daemon",
+ "pa-types",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
