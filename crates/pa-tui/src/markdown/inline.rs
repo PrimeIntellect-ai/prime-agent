@@ -209,7 +209,20 @@ fn render_inline_ctx(
                     // pairs with the inner single delimiter, the outer keeps the
                     // last two — marked renders bold(outer + italic(inner)).
                     let run = run_length(&bytes, close, c);
-                    if run == 3 {
+                    let nested_opener = (close_search..close).any(|at| {
+                        bytes[at] == c
+                            && bytes.get(at.wrapping_sub(1)) != Some(&c)
+                            && bytes.get(at + 1) != Some(&c)
+                            && bytes.get(at + 1).is_some_and(|next| !next.is_whitespace())
+                            && bytes[..at]
+                                .iter()
+                                .rev()
+                                .take_while(|&&ch| ch == '\\')
+                                .count()
+                                .is_multiple_of(2)
+                            && (c != '_' || underscore_can_open(&bytes, at))
+                    });
+                    if run == 3 && nested_opener {
                         let inner: String = bytes[close_search..=close].iter().collect();
                         if !inner.trim().is_empty() {
                             flush!();
@@ -417,7 +430,12 @@ fn link_destination(bytes: &[char], from: usize) -> Option<(String, usize)> {
         let quote = bytes[k];
         k += 1;
         while k < bytes.len() && bytes[k] != quote {
-            k += 1;
+            // An escaped quote belongs to the title, not its closing delimiter.
+            k += if bytes[k] == '\\' && k + 1 < bytes.len() {
+                2
+            } else {
+                1
+            };
         }
         if k == bytes.len() {
             return None;

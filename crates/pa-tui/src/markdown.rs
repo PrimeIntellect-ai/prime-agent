@@ -339,6 +339,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 start,
                 indent,
                 content_col,
+                0,
             );
             blocks.push(Block {
                 kind: BlockKind::List(list),
@@ -504,6 +505,7 @@ fn parse_list_level(
     start: usize,
     indent: usize,
     first_content_col: usize,
+    depth: usize,
 ) -> ListBlock {
     let mut items = vec![first];
     // The column the current item's content starts at: a line indented to it is
@@ -523,6 +525,19 @@ fn parse_list_level(
         if let Some((child_ordered, child_start)) = list_marker(t) {
             let marker_w = marker_width(t);
             if line_indent >= content_col {
+                // Keep untrusted message content from building an unbounded recursive tree.
+                // Beyond this level the source marker stays literal; count, paint and Drop
+                // therefore share the same bounded tree without losing the item text.
+                if depth >= 64 {
+                    items
+                        .last_mut()
+                        .expect("the level has its first item")
+                        .parts
+                        .push(ListPart::Text(t.to_string()));
+                    pending_blank = None;
+                    *i += 1;
+                    continue;
+                }
                 let child_first = ListItem {
                     parts: vec![ListPart::Text(t[marker_w..].to_string())],
                 };
@@ -535,6 +550,7 @@ fn parse_list_level(
                     child_start,
                     line_indent,
                     line_indent + marker_w,
+                    depth + 1,
                 );
                 items
                     .last_mut()
