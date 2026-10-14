@@ -111,8 +111,9 @@ class StyledScreen(Screen):
                         continue
                     if command == 'u' and params == '?':
                         self.keyboard_controls.append(token)
-                        # Our PTY input driver sends ordinary legacy keys only.
-                        replies.append(b'\x1b[?0u')
+                        # A flags response, even zero, advertises Kitty support.
+                        # Stay silent; the following DA1 query is answered by the
+                        # legacy Screen and settles crossterm's probe as non-Kitty.
                         continue
                     if command == 'u' and (re.fullmatch(r'[>=]\d+(?:;\d+)?', params)
                                             or re.fullmatch(r'<\d*', params)):
@@ -197,6 +198,20 @@ class StyledTerminal(Terminal):
         self.screen, self.raw = StyledScreen(width), bytearray()
 
 
+class MarkdownSupervisor(Supervisor):
+    def __init__(self, path, hello, root, cwd):
+        self.cwd = str(cwd)
+        super().__init__(path, hello, 'markdown', root)
+
+    def send(self, sock, data):
+        if data.get('type') == 'response' and data.get('command') == 'attach':
+            data['data']['snapshot']['state']['cwd'] = self.cwd
+            data['data']['snapshot']['summary']['cwd'] = self.cwd
+        elif data.get('type') == 'response' and data.get('command') in ('get_state', 'get_connection_state'):
+            data['data']['cwd'] = self.cwd
+        super().send(sock, data)
+
+
 def assistant(text):
     return {"role": "assistant", "stopReason": "stop", "api": "openai-completions",
             "provider": "parity-local", "model": "parity-1", "timestamp": 1750000000000,
@@ -205,15 +220,15 @@ def assistant(text):
                       "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}}
 
 
-def capture(kind, binary, root, hello, text, width):
+def capture(kind, binary, root, hello, text, width, cwd):
     root.mkdir()
     env = env_for(root, kind)
-    server = Supervisor(root / "fixture.sock", hello, "markdown", root)
+    server = MarkdownSupervisor(root / "fixture.sock", hello, root, cwd)
     server.messages = [assistant(text)]
     terminal = None
     result = {"executed": False}
     try:
-        terminal = StyledTerminal([str(binary), "--daemon-socket", str(server.path)], root, env, width)
+        terminal = StyledTerminal([str(binary), "--daemon-socket", str(server.path)], cwd, env, width)
         terminal.wait("Markdown history fully painted", lambda: START in terminal.screen.text()
                       and END in terminal.screen.text(), server)
         if terminal.screen.style_errors: raise RuntimeError(terminal.screen.style_errors)
@@ -221,19 +236,27 @@ def capture(kind, binary, root, hello, text, width):
         painted = [style for row in region for char, style in row if not char.isspace()]
         if not painted:
             raise RuntimeError("Markdown corpus body was not painted")
+        if r'\![link](url)' in text:
+            targets = {style[3] for style in painted if style and style[3]}
+            expected = cwd.as_uri() + '/url'
+            if targets != {expected}:
+                raise RuntimeError(f"relative hyperlink target differs: {targets!r} vs {expected!r}")
         if "**bold***italic*" in text and not all(any(style and modifier in style[2] for style in painted)
                                                  for modifier in (1, 3)):
             raise RuntimeError("actual PTY did not render both bold and italic modifiers")
         result.update(executed=True, styled_region=region, commands=server.commands,
                       osc8_observed=any(style and style[3] for style in painted),
                       keyboard_controls=terminal.screen.keyboard_controls,
+                      explicit_session_cwd=str(cwd),
                       screen=terminal.screen.text())
     except Exception as error: result["error"] = f"{type(error).__name__}: {error}"
     finally:
-        if terminal:
-            result["raw_terminal"] = bytes(terminal.raw).decode("utf-8", "replace")
-            terminal.close()
-        server.close()
+        try:
+            if terminal:
+                result["raw_terminal"] = bytes(terminal.raw).decode("utf-8", "replace")
+                terminal.close()
+        finally:
+            server.close()
     return result
 
 
@@ -251,6 +274,8 @@ def main():
             raise RuntimeError("pinned official TS archive hash mismatch")
         receipt["ts_archive_sha256"] = TS_ARCHIVE_SHA256
         with tempfile.TemporaryDirectory(prefix="pa-md-frames-") as temp:
+            cwd = Path(temp) / 'project'
+            cwd.mkdir()
             for kind in ("ts", "rust"):
                 binary = Path(os.environ[f"PA_{kind.upper()}_BINARY"]).resolve()
                 root = Path(temp) / kind
@@ -266,7 +291,7 @@ def main():
                 for name, text in CORPUS.items():
                     for width in (40, 80, 120):
                         key = f"{name}-{width}"
-                        side["cases"][key] = capture(kind, binary, root / key, hello, text, width)
+                        side["cases"][key] = capture(kind, binary, root / key, hello, text, width, cwd)
         for key in receipt["results"]["ts"]["cases"]:
             a, b = [receipt["results"][kind]["cases"][key] for kind in ("ts", "rust")]
             receipt["comparisons"][key] = bool(a.get("executed") and b.get("executed")

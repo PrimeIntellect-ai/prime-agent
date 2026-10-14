@@ -9,7 +9,7 @@ class CaptureTests(unittest.TestCase):
         screen = StyledScreen(40)
         screen.feed(b'\x1b[1mA\x1b[>4;0mB')
         replies = screen.feed(b'\x1b[?uC')
-        self.assertEqual(replies, [b'\x1b[?0u'])
+        self.assertEqual(replies, [])
         self.assertEqual(screen.keyboard_controls, ['\x1b[>4;0m', '\x1b[?u'])
         self.assertEqual(screen.styles[0][:3], [(None, None, (1,), None)] * 3)
         self.assertEqual(screen.style_errors, [])
@@ -20,7 +20,7 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(screen.keyboard_controls, [])
         screen.feed(b'0m\x1b[?')
         self.assertEqual(screen.keyboard_controls, ['\x1b[>4;0m'])
-        self.assertEqual(screen.feed(b'u'), [b'\x1b[?0u'])
+        self.assertEqual(screen.feed(b'u\x1b[c'), [b'\x1b[?1;2c'])
         self.assertEqual(screen.style_errors, [])
 
     def test_unknown_private_styles_and_geometry_still_fail(self):
