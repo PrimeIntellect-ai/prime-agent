@@ -5,7 +5,10 @@ if [[ "${CI:-}" != true ]]; then
   echo 'Run this regression check in hosted CI, not on the local Mac.' >&2
   exit 2
 fi
-baseline="${1:-3bad9c537}"
+baseline="${1:-3bad9c537ad0fd6466a47d6bf8aef64b71ba7bc3}"
+if ! git cat-file -e "$baseline^{commit}"; then
+  git fetch --no-tags --depth=1 origin "$baseline"
+fi
 receipt_dir="${RUNNER_TEMP:-/tmp}/markdown-review-regressions"
 mkdir -p "$receipt_dir"
 backup_dir="$(mktemp -d)"

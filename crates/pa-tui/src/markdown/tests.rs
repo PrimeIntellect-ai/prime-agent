@@ -24,6 +24,19 @@ fn review_markdown_adjacent_emphasis_keeps_the_next_opener() {
         .style
         .add_modifier
         .contains(Modifier::BOLD | Modifier::ITALIC));
+    for text in ["**outer *inner* tail***next*", "**outer `*` tail***next*"] {
+        let spans = render_inline(text, &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        let expected = if text.contains('`') {
+            "outer * tailnext"
+        } else {
+            "outer inner tailnext"
+        };
+        assert_eq!(joined, expected);
+        let next = spans.last().unwrap();
+        assert_eq!(next.content, "next");
+        assert_eq!(next.style.add_modifier, Modifier::ITALIC);
+    }
 }
 
 #[test]

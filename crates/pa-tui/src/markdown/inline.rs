@@ -209,19 +209,45 @@ fn render_inline_ctx(
                     // pairs with the inner single delimiter, the outer keeps the
                     // last two — marked renders bold(outer + italic(inner)).
                     let run = run_length(&bytes, close, c);
-                    let nested_opener = (close_search..close).any(|at| {
-                        bytes[at] == c
-                            && bytes.get(at.wrapping_sub(1)) != Some(&c)
-                            && bytes.get(at + 1) != Some(&c)
-                            && bytes.get(at + 1).is_some_and(|next| !next.is_whitespace())
-                            && bytes[..at]
-                                .iter()
-                                .rev()
-                                .take_while(|&&ch| ch == '\\')
-                                .count()
-                                .is_multiple_of(2)
-                            && (c != '_' || underscore_can_open(&bytes, at))
-                    });
+                    // Only an unmatched inner opener owns that third closer. A
+                    // completed *inner* pair (or a star inside code) cannot steal
+                    // the opener of the following adjacent emphasis span.
+                    let mut nested_opener = false;
+                    let mut at = close_search;
+                    while at < close {
+                        if bytes[at] == '\\'
+                            && bytes.get(at + 1).is_some_and(char::is_ascii_punctuation)
+                        {
+                            at += 2;
+                            continue;
+                        }
+                        if bytes[at] == '`' {
+                            let end = (at + 1..close).find(|&k| bytes[k] == '`');
+                            if let Some(end) = end {
+                                at = end + 1;
+                                continue;
+                            }
+                        }
+                        if bytes[at] == c {
+                            let length = run_length(&bytes, at, c);
+                            if length == 1 {
+                                let can_open =
+                                    bytes.get(at + 1).is_some_and(|next| !next.is_whitespace())
+                                        && (c != '_' || underscore_can_open(&bytes, at));
+                                let can_close = at > 0
+                                    && !bytes[at - 1].is_whitespace()
+                                    && (c != '_' || underscore_can_close(&bytes, at, 1));
+                                if nested_opener && can_close {
+                                    nested_opener = false;
+                                } else if !nested_opener && can_open {
+                                    nested_opener = true;
+                                }
+                            }
+                            at += length;
+                        } else {
+                            at += 1;
+                        }
+                    }
                     if run == 3 && nested_opener {
                         let inner: String = bytes[close_search..=close].iter().collect();
                         if !inner.trim().is_empty() {

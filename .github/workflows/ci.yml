@@ -337,6 +337,17 @@ jobs:
       - name: Build the workspace bins (sibling-binary parity for the e2e suites)
         if: steps.selection.outputs.units != '0'
         run: cargo build --locked --workspace --bins
+      - name: Verify Markdown regressions fail before fixes and pass after
+        id: markdown_regressions
+        if: github.event_name == 'pull_request' && github.event.pull_request.number == 3591 && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check-markdown-review-regressions.sh') != ''
+        run: bash scripts/check-markdown-review-regressions.sh
+      - name: Upload Markdown red and green regression logs
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.number == 3591 && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check-markdown-review-regressions.sh') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: markdown-review-regressions-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/markdown-review-regressions/*.log
+          if-no-files-found: error
       # The kernel e2e suites resolve the ambient kernel venv; left to
       # bootstrap lazily, the first session prewarm starts it mid-shard and
       # the next kernel unit fails against the half-built venv (run
