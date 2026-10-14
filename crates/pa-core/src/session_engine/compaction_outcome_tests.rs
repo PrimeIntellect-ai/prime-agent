@@ -1170,6 +1170,41 @@ async fn closing_session_cancels_background_planning_without_committing() {
     assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
 }
 
+/// The background funnel (the auto-refine and requested-refinement paths)
+/// refuses before planning when the settings disable refinements: the gate
+/// lives in the shared prepare step, not only the foreground executor.
+#[tokio::test]
+async fn disabled_background_refinement_refuses_before_planning() {
+    let (session, tmp) = refine_test_session().await;
+    let agent_dir = tmp.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).unwrap();
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{"harnessRefinements":false}"#,
+    )
+    .unwrap();
+    let global_dir = tmp.path().join("harness");
+    let error = refine::run_refinement(
+        session.session.clone(),
+        session.agent.clone(),
+        session.compaction_flight.clone(),
+        session.refinement_signal(),
+        Some(agent_dir),
+        refine::RefineOptions {
+            global: true,
+            ..Default::default()
+        },
+        refine::RefinementSource::User,
+        session_ai_model(),
+        Box::new(|_, _, _| panic!("disabled refinement must not call the planner")),
+        global_dir.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("disabled"));
+    assert!(!crate::refinement::get_harness_state_path(&global_dir).exists());
+}
+
 #[tokio::test]
 async fn prepared_refinement_cannot_change_harness_during_an_active_run() {
     let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
