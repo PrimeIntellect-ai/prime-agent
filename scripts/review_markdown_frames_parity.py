@@ -49,6 +49,7 @@ class StyledScreen(Screen):
         self.mods = set()
         self.styles = [[None] * width for _ in range(height)]
         self.style_errors = []
+        self.keyboard_controls = []
 
     def sgr(self, params):
         nums = [int(x or 0) for x in params.split(";")]
@@ -102,6 +103,24 @@ class StyledScreen(Screen):
                     if hit is None: break
                     token, self.stream = self.stream[:hit.end()], self.stream[hit.end():]
                     params, _, command = hit.groups()
+                    # These private controls configure/query keyboard input. They
+                    # never modify painted cells; interpreting >4 as SGR4 would
+                    # invent underline, and int('>4') is not a color parser.
+                    if command == 'm' and params in ('>4;0', '>4;1', '>4;2'):
+                        self.keyboard_controls.append(token)
+                        continue
+                    if command == 'u' and params == '?':
+                        self.keyboard_controls.append(token)
+                        # Our PTY input driver sends ordinary legacy keys only.
+                        replies.append(b'\x1b[?0u')
+                        continue
+                    if command == 'u' and (re.fullmatch(r'[>=]\d+(?:;\d+)?', params)
+                                            or re.fullmatch(r'<\d*', params)):
+                        self.keyboard_controls.append(token)
+                        continue
+                    if params.startswith(('?', '<', '>')) and command not in 'hlnc':
+                        self.style_errors.append(f"unsupported private VT command {token!r}")
+                        continue
                     nums = [int(x) if x.isdigit() else 0 for x in params.lstrip("?<>").split(";")]
                     n = nums[0] or 1
                     if command == "m": self.sgr(params)
@@ -207,6 +226,7 @@ def capture(kind, binary, root, hello, text, width):
             raise RuntimeError("actual PTY did not render both bold and italic modifiers")
         result.update(executed=True, styled_region=region, commands=server.commands,
                       osc8_observed=any(style and style[3] for style in painted),
+                      keyboard_controls=terminal.screen.keyboard_controls,
                       screen=terminal.screen.text())
     except Exception as error: result["error"] = f"{type(error).__name__}: {error}"
     finally:

@@ -5,6 +5,31 @@ from review_markdown_frames_parity import StyledScreen, START, END, CORPUS
 
 
 class CaptureTests(unittest.TestCase):
+    def test_captured_keyboard_controls_are_not_sgr(self):
+        screen = StyledScreen(40)
+        screen.feed(b'\x1b[1mA\x1b[>4;0mB')
+        replies = screen.feed(b'\x1b[?uC')
+        self.assertEqual(replies, [b'\x1b[?0u'])
+        self.assertEqual(screen.keyboard_controls, ['\x1b[>4;0m', '\x1b[?u'])
+        self.assertEqual(screen.styles[0][:3], [(None, None, (1,), None)] * 3)
+        self.assertEqual(screen.style_errors, [])
+
+    def test_partial_keyboard_query_and_config_wait_for_terminator(self):
+        screen = StyledScreen(40)
+        self.assertEqual(screen.feed(b'\x1b[>4;'), [])
+        self.assertEqual(screen.keyboard_controls, [])
+        screen.feed(b'0m\x1b[?')
+        self.assertEqual(screen.keyboard_controls, ['\x1b[>4;0m'])
+        self.assertEqual(screen.feed(b'u'), [b'\x1b[?0u'])
+        self.assertEqual(screen.style_errors, [])
+
+    def test_unknown_private_styles_and_geometry_still_fail(self):
+        screen = StyledScreen(40)
+        screen.feed(b'\x1b[>31m\x1b[3S')
+        self.assertEqual(len(screen.style_errors), 2)
+        self.assertEqual(screen.fg, None)
+        self.assertEqual(screen.mods, set())
+
     def test_fragmented_sgr_and_osc8_keep_cell_attributes(self):
         screen = StyledScreen(40)
         chunks = [b'\x1b[38;2;1;', b'2;3m\x1b[1mA\x1b[22mB',
