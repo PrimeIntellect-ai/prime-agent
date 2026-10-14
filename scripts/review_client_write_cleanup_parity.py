@@ -9,6 +9,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import signal
+import time
 import subprocess
 import tempfile
 import threading
@@ -70,6 +72,38 @@ class WireClient(Client):
         self.raw_wire = []
         self.sock = RecordedIO(self.sock, self.raw_wire, 'out')
         self.reader = RecordedIO(self.reader, self.raw_wire, 'in')
+
+
+def owned_processes(root):
+    """Linux hosted receipt: exact unique fixture agent-dir environment ownership."""
+    expected = ('PRIME_AGENT_CODING_AGENT_DIR=' + str(root / 'agent')).encode()
+    owned = []
+    for directory in Path('/proc').iterdir():
+        if directory.name.isdigit():
+            try:
+                if expected in (directory / 'environ').read_bytes().split(b'\0'):
+                    owned.append(int(directory.name))
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                pass
+    return owned
+
+
+def settle_owned_processes(root, observed):
+    deadline = time.monotonic() + LIMIT
+    while owned_processes(root) and time.monotonic() < deadline:
+        threading.Event().wait(0.025)
+    remaining = owned_processes(root)
+    observed['remaining_owned_processes'] = remaining
+    if remaining:
+        # Failed cleanup never becomes a green receipt. Best-effort signals
+        # recheck exact fixture ownership before touching each detached process.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid in owned_processes(root):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+        raise RuntimeError('owned fixture processes survived shutdown: ' + str(remaining))
 
 
 def canonical(value):
@@ -141,8 +175,8 @@ def run_case(binary, kind, root, observed):
         observed['canonical_action_responses'] = canonical(responses)
         observed['hello'] = observer.hello
         observed['provider_requests'] = provider.requests
-        observed['verified'] = True
     finally:
+        cleanup_error = None
         provider.release.set()
         if process and process.poll() is None and clients:
             try:
@@ -151,6 +185,9 @@ def run_case(binary, kind, root, observed):
                 observed['shutdown'] = 'owned supervisor and workers stopped'
             except Exception as error:
                 observed['shutdown_error'] = str(error)
+                cleanup_error = error
+        elif process:
+            cleanup_error = RuntimeError('daemon exited before owned shutdown acknowledgement')
         if process:
             stop(process)
         observed['raw_wire'] = [client.raw_wire for client in clients]
@@ -162,6 +199,14 @@ def run_case(binary, kind, root, observed):
             observed['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')[-6000:]
         provider.shutdown()
         provider.server_close()
+        try:
+            settle_owned_processes(root, observed)
+        except Exception as error:
+            cleanup_error = cleanup_error or error
+        if cleanup_error:
+            observed['verified'] = False
+            raise RuntimeError('fixture cleanup failed: ' + str(cleanup_error)) from cleanup_error
+    observed['verified'] = True
 
 
 def main():
