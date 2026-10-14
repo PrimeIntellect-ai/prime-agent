@@ -337,9 +337,8 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 first,
                 ordered,
                 start,
-                indent,
+                ListNesting { indent, depth: 0 },
                 content_col,
-                0,
             );
             blocks.push(Block {
                 kind: BlockKind::List(list),
@@ -489,6 +488,11 @@ fn list_line_budget(
     width.saturating_sub(used).max(1)
 }
 
+struct ListNesting {
+    indent: usize,
+    depth: usize,
+}
+
 /// Parse one list level (marked's list rule): marker lines of the level's own
 /// type start items (a marker line indented between the level indent and the
 /// current item's content column is absorbed as a sibling — marked renumbers
@@ -503,10 +507,10 @@ fn parse_list_level(
     first: ListItem,
     ordered: bool,
     start: usize,
-    indent: usize,
+    nesting: ListNesting,
     first_content_col: usize,
-    depth: usize,
 ) -> ListBlock {
+    let ListNesting { indent, depth } = nesting;
     let mut items = vec![first];
     // The column the current item's content starts at: a line indented to it is
     // the item's continuation or a nested list; a marker line between the level
@@ -548,9 +552,11 @@ fn parse_list_level(
                     child_first,
                     child_ordered,
                     child_start,
-                    line_indent,
+                    ListNesting {
+                        indent: line_indent,
+                        depth: depth + 1,
+                    },
                     line_indent + marker_w,
-                    depth + 1,
                 );
                 items
                     .last_mut()
