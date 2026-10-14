@@ -69,9 +69,11 @@ class DockScreen:
                         continue
                     if command == 'u' and params == '?':
                         self.keyboard_controls.append(sequence)
-                        # The PTY driver sends legacy ordinary keys and supports
-                        # no Kitty enhancement flags: report exactly zero.
-                        replies.append(b'\x1b[?0u')
+                        # Even a zero-flags reply advertises Kitty support to
+                        # crossterm (vendor terminal/sys/unix.rs:255). This PTY
+                        # emits legacy keys: stay silent on the Kitty query.
+                        # The following DA1 query's response settles non-Kitty
+                        # through KeyboardEnhancementFlagsFilter instead.
                         continue
                     if command == 'u' and (re.fullmatch(r'[>=]\d+(?:;\d+)?', params)
                                            or re.fullmatch(r'<\d*', params)):

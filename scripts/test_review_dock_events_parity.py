@@ -94,18 +94,30 @@ class CaptureTests(unittest.TestCase):
         self.assertEqual(screen.sgr, before)
         self.assertEqual(screen.styles[0][0], before)
         self.assertNotIn('4', screen.styles[0][0])
-        self.assertEqual(replies, [b'\x1b[?0u'])
+        self.assertEqual(replies, [])
         self.assertEqual(screen.keyboard_controls,
                          ['\x1b[>4;0m', '\x1b[?u', '\x1b[>1u', '\x1b[<u'])
         self.assertEqual(screen.unsupported_terminal, [])
 
-    def test_partial_keyboard_query_replies_only_when_complete(self):
+    def test_partial_keyboard_query_never_advertises_kitty_support(self):
         screen = DockScreen()
         self.assertEqual(screen.feed(b'\x1b[?'), [])
         self.assertEqual(screen.keyboard_controls, [])
-        self.assertEqual(screen.feed(b'u'), [b'\x1b[?0u'])
+        self.assertEqual(screen.feed(b'u'), [])
         self.assertEqual(screen.feed(b'\x1b[>9;0m'), [])
         self.assertEqual(screen.unsupported_terminal, ['\x1b[>9;0m'])
+
+    def test_full_crossterm_probe_gets_only_non_kitty_da1_reply(self):
+        screen = DockScreen()
+        screen.feed(b'\x1b[31m1 subagents')
+        before = screen.dock_styles()
+        cursor = (screen.row, screen.col)
+        replies = screen.feed(b'\x1b[?u\x1b[c')
+        self.assertEqual(replies, [b'\x1b[?1;2c'])
+        self.assertFalse(any(reply.endswith(b'u') for reply in replies))
+        self.assertEqual(screen.dock_styles(), before)
+        self.assertEqual((screen.row, screen.col), cursor)
+        self.assertEqual(screen.unsupported_terminal, [])
 
     def test_dock_hello_advertises_implemented_roster_capability(self):
         server = DockSupervisor.__new__(DockSupervisor)
