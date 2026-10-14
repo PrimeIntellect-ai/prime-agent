@@ -205,12 +205,14 @@ fn render_inline_ctx(
             }
             let doubled = i + 1 < bytes.len() && bytes[i + 1] == c;
             let (len, close_search) = if doubled { (2, i + 2) } else { (1, i + 1) };
-            if let Some(close) = find_closing(&bytes, close_search, c, len) {
-                if c == '_' && !underscore_can_close(&bytes, close, len) {
-                    buf.push(c);
-                    i += 1;
-                    continue;
-                }
+            // An intraword `_` cannot close, but the opener still matches a
+            // later one — keep searching instead of giving up.
+            let mut close = find_closing(&bytes, close_search, c, len);
+            while close.is_some_and(|k| c == '_' && !underscore_can_close(&bytes, k, len)) {
+                let resume = close.expect("checked Some") + len;
+                close = find_closing(&bytes, resume, c, len);
+            }
+            if let Some(close) = close {
                 if doubled {
                     // A closer run of three (`**outer *inner***`): the extra star
                     // pairs with the inner single delimiter, the outer keeps the

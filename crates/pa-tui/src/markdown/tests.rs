@@ -1593,3 +1593,21 @@ fn continuation_after_a_nested_list_keeps_source_order() {
         );
     }
 }
+
+#[test]
+fn an_underscore_opener_keeps_searching_for_a_closer() {
+    // `_foo_bar_`: the first candidate closer is intraword (cannot close),
+    // so the opener keeps searching — marked renders em(`foo_bar`).
+    let style = MarkdownStyle::default();
+    let spans = render_inline("_foo_bar_", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "foo_bar");
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    // The intraword rejection still holds when no closer exists.
+    let spans = render_inline("snake_case_name", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "snake_case_name");
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty());
+    }
+}
