@@ -190,7 +190,6 @@ struct ListBlock {
     items: Vec<ListItem>,
 }
 
-/// One list item: its own text lines (continuation lines included) and the
 /// One item part, in source order: a text line or a nested list.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ListPart {

@@ -346,7 +346,7 @@ fn image_marker_before(bytes: &[char], at: usize) -> bool {
         backslashes += 1;
         j -= 1;
     }
-    backslashes % 2 == 0
+    backslashes.is_multiple_of(2)
 }
 
 /// Recurse into one inline construct's inner text and merge the result into the
