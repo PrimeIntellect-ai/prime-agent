@@ -171,14 +171,16 @@ impl Supervisor {
         let dispatch_slots = Arc::new(tokio::sync::Semaphore::new(
             crate::backpressure::CLIENT_DISPATCH_CONCURRENCY,
         ));
-        loop {
+        // The loop yields the connection's result; a write failure parks the
+        // error and falls through the shared exit tail below.
+        let served: Result<()> = 'serve: loop {
             line.clear();
             tokio::select! {
                 biased;
                 read = reader.read_line(&mut line), if dispatch_slots.available_permits() > 0 => {
-                    let Ok(read) = read else { break };
+                    let Ok(read) = read else { break 'serve Ok(()) };
                     if read == 0 {
-                        break;
+                        break 'serve Ok(());
                     }
                     let trimmed = line.trim().to_string();
                     if trimmed.is_empty() {
@@ -214,18 +216,9 @@ impl Supervisor {
                         if dispatch_tx.send((lines, stop)).await.is_err() && stop {
                             // Only a terminal shutdown owns the descriptor-deleting stop pass; an
                             // update restart must leave its descriptors for the successor.
-                            let is_shutdown_owner = supervisor
-                                .shutdown_owner
-                                .lock()
-                                .unwrap()
-                                .as_deref()
-                                == Some(connection_id.as_str());
-                            if is_shutdown_owner
-                                && supervisor.shutting_down.load(Ordering::SeqCst)
-                                && !supervisor.accept_exit.load(Ordering::SeqCst)
-                            {
-                                supervisor.ensure_shutdown_started().await;
-                            }
+                            supervisor
+                                .start_shutdown_if_owner(&connection_id)
+                                .await;
                         }
                         // The slot frees only once the bundle is in the queue.
                         drop(dispatch_slot);
@@ -241,29 +234,15 @@ impl Supervisor {
                     // event-before-response socket order survives the hop.
                     if let Some(payload) = targeted {
                         if let Err(error) = write_line(&mut writer, &payload).await {
-                            // An event-write failure must not strand an
-                            // accepted shutdown: if this connection owns
-                            // the stop, it still starts the pass.
-                            let is_shutdown_owner = self
-                                .shutdown_owner
-                                .lock()
-                                .unwrap()
-                                .as_deref()
-                                == Some(connection_id.as_str());
-                            if is_shutdown_owner
-                                && self.shutting_down.load(Ordering::SeqCst)
-                                && !self.accept_exit.load(Ordering::SeqCst)
-                            {
-                                self.ensure_shutdown_started().await;
-                            }
-                            return Err(error);
+                            // An event-write failure exits through the shared cleanup below.
+                            break 'serve Err(error);
                         }
                     } else {
-                        break;
+                        break 'serve Ok(());
                     }
                 }
                 dispatched = dispatch_rx.recv() => {
-                    let Some((lines, stop)) = dispatched else { break };
+                    let Some((lines, stop)) = dispatched else { break 'serve Ok(()) };
                     for outbound in lines {
                         let written = match &outbound {
                             Outbound::Line(value) => write_line(&mut writer, value).await,
@@ -277,7 +256,7 @@ impl Supervisor {
                                 if stop {
                                     self.ensure_shutdown_started().await;
                                 }
-                                return Err(error);
+                                break 'serve Err(error);
                             }
                         };
                         // A large outbound response freed big transients: return the heap to
@@ -290,7 +269,7 @@ impl Supervisor {
                         // above; only now may the stop pass end the runtime (the accept loop
                         // stays up until begin_shutdown sets accept_exit).
                         self.ensure_shutdown_started().await;
-                        break;
+                        break 'serve Ok(());
                     }
                 }
                 event = events.recv() => {
@@ -307,20 +286,8 @@ impl Supervisor {
                             };
                             if deliver {
                                 if let Err(error) = write_line(&mut writer, &payload).await {
-                                    // An event-write failure must not strand an accepted shutdown.
-                                    let is_shutdown_owner = self
-                                        .shutdown_owner
-                                        .lock()
-                                        .unwrap()
-                                        .as_deref()
-                                        == Some(connection_id.as_str());
-                                    if is_shutdown_owner
-                                        && self.shutting_down.load(Ordering::SeqCst)
-                                        && !self.accept_exit.load(Ordering::SeqCst)
-                                    {
-                                        self.ensure_shutdown_started().await;
-                                    }
-                                    return Err(error);
+                                    // An event-write failure exits through the shared cleanup below.
+                                    break 'serve Err(error);
                                 }
                             }
                         }
@@ -331,22 +298,15 @@ impl Supervisor {
                                 "client {connection_id} lagged on the event ring: {skipped} events dropped"
                             ));
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Closed) => break 'serve Ok(()),
                     }
                 }
             }
-        }
+        };
         // Only the connection that accepted the shutdown may run the stop pass from this
         // fallback: another client disconnecting in the response window must not preempt the
-        // acknowledgement.
-        let is_shutdown_owner =
-            self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id.as_str());
-        if is_shutdown_owner
-            && self.shutting_down.load(Ordering::SeqCst)
-            && !self.accept_exit.load(Ordering::SeqCst)
-        {
-            self.ensure_shutdown_started().await;
-        }
+        // acknowledgement. Every exit path lands here, including the write failures.
+        self.start_shutdown_if_owner(&connection_id).await;
         // Detach from every attached session on disconnect (a TUI exit does not
         // stop the session). The registry entries go first — no session event may
         // be enqueued for a connection whose loop has exited.
@@ -370,7 +330,22 @@ impl Supervisor {
         // lease releases, and waiting prompt admissions cancel with the TS cancellation error.
         self.release_all_client_pauses(&connection).await;
         connection.prompt_admissions.cancel_all_waiting();
-        Ok(())
+        served
+    }
+
+    /// The accepted-shutdown fallback on a connection's exit: only the
+    /// connection that accepted the shutdown may start the stop pass, so
+    /// another client disconnecting in the response window cannot preempt
+    /// the acknowledgement.
+    async fn start_shutdown_if_owner(self: &Arc<Self>, connection_id: &str) {
+        let is_shutdown_owner =
+            self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id);
+        if is_shutdown_owner
+            && self.shutting_down.load(Ordering::SeqCst)
+            && !self.accept_exit.load(Ordering::SeqCst)
+        {
+            self.ensure_shutdown_started().await;
+        }
     }
 
     /// Whether any live connection still speaks for `client_id` (one
