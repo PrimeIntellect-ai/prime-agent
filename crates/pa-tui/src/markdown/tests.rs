@@ -1,6 +1,68 @@
 use super::*;
 use std::fmt::Write as FmtWrite;
 
+#[test]
+fn review_markdown_escaped_delimiters_keep_their_emphasis() {
+    let style = MarkdownStyle::default();
+    for (text, shown, modifier) in [
+        (r"*a\*b*", "a*b", Modifier::ITALIC),
+        (r"**a\**b**", "a**b", Modifier::BOLD),
+        (r"***a\*b***", "a*b", Modifier::BOLD | Modifier::ITALIC),
+        (r"~~a\~~b~~", "a~~b", Modifier::CROSSED_OUT),
+    ] {
+        let spans = render_inline(text, &style);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>(),
+            shown
+        );
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.style.add_modifier.contains(modifier)),
+            "{text}"
+        );
+    }
+    // Two backslashes escape each other; the following star closes emphasis.
+    let spans = render_inline(r"*a\\* tail", &style);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "a\\ tail"
+    );
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    assert_eq!(spans.last().unwrap().style.add_modifier, Modifier::empty());
+}
+
+#[test]
+fn review_markdown_destinations_balance_before_a_title() {
+    let style = MarkdownStyle::default();
+    let malformed = "[t](foo(bar \"title\")";
+    let spans = render_inline(malformed, &style);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        malformed
+    );
+    for text in ["[t](foo(bar) \"title\")", r#"[t](foo\(bar\) "a \"b\"")"#] {
+        let spans = render_inline(text, &style);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>(),
+            "t (foo(bar))"
+        );
+        assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+}
+
 // Visible-text tests discard metadata only in the legacy-capability fixture;
 // raw metadata contracts use super::render_inline/render_markdown explicitly.
 fn render_inline(text: &str, style: &MarkdownStyle) -> Line {

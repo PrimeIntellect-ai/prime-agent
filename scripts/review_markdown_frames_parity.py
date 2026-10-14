@@ -27,9 +27,14 @@ from review_draft_disconnect_parity import (
 
 START, END = "MARKDOWN FRAME START", "MARKDOWN FRAME END"
 CORPUS = {
-    "adjacent_emphasis": "**bold***italic*\n**outer *inner***\n**outer *inner* tail***next*\n**outer `*` tail***next*",
+    "adjacent_emphasis": "**bold***italic*\n**outer *inner***\n**outer *inner* tail***next*\n**outer `*` tail***next*\n" + r'''*a\*b* **a\**b**
+***a\*b*** ~~a\~~b~~
+*a\\* tail''',
     "escaped_titles": r'''[t](https://example.com "a \"b\"")
-[t](https://example.com 'a \'b\'')''',
+[t](https://example.com 'a \'b\'')
+[t](foo(bar) "title")
+[t](foo\(bar\) "a \"b\"")
+[t](foo(bar "title")''',
     "headings": "# Heading one\n## Heading two\n#### Heading four\n###### Heading six",
     "nested_lists": "1. parent\n   - child\n     - leaf\n   continuation\n2. sibling",
     "quotes": "> quoted **bold** and `code`\n> lazy continuation",

@@ -1,6 +1,8 @@
-//! Terminal hyperlinks (OSC 8), gated on terminal capabilities: a
-//! positively-capable terminal wraps the link text in an OSC 8 pair; the
-//! legacy form prints the URL after the text. The renderer embeds the
+//! Terminal hyperlinks (OSC 8). Markdown retains label metadata even when
+//! the capability decision selects a visible URL fallback, matching TS's
+//! fullscreen backend and keeping in-app hit testing available. Other UI
+//! surfaces may gate their link presentation on terminal capabilities.
+//! The renderer embeds the
 //! zero-width sequences in span content; `width` skips them, the ratatui
 //! paint path strips them (`to_ratatui_line`), and [`HyperlinkWriter`]
 //! re-emits them around the painted link cells (the sequences must ride
@@ -668,6 +670,31 @@ mod tests {
             out,
             "\x1b[1;3Hab\x1b[1;5H\x1b]8;;https://z\x1b\\cd\x1b]8;;\x1b\\\x1b[1;8Hxy"
         );
+    }
+
+    #[test]
+    fn fallback_capability_keeps_markdown_label_metadata_and_hit_testing() {
+        set_hyperlinks_override(Some(false));
+        let style = crate::markdown::MarkdownStyle::default();
+        let frame = vec![crate::markdown::render_inline(
+            "[docs](https://example.com)",
+            &style,
+        )];
+        let ranges = frame_link_ranges(&frame);
+        assert_eq!(link_at(&ranges, 0, 0), Some("https://example.com/"));
+        assert_eq!(
+            link_at(&ranges, 0, 4),
+            None,
+            "fallback URL is outside the label's region"
+        );
+        let out = paint(&frame, &[b"\x1b[1;1Hdocs (https://example.com)"]);
+        assert!(out.contains(&format!(
+            "{}docs{}",
+            osc8_open("https://example.com/"),
+            OSC8_CLOSE
+        )));
+        assert!(out.ends_with(" (https://example.com)"));
+        set_hyperlinks_override(None);
     }
 
     #[test]

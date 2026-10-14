@@ -187,10 +187,13 @@ fn render_inline_ctx(
                     bold = !bold;
                     italic = !italic;
                     let inner: String = bytes[i + 3..close].iter().collect();
-                    spans.push(Span::styled(
-                        inner,
-                        base.add_modifier(style.bold | style.italic),
-                    ));
+                    append_inner(
+                        &mut spans,
+                        &mut url_slots,
+                        &mut code_slots,
+                        render_inline_ctx(&inner, style, in_link),
+                        style.bold | style.italic,
+                    );
                     bold = !bold;
                     italic = !italic;
                     i = close + 3;
@@ -422,7 +425,7 @@ fn append_inner(
 
 /// The `CommonMark` inline-link destination after `[label](` (marked's link rule):
 /// parens ride as a balanced pair (the destination ends at its own `)`, not the
-/// first one inside), an escaped char rides verbatim, and the destination stops at
+/// first one inside), escaped punctuation consumes its backslash, and the destination stops at
 /// whitespace — a quoted title may follow before the closing paren. Returns the
 /// destination and the index of the closing `)`.
 fn link_destination(bytes: &[char], from: usize) -> Option<(String, usize)> {
@@ -438,10 +441,12 @@ fn link_destination(bytes: &[char], from: usize) -> Option<(String, usize)> {
             return Some((url, k));
         }
         if b == ' ' || b == '\t' {
+            if paren_depth != 0 {
+                return None;
+            }
             break;
         }
-        if b == '\\' && k + 1 < bytes.len() {
-            url.push(b);
+        if b == '\\' && bytes.get(k + 1).is_some_and(char::is_ascii_punctuation) {
             k += 1;
             url.push(bytes[k]);
             k += 1;
@@ -522,6 +527,12 @@ fn run_length(bytes: &[char], at: usize, delim: char) -> usize {
 fn find_closing(chars: &[char], from: usize, delim: char, len: usize) -> Option<usize> {
     let mut i = from;
     while i + len <= chars.len() {
+        // Escaped punctuation is literal, including a would-be closer. Walking
+        // escape pairs also leaves a delimiter after an even backslash run live.
+        if chars[i] == '\\' && chars.get(i + 1).is_some_and(char::is_ascii_punctuation) {
+            i += 2;
+            continue;
+        }
         if (0..len).all(|k| chars[i + k] == delim) {
             return Some(i);
         }
