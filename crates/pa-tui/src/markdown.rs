@@ -40,6 +40,7 @@ pub struct MarkdownStyle {
     /// over the highlight.js grammar). `None` renders every code line uniform in `code_block`
     /// — the TS no-valid-language fallback, and the quiet thinking theme.
     pub(crate) syntax: Option<crate::tool_card::highlight::SyntaxPalette>,
+    pub(crate) link_base_url: Option<url::Url>,
 }
 
 impl Default for MarkdownStyle {
@@ -77,6 +78,7 @@ impl MarkdownStyle {
             syntax: Some(crate::tool_card::highlight::SyntaxPalette::from_theme(
                 theme,
             )),
+            link_base_url: None,
         }
     }
 }
@@ -111,7 +113,13 @@ pub fn render_markdown_tagged(
         if block.sep_blank {
             lines.push(Vec::new());
         }
-        let key = block_cache_key(style_tag, &blocks, i, content_width);
+        let key = block_cache_key(
+            style_tag,
+            &blocks,
+            i,
+            content_width,
+            style.link_base_url.as_ref(),
+        );
         if let Some(cached) = key.as_ref().and_then(|key| cache.0.get(key)) {
             lines.extend_from_slice(cached);
             continue;
@@ -148,6 +156,7 @@ pub struct MarkdownBlockCache(std::collections::HashMap<BlockKey, Vec<Line>>);
 /// inputs structurally, so a field added later is covered automatically.
 #[derive(PartialEq, Eq, Hash)]
 struct BlockKey {
+    link_base_url: Option<url::Url>,
     style_tag: String,
     width: usize,
     kind: BlockKind,
@@ -164,6 +173,7 @@ fn block_cache_key(
     blocks: &[Block],
     index: usize,
     width: usize,
+    link_base_url: Option<&url::Url>,
 ) -> Option<BlockKey> {
     if index + 1 == blocks.len() {
         return None;
@@ -171,6 +181,7 @@ fn block_cache_key(
     let next = blocks.get(index + 1);
     let block = &blocks[index];
     Some(BlockKey {
+        link_base_url: link_base_url.cloned(),
         style_tag: style_tag.to_string(),
         width,
         kind: block.kind.clone(),
@@ -194,6 +205,8 @@ struct ListBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ListPart {
     Text(String),
+    /// A lazy soft line within nested item text: TS inline newlines resume at column zero.
+    LazyText(String),
     List(ListBlock),
 }
 
@@ -587,6 +600,15 @@ fn parse_list_level(
                 .parts
                 .push(ListPart::Text(t.to_string()));
             pending_blank = None;
+            *i += 1;
+            continue;
+        }
+        if depth > 0 && pending_blank.is_none() && !interrupts_paragraph(t, src_lines.get(*i + 1)) {
+            items
+                .last_mut()
+                .expect("the level has its first item")
+                .parts
+                .push(ListPart::LazyText(t.to_string()));
             *i += 1;
             continue;
         }
@@ -999,6 +1021,10 @@ fn list_row_count(
                     item_count += list_row_count(child, depth + 1, child_outer, width, style);
                     first_part = false;
                 }
+                ListPart::LazyText(text) => {
+                    item_count += wrapped_span_count(&render_inline(text, style), width);
+                    first_part = false;
+                }
             }
         }
         count += item_count.max(1);
@@ -1063,6 +1089,10 @@ fn render_list_level(
                 }
                 ListPart::List(child) => {
                     render_list_level(child, depth + 1, child_outer, width, style, &mut item_rows);
+                    first_part = false;
+                }
+                ListPart::LazyText(text) => {
+                    wrap_spans(&render_inline(text, style), width, &mut item_rows);
                     first_part = false;
                 }
             }

@@ -1,6 +1,83 @@
 use super::*;
 use std::fmt::Write as FmtWrite;
 
+// Visible-text tests discard metadata only in the legacy-capability fixture;
+// raw metadata contracts use super::render_inline/render_markdown explicitly.
+fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
+    let mut line = super::render_inline(text, style);
+    if !crate::hyperlinks::hyperlinks_enabled() {
+        crate::hyperlinks::strip_osc8(&mut line);
+    }
+    line
+}
+
+fn render_markdown(text: &str, width: usize, style: &MarkdownStyle) -> Vec<Line> {
+    let mut rows = super::render_markdown(text, width, style);
+    if !crate::hyperlinks::hyperlinks_enabled() {
+        for row in &mut rows {
+            crate::hyperlinks::strip_osc8(row);
+        }
+    }
+    rows
+}
+
+#[test]
+fn review_markdown_legacy_links_keep_metadata_and_session_base() {
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let mut style = MarkdownStyle::default();
+    style.link_base_url = Some(url::Url::parse("file:///workspace/project/").unwrap());
+    let line = super::render_inline("[link](url)", &style);
+    assert_eq!(
+        line,
+        vec![
+            Span::styled(
+                format!(
+                    "{}link{}",
+                    crate::hyperlinks::osc8_open("file:///workspace/project/url"),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                style.body.add_modifier(Modifier::UNDERLINED)
+            ),
+            Span::styled(" (url)", style.link_url),
+        ]
+    );
+    let mut cache = MarkdownBlockCache::default();
+    let text = "[link](url)\n\ntail";
+    let before = super::render_markdown_tagged(text, 80, &style, "", &mut cache);
+    style.link_base_url = Some(url::Url::parse("file:///workspace/other/").unwrap());
+    let after = super::render_markdown_tagged(text, 80, &style, "", &mut cache);
+    assert_ne!(before, after);
+    assert_eq!(after, super::render_markdown(text, 80, &style));
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn review_markdown_outdented_nested_text_matches_captured_ts_frame() {
+    let text = "1. parent\n   - child\n     - leaf\n   continuation\n2. sibling";
+    let style = MarkdownStyle::default();
+    let rows = render_markdown(text, 80, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|row| row.iter().map(|span| span.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "1. parent",
+            "    - child",
+            "          - leaf",
+            "continuation",
+            "2. sibling"
+        ]
+    );
+    for width in [40, 80, 120] {
+        assert_eq!(
+            markdown_row_count(text, width, &style),
+            render_markdown(text, width, &style).len()
+        );
+    }
+}
+
 #[test]
 fn review_markdown_adjacent_emphasis_keeps_the_next_opener() {
     let style = MarkdownStyle::default();
@@ -75,7 +152,9 @@ fn review_markdown_deep_lists_keep_text_with_a_bounded_tree() {
             for part in &item.parts {
                 match part {
                     ListPart::List(child) => pending.push((child, depth + 1)),
-                    ListPart::Text(text) => literal_tail |= text == "- item95",
+                    ListPart::Text(text) | ListPart::LazyText(text) => {
+                        literal_tail |= text == "- item95"
+                    }
                 }
             }
         }
@@ -1598,7 +1677,7 @@ fn a_glued_word_wider_than_the_row_wraps_to_the_next_row() {
 fn continuation_after_a_nested_list_keeps_source_order() {
     // marked walks an item's block tokens in source order: text, then the
     // nested list, then the continuation text. The item model keeps that
-    // order (the continuation keeps the R3 indented-continuation shape).
+    // order; a lazy soft continuation resumes at column zero in the TS frame.
     let style = MarkdownStyle::default();
     let rows = render_markdown("- parent\n  - child\n  after", 60, &style);
     let flat: Vec<String> = rows
@@ -1610,7 +1689,7 @@ fn continuation_after_a_nested_list_keeps_source_order() {
         vec![
             "- parent".to_string(),
             "    - child".to_string(),
-            "  after".to_string(),
+            "after".to_string(),
         ]
     );
     for width in 1..60 {

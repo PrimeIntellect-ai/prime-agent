@@ -12,6 +12,31 @@ fn view() -> AgentView {
     AgentView::new(Theme::builtin("prime", ColorMode::TrueColor))
 }
 
+#[test]
+fn markdown_link_targets_use_the_owning_view_cwd() {
+    let mut first = view();
+    first.chrome.cwd = "/workspace/first".to_string();
+    first.push_entry(ChatEntry::User {
+        text: "[link](url)".to_string(),
+    });
+    let mut second = view();
+    second.chrome.cwd = "/workspace/second".to_string();
+    second.push_entry(ChatEntry::User {
+        text: "[link](url)".to_string(),
+    });
+    let targets =
+        |v: &mut AgentView| crate::hyperlinks::frame_link_ranges(&v.render_transcript(80));
+    let first_targets = targets(&mut first);
+    let second_targets = targets(&mut second);
+    assert!(first_targets
+        .iter()
+        .any(|link| link.url == "file:///workspace/first/url"));
+    assert!(second_targets
+        .iter()
+        .any(|link| link.url == "file:///workspace/second/url"));
+    assert_eq!(targets(&mut first), first_targets);
+}
+
 /// The hardware caret never sits over the factory page: the page is an
 /// input-less replacement view, so `frame_cursor` suppresses the stale
 /// editor dock position while it is open (the settings menu's guard

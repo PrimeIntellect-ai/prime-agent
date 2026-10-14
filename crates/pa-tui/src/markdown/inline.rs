@@ -130,11 +130,14 @@ fn render_inline_ctx(
                 // The label renders underlined (the standard
                 // terminal link affordance); `modifier` carries the
                 // emphasis context.
-                let href = crate::hyperlinks::resolve_link_href(&url);
+                let href = crate::hyperlinks::resolve_link_href_with_base(
+                    &url,
+                    style.link_base_url.as_ref(),
+                );
                 let (label_spans, label_slots, label_codes) =
                     render_inline_ctx(&label, style, true);
                 let mut label_spans = label_spans;
-                if crate::hyperlinks::hyperlinks_enabled() {
+                {
                     // OSC 8: the label stays clickable (TS `hyperlink()`).
                     let open = crate::hyperlinks::osc8_open(&href);
                     if let Some(first) = label_spans.first_mut() {
@@ -342,8 +345,11 @@ fn render_inline_ctx(
                 token.text.clone(),
                 base.add_modifier(m | Modifier::UNDERLINED),
             );
-            if crate::hyperlinks::hyperlinks_enabled() {
-                let href = crate::hyperlinks::resolve_link_href(&token.href);
+            {
+                let href = crate::hyperlinks::resolve_link_href_with_base(
+                    &token.href,
+                    style.link_base_url.as_ref(),
+                );
                 label
                     .content
                     .insert_str(0, &crate::hyperlinks::osc8_open(&href));

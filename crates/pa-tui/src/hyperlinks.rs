@@ -46,19 +46,23 @@ pub fn rewrite_drive_path(url: &str) -> String {
 }
 
 /// TS `case "link"` href resolution: drive-path rewrite, then a WHATWG
-/// `new URL(target, baseUrl)` pass (the deployed renderer always sets
-/// `options.baseUrl`). Relative targets pass through raw — the one
-/// documented gap (they need cwd plumbing the markdown pipeline does not
-/// carry).
+/// `new URL(target, baseUrl)` pass. Standalone callers have no base; the
+/// session view supplies its own base through the crate-private Markdown context.
 #[must_use]
 pub fn resolve_link_href(token_href: &str) -> String {
+    resolve_link_href_with_base(token_href, None)
+}
+
+pub(crate) fn resolve_link_href_with_base(token_href: &str, base: Option<&url::Url>) -> String {
     let target = rewrite_drive_path(token_href);
     if target.starts_with('#') {
         return sanitize_control_bytes(target);
     }
     match url::Url::parse(&target) {
         Ok(parsed) => parsed.to_string(),
-        Err(_) => sanitize_control_bytes(target),
+        Err(_) => base
+            .and_then(|base| base.join(&target).ok())
+            .map_or_else(|| sanitize_control_bytes(target), |url| url.to_string()),
     }
 }
 
