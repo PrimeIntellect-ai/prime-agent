@@ -27,11 +27,11 @@ if cargo test --locked -p pa-cli --test daemon_discovery_e2e "$test_name" -- --e
   exit 1
 fi
 # Compilation failures or zero selected tests do not prove the defect.
-if ! rg -F "test $test_name ... FAILED" "$receipt_dir/red.log"; then
+if ! grep -F "test $test_name ... FAILED" "$receipt_dir/red.log"; then
   cat "$receipt_dir/red.log" >&2
   exit 1
 fi
 restore_source
 cargo test --locked -p pa-cli --test daemon_discovery_e2e "$test_name" -- --exact > "$receipt_dir/green.log" 2>&1
-rg -F "test $test_name ... ok" "$receipt_dir/green.log"
+grep -F "test $test_name ... ok" "$receipt_dir/green.log"
 cat "$receipt_dir/green.log"
