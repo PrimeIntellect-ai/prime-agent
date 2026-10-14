@@ -687,7 +687,10 @@ mod tests {
             None,
             "fallback URL is outside the label's region"
         );
-        let out = paint(&frame, &[b"\x1b[1;1Hdocs (https://example.com)"]);
+        // The actual render has separate label/body and dim fallback spans.
+        // Pin that boundary; this is not a test of splitting a homogeneous
+        // writer chunk across a link range in the middle of its bytes.
+        let out = paint(&frame, &[b"\x1b[1;1Hdocs", b" (https://example.com)"]);
         assert!(out.contains(&format!(
             "{}docs{}",
             osc8_open("https://example.com/"),
