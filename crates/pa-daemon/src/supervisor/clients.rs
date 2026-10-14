@@ -306,7 +306,8 @@ impl Supervisor {
         // Only the connection that accepted the shutdown may run the stop pass from this
         // fallback: another client disconnecting in the response window must not preempt the
         // acknowledgement. Every exit path lands here, including the write failures.
-        self.start_shutdown_if_owner(&connection_id).await;
+        self.retire_client_dispatches(&mut dispatch_rx, &connection_id)
+            .await;
         // Detach from every attached session on disconnect (a TUI exit does not
         // stop the session). The registry entries go first — no session event may
         // be enqueued for a connection whose loop has exited.
@@ -331,6 +332,15 @@ impl Supervisor {
         self.release_all_client_pauses(&connection).await;
         connection.prompt_admissions.cancel_all_waiting();
         served
+    }
+
+    /// Retire a connection's response path before its asynchronous cleanup.
+    async fn retire_client_dispatches(
+        self: &Arc<Self>,
+        _dispatch_rx: &mut tokio::sync::mpsc::Receiver<(Vec<Outbound>, bool)>,
+        connection_id: &str,
+    ) {
+        self.start_shutdown_if_owner(connection_id).await;
     }
 
     /// The accepted-shutdown fallback on a connection's exit: only the
@@ -1097,6 +1107,82 @@ mod tests {
     #[cfg(unix)]
     use std::sync::Arc;
     use std::time::Duration;
+
+    /// A response-write failure can retire the serve loop while an accepted
+    /// shutdown task has not claimed its owner yet. Keep the receiver alive
+    /// through that cleanup window, then release the real shutdown dispatch.
+    #[tokio::test]
+    async fn a_late_shutdown_cannot_send_into_a_retired_client_queue() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.path().join("daemon.sock"),
+                agent_dir: dir.path().join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::channel(1);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let late_dispatch = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move {
+                release_rx.await.expect("release the in-flight dispatch");
+                let effective = Arc::new(std::sync::Mutex::new("shutdown-client".to_string()));
+                let (targeted_tx, _targeted_rx) = tokio::sync::mpsc::channel(1);
+                let attached = subscribers::ClientSubscriptions::new(
+                    "shutdown-client".to_string(),
+                    targeted_tx,
+                );
+                let roster = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let connection = Arc::new(crate::input_pause_lease::ClientConnectionState::new());
+                let command = json!({
+                    "type": "command", "id": "late-stop",
+                    "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                    "command": { "type": "shutdown", "force": true }
+                })
+                .to_string();
+                let (lines, stop) = supervisor
+                    .dispatch_client(
+                        &command,
+                        &effective,
+                        &attached,
+                        &roster,
+                        &connection,
+                        "shutdown-client",
+                        &dispatch_tx,
+                    )
+                    .await;
+                assert!(stop, "the real shutdown dispatch accepted the stop");
+                let rejected = dispatch_tx.send((lines, stop)).await.is_err();
+                if rejected {
+                    supervisor.start_shutdown_if_owner("shutdown-client").await;
+                }
+                rejected
+            })
+        };
+        assert!(supervisor.shutdown_owner.lock().unwrap().is_none());
+        supervisor
+            .retire_client_dispatches(&mut dispatch_rx, "shutdown-client")
+            .await;
+        assert!(!supervisor.accept_exit.load(Ordering::SeqCst));
+        release_tx.send(()).expect("resume the in-flight shutdown");
+        let rejected = tokio::time::timeout(Duration::from_secs(5), late_dispatch)
+            .await
+            .expect("late dispatch settles")
+            .expect("late dispatch task");
+        assert!(
+            rejected,
+            "a retired response queue accepted the shutdown bundle"
+        );
+        assert!(supervisor.shutting_down.load(Ordering::SeqCst));
+        assert!(supervisor.shutdown_started.load(Ordering::SeqCst));
+        assert!(
+            supervisor.accept_exit.load(Ordering::SeqCst),
+            "the failed-send fallback completed the stop pass"
+        );
+        // The caller still owns the receiver during this cleanup window.
+        assert!(dispatch_rx.recv().await.is_none());
+    }
 
     #[cfg(unix)]
     #[tokio::test]
