@@ -188,6 +188,8 @@ def run_case(binary, label, root, trusted, key, cert, ca_cert, unrelated, observ
         'baseUrl': 'https://127.0.0.1:%s/v1' % server.server_address[1],
         'models': [{'id': 'ca-fixture', 'name': 'CA fixture', 'reasoning': False,
                     'contextWindow': 128000, 'maxTokens': 4096}]}}}))
+    (agent / 'prompts').mkdir()
+    (agent / 'prompts/transport-warm.md').write_text('Complete the transport fixture.')
     (agent / 'settings.json').write_text(json.dumps({'defaultProvider': 'fixture',
         'defaultModel': 'ca-fixture', 'prewarmPythonKernel': False,
         'retry': {'enabled': False}}))
@@ -207,6 +209,15 @@ def run_case(binary, label, root, trusted, key, cert, ca_cert, unrelated, observ
         active = created.get('activeSessionId') or created.get('id')
         assert active, created
         client.call('attach', activeSessionId=active)
+        # The ordinary UI requests its slash-command catalog before a turn.
+        # This public read builds Rust's lazy core before user admission; a
+        # real fixture template proves the build succeeded rather than
+        # accepting its empty-on-build-error fallback. Cold admission is
+        # separately blocked by the known #3560 bug, not normalized here.
+        catalog = client.call('get_commands', activeSessionId=active)
+        observation['startup_command_catalog'] = catalog
+        assert any(row.get('name') == 'transport-warm' for row in catalog['commands']), catalog
+        assert not server.requests, 'startup catalog unexpectedly invoked the provider'
         try:
             client.call('prompt_and_wait', activeSessionId=active, message=PROMPT)
         except AssertionError:
@@ -267,7 +278,8 @@ def main():
     args = parser.parse_args()
     result = {'verified': False, 'runs': {}, 'scope': __doc__,
               'retry_scope': 'Set documented retry.enabled=false identically in both real runtimes; compare certificate outcome, not retry policy.',
-              'execution_scope': 'Explicit owned daemon, ordinary create/attach/prompt_and_wait/get_messages, graceful shutdown acknowledgement then close socket before waiting.',
+              'dependency_scope': 'Warm ordinary startup get_commands before admission in both binaries. Cold lazy-first-prompt duplicate remains an unresolved dependency on #3560; no prompt deduplication or production repair in this TLS PR.',
+              'execution_scope': 'Explicit owned daemon, ordinary create/attach/get_commands/prompt_and_wait/get_messages, graceful shutdown acknowledgement then close socket before waiting.',
               'prompt_scope': 'Compare current fixture prompt once, auth, model, stream and outcome. Harness digests/unrelated layers excluded; raw messages retained.',
               'cache_scope': 'Each case starts a fresh actual process. No assertion about in-process native-store refresh or TS native-root caching.'}
     try:
