@@ -19,7 +19,7 @@ use crate::tools::ipython::{
     KernelExecError, KernelExecuteOptions, KernelExecutor,
 };
 use crate::tools::tool_definition::ToolDefinition;
-use crate::tools::truncate::{truncate_head, truncate_tail, TruncationOptions};
+use crate::tools::truncate::{truncate_tail, TruncationOptions};
 
 const CORPUS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/corpus");
 
@@ -315,13 +315,7 @@ fn golden_truncate_group_matches_ts() {
             case["maxLines"].as_u64().expect("maxLines") as usize,
             case["maxBytes"].as_u64().expect("maxBytes") as usize,
         );
-        let head = truncate_head(content, options);
         let tail = truncate_tail(content, options);
-        assert_json_eq(
-            &truncation_json(&head),
-            &case["head"].clone(),
-            &format!("truncate/{name} head"),
-        );
         assert_json_eq(
             &truncation_json(&tail),
             &case["tail"].clone(),

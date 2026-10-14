@@ -13,11 +13,9 @@ pub(crate) mod jsdiff;
 pub(crate) mod output_accumulator;
 #[allow(dead_code)] // util module; every fn exercised by unit + golden tests
 pub(crate) mod path_utils;
-#[allow(dead_code)] // render helpers; consumed by the TUI-side renderer (parity-ported here)
 pub(crate) mod render_utils;
 pub(crate) mod rlm_bootstrap;
 #[allow(dead_code)] // util module; fully exercised by unit + golden tests
 pub(crate) mod shell_utils;
 pub(crate) mod tool_definition;
-#[allow(dead_code)] // util module; fully exercised by unit + golden tests
 pub(crate) mod truncate;
