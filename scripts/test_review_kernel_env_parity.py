@@ -5,7 +5,7 @@ import asyncio
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch, MagicMock
-from review_kernel_env_parity import current_probe, CODE, MARKER, owned_kernel, invoke_clean
+from review_kernel_env_parity import current_probe, CODE, MARKER, owned_kernel, finish_daemon
 
 
 def requests(content=None):
@@ -62,13 +62,21 @@ class ProbeTests(unittest.TestCase):
                 patch('pathlib.Path.read_bytes', side_effect=[env, b'/fixture/python3\0-m\0rlm.kernel\0']):
             self.assertEqual(owned_kernel(789, 123, '/fixture', 'proc:456'), 'proc:456')
 
-    def test_successful_process_without_kernel_ownership_is_not_verified(self):
-        process = MagicMock(pid=123, returncode=0)
-        process.communicate.return_value = ('fixture output', '')
-        with patch('review_kernel_env_parity.subprocess.Popen', return_value=process), \
-                patch('pathlib.Path.iterdir', return_value=[]), patch('review_kernel_env_parity.stop'):
-            with self.assertRaisesRegex(AssertionError, 'capture kernel ownership'):
-                invoke_clean(['/fixture/binary'], '/fixture', {'PA_KERNEL_ENV_FIXTURE_ID': '/fixture'}, {})
+    def test_shutdown_ack_then_control_close_then_process_exit(self):
+        events = []
+        client, process = MagicMock(), MagicMock(returncode=0)
+        client.call.side_effect = lambda *a, **k: events.append('ack')
+        client.close.side_effect = lambda: events.append('client_closed')
+        process.wait.side_effect = lambda **k: events.append('process_exit')
+        finish_daemon(client, process)
+        self.assertEqual(events, ['ack', 'client_closed', 'process_exit'])
+
+    def test_refused_shutdown_is_not_cleanup_success(self):
+        client, process = MagicMock(), MagicMock(returncode=0)
+        client.call.side_effect = AssertionError('refused')
+        with self.assertRaisesRegex(AssertionError, 'refused'):
+            finish_daemon(client, process)
+        process.wait.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -20,8 +20,10 @@ import threading
 
 from review_restore_notice_parity import texts, Server, sha256, TS_ARCHIVE_SHA256
 from review_draft_disconnect_parity import stop
+from review_agent_bounce_parity import Client
 
 MARKER = 'KERNEL_ENV_PARITY='
+LIMIT = 35
 CODE = '''import os, json
 shell = await bash("printf '%s' \\"${PA_PREFIX_SENTINEL:-ABSENT}\\"")
 print('KERNEL_ENV_PARITY=' + json.dumps({'serper': os.environ.get('SERPER_API_KEY'),
@@ -112,76 +114,73 @@ def owned_kernel(pid, owner, fixture, identity=None):
         return None
 
 
-def same_live_process(pid, identity):
-    try:
-        current, state = proc_identity(pid)
-        return current == identity and state != 'Z'
-    except FileNotFoundError:
-        return False
+def process_identity(pid):
+    stat = Path('/proc/%d/stat' % pid).read_text()
+    fields = stat[stat.rfind(')') + 2:].split()
+    return 'proc:' + fields[19], fields[0]
 
 
-def invoke_clean(command, cwd, env, observation):
-    # Continuously discover only kernels bearing BOTH this root's unique fixture
-    # tag and this exact invocation's kernel-owner pid. Preserve process start
-    # identity so a recycled pid cannot become a cleanup signal target.
-    process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, start_new_session=True)
-    tracked = {}
-    finished = threading.Event()
-    fixture = env['PA_KERNEL_ENV_FIXTURE_ID']
-    def discover():
-        while not finished.is_set():
-            for entry in Path('/proc').iterdir():
-                if entry.name.isdigit():
-                    pid = int(entry.name)
-                    identity = owned_kernel(pid, process.pid, fixture)
-                    if identity:
-                        tracked[pid] = identity
-            finished.wait(0.025)
-    tracker = threading.Thread(target=discover, daemon=True)
-    tracker.start()
-    cleanup_error = None
-    try:
-        stdout, stderr = process.communicate(timeout=75)
-        if process.returncode:
-            raise RuntimeError('binary exited %s: %s' % (process.returncode, stderr[-3000:]))
-        return {'exit_code': process.returncode, 'stdout': stdout, 'stderr': stderr}
-    finally:
-        finished.set()
-        tracker.join(timeout=2)
-        stop(process)  # Only the invocation's own process group.
-        observation['owned_kernel_identities'] = dict(tracked)
-        if process.returncode == 0:
-            assert tracked, 'successful fixture did not capture kernel ownership'
-        # Gracefully stop any remaining identity-verified detached kernels. This
-        # is fixture cleanup, not a claim of equivalent shutdown behavior.
-        for pid, identity in tracked.items():
-            if owned_kernel(pid, process.pid, fixture, identity):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            remaining = {pid: identity for pid, identity in tracked.items()
-                if same_live_process(pid, identity)}
-            if not remaining:
-                break
-            threading.Event().wait(0.025)
-        else:
-            # A final narrowly owned kill avoids leaving a CI kernel behind,
-            # but escalation is a failed cleanup receipt, never parity success.
-            cleanup_error = 'kernel did not stop after SIGTERM: ' + str(list(remaining))
-            for pid, identity in remaining.items():
-                if owned_kernel(pid, process.pid, fixture, identity):
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-        assert not tracker.is_alive(), 'kernel ownership tracker did not stop'
-        observation['cleanup_verified'] = cleanup_error is None
-        if cleanup_error:
-            raise AssertionError(cleanup_error)
+def worker_descriptor(agent, active, socket_path, deadline=None, previous=None):
+    deadline = deadline or time.monotonic() + LIMIT
+    while time.monotonic() < deadline:
+        candidates = list((agent / 'daemon-workers').rglob('*.json'))
+        for path in candidates:
+            try:
+                row = json.loads(path.read_text())
+                pid = row.get('pid')
+                if (row.get('rootActiveSessionId') == active
+                        and row.get('supervisorSocketPath') == str(socket_path)
+                        and isinstance(pid, int) and pid > 0 and pid != previous):
+                    return path, row
+            except (OSError, ValueError):
+                pass  # Atomic/transitional descriptor writes are not readiness.
+        threading.Event().wait(0.025)
+    raise AssertionError('fixture worker descriptor never reached readiness')
+
+
+def verify_worker(row, active, binary, socket_path):
+    pid = row['pid']
+    assert row.get('rootActiveSessionId') == active, 'wrong descriptor identity'
+    assert row.get('supervisorSocketPath') == str(socket_path), 'wrong supervisor descriptor'
+    command = Path('/proc/%d/cmdline' % pid).read_bytes().split(b'\0')
+    assert command[0] == str(binary).encode(), 'worker argv0 is not fixture binary'
+    env = dict(item.split(b'=', 1) for item in Path('/proc/%d/environ' % pid).read_bytes().split(b'\0') if b'=' in item)
+    for key, value in {
+        'PRIME_AGENT_INTERNAL_DAEMON_WORKER': '1',
+        'PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID': active,
+        'PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET': str(socket_path),
+    }.items():
+        assert env.get(key.encode()) == value.encode(), 'wrong fixture worker env identity'
+    worker_socket = str(row['socketPath']).encode()
+    assert (worker_socket in command or env.get(b'PRIME_AGENT_INTERNAL_DAEMON_WORKER_SOCKET') == worker_socket), 'wrong worker socket identity'
+    identity, state = process_identity(pid)
+    assert row.get('processStartId') == identity and state != 'Z', 'wrong/reused worker PID'
+    return pid, identity
+
+
+def wait_gone(identities):
+    deadline = time.monotonic() + LIMIT
+    while time.monotonic() < deadline:
+        alive = []
+        for pid, identity in identities:
+            try:
+                current, state = process_identity(pid)
+                if current == identity and state != 'Z':
+                    alive.append(pid)
+            except FileNotFoundError:
+                pass
+        if not alive:
+            return
+        threading.Event().wait(0.025)
+    raise AssertionError('owned fixture processes remained after shutdown: ' + str(alive))
+
+
+
+def finish_daemon(client, process):
+    client.call('shutdown', force=True)
+    client.close()
+    process.wait(timeout=15)
+    assert process.returncode == 0, 'fixture supervisor failed graceful shutdown'
 
 
 def run_case(binary, label, name, case, root, observation):
@@ -225,30 +224,92 @@ def run_case(binary, label, name, case, root, observation):
     (agent / 'settings.json').write_text(json.dumps({'defaultProvider': 'fixture',
         'defaultModel': 'env-fixture', 'prewarmPythonKernel': False,
         'shellCommandPrefix': case['prefix'], 'bundledSkills': {'websearch': False}}))
+    socket_path = root / 'd.sock'
+    log = open(root / 'daemon.log', 'wb')
+    process = subprocess.Popen([str(binary), '--mode', 'daemon', '--daemon-socket', str(socket_path)],
+        cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    client = None
+    tracker = None
+    finished = threading.Event()
+    kernels = {}
+    tracked = set()
+    primary_error = None
+    worker_pid = None
+    fixture = env['PA_KERNEL_ENV_FIXTURE_ID']
     try:
-        observation['run'] = invoke_clean([str(binary), '--mode', 'json', '--provider', 'fixture',
-            '--model', 'env-fixture', '--session-dir', str(root / 'sessions'),
-            'Run the kernel environment fixture cell.'], cwd, env, observation)
+        client = Client(socket_path, process)
+        created = client.call('create', name='kernel-env-' + name, config={
+            'cwd': str(cwd), 'agentDir': str(agent), 'sessionDir': str(root / 'sessions'),
+            'provider': 'fixture', 'model': 'env-fixture', 'noExtensions': True,
+            'noContextFiles': True, 'telemetryDisabled': True})
+        active = created.get('activeSessionId') or created.get('id')
+        assert active, 'create omitted active identity'
+        _, descriptor = worker_descriptor(agent, active, socket_path)
+        worker_pid, worker_identity = verify_worker(descriptor, active, binary, socket_path)
+        tracked.add((worker_pid, worker_identity))
+        def discover():
+            while not finished.is_set():
+                for entry in Path('/proc').iterdir():
+                    if entry.name.isdigit():
+                        pid = int(entry.name)
+                        identity = owned_kernel(pid, worker_pid, fixture)
+                        if identity:
+                            kernels[pid] = identity
+                finished.wait(0.025)
+        tracker = threading.Thread(target=discover, daemon=True)
+        tracker.start()
+        # Raw daemon user input is identical in both products. This avoids TS's
+        # CLI->daemon worker route vs Rust's in-process JSON route entirely.
+        client.call('prompt_and_wait', activeSessionId=active, message='Run the kernel environment fixture cell.')
         observation['probe'] = current_probe(server.requests[name], name)
         assert observation['probe'] == expected(case), (observation['probe'], expected(case))
         ran = case['skill'] and (case['ambient'] is None or not case['ambient'].strip())
         assert invoked.exists() == ran, 'credential command ran outside its skill/ambient gate'
         observation['credential_command_ran'] = invoked.exists()
+        assert kernels, 'successful fixture did not capture kernel ownership'
+    except BaseException as error:
+        primary_error = error
+        observation['primary_error'] = str(error)
+        raise
     finally:
+        finished.set()
+        if tracker:
+            tracker.join(timeout=2)
+        observation['owned_kernel_identities'] = dict(kernels)
+        tracked.update(kernels.items())
         observation['requests'] = server.requests[name]
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+        cleanup_error = None
+        try:
+            assert client is not None, 'fixture did not establish cleanup control'
+            observation['wire'] = client.wire
+            finish_daemon(client, process)  # Close after ack, before waiting for TS exit.
+            wait_gone(tracked)
+            assert tracker is None or not tracker.is_alive(), 'kernel tracker did not stop'
+            observation['cleanup_verified'] = True
+        except Exception as error:
+            cleanup_error = error
+            observation['cleanup_error'] = str(error)
+        finally:
+            if client:
+                client.close()
+            stop(process)
+            log.close()
+            observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')[-6000:]
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        if cleanup_error and primary_error is None:
+            raise AssertionError('fixture cleanup failed: ' + str(cleanup_error)) from cleanup_error
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
-    receipt = {'verified': False, 'runs': {}, 'scope': 'Actual REPL kernel env + real bash output; '
+    receipt = {'verified': False, 'runs': {}, 'scope': 'Identical raw daemon create/prompt_and_wait + actual REPL kernel env + real bash output; '
         'command-backed credential, trimming, ambient precedence, custom skill gate, empty-prefix omission',
         'not_verified': ['Windows PYTHONUTF8 behavior (cross-compiled Rust regression only)',
-                         'TUI frame comparison; runtime settings reload of captured env'],
+                         'TUI/JSON CLI sender routing; runtime settings reload of captured env'],
         'normalization': 'Identical synthetic scalar results; legacy offered ipython/python_repl tool name selected per binary. Raw traffic retained.'}
     try:
         assert sys.platform == 'linux', 'requires hosted Linux binaries'
