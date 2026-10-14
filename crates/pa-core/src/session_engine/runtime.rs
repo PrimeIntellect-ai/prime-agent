@@ -84,78 +84,43 @@ impl SessionRuntime {
         handlers: &mut HostRequestHandlers,
     ) {
         let driver = self.goal_driver.clone();
-        let goal_session = session.clone();
-        handlers.register(
-            "goal.get",
-            host_handler(move |payload| {
-                let driver = driver.clone();
-                let session = goal_session.clone();
-                Box::pin(async move {
-                    let mut driver = driver.lock().await;
-                    let mut session = session.lock().await;
-                    let response = handle_goal_host_request(
-                        payload
-                            .data
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("goal.get"),
-                        &payload.data,
-                        &mut driver,
-                        &mut session,
-                    )?;
-                    host_ok(&response)
-                })
-            }),
-        );
-        let driver = self.goal_driver.clone();
-        let goal_session = session.clone();
-        handlers.register(
-            "goal.create",
-            host_handler(move |payload| {
-                let driver = driver.clone();
-                let session = goal_session.clone();
-                Box::pin(async move {
-                    let mut driver = driver.lock().await;
-                    let mut session = session.lock().await;
-                    let response = handle_goal_host_request(
-                        "goal.create",
-                        &payload.data,
-                        &mut driver,
-                        &mut session,
-                    )?;
-                    host_ok(&response)
-                })
-            }),
-        );
-        let driver = self.goal_driver.clone();
         let goal_session = session;
         // TS `_completeGoalFromHost` clears the queued goal contexts: a continuation
         // queued behind the completing turn never runs post-completion.
         let goal_complete_purge = self.goal_complete_purge.clone();
-        handlers.register(
-            "goal.complete",
-            host_handler(move |payload| {
-                let driver = driver.clone();
-                let session = goal_session.clone();
-                let purge = goal_complete_purge.clone();
-                Box::pin(async move {
-                    let response = {
-                        let mut driver = driver.lock().await;
-                        let mut session = session.lock().await;
-                        handle_goal_host_request(
-                            "goal.complete",
-                            &payload.data,
-                            &mut driver,
-                            &mut session,
-                        )?
-                    };
-                    if let Some(purge) = purge {
-                        purge();
-                    }
-                    host_ok(&response)
-                })
-            }),
-        );
+        for request_type in ["goal.get", "goal.create", "goal.complete"] {
+            let driver = driver.clone();
+            let session = goal_session.clone();
+            let purge = if request_type == "goal.complete" {
+                goal_complete_purge.clone()
+            } else {
+                None
+            };
+            handlers.register(
+                request_type,
+                host_handler(move |payload| {
+                    let driver = driver.clone();
+                    let session = session.clone();
+                    let purge = purge.clone();
+                    Box::pin(async move {
+                        let response = {
+                            let mut driver = driver.lock().await;
+                            let mut session = session.lock().await;
+                            handle_goal_host_request(
+                                request_type,
+                                &payload.data,
+                                &mut driver,
+                                &mut session,
+                            )?
+                        };
+                        if let Some(purge) = purge {
+                            purge();
+                        }
+                        host_ok(&response)
+                    })
+                }),
+            );
+        }
         let store = self.cron_store.clone();
         let active_session_id = self.active_session_id.clone();
         let binding_session_id = self.binding.session_id.clone();
@@ -231,10 +196,50 @@ mod tests {
     }
 
     fn payload(data: Value) -> HostRequestPayload {
-        HostRequestPayload {
-            data,
-            cell_source_code: None,
-        }
+        HostRequestPayload { data }
+    }
+
+    /// The purge seam fires only for `goal.complete`, never on the way in.
+    #[tokio::test]
+    async fn goal_complete_purge_runs_only_after_goal_complete() {
+        let session = Arc::new(Mutex::new(persisted_session()));
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut runtime = SessionRuntime::new(
+            &*session.lock().await,
+            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            "live-1".to_string(),
+            SessionBinding {
+                session_id: "session-1".to_string(),
+                session_file: "/w/s.jsonl".to_string(),
+                cwd: "/w".to_string(),
+            },
+        );
+        let purges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = Arc::clone(&purges);
+        runtime.set_goal_complete_purge(Arc::new(move || {
+            sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let mut handlers = HostRequestHandlers::default();
+        runtime.register_host_handlers(session, &mut handlers);
+
+        let create = handlers.get("goal.create").unwrap().clone();
+        create(payload(serde_json::json!({
+            "type": "goal.create",
+            "objective": "pin the purge ordering"
+        })))
+        .await
+        .unwrap();
+        let get = handlers.get("goal.get").unwrap().clone();
+        get(payload(serde_json::json!({ "type": "goal.get" })))
+            .await
+            .unwrap();
+        assert_eq!(purges.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let complete = handlers.get("goal.complete").unwrap().clone();
+        complete(payload(serde_json::json!({ "type": "goal.complete" })))
+            .await
+            .unwrap();
+        assert_eq!(purges.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

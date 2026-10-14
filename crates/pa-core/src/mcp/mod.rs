@@ -1229,7 +1229,6 @@ mod tests {
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(crate::kernel::shared::HostRequestPayload {
             data: json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1247,7 +1246,6 @@ mod tests {
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(crate::kernel::shared::HostRequestPayload {
             data: json!({ "server": "nope" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1270,18 +1268,14 @@ mod tests {
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(crate::kernel::shared::HostRequestPayload {
             data: json!({ "server": "session-tool" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
         assert_eq!(result["type"], "stdio");
         assert_eq!(result["credentialSource"], "acp");
-        let error = config(crate::kernel::shared::HostRequestPayload {
-            data: json!({}),
-            cell_source_code: None,
-        })
-        .await
-        .unwrap_err();
+        let error = config(crate::kernel::shared::HostRequestPayload { data: json!({}) })
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "mcp.config requires a server");
         assert!(handlers.get("mcp.begin_login").is_none());
     }
@@ -1293,12 +1287,9 @@ mod tests {
         McpManager::register_host_handlers(&manager, &mut handlers);
         let list_plugins = handlers.get("mcp.list_plugins").expect("wired").clone();
         // Default page: the first 50 plugin cards, and the real catalog is present.
-        let page = list_plugins(crate::kernel::shared::HostRequestPayload {
-            data: json!({}),
-            cell_source_code: None,
-        })
-        .await
-        .unwrap();
+        let page = list_plugins(crate::kernel::shared::HostRequestPayload { data: json!({}) })
+            .await
+            .unwrap();
         assert!(page["plugins"].as_array().expect("plugins").len() > 1);
         assert!(
             page["plugins"]
@@ -1310,7 +1301,6 @@ mod tests {
         );
         let filtered = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "connectionStatus": "connected" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1324,7 +1314,6 @@ mod tests {
         );
         let error = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "connectionStatus": "maybe" }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err();
@@ -1334,7 +1323,6 @@ mod tests {
         );
         let error = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "connectionStatus": 7 }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err();
@@ -1344,7 +1332,6 @@ mod tests {
         );
         let error = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "cursor": "not-digits" }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err();
@@ -1354,7 +1341,6 @@ mod tests {
         );
         let error = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "limit": 0 }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err();
@@ -1364,7 +1350,6 @@ mod tests {
         );
         let clamped = list_plugins(crate::kernel::shared::HostRequestPayload {
             data: json!({ "limit": 1000 }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1377,7 +1362,6 @@ mod tests {
         if total > 2 {
             let first = list_plugins(crate::kernel::shared::HostRequestPayload {
                 data: json!({ "limit": 2 }),
-                cell_source_code: None,
             })
             .await
             .unwrap();
@@ -1387,7 +1371,6 @@ mod tests {
             assert_eq!(next_cursor, "2");
             let second = list_plugins(crate::kernel::shared::HostRequestPayload {
                 data: json!({ "limit": 2, "cursor": next_cursor }),
-                cell_source_code: None,
             })
             .await
             .unwrap();
@@ -1406,7 +1389,6 @@ mod tests {
         let search = handlers.get("mcp.search_plugins").expect("wired").clone();
         let result = search(crate::kernel::shared::HostRequestPayload {
             data: json!({ "query": "linear" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1416,12 +1398,9 @@ mod tests {
             .any(|entry| entry["serviceId"] == json!("linear")));
         assert_eq!(result["nextCursor"], serde_json::Value::Null);
         for bad in [json!(["query", ""]), json!({}), json!({ "query": "   " })] {
-            let error = search(crate::kernel::shared::HostRequestPayload {
-                data: bad,
-                cell_source_code: None,
-            })
-            .await
-            .unwrap_err();
+            let error = search(crate::kernel::shared::HostRequestPayload { data: bad })
+                .await
+                .unwrap_err();
             assert_eq!(
                 error.to_string(),
                 "mcp.search_plugins requires a non-empty query"
@@ -1429,7 +1408,6 @@ mod tests {
         }
         let error = search(crate::kernel::shared::HostRequestPayload {
             data: json!({ "query": "linear", "limit": -3 }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err();
@@ -1474,12 +1452,10 @@ mod tests {
         let mut handlers = HostRequestHandlers::default();
         McpManager::register_host_handlers(&manager, &mut handlers);
         let list_connections = handlers.get("mcp.list_connections").expect("wired").clone();
-        let result = list_connections(crate::kernel::shared::HostRequestPayload {
-            data: json!({}),
-            cell_source_code: None,
-        })
-        .await
-        .unwrap();
+        let result =
+            list_connections(crate::kernel::shared::HostRequestPayload { data: json!({}) })
+                .await
+                .unwrap();
         let connections = result["connections"].as_array().expect("connections");
         let mut ids = Vec::new();
         for entry in connections {

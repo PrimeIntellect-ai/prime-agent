@@ -131,12 +131,7 @@ pub type OnPayloadHook =
 pub type OnResponseHook = std::sync::Arc<dyn Fn(ProviderResponse, &Model) + Send + Sync>;
 
 /// Stream request options (subset of the TS `SimpleStreamOptions` the loop
-/// uses, plus the request hooks the TS options carry). Every option is
-/// either serialized into the proxy request (`temperature`, `max_tokens`,
-/// `reasoning`, `session_id`, `service_tier`, `headers` — see
-/// [`crate::proxy`]) or client-local (`api_key`, `signal`); TS
-/// `PROXY_SERIALIZED_OPTIONS` marks the same classification so a new
-/// shared option cannot be silently dropped by the proxy transport.
+/// uses, plus the request hooks the TS options carry).
 #[derive(Clone)]
 pub struct StreamRequestOptions {
     pub temperature: Option<f64>,

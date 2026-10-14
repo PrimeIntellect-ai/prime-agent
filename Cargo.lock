@@ -1438,16 +1438,10 @@ name = "pa-agent"
 version = "0.10.0"
 dependencies = [
  "anyhow",
- "futures",
- "rcgen",
- "reqwest",
- "rustls",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]

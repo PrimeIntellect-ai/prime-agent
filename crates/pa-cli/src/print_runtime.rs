@@ -1915,7 +1915,6 @@ mod tests {
         let config = handlers.get("mcp.config").unwrap().clone();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1946,7 +1945,6 @@ mod tests {
         }
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "second-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
@@ -1956,7 +1954,6 @@ mod tests {
         );
         let withdrawn = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
-            cell_source_code: None,
         })
         .await
         .unwrap();
