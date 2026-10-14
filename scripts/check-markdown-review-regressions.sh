@@ -33,7 +33,7 @@ for case_name in "${cases[@]}"; do
     exit 1
   fi
   # Compilation/infrastructure errors are not a red-first behavioral proof.
-  if ! rg -F "test $test_name ... FAILED" "$receipt_dir/$case_name-red.log"; then
+  if ! grep -F "test $test_name ... FAILED" "$receipt_dir/$case_name-red.log"; then
     cat "$receipt_dir/$case_name-red.log" >&2
     exit 1
   fi

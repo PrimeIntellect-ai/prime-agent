@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as FmtWrite;
 
 #[test]
 fn review_markdown_adjacent_emphasis_keeps_the_next_opener() {
@@ -55,9 +56,10 @@ fn review_markdown_link_titles_skip_escaped_quotes() {
 
 #[test]
 fn review_markdown_deep_lists_keep_text_with_a_bounded_tree() {
-    let text: String = (0..96)
-        .map(|n| format!("{}- item{n}\n", "  ".repeat(n)))
-        .collect();
+    let text = (0..96).fold(String::new(), |mut text, n| {
+        writeln!(text, "{}- item{n}", "  ".repeat(n)).expect("writing a String cannot fail");
+        text
+    });
     let blocks = parse_blocks(&text);
     let mut pending = Vec::new();
     for block in &blocks {

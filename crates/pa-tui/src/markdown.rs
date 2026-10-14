@@ -488,6 +488,7 @@ fn list_line_budget(
     width.saturating_sub(used).max(1)
 }
 
+#[derive(Clone, Copy)]
 struct ListNesting {
     indent: usize,
     depth: usize,
