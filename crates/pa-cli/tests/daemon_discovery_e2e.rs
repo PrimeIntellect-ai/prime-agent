@@ -667,17 +667,18 @@ fn worker_descriptors(agent_dir: &Path) -> Vec<Value> {
     let Ok(directories) = std::fs::read_dir(agent_dir.join("daemon-workers")) else {
         return descriptors;
     };
-    for file in directories
-        .flatten()
-        .flat_map(|directory| std::fs::read_dir(directory.path()))
-        .flatten()
-    {
-        if !file.file_name().to_string_lossy().ends_with(".json") {
+    for directory in directories.flatten() {
+        let Ok(files) = std::fs::read_dir(directory.path()) else {
             continue;
-        }
-        if let Ok(content) = std::fs::read_to_string(file.path()) {
-            if let Ok(descriptor) = serde_json::from_str::<Value>(&content) {
-                descriptors.push(descriptor);
+        };
+        for file in files.flatten() {
+            if !file.file_name().to_string_lossy().ends_with(".json") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(file.path()) {
+                if let Ok(descriptor) = serde_json::from_str::<Value>(&content) {
+                    descriptors.push(descriptor);
+                }
             }
         }
     }
@@ -712,7 +713,7 @@ fn tracked_worker_pid(agent_dir: &Path, supervisor_socket: &Path) -> u32 {
 }
 
 /// The 2026-10-14 incident, end to end: an isolated test daemon's
-/// `shutdown --force` stopped the shared default daemon and SIGTERMed every
+/// `shutdown --force` stopped the shared default daemon and killed every
 /// live worker on the machine — the state root ignored
 /// `PRIME_AGENT_DAEMON_SOCKET`, and the residual sweep treated worker
 /// sockets as daemons. One shared TMPDIR, so every worker socket any daemon
@@ -886,5 +887,93 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     assert!(
         wait_for_pid_exit(worker_c, Duration::from_secs(10)),
         "C's worker must stop with C (through its tracked descriptor)"
+    );
+}
+
+/// A fresh top-level invocation must not inherit an ancestor worker's
+/// identity: a kernel bash hands a worker's full environment to every
+/// child, so `prime-agent --mode daemon --daemon-socket B` launched from
+/// inside a worker must come up as B's supervisor — never as a second
+/// worker of the live supervisor the inherited env points at.
+#[test]
+fn a_daemon_launched_with_an_inherited_worker_env_comes_up_as_a_supervisor() {
+    let fixture = tempfile::tempdir().expect("fixture");
+    let agent_dir = fixture.path().join("agent");
+    let tmp_dir = fixture.path().join("tmp");
+    let socket = fixture.path().join("daemon.sock");
+    let worker_socket = fixture.path().join("worker.sock");
+    let ancestor_socket = fixture.path().join("ancestor-supervisor.sock");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    std::fs::create_dir_all(&tmp_dir).expect("tmp dir");
+    let mut command = Command::new(cli_binary());
+    command
+        .args(["--mode", "daemon", "--daemon-socket"])
+        .arg(&socket)
+        .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
+        .env("TMPDIR", &tmp_dir)
+        // The inherited worker handshake set (what a kernel bash sees).
+        .env(pa_daemon::worker::WORKER_ROLE_ENV, "1")
+        .env(
+            pa_daemon::worker::WORKER_TOKEN_ENV,
+            "inherited-worker-token",
+        )
+        .env(
+            pa_daemon::worker::WORKER_INSTANCE_ID_ENV,
+            "inherited-instance",
+        )
+        .env(
+            pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV,
+            "inherited-session",
+        )
+        .env(pa_daemon::worker::WORKER_CWD_ENV, fixture.path())
+        .env(
+            pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV,
+            &ancestor_socket,
+        )
+        .env(pa_daemon::worker::WORKER_SOCKET_ENV, &worker_socket)
+        .env(
+            pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV,
+            fixture.path().join("recovery.jsonl"),
+        )
+        .env(pa_daemon::worker::WORKER_TELEMETRY_DISABLED_ENV, "1")
+        .env(
+            pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
+            "inherited-session",
+        )
+        .env(
+            pa_core::kernel::orphan_journal::ORPHAN_PROCESS_JOURNAL_ENV,
+            fixture.path().join("orphans.jsonl"),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn the daemon");
+    let pid = child.id();
+    let _daemon = Daemon { child };
+
+    // The invocation must come up as B's supervisor. On a routing
+    // regression the process starts as a worker instead and this socket
+    // never appears.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        socket.exists(),
+        "the daemon must come up as a supervisor on {} (an inherited worker env must not reroute it into worker mode)",
+        socket.display()
+    );
+
+    // The hello names this child as the supervisor.
+    let stream = UnixStream::connect(&socket).expect("connect the supervisor");
+    let mut hello = String::new();
+    BufReader::new(stream)
+        .read_line(&mut hello)
+        .expect("read the daemon hello");
+    let hello: Value = serde_json::from_str(hello.trim()).expect("parse the daemon hello");
+    assert_eq!(
+        hello["supervisorPid"].as_i64(),
+        Some(i64::from(pid)),
+        "the hello must name this child as the supervisor: {hello}"
     );
 }
