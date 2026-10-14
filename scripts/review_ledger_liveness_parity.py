@@ -227,6 +227,8 @@ def run_case(binary, kind, root, observed):
         if process and process.poll() is None and client:
             try:
                 client.call('shutdown', force=True)
+                observed['wire'] = client.wire
+                client.close()
                 process.wait(timeout=15)
                 observed['shutdown'] = 'owned supervisor and workers stopped'
             except Exception as error:
