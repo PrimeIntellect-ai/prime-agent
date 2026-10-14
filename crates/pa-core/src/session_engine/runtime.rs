@@ -231,10 +231,7 @@ mod tests {
     }
 
     fn payload(data: Value) -> HostRequestPayload {
-        HostRequestPayload {
-            data,
-            cell_source_code: None,
-        }
+        HostRequestPayload { data }
     }
 
     /// The purge seam fires only for `goal.complete`, never on the way in.
