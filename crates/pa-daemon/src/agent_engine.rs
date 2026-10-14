@@ -99,6 +99,16 @@ pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
 pub(crate) type SettledKernelRelease =
     std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
+/// Transfers completion reporting to the worker without retaining its turn runner.
+pub(crate) type RefinementCompletionSink = std::sync::Arc<
+    dyn Fn(
+            tokio::task::JoinHandle<
+                anyhow::Result<pa_core::session_engine::refine::CommittedRefinement>,
+            >,
+        ) + Send
+        + Sync,
+>;
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -106,6 +116,7 @@ pub struct AgentSessionEngine {
     /// The session-scoped ACP MCP store, shared with the core engine's prompt gating.
     pub(crate) mcp: std::sync::Arc<std::sync::Mutex<pa_core::mcp::McpManager>>,
     /// The last emitted `goal_update`; unchanged states stay silent.
+    pub(crate) refinement_completion_sink: std::sync::Mutex<Option<RefinementCompletionSink>>,
     pub(crate) published_goal: std::sync::Mutex<Option<pa_core::goals::GoalState>>,
     pub(crate) late_agent_message_sink:
         std::sync::Mutex<Option<pa_core::LateSentAgentMessageHandler>>,

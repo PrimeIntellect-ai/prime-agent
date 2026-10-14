@@ -73,6 +73,11 @@ pub struct TurnBoundaryRequests {
     runtime: std::sync::RwLock<Option<Arc<TurnBoundaryRuntime>>>,
     compaction: Mutex<Option<PendingCompaction>>,
     refine: Mutex<Option<PendingRefine>>,
+    /// The assembled session's refinement-flight counter — the same Arc
+    /// every `refine::run_refinement` holds its flight guard on. Bound
+    /// once when the session assembles; an unset cell (a session that
+    /// never assembled) answers `in_flight: false`.
+    refinements_in_flight: std::sync::OnceLock<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl TurnBoundaryRequests {
@@ -98,6 +103,12 @@ impl TurnBoundaryRequests {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Bind the assembled session's refinement-flight counter (first bind
+    /// wins): `refine.status` answers from the runs it counts.
+    pub fn bind_refinements_in_flight(&self, in_flight: Arc<std::sync::atomic::AtomicUsize>) {
+        let _ = self.refinements_in_flight.set(in_flight);
     }
 
     /// Re-bind the model facts after a live model switch (the agent and
@@ -310,10 +321,13 @@ impl TurnBoundaryRequests {
                         ));
                     };
                     let pending = requests.refine_pending().await;
-                    // The Rust consumption runs refinement synchronously
-                    // between turns, so a cell never observes it in flight
-                    // (the TS background-planning path is not ported).
-                    Ok(json!({ "pending": pending, "in_flight": false }))
+                    let in_flight = requests
+                        .refinements_in_flight
+                        .get()
+                        .is_some_and(|in_flight| {
+                            in_flight.load(std::sync::atomic::Ordering::Acquire) > 0
+                        });
+                    Ok(json!({ "pending": pending, "in_flight": in_flight }))
                 })
             }),
         );
@@ -411,6 +425,28 @@ impl SessionEngine {
             },
             None => compact.await,
         })
+    }
+
+    /// Start a pending model-requested refinement without waiting on planning or
+    /// its idle-boundary commit. The host owns only completion reporting.
+    pub async fn start_pending_refinement(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+    ) -> Option<tokio::task::JoinHandle<anyhow::Result<super::refine::CommittedRefinement>>> {
+        let pending = self.turn_boundary.take_refine().await?;
+        Some(self.session.start_refinement(
+            super::refine::RefineOptions {
+                global: pending.global,
+                instructions: pending.instructions,
+                rollback_id: None,
+            },
+            super::refine::RefinementSource::SelfRefine,
+            model.clone(),
+            api_key,
+            global_harness_dir,
+        ))
     }
 
     /// Consume a pending model-requested refinement at a turn boundary;

@@ -94,27 +94,29 @@ impl AgentSessionEngine {
                 .expect("auto compaction abort lock") = Some(std::sync::Arc::clone(&controller));
         }
         let consumption = {
-            let guard = self.session.blocking_lock();
-            let Some(engine) = guard.as_deref() else {
+            let engine = self.session.blocking_lock().clone();
+            let Some(engine) = engine else {
                 self.clear_auto_compaction_abort(&controller);
                 return BoundaryRun::Proceed;
             };
             let consumed = self.runtime.block_on(async {
-                engine
-                    .consume_turn_boundary_requests(
-                        &model,
-                        api_key,
-                        global_harness_dir,
-                        Some(&signal),
-                    )
+                let compaction = engine
+                    .consume_pending_compaction(&model, api_key.clone(), Some(&signal))
+                    .await;
+                if let Some(pending) = engine
+                    .start_pending_refinement(&model, api_key, global_harness_dir)
                     .await
+                {
+                    self.report_background_refinement(pending);
+                }
+                compaction
             });
             self.clear_auto_compaction_abort(&controller);
             consumed
         };
         let mut stopped_for_compaction = false;
         let mut compacted = false;
-        match consumption.compaction {
+        match consumption {
             Some(Ok(pa_core::session_engine::compact_session::CompactOutcome::Ran(run))) => {
                 // The post-compaction kernel notice goes out before the settled end;
                 // its pair precedes `compaction_end`.
@@ -191,35 +193,6 @@ impl AgentSessionEngine {
                     return BoundaryRun::Cancelled;
                 }
                 stopped_for_compaction = true;
-            }
-            None => {}
-        }
-        match consumption.refinement {
-            Some(Ok(refinement)) => {
-                if refinement.applied_edits.iter().any(|edit| edit.applied) {
-                    let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                        &refinement,
-                        pa_core::session_engine::refine::RefinementSource::SelfRefine,
-                    );
-                    if !emit(EngineEvent::CustomMessage(
-                        crate::session_commands::custom_message_value(&notice),
-                    )) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-                if let Ok(result) = serde_json::to_value(&refinement) {
-                    if !emit(EngineEvent::RefineComplete { result }) {
-                        return BoundaryRun::Cancelled;
-                    }
-                }
-            }
-            Some(Err(error)) => {
-                eprintln!("pa-daemon: requested refinement failed: {error:#}");
-                if !emit(EngineEvent::RefineFailed {
-                    error: format!("{error:#}"),
-                }) {
-                    return BoundaryRun::Cancelled;
-                }
             }
             None => {}
         }
