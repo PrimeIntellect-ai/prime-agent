@@ -337,9 +337,13 @@ impl Supervisor {
     /// Retire a connection's response path before its asynchronous cleanup.
     async fn retire_client_dispatches(
         self: &Arc<Self>,
-        _dispatch_rx: &mut tokio::sync::mpsc::Receiver<(Vec<Outbound>, bool)>,
+        dispatch_rx: &mut tokio::sync::mpsc::Receiver<(Vec<Outbound>, bool)>,
         connection_id: &str,
     ) {
+        // Cleanup below awaits worker replies. A shutdown that claims this
+        // connection later must fail its send and run the owner fallback,
+        // rather than successfully enqueueing into a loop that has exited.
+        dispatch_rx.close();
         self.start_shutdown_if_owner(connection_id).await;
     }
 
