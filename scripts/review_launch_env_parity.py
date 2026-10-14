@@ -148,7 +148,7 @@ def wait_gone(identities):
     raise AssertionError('owned fixture processes remained after shutdown: ' + str(alive))
 
 
-def restart(client, active, agent, binary, config, owned, observation, tracked):
+def restart(client, active, agent, binary, config, owned, observation, tracked, label, session_info):
     socket_path = agent.parent / 'd.sock'
     path, row = worker_descriptor(agent, active, socket_path)
     pid, identity = verify_worker(row, active, binary, socket_path)
@@ -171,12 +171,53 @@ def restart(client, active, agent, binary, config, owned, observation, tracked):
             raise AssertionError('owner recovery never observed worker death')
         # Same owner context; refreshed attach launchEnv is deliberately out of scope.
         client.call('attach', activeSessionId=active, recoveryConfig=config)
-    new_path, new_row = worker_descriptor(agent, active, socket_path, previous=pid)
-    assert new_path == path
-    tracked.add(verify_worker(new_row, active, binary, socket_path))
+    replacement_active = active
+    if label == 'ts' and not owned:
+        # Pinned TS recoverWorker (4236-4242) deliberately parks a resident
+        # whose transient runtime/env were cleared at Ready. Rust instead
+        # relaunches from its durable descriptor. Do not call those policies
+        # equivalent: record the actual TS failed state, then explicitly reopen
+        # the same file with fresh context and an empty client environment.
+        deadline = time.monotonic() + LIMIT
+        while time.monotonic() < deadline:
+            try:
+                failed = json.loads(path.read_text())
+                if failed.get('lifecycle') == 'failed':
+                    assert failed.get('lastError') == 'Waiting for a client with fresh runtime context', failed.get('lastError')
+                    observation['parked_descriptor'] = failed
+                    break
+            except (OSError, ValueError):
+                pass
+            threading.Event().wait(0.025)
+        else:
+            raise AssertionError('TS resident did not reach its fresh-context-required state')
+        action = {'type': 'create', 'sessionPath': session_info['sessionFile'],
+                  'config': config, 'lifecycle': 'resident', 'launchEnv': {}}
+        observation['recovery_input'] = action
+        created = client.call(action['type'], **{key: value for key, value in action.items() if key != 'type'})
+        observation['recovery_create_response'] = created
+        assert created['sessionId'] == session_info['sessionId'], 'TS fresh create changed durable session identity'
+        assert created['sessionFile'] == session_info['sessionFile'], 'TS fresh create opened a different file'
+        replacement_active = created.get('activeSessionId') or created.get('id')
+        assert replacement_active, 'TS fresh create omitted active identity'
+        observation['recovery_policy'] = 'TS parked after crash; explicit fresh-context create with empty launchEnv reopened the same durable session'
+    elif not owned:
+        observation['recovery_policy'] = 'Rust automatically relaunched from durable descriptor without retained client launchEnv'
+    else:
+        observation['recovery_policy'] = 'Owned recovery retained the original client launchEnv'
+    new_path, new_row = worker_descriptor(agent, replacement_active, socket_path, previous=pid)
+    if label != 'ts' or owned:
+        assert new_path == path
+    tracked.add(verify_worker(new_row, replacement_active, binary, socket_path))
     observation['replacement_worker_pid'] = new_row['pid']
+    observation['replacement_active_session_id'] = replacement_active
     if not owned:
-        client.call('attach', activeSessionId=active)
+        client.call('attach', activeSessionId=replacement_active)
+    state = client.call('get_state', activeSessionId=replacement_active)
+    observation['replacement_state'] = state
+    assert state['sessionId'] == session_info['sessionId'], 'recovery changed durable session identity'
+    assert state['sessionFile'] == session_info['sessionFile'], 'recovery changed durable session file'
+    return replacement_active
 
 
 def finish_daemon(client, process, kind, **payload):
@@ -216,6 +257,7 @@ def run_case(binary, label, root, observed):
         cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
     client = None
     probes = observed['probes'] = {}
+    session_info = {}
     tracked = set()
     secret = 'fixture-launch-secret'
     prepared_transaction = False
@@ -230,6 +272,8 @@ def run_case(binary, label, root, observed):
         assert active
         header = json.loads(Path(row['sessionFile']).read_text().splitlines()[0])
         assert header.get('rlmDepth', 0) == 0, header
+        session_info[name] = {'sessionId': header['id'], 'sessionFile': row['sessionFile']}
+        assert row['sessionId'] == header['id'], 'create response/file identity mismatch'
         client.call('attach', activeSessionId=active)
         _, descriptor = worker_descriptor(root / 'agent', active, root / 'd.sock')
         tracked.add(verify_worker(descriptor, active, binary, root / 'd.sock'))
@@ -251,16 +295,16 @@ def run_case(binary, label, root, observed):
         probe(a, 'resident_initial', secret, 'client')
         probe(b, 'isolated_other', None, 'daemon')
         observed['resident_recovery'] = {}
-        restart(client, a, root / 'agent', binary, config, False, observed['resident_recovery'], tracked)
+        a = restart(client, a, root / 'agent', binary, config, False, observed['resident_recovery'], tracked, label, session_info['launch-a'])
         probe(a, 'resident_recovered', None, 'daemon')
         owner = create('launch-owned', 'client_owned', {'launchEnv': launch})
         probe(owner, 'owned_initial', secret, 'client')
         observed['owned_recovery'] = {}
-        restart(client, owner, root / 'agent', binary, config, True, observed['owned_recovery'], tracked)
+        owner = restart(client, owner, root / 'agent', binary, config, True, observed['owned_recovery'], tracked, label, session_info['launch-owned'])
         probe(owner, 'owned_recovered', secret, 'client')
         client.call('promote_owned_session', activeSessionId=owner)
         observed['promoted_recovery'] = {}
-        restart(client, owner, root / 'agent', binary, config, False, observed['promoted_recovery'], tracked)
+        owner = restart(client, owner, root / 'agent', binary, config, False, observed['promoted_recovery'], tracked, label, session_info['launch-owned'])
         probe(owner, 'promoted_recovered', None, 'daemon')
         descriptors = list((root / 'agent/daemon-workers').rglob('*.json'))
         assert len(descriptors) >= 3, 'durable descriptor audit would be empty'
@@ -322,10 +366,10 @@ def main():
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     receipt = {'verified': False, 'runs': {}, 'scope': 'Raw daemon create, actual REPL/subprocess env, '
-        'resident/owned/promotion recovery lifetime, durable launch-env secret exclusion',
+        'env clearing/retention and durable launch-env secret exclusion. TS residents require explicit fresh-context reopen; Rust auto-relaunches. No recovery-policy equivalence claim.',
         'not_verified': ['TUI/ACP sender env collection', 'refreshed attach launchEnv recovery',
-                         'rlm.spawn and minimal depth-0 root forwarding'],
-        'intentional_difference': 'Rust re-filters raw launchEnv internal-prefixed keys; TS trusts sender filtering and merges the injected canary. Exact canary values asserted per phase; raw results retained.',
+                         'rlm.spawn and minimal depth-0 root forwarding', 'automatic resident/promotion recovery parity (actual policies differ)'],
+        'intentional_difference': 'Rust re-filters raw launchEnv internal-prefixed keys; TS trusts sender filtering and merges the injected canary. Exact canary values asserted per phase; raw results retained. Separately, TS parks crashed residents requiring fresh create context, whereas Rust relaunches automatically; exact parked states, explicit fresh-create inputs and durable identity proofs retained.',
         'normalization': 'Generated session IDs, roots, worker PIDs and timestamps excluded only from cross-run comparison; raw wire retained.'}
     try:
         assert sys.platform == 'linux', 'requires hosted Linux /proc ownership checks'

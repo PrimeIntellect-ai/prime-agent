@@ -36,7 +36,7 @@ class VerifierTests(unittest.TestCase):
         with patch('review_launch_env_parity.worker_descriptor', return_value=(Path('/fixture'),
                 {'pid': 123, 'rootActiveSessionId': 'someone-else'})), patch('os.kill') as kill:
             with self.assertRaisesRegex(AssertionError, 'descriptor identity'):
-                restart(None, 'fixture', Path('/fixture'), Path('/fixture/binary'), {}, False, {}, set())
+                restart(None, 'fixture', Path('/fixture'), Path('/fixture/binary'), {}, False, {}, set(), 'rust', {})
             kill.assert_not_called()
 
     def test_wrong_executable_never_kills(self):
@@ -44,7 +44,7 @@ class VerifierTests(unittest.TestCase):
                 {'pid': 123, 'rootActiveSessionId': 'fixture', 'supervisorSocketPath': '/d.sock'})), \
                 patch('pathlib.Path.read_bytes', return_value=b'/other/binary\0worker\0'), patch('os.kill') as kill:
             with self.assertRaisesRegex(AssertionError, 'fixture binary'):
-                restart(None, 'fixture', Path('/fixture'), Path('/fixture/binary'), {}, False, {}, set())
+                restart(None, 'fixture', Path('/fixture'), Path('/fixture/binary'), {}, False, {}, set(), 'rust', {})
             kill.assert_not_called()
 
     def test_ts_descriptor_filename_need_not_equal_active_id(self):
@@ -102,6 +102,48 @@ class VerifierTests(unittest.TestCase):
         rust['phase']['env']['PA_ENV_MARKER'] = 'wrong'
         self.assertNotEqual(comparable_probes(ts), comparable_probes(rust))
         self.assertEqual(ts['phase']['env']['PRIME_AGENT_INTERNAL_PARITY_CANARY'], 'injected')
+
+    def test_ts_resident_reopens_exact_file_with_empty_fresh_context(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / 'descriptor.json'
+            failed = {'pid': 123, 'rootActiveSessionId': 'old-active', 'lifecycle': 'failed',
+                'lastError': 'Waiting for a client with fresh runtime context'}
+            path.write_text(json.dumps(failed))
+            session = {'sessionId': 'durable-id', 'sessionFile': str(root / 'session.jsonl')}
+            created = {**session, 'activeSessionId': 'new-active'}
+            client = MagicMock()
+            client.call.side_effect = lambda kind, **data: created if kind == 'create' else session
+            observed = {}
+            with patch('review_launch_env_parity.worker_descriptor', side_effect=[(path, failed), (root / 'new-descriptor.json', {'pid': 456})]), \
+                    patch('review_launch_env_parity.verify_worker', side_effect=[(123, 'proc:old'), (456, 'proc:new')]), \
+                    patch('review_launch_env_parity.wait_gone'), patch('os.kill'):
+                active = restart(client, 'old-active', root / 'agent', root / 'binary', {'cwd': str(root)},
+                    False, observed, set(), 'ts', session)
+            self.assertEqual(active, 'new-active')
+            self.assertEqual(observed['parked_descriptor'], failed)
+            create = [call for call in client.call.call_args_list if call.args == ('create',)]
+            self.assertEqual(len(create), 1)
+            self.assertEqual(create[0].kwargs['sessionPath'], session['sessionFile'])
+            self.assertEqual(create[0].kwargs['launchEnv'], {})
+            self.assertEqual(observed['replacement_state'], session)
+
+    def test_ts_fresh_create_cannot_switch_durable_identity(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            path = root / 'descriptor.json'
+            failed = {'pid': 123, 'rootActiveSessionId': 'old-active', 'lifecycle': 'failed',
+                'lastError': 'Waiting for a client with fresh runtime context'}
+            path.write_text(json.dumps(failed))
+            session = {'sessionId': 'durable-id', 'sessionFile': str(root / 'session.jsonl')}
+            client = MagicMock()
+            client.call.return_value = {**session, 'sessionId': 'wrong-id', 'activeSessionId': 'new-active'}
+            with patch('review_launch_env_parity.worker_descriptor', return_value=(path, failed)), \
+                    patch('review_launch_env_parity.verify_worker', return_value=(123, 'proc:old')), \
+                    patch('review_launch_env_parity.wait_gone'), patch('os.kill'):
+                with self.assertRaisesRegex(AssertionError, 'changed durable session identity'):
+                    restart(client, 'old-active', root / 'agent', root / 'binary', {}, False,
+                        {}, set(), 'ts', session)
 
 
 if __name__ == '__main__':
