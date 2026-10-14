@@ -1611,3 +1611,26 @@ fn an_underscore_opener_keeps_searching_for_a_closer() {
         assert_eq!(s.style.add_modifier, Modifier::empty());
     }
 }
+
+#[test]
+fn an_escaped_bang_before_a_link_is_not_an_image() {
+    // The image marker is decided from the SOURCE text: `\!` is an escaped
+    // bang (literal), not an image marker — the link still renders as a link.
+    let style = MarkdownStyle::default();
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let spans = render_inline(r"Wow\![docs](https://x.dev/a)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "Wow!docs (https://x.dev/a)");
+    assert!(spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)));
+    crate::hyperlinks::set_hyperlinks_override(None);
+    // An unescaped bang still marks an image: alt text only.
+    let spans = render_inline("![alt](https://x.dev/b)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "alt");
+    // An escaped backslash before the bang stays an image marker.
+    let spans = render_inline(r"\\![alt](https://x.dev/c)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "\\alt");
+}

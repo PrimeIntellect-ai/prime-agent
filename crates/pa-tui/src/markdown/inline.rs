@@ -120,7 +120,9 @@ fn render_inline_ctx(
             if let Some((url, k)) = parsed {
                 // An image (`![alt](url)`): marked's image token falls through to the
                 // alt text in the TS renderer — no `!`, no link affordance, no bracket.
-                let image = buf.ends_with('!');
+                // The marker is read from the SOURCE: an escaped `\!` is a literal
+                // bang, not an image marker (an odd backslash run escapes it).
+                let image = image_marker_before(&bytes, i);
                 let mut modifier = Modifier::empty();
                 if bold {
                     modifier |= style.bold;
@@ -341,6 +343,21 @@ fn render_inline_ctx(
         spans.push(Span::raw(""));
     }
     (spans, url_slots, code_slots)
+}
+
+/// True when the `!` immediately before the `[` at `at` is an image marker:
+/// an even run of backslashes precedes it (an escaped `!` is a literal bang).
+fn image_marker_before(bytes: &[char], at: usize) -> bool {
+    if at == 0 || bytes[at - 1] != '!' {
+        return false;
+    }
+    let mut backslashes = 0usize;
+    let mut j = at - 1;
+    while j > 0 && bytes[j - 1] == '\\' {
+        backslashes += 1;
+        j -= 1;
+    }
+    backslashes % 2 == 0
 }
 
 /// The reference-link target after `[label]` (marked's reference forms):
