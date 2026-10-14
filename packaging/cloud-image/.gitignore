@@ -1,0 +1,5 @@
+# Release artifacts are fetched by prepare.sh into the build context and
+# verified there; they never live in the repo.
+*.tar.gz
+prime-agent-release.tar.gz
+frp_*.tar.gz

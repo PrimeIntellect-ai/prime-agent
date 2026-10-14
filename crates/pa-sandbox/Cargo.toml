@@ -1,0 +1,20 @@
+[package]
+name = "pa-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prime Sandboxes lifecycle client: idempotent create, wait, delete."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+] }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+
+[lints]
+workspace = true
