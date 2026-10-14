@@ -371,14 +371,17 @@ jobs:
           test -x "${PRIME_AGENT_KERNEL_PYTHON}"
           mkdir -p "${RUNNER_TEMP}/lifecycle-parity-receipts"
           comparison_status=0
-          for scenario in graceful_shutdown goal_backoff draft_disconnect restore_notice; do
-            verifier="scripts/review_${scenario}_parity.py"
-            if [ -f "${verifier}" ]; then
-              if [ "${scenario}" = "draft_disconnect" ]; then
-                python3 scripts/test_review_draft_disconnect_parity.py || comparison_status=1
-              fi
-              python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
+          # Discover independently added verifiers so feature PRs do not
+          # overwrite or conflict with each other's comparison selection.
+          for verifier in scripts/review_*_parity.py; do
+            [ -f "${verifier}" ] || continue
+            scenario="${verifier#scripts/review_}"
+            scenario="${scenario%_parity.py}"
+            verifier_test="scripts/test_review_${scenario}_parity.py"
+            if [ -f "${verifier_test}" ]; then
+              python3 "${verifier_test}" || comparison_status=1
             fi
+            python3 "${verifier}" --receipt "${RUNNER_TEMP}/lifecycle-parity-receipts/${scenario}.json" || comparison_status=1
           done
           exit "${comparison_status}"
       - name: Upload the binary comparison receipts
