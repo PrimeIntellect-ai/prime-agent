@@ -199,7 +199,11 @@ fn edge_is_live_revalidates_paths_without_a_ledger_append() {
             .unwrap();
     }
     ledger
-        .append_delete("sub-1", &target.to_string_lossy(), RlmLedgerDeleteReason::User)
+        .append_delete(
+            "sub-1",
+            &target.to_string_lossy(),
+            RlmLedgerDeleteReason::User,
+        )
         .unwrap();
     let child_path = child.to_string_lossy();
     let target_path = target.to_string_lossy();
@@ -217,7 +221,18 @@ fn edge_is_live_revalidates_paths_without_a_ledger_append() {
     assert!(ledger.edge_is_live("sub-1", &child_path));
     assert!(ledger.edge_is_live("sub-1", &target_path));
 
-    fs::remove_file(&target).unwrap();
+    let unindexed = dir.join("c.jsonl");
+    fs::write(&unindexed, "{}").unwrap();
+    fs::remove_file(&child).unwrap();
+    symlink(&unindexed, &child).unwrap();
+    assert_eq!(file_identity(&ledger.path).unwrap(), identity);
+    assert!(Arc::ptr_eq(&cached, &ledger.replay_cached().unwrap()));
+    // This query misses the index entirely after the second retarget.
+    assert!(ledger.edge_is_live("sub-1", &child_path));
+    assert!(ledger.edge_is_live("sub-1", &unindexed.to_string_lossy()));
+    assert!(!ledger.edge_is_live("sub-1", &target_path));
+
+    fs::remove_file(&unindexed).unwrap();
     assert!(!ledger.edge_is_live("sub-1", &child_path));
     assert!(!ledger.edge_is_live("sub-1", &target_path));
 }
