@@ -72,6 +72,12 @@ class WireClient(Client):
         self.raw_wire = []
         self.sock = RecordedIO(self.sock, self.raw_wire, 'out')
         self.reader = RecordedIO(self.reader, self.raw_wire, 'in')
+        self.closed = False
+
+    def close(self):
+        if not self.closed:
+            super().close()
+            self.closed = True
 
 
 def owned_processes(root):
@@ -186,6 +192,10 @@ def run_case(binary, kind, root, observed):
         if process and process.poll() is None and clients:
             try:
                 clients[0].call('shutdown', force=True)
+                # TS net.Server.close waits for every fixture peer to close.
+                # The SECOND provider-arrival proof already finished above.
+                for client in clients:
+                    client.close()
                 process.wait(timeout=15)
                 observed['shutdown'] = 'owned supervisor and workers stopped'
             except Exception as error:
