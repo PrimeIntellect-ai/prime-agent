@@ -344,16 +344,6 @@ jobs:
       - name: Bootstrap the kernel venv (ready before the kernel e2e units)
         if: steps.selection.outputs.units != '0'
         run: ./target/debug/prime-agent --prime-agent-bootstrap
-      - name: Prove shutdown scope regression red then green
-        if: github.event_name == 'pull_request' && github.event.pull_request.number == 3601 && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check-shutdown-scope-review-regression.sh') != ''
-        run: bash scripts/check-shutdown-scope-review-regression.sh
-      - name: Upload shutdown scope regression logs
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.number == 3601 && matrix.shard == 1 && steps.selection.outputs.units != '0' && hashFiles('scripts/check-shutdown-scope-review-regression.sh') != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: shutdown-scope-review-regression-attempt-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/shutdown-scope-review-regression/*.log
-          if-no-files-found: error
       # The targeted lifecycle comparisons use the recognized, pinned TS release
       # and only synthetic loopback providers/state. One leg avoids 8 downloads.
       - name: Compare the lifecycle binaries (pinned TS reference)

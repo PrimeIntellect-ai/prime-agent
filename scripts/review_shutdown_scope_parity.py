@@ -95,9 +95,13 @@ def finish_tree(tree, observed):
     error = None
     if process.poll() is None:
         try:
-            if client is None:
-                client = tree['client'] = Client(tree['socket'], process)
-            observed['cleanup_shutdown_response'] = client.call('shutdown', force=True)
+            if tree.get('shutdown_acknowledged'):
+                observed['shutdown_already_acknowledged'] = True
+            else:
+                if client is None:
+                    client = tree['client'] = Client(tree['socket'], process)
+                observed['cleanup_shutdown_response'] = client.call('shutdown', force=True)
+                tree['shutdown_acknowledged'] = True
             close_client(tree)
             wait_stopped(process)
         except Exception as caught:
@@ -192,6 +196,7 @@ def run_case(binary, kind, root, mode, observed):
         if mode == 'exact_socket':
             provider.release.set()
             observed['action_response'] = own['client'].call('shutdown', force=True)
+            own['shutdown_acknowledged'] = True
             close_client(own)
             wait_stopped(own['process'])
             kept = survivors(foreign['original_processes'], foreign['root'])
@@ -215,11 +220,20 @@ def run_case(binary, kind, root, mode, observed):
                 provider.foreign_release.set()
             shutdown = observed['shutdown_cli'] = invoke(binary, ['shutdown', '--force', '--json'], own)
             assert shutdown['returncode'] == 0, shutdown
+            report = json.loads(shutdown['stdout'])
+            assert report['failed'] == [], report
+            stopped_paths = {row['socketPath'] for row in report['stopped']}
+            assert str(own['socket']) in stopped_paths, 'root shutdown omitted own supervisor'
+            for tree in trees:
+                if str(tree['socket']) in stopped_paths:
+                    tree['shutdown_acknowledged'] = True
+            # A successful root report must settle before cleanup; a new
+            # connection must never re-pin a supervisor already in server.close.
+            wait_stopped(own['process'])
             kept = survivors(foreign['original_processes'], foreign['root'])
             observed['foreign_original_processes_after'] = kept
             observed['own_supervisor_stopped'] = own['process'].poll() is not None
             if kind == 'rust':
-                wait_stopped(own['process'])
                 observed['own_supervisor_stopped'] = True
                 assert survivors(foreign['critical_processes'], foreign['root']) == foreign['critical_processes'], 'pinned root shutdown harmed foreign supervisor or worker'
             else:

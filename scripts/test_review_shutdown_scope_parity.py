@@ -36,6 +36,28 @@ class OwnershipTests(unittest.TestCase):
             self.assertEqual(observed['wire'], [{'type': 'response', 'success': True}])
             self.assertEqual(observed['remaining_owned_processes'], {})
 
+    def test_acknowledged_shutdown_never_reconnects_and_timeout_stays_red(self):
+        for timeout in (False, True):
+            with tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / 'daemon.log').write_text('fixture')
+                process = Mock(poll=Mock(return_value=None))
+                if timeout:
+                    process.wait.side_effect = TimeoutError('acknowledged process still alive')
+                tree = {'root': root, 'process': process, 'client': None,
+                        'shutdown_acknowledged': True, 'log': io.BytesIO()}
+                observed = {}
+                with patch.object(verifier, 'Client') as connect, patch.object(verifier, 'stop'), patch.object(verifier, 'owned_processes', return_value={}):
+                    if timeout:
+                        with self.assertRaisesRegex(RuntimeError, 'acknowledged process still alive'):
+                            verifier.finish_tree(tree, observed)
+                    else:
+                        verifier.finish_tree(tree, observed)
+                    connect.assert_not_called()
+                    process.wait.assert_called_once()
+                self.assertTrue(tree['shutdown_acknowledged'])
+                self.assertTrue(observed['shutdown_already_acknowledged'])
+
     def test_cleanup_survival_fails_and_pid_reuse_is_not_signaled(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
