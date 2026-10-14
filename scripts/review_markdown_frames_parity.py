@@ -29,7 +29,8 @@ START, END = "MARKDOWN FRAME START", "MARKDOWN FRAME END"
 CORPUS = {
     "adjacent_emphasis": "**bold***italic*\n**outer *inner***\n**outer *inner* tail***next*\n**outer `*` tail***next*\n" + r'''*a\*b* **a\**b**
 ***a\*b*** ~~a\~~b~~
-*a\\* tail''',
+*a\\* tail
+**a *b** **a*b**''',
     "escaped_titles": r'''[t](https://example.com "a \"b\"")
 [t](https://example.com 'a \'b\'')
 [t](foo(bar) "title")

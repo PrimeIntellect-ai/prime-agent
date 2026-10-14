@@ -58,17 +58,25 @@ fn review_markdown_destinations_balance_before_a_title() {
             Span::styled(" (foo(bar)", style.link_url)
         ],
     );
-    for text in ["[t](foo(bar) \"title\")", r#"[t](foo\(bar\) "a \"b\"")"#] {
-        let spans = render_inline(text, &style);
-        assert_eq!(
-            spans
-                .iter()
-                .map(|span| span.content.as_str())
-                .collect::<String>(),
-            "t (foo(bar))"
-        );
-        assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+    for capability in [false, true] {
+        crate::hyperlinks::set_hyperlinks_override(Some(capability));
+        for text in ["[t](foo(bar) \"title\")", r#"[t](foo\(bar\) "a \"b\"")"#] {
+            let mut spans = super::render_inline(text, &style);
+            let ranges = crate::hyperlinks::frame_link_ranges(&[spans.clone()]);
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0].url, "foo(bar)");
+            // Visible text excludes zero-width metadata under either capability.
+            crate::hyperlinks::strip_osc8(&mut spans);
+            assert_eq!(
+                spans,
+                vec![
+                    Span::styled("t", style.body.add_modifier(Modifier::UNDERLINED)),
+                    Span::styled(" (foo(bar))", style.link_url)
+                ]
+            );
+        }
     }
+    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 #[test]
@@ -105,6 +113,17 @@ fn review_markdown_unmatched_single_in_strong_matches_ts_emphasis_pairing() {
     assert_eq!(
         intraword,
         vec![Span::styled("a*b", style.body.add_modifier(Modifier::BOLD))]
+    );
+    // Pinned marked18.0.7 tokens also use literal '*' + nested em for the
+    // ordinary left-only inner opener; it is not restricted to an escape case.
+    let ordinary = render_inline("**a *b**", &style);
+    assert_eq!(
+        ordinary,
+        vec![
+            Span::styled("*", style.body),
+            Span::styled("a ", style.body.add_modifier(Modifier::ITALIC)),
+            Span::styled("b", style.body.add_modifier(Modifier::ITALIC)),
+        ]
     );
 }
 
