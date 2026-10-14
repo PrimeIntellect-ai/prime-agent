@@ -10,6 +10,7 @@ import argparse
 import http.server
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +29,59 @@ MARKER = 'LEDGER_LIVENESS_ADMITTED='
 CODE = """import json
 ledger_handle = await rlm.spawn('LEDGER_LIVENESS_CHILD_HOLD', name='ledger-fixture-child')
 print('LEDGER_LIVENESS_ADMITTED=' + json.dumps({'child_id': ledger_handle.rlm_child_id}))"""
+
+
+def admitted_probe(body):
+    rows = [row for row in body.get('messages', [])
+            if row.get('role') == 'tool' and row.get('tool_call_id') == 'ledger_spawn']
+    assert len(rows) == 1, 'expected exactly one current ledger_spawn tool result'
+    probes = [json.loads(line[len(MARKER):]) for row in rows
+              for text in texts(row.get('content')) for line in text.splitlines()
+              if line.startswith(MARKER)]
+    assert len(probes) == 1 and probes[0].get('child_id'), 'expected one nonempty admission probe'
+    return probes[0]
+
+
+def owned_processes(root):
+    expected = {('PI_CODING_AGENT_DIR=' + str(root / 'agent')).encode(),
+                ('PRIME_AGENT_CODING_AGENT_DIR=' + str(root / 'agent')).encode()}
+    found = {}
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            environment = set((path / 'environ').read_bytes().split(b'\0'))
+            if expected.isdisjoint(environment):
+                continue
+            start = (path / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+            found[int(path.name)] = start
+        except (OSError, IndexError):
+            continue
+    return found
+
+
+def confirm_cleanup(root, observed):
+    deadline = time.monotonic() + 10
+    remaining = owned_processes(root)
+    while remaining and time.monotonic() < deadline:
+        threading.Event().wait(0.025)
+        remaining = owned_processes(root)
+    observed['remaining_owned_processes'] = remaining
+    # Failure stays red, even when fixture-owned fallback cleanup succeeds.
+    if remaining:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid, start in remaining.items():
+                if owned_processes(root).get(pid) == start:
+                    try:
+                        os.kill(pid, sig)
+                    except ProcessLookupError:
+                        pass
+            deadline = time.monotonic() + 5
+            while owned_processes(root) and time.monotonic() < deadline:
+                threading.Event().wait(0.025)
+        observed['remaining_after_fallback'] = owned_processes(root)
+    assert not remaining, 'owned detached processes survived normal shutdown'
+    assert 'shutdown_error' not in observed, observed.get('shutdown_error')
 
 
 class Provider(http.server.ThreadingHTTPServer):
@@ -75,13 +129,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                               'function': {'name': tool, 'arguments': json.dumps({'code': CODE})}}]}
                     finish = 'tool_calls'
                 else:
-                    results = [row for row in body.get('messages', [])
-                               if row.get('role') == 'tool' and row.get('tool_call_id') == 'ledger_spawn']
-                    for row in results:
-                        for text in texts(row.get('content')):
-                            for line in text.splitlines():
-                                if line.startswith(MARKER):
-                                    self.server.probe = json.loads(line[len(MARKER):])
+                    self.server.probe = admitted_probe(body)
                     delta, finish = {'content': 'Parent fixture completed.'}, 'stop'
             self.server.arrived.notify_all()
         if is_child:
@@ -167,11 +215,14 @@ def run_case(binary, kind, root, observed):
             assert len(spawns) == 1, 'actual spawn did not produce one durable ledger edge'
             assert spawns[0]['depth'] == 1 and spawns[0]['name'] == NAME, spawns
             assert Path(spawns[0]['parent']).resolve() == Path(created['sessionFile']).resolve(), spawns
+            listed = [row for row in observed['lists'][0]['sessions'] if row.get('rlmChildId') == child_id]
+            assert Path(spawns[0]['child']).resolve() == Path(listed[0]['sessionFile']).resolve(), spawns
             assert Path(spawns[0]['child']).is_file(), spawns
             return {'list': contracts, 'roster': roster_contract,
                     'durable_spawn': {'name': NAME, 'depth': 1, 'count': 1,
                                       'parent_matches_created_session': True, 'child_transcript_exists': True}}
     finally:
+        observed['owned_before_shutdown'] = owned_processes(root)
         provider.release.set()
         if process and process.poll() is None and client:
             try:
@@ -191,6 +242,7 @@ def run_case(binary, kind, root, observed):
         provider.shutdown()
         provider.server_close()
         thread.join(timeout=5)
+        confirm_cleanup(root, observed)
 
 
 def main():

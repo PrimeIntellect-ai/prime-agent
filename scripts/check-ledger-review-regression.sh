@@ -38,13 +38,13 @@ if cargo test --locked -p pa-daemon --lib "$test_name" -- --exact > "$receipt_di
   exit 1
 fi
 # A compiler or infrastructure failure is not behavioral red-first evidence.
-if ! rg -F "test $test_name ... FAILED" "$receipt_dir/red.log"; then
+if ! grep -F "test $test_name ... FAILED" "$receipt_dir/red.log"; then
   cat "$receipt_dir/red.log" >&2
   exit 1
 fi
 restore_source
 cargo test --locked -p pa-daemon --lib "$test_name" -- --exact > "$receipt_dir/green.log" 2>&1
-if ! rg -F "test $test_name ... ok" "$receipt_dir/green.log"; then
+if ! grep -F "test $test_name ... ok" "$receipt_dir/green.log"; then
   cat "$receipt_dir/green.log" >&2
   exit 1
 fi
