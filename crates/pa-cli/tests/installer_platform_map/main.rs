@@ -10,10 +10,15 @@
 //! step code, fixture inputs), so the pin holds the shipped text, not a
 //! copy of it.
 
+// too_many_lines: style gate only (the extraction harnesses are
+// intentionally linear, one pinned block per test).
+#![allow(clippy::too_many_lines)]
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+mod prewarm_watchdog;
 
 /// The repo root (crates/pa-cli -> crates -> root): install-rust.sh and
 /// install.ps1 live there.
@@ -1178,5 +1183,106 @@ fn windows_e2e_harnesses_keep_the_kernel_prewarm_writes_in_scratch() {
             !harness.contains("Remove-Item 'Env:PRIME_AGENT_KERNEL_VENV'"),
             "{harness_name}'s cleanup must RESTORE the caller's override values, never delete the knobs (a caller with its own redirect loses it on an in-process run)"
         );
+    }
+}
+
+/// install.ps1's kernel pre-warm WATCHDOG: a best-effort step (the no-uv
+/// arm already degrades to an honest note), so the launcher runs as a
+/// WATCHED child - bounded, tree-killed on expiry, degraded honestly
+/// (only an observed stop is called a stop), and never fatal.
+#[test]
+fn install_ps1_bounds_the_kernel_prewarm_with_a_watchdog() {
+    let text = std::fs::read_to_string(repo_root().join("install.ps1")).expect("read install.ps1");
+    let section_start = text
+        .find("# --- the kernel pre-warm")
+        .expect("the pre-warm section exists");
+    let section_end = text
+        .find("# --- the PATH add")
+        .expect("the PATH-add section follows");
+    let section = &text[section_start..section_end];
+    let markers: [(&str, &str); 11] = [
+        (
+            "the watchdog bound (the pre-warm may take minutes on a slow link, never forever)",
+            "$prewarmBoundSec = 300",
+        ),
+        (
+            "the watched child is the payload exe (never the .cmd shim: Start-Process on a batch file needs cmd.exe and its quoting)",
+            "$prewarmExe = Join-Path $share 'prime-agent.exe'",
+        ),
+        (
+            "the watched spawn (the bootstrap argument, the shared console, the process handle)",
+            "Start-Process -FilePath $prewarmExe -ArgumentList '--prime-agent-bootstrap' -NoNewWindow -PassThru",
+        ),
+        (
+            "the bounded wait (milliseconds, from the bound)",
+            "$prewarm.WaitForExit($prewarmBoundSec * 1000)",
+        ),
+        (
+            "the expiry arm tree-kills the launcher tree (the launch itself rides the best-effort try)",
+            "$taskkill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\taskkill.exe')",
+        ),
+        (
+            "the taskkill wait is bounded (a stuck one is killed after its grace, like the Rust helper's own)",
+            "-not $taskkill.WaitForExit(5000)",
+        ),
+        (
+            "a stuck taskkill is killed",
+            "$null = $taskkill.Kill()",
+        ),
+        (
+            "the expiry arm reaps the killed child",
+            "$prewarm.WaitForExit(15000)",
+        ),
+        (
+            "the observed exit is the only proof of a stop (a kill's exit code is a request's receipt, not a dead tree)",
+            "$prewarmStopped = $prewarm.HasExited",
+        ),
+        (
+            "the honest expiry note names the wait",
+            "the kernel pre-warm did not finish within",
+        ),
+        (
+            "the honest expiry note degrades to the offline note's own phrase",
+            "the first session bootstraps the kernel itself and needs the network once",
+        ),
+    ];
+    let mut positions: Vec<usize> = Vec::new();
+    for (what, marker) in markers {
+        positions.push(section.find(marker).unwrap_or_else(|| {
+            panic!("the pre-warm watchdog must carry its {what} line: {marker}")
+        }));
+    }
+    for pair in positions.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "the watchdog's discipline is spawn, bound, kill, degrade - in that order: {markers:?}"
+        );
+    }
+    // The expiry note must sit in the expiry arm (after the bounded wait),
+    // not in the no-uv arm alone.
+    let note_at = section
+        .find("the first session bootstraps the kernel itself and needs the network once")
+        .expect("the honest degradation phrase");
+    assert!(
+        note_at > positions[3],
+        "the honest note belongs to the expiry arm"
+    );
+    // Never fatal: every "Fail" in the expiry arm is a ledger Step-Fail -
+    // the thrown Fail helper would abort an install whose payload is
+    // already published.
+    let expiry_arm = &section[positions[4]..];
+    let mut at = 0;
+    while let Some(found) = expiry_arm[at..].find("Fail") {
+        // `found` is relative to `at`: re-anchor it before every use, or a
+        // second occurrence would check the wrong text and walk `at`
+        // backward into an infinite loop.
+        let fail_at = at + found;
+        let before = expiry_arm[..fail_at + 4].trim_end();
+        assert!(
+            before.ends_with("Step-Fail"),
+            "the expiry arm must not call the throwing Fail helper: {}",
+            &expiry_arm[fail_at.saturating_sub(40)..(fail_at + 40).min(expiry_arm.len())]
+        );
+        at = fail_at + 4;
     }
 }

@@ -45,7 +45,10 @@ use super::*;
 
 #[test]
 fn venv_dir_honors_override() {
-    // The default path lives under $HOME.
+    // The default path lives under $HOME. The read joins the env-test
+    // lock: concurrent override tests set `PRIME_AGENT_KERNEL_VENV`, and
+    // this read must not race them.
+    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
     let base = kernel_venv_dir();
     assert!(base.ends_with("kernel-venv"));
 }
@@ -543,9 +546,40 @@ fn disk_memo_late_write_after_invalidate_is_benign() {
 }
 
 /// Env-mutating tests serialize on this lock: the process env is global.
-/// Unix only: its takers are the unix env-override tests.
-#[cfg(unix)]
+/// (The env-override tests are Unix-only; env-reading tests on other
+/// platforms take it too so the serialization is one lock everywhere.)
 static PRIME_AGENT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The bound override resolves to a usable bound or the default - a
+/// non-positive value would tree-kill every child on its first poll.
+#[test]
+fn bootstrap_child_timeout_rejects_non_positive_overrides() {
+    let _guard = PRIME_AGENT_ENV_LOCK.blocking_lock();
+    let previous = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
+    let resolve = super::resolve_bootstrap_child_timeout_ms;
+    for (given, expected) in [
+        ("0", 600_000u64),
+        ("-5", 600_000),
+        ("abc", 600_000),
+        ("", 600_000),
+        ("2500", 2_500),
+        // The day-topping clamp: a huge override is representable, never a
+        // clock-overflow panic after the child is running.
+        ("99999999999999999", 86_400_000),
+        ("86400000", 86_400_000),
+    ] {
+        std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", given);
+        assert_eq!(
+            resolve(),
+            expected,
+            "the override {given:?} resolves to {expected:?}"
+        );
+    }
+    match previous {
+        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
+        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
+    }
+}
 
 /// A caller-owned `PRIME_AGENT_KERNEL_PYTHON` override resolves through
 /// the DIRECT probe and never reads or writes any memo file.
@@ -1064,4 +1098,448 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
         .map(|s| s.import_name.clone())
         .collect::<Vec<_>>();
     assert_eq!(recorded, vec!["edit"], "only the healthy skill is recorded");
+}
+
+/// Saves the caller's `PATH`, prepends `dir`, and returns the restore
+/// closure (the fake-uv tests put their stub on PATH because `ensure_uv`
+/// searches PATH before its `~/.local/bin` fallback - a real uv on the
+/// box's PATH would otherwise win).
+#[cfg(unix)]
+fn prepend_path(dir: &Path) -> impl FnOnce() {
+    let previous = std::env::var("PATH").ok();
+    let with_stub = std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(
+        std::env::split_paths(&std::env::var("PATH").unwrap_or_default()),
+    ))
+    .unwrap_or_default();
+    std::env::set_var("PATH", &with_stub);
+    move || match previous {
+        Some(value) => std::env::set_var("PATH", value),
+        None => std::env::remove_var("PATH"),
+    }
+}
+
+#[cfg(unix)]
+fn report_collector() -> (
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    EnsureKernelPythonOptions,
+) {
+    let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = lines.clone();
+    let options = EnsureKernelPythonOptions {
+        on_progress: Some(std::sync::Arc::new(move |message: &str| {
+            sink.lock().unwrap().push(message.to_string());
+        })),
+        ..Default::default()
+    };
+    (lines, options)
+}
+
+/// The drain pin: every bootstrap uv child writes through piped stdio
+/// that the parent drains and forwards through the progress reporter.
+/// The bulk is past the pipe capacity on both streams, so a spawn nobody
+/// drains would block the child before it can exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn bootstrap_children_forward_piped_output_through_the_reporter() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         echo UV_STDOUT_MARKER\n\
+         echo UV_STDERR_MARKER >&2\n\
+         seq 1 20000\n\
+         seq 1 20000 >&2\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let drained = reports.lock().unwrap().join("\n");
+    assert!(
+        drained.contains("UV_STDOUT_MARKER"),
+        "the drained stdout reaches the reporter: {drained:?}"
+    );
+    assert!(
+        drained.contains("UV_STDERR_MARKER"),
+        "the drained stderr reaches the reporter: {drained:?}"
+    );
+}
+
+/// A stream without newlines is drained in bounded pieces: one line may
+/// not buffer without bound while the child bound is still minutes away.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_newline_free_stream_is_drained_in_bounded_pieces() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         echo BEGIN_MARKER\n\
+         head -c 2097152 /dev/zero | tr '\\0' x\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    assert!(
+        collected.len() > 10,
+        "the cap-free stream reaches the reporter in pieces: {:?}",
+        collected.len()
+    );
+    let longest = collected.iter().map(String::len).max().unwrap_or(0);
+    assert!(
+        longest <= super::MAX_DRAIN_LINE_BYTES,
+        "no forwarded piece may exceed the cap: longest is {longest}, cap is {}",
+        super::MAX_DRAIN_LINE_BYTES
+    );
+    let pieces = collected
+        .iter()
+        .filter(|line| line.contains('x') && !line.contains("MARKER"))
+        .map(String::len)
+        .collect::<Vec<_>>();
+    let filled = pieces.iter().any(|length| *length >= 32_000);
+    assert!(
+        filled,
+        "the over-long line is forwarded in cap-sized pieces, not in every          reader-sized chunk (pieces: {pieces:?})"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("BEGIN_MARKER")),
+        "the stream's head reaches the reporter"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the stream's tail reaches the reporter"
+    );
+}
+
+/// A line shorter than the cap that spans several reader fills stays
+/// whole: only the cap splits a line, never the reader's chunk size.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_short_line_spanning_fills_is_forwarded_whole() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n\
+         head -c 20480 /dev/zero | tr '\\0' x\n\
+         echo\n\
+         echo END_MARKER\n\
+         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let collected = reports.lock().unwrap();
+    let whole = collected
+        .iter()
+        .find(|line| line.starts_with('x'))
+        .expect("the over-cap-free line reached the reporter");
+    assert_eq!(
+        whole.len(),
+        20480,
+        "a line under the cap arrives in one piece, spanning fills: {whole:?}"
+    );
+    assert!(
+        collected.iter().any(|line| line.contains("END_MARKER")),
+        "the tail reaches the reporter"
+    );
+}
+
+/// A parent's death takes its bootstrap children down: they run in
+/// their own process group (the bound's group kill needs it), which also
+/// shields them from a terminal's interrupt - so the guard stack itself
+/// must arm the parent-death signal that reaches them when the parent
+/// exits. The signal follows the spawning thread, and the bootstrap
+/// keeps that thread waiting for as long as the child runs - so here
+/// the child survives until the spawning thread's exit, then it must
+/// die by the stack's own kill.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_parent_death_kills_the_bootstrap_child() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::{Arc, Mutex};
+    let child_slot: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+    let slot_for_thread = child_slot.clone();
+    let handle = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("sleep");
+        // Five seconds out, well inside the ten-second deadline: the
+        // child's own exit must lose the race to the parent-death kill,
+        // so only the kill can end it while the stack is intact - and a
+        // stack that lost its kill still dies (and gets reaped below)
+        // rather than leaking.
+        command.arg("5");
+        // The stack the real bootstrap children spawn under: if the
+        // parent-death signal is dropped from it, this test goes red.
+        configure_bootstrap_child_spawn(&mut command);
+        let child = command.spawn().expect("spawn the child");
+        *slot_for_thread.lock().unwrap() = Some(child);
+    });
+    handle.join().expect("the spawning thread ran");
+    // A blocking wait turns the child's death into a message, and the
+    // deadline bounds only the failure path: no polling, and the reaping
+    // happens in the waiter as part of the wait.
+    let (status_tx, status_rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let status = match child_slot.lock().unwrap().take() {
+            Some(mut child) => child.wait(),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the child was never stored",
+            )),
+        };
+        let _ = status_tx.send(status);
+    });
+    let deadline = std::time::Duration::from_secs(10);
+    match status_rx.recv_timeout(deadline) {
+        Ok(Ok(status)) => {
+            // The child self-exits only after five seconds, the verdict
+            // lands inside milliseconds: only the parent-death kill can
+            // end it with the kill wired.
+            assert_eq!(
+                status.signal(),
+                Some(libc::SIGKILL),
+                "the child must die by the parent-death SIGKILL"
+            );
+            waiter.join().expect("the waiter thread ran");
+        }
+        Ok(Err(err)) => {
+            waiter.join().expect("the waiter thread ran");
+            panic!("the child's wait failed: {err}");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            // The child cannot outlive the deadline on its own, so this
+            // arm is the wiring lost AND the natural exit unscheduled -
+            // the join below still reaps it before the verdict fails the
+            // test, and no kill is ever sent to a pid that might have
+            // been recycled.
+            waiter.join().expect("the waiter thread ran");
+            panic!("the child outlived its spawning thread");
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("the waiter thread never reported the child's exit");
+        }
+    }
+}
+
+/// A child that emits non-UTF-8 bytes mid-stream is forwarded mangled,
+/// never allowed to end the drain: the lines after the bad bytes still
+/// reach the reporter and the bootstrap still completes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_non_utf8_child_line_never_stops_the_drain() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let _uv = fake_uv(
+        dir.path(),
+        "#!/bin/sh\n         echo BEFORE_MARKER\n         printf '\\377\\376BAD\\n'\n         echo AFTER_MARKER\n         exit 0\n",
+    );
+    let (reports, options) = report_collector();
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = bootstrap_venv(&venv, &[], &options).await;
+    restore_path();
+    assert!(outcome.is_ok(), "the bootstrap completes: {outcome:?}");
+    let drained = reports.lock().unwrap().join("\n");
+    assert!(
+        drained.contains("AFTER_MARKER"),
+        "the drain survives the non-UTF-8 line: {drained:?}"
+    );
+    assert!(
+        drained.contains("BEFORE_MARKER"),
+        "the drain forwards the lines before it too: {drained:?}"
+    );
+}
+
+/// The bound pin: a child that never exits is tree-killed at the bound -
+/// the child AND its descendants (the fake uv leaves a sleeping one) -
+/// and the bootstrap reports the honest failure instead of waiting.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_hung_bootstrap_child_is_bounded_and_killed() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("hung-uv.pid");
+    let descendant_file = dir.path().join("hung-uv.descendant.pid");
+    let _uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nsleep 600 &\nprintf '%s\\n' \"$!\" > {}\nwait\n",
+            pid_file.display(),
+            descendant_file.display()
+        ),
+    );
+    // `ensure_kernel_python` resolves the venv dir itself: the override
+    // must pin it to this test's scratch, never a real machine venv.
+    let venv = dir.path().join("venv");
+    let previous_venv = std::env::var("PRIME_AGENT_KERNEL_VENV").ok();
+    let previous_timeout = std::env::var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS").ok();
+    std::env::set_var("PRIME_AGENT_KERNEL_VENV", &venv);
+    std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", "1200");
+    let restore_path = prepend_path(dir.path());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        super::super::ensure_kernel_python(EnsureKernelPythonOptions::default()),
+    )
+    .await;
+    restore_path();
+    match previous_timeout {
+        Some(value) => std::env::set_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS", value),
+        None => std::env::remove_var("PRIME_AGENT_BOOTSTRAP_CHILD_TIMEOUT_MS"),
+    }
+    match previous_venv {
+        Some(value) => std::env::set_var("PRIME_AGENT_KERNEL_VENV", value),
+        None => std::env::remove_var("PRIME_AGENT_KERNEL_VENV"),
+    }
+    // Red-shape cleanup first: a boundless wait leaves the hung child
+    // alive behind a leaked blocked thread - kill it so the test process
+    // stays clean whatever the assertion below finds.
+    let hung_pid = std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    let descendant_pid = std::fs::read_to_string(&descendant_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    for pid in [hung_pid, descendant_pid].into_iter().flatten() {
+        let _ =
+            crate::platform::process::kill_pid(pid as i32, crate::platform::process::Signal::Kill);
+    }
+    let result = outcome.expect(
+        "the bootstrap wait must be bounded - the hung child held it for the whole 30s guard",
+    );
+    let error = result.expect_err("a hung child must fail the bootstrap");
+    let text = format!("{error:#}");
+    assert!(
+        text.contains("did not finish within"),
+        "the bounded failure names the wait: {text}"
+    );
+    assert!(text.contains("1200ms"), "the bound is the override: {text}");
+    let pid = hung_pid.expect("the fake uv published its pid");
+    assert!(
+        !crate::platform::process::pid_exists(pid),
+        "the hung uv child is killed, not left running"
+    );
+    let descendant = descendant_pid.expect("the fake uv published its descendant");
+    assert!(
+        !crate::platform::process::pid_exists(descendant),
+        "the kill reaches the child tree, not just the child"
+    );
+}
+
+/// The exit-path grace: a child that exits while a descendant holds its
+/// pipes must not turn the drained join into a new unbounded wait - the
+/// bootstrap completes within the grace and the descendant is left to
+/// die on its own.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_descendant_holding_the_pipes_does_not_hang_a_completed_bootstrap() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let descendant_file = dir.path().join("holder.pid");
+    let _uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\nsleep 60 &\nprintf '%s\\n' \"$!\" > {}\nexit 0\n",
+            descendant_file.display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        bootstrap_venv(&venv, &[], &EnsureKernelPythonOptions::default()),
+    )
+    .await;
+    restore_path();
+    let descendant = std::fs::read_to_string(&descendant_file)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok());
+    if let Some(pid) = descendant {
+        let _ =
+            crate::platform::process::kill_pid(pid as i32, crate::platform::process::Signal::Kill);
+    }
+    let result = outcome.expect("a completed bootstrap must not wait on a pipe-holding descendant");
+    assert!(result.is_ok(), "the bootstrap completes: {result:?}");
+}
+
+/// The non-interactive pin: stdin stays null (never inherited - an
+/// unattended bootstrap must not wait on stdio it does not own), and
+/// every uv call carries `--no-progress`.
+#[cfg(unix)]
+#[tokio::test]
+async fn bootstrap_venv_runs_uv_quietly_with_no_stdin() {
+    let _guard = PRIME_AGENT_ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let uv_log = dir.path().join("uv.log");
+    let _uv = fake_uv(
+        dir.path(),
+        &format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> {uv_log}\n\
+             if read -r leaked; then printf 'stdin-leaked: %s\\n' \"$leaked\" >> {uv_log}; fi\n\
+             exit 0\n",
+            uv_log = uv_log.display()
+        ),
+    );
+    let venv = dir.path().join("venv");
+    std::fs::create_dir_all(&venv).unwrap();
+    let restore_path = prepend_path(dir.path());
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        bootstrap_venv(&venv, &[], &EnsureKernelPythonOptions::default()),
+    )
+    .await;
+    restore_path();
+    let result = outcome.expect("the bootstrap must be bounded even against a stdin-blocked child");
+    assert!(result.is_ok(), "the bootstrap completes: {result:?}");
+    let calls = uv_invocations(dir.path());
+    assert_eq!(
+        calls.len(),
+        3,
+        "python, venv, then the runtime install: {calls:?}"
+    );
+    for call in &calls {
+        assert!(
+            call.starts_with("--no-progress"),
+            "every uv call is non-interactive: {call}"
+        );
+    }
+    assert_eq!(calls[0], "--no-progress python install 3.11");
+    assert!(
+        calls[1].starts_with("--no-progress venv ") && calls[1].contains("--python 3.11 --seed"),
+        "the venv call keeps its shape: {}",
+        calls[1]
+    );
+    assert!(
+        calls[2].starts_with("--no-progress pip install "),
+        "the runtime call keeps its shape: {}",
+        calls[2]
+    );
+    assert!(
+        calls[2].contains("requests") && calls[2].contains("tyro"),
+        "the default extras ride: {}",
+        calls[2]
+    );
+    assert!(
+        !calls.join("\n").contains("stdin-leaked"),
+        "the child's stdin is null, never inherited: {calls:?}"
+    );
 }
