@@ -23,7 +23,8 @@ class CompletionHandler(Handler):
         with self.server.arrived:
             self.server.requests.append(body)
             self.server.arrived.notify_all()
-        self.server.release.wait(LIMIT * 3)
+        gate = self.server.foreign_release if 'SHUTDOWN_SCOPE_BUSY_foreign' in json.dumps(body) else self.server.release
+        gate.wait(LIMIT * 3)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -142,12 +143,16 @@ def launch(binary, kind, root, socket_path, shared_tmp, provider, trees):
         'provider': 'parity-local', 'model': 'parity-1', 'noExtensions': True,
         'noSkills': True, 'noTools': True, 'noContextFiles': True, 'telemetryDisabled': True})
     active = created.get('activeSessionId') or created.get('id')
+    worker_pid = created.get('workerPid')
+    assert isinstance(worker_pid, int), 'create did not identify its worker'
     assert active, created
     marker = 'SHUTDOWN_SCOPE_BUSY_' + root.name
     client.call('prompt', activeSessionId=active, message=marker)
     provider.wait_for(marker)
     original = tree['original_processes'] = owned_processes(root)
-    assert process.pid in original and len(original) >= 2, 'live supervisor and worker not observed'
+    assert process.pid in original and worker_pid in original, 'live supervisor and worker not observed'
+    tree['critical_processes'] = {pid: original[pid] for pid in (process.pid, worker_pid)}
+    tree['process_roles'] = {str(pid): {'role': 'supervisor' if pid == process.pid else 'worker' if pid == worker_pid else 'other inherited-environment process', 'cmdline': Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')} for pid in original}
     return tree
 
 
@@ -166,12 +171,15 @@ def run_case(binary, kind, root, mode, observed):
     pins.mkdir()
     provider = Provider()
     provider.RequestHandlerClass = CompletionHandler
+    provider.foreign_release = threading.Event()
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     trees = []
     primary_error = None
     try:
         foreign = launch(binary, kind, root / 'foreign', default_socket, shared_tmp, provider, trees)
         own = launch(binary, kind, root / 'own', pins / 'own.sock', shared_tmp, provider, trees)
+        observed['process_roles'] = {name: tree['process_roles'] for name, tree in [('own', own), ('foreign', foreign)]}
+        observed['critical_processes'] = {name: tree['critical_processes'] for name, tree in [('own', own), ('foreign', foreign)]}
         observed['original_processes'] = {name: tree['original_processes']
             for name, tree in [('own', own), ('foreign', foreign)]}
         if mode == 'exact_socket':
@@ -180,8 +188,8 @@ def run_case(binary, kind, root, mode, observed):
             close_client(own)
             wait_stopped(own['process'])
             kept = survivors(foreign['original_processes'], foreign['root'])
-            assert kept == foreign['original_processes'], 'exact socket shutdown harmed foreign tree'
             observed['foreign_original_processes_after'] = kept
+            assert survivors(foreign['critical_processes'], foreign['root']) == foreign['critical_processes'], 'exact socket shutdown harmed foreign supervisor or worker'
         else:
             status = observed['status_cli'] = invoke(binary, ['status', '--json'], own)
             assert status['returncode'] == 0, status
@@ -197,6 +205,7 @@ def run_case(binary, kind, root, mode, observed):
             close_client(own)
             if kind == 'ts':
                 close_client(foreign)
+                provider.foreign_release.set()
             shutdown = observed['shutdown_cli'] = invoke(binary, ['shutdown', '--force', '--json'], own)
             assert shutdown['returncode'] == 0, shutdown
             kept = survivors(foreign['original_processes'], foreign['root'])
@@ -205,7 +214,7 @@ def run_case(binary, kind, root, mode, observed):
             if kind == 'rust':
                 wait_stopped(own['process'])
                 observed['own_supervisor_stopped'] = True
-                assert kept == foreign['original_processes'], 'pinned root shutdown harmed foreign tree'
+                assert survivors(foreign['critical_processes'], foreign['root']) == foreign['critical_processes'], 'pinned root shutdown harmed foreign supervisor or worker'
             else:
                 wait_stopped(foreign['process'])
                 deadline = time.monotonic() + LIMIT
@@ -219,6 +228,7 @@ def run_case(binary, kind, root, mode, observed):
         raise
     finally:
         provider.release.set()
+        provider.foreign_release.set()
         errors = []
         for index, tree in enumerate(trees):
             cleanup = observed.setdefault('cleanup', {})[str(index)] = {}
@@ -242,6 +252,7 @@ def main():
     receipt = {'scenario': 'shutdown_scope', 'verified': False, 'cases': {},
         'scope': 'real supervisor and busy worker identities, exact-socket shutdown baseline, pinned-root status and shutdown',
         'intentional_difference': 'TS 0.9.8 discovers/stops the shared default tree; Rust pinned root discovers/stops only its own supervisor tree',
+        'process_scope': 'original supervisor and worker identities must survive Rust isolation; other inherited-environment processes are role/cmdline captured but can complete naturally',
         'not_covered': 'doctor output, inherited worker environment routing, overlapping agent-dir regression (separate Rust hosted red/green test)'}
     try:
         archive = Path(os.environ['PA_TS_ARCHIVE'])
