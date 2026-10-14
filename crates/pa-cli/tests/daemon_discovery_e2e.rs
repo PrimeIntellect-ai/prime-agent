@@ -899,6 +899,72 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     );
 }
 
+/// An agent-dir override can contain the shared worker directory while its
+/// own supervisor is pinned elsewhere. Such a root must still exclude other
+/// supervisors' workers from both discovery and the force residual sweep.
+#[test]
+fn a_pinned_root_with_an_overlapping_agent_dir_never_stops_foreign_workers() {
+    let shared_tmp = tempfile::tempdir().expect("shared worker tmpdir");
+    let pins = tempfile::tempdir().expect("supervisor pins outside agent dir");
+    let foreign_fixture = tempfile::tempdir().expect("foreign agent dir");
+    let own_socket = pins.path().join("own.sock");
+    let foreign_socket = pins.path().join("foreign.sock");
+    // Every worker socket is below shared_tmp, which is also this root's
+    // agent dir. Neither supervisor socket is below it.
+    let own_agent = shared_tmp.path();
+    let foreign_agent = foreign_fixture.path().join("agent");
+    let mut own_daemon = spawn_daemon(&own_socket, own_agent, shared_tmp.path());
+    let _own_session = create_scripted_session(&own_socket, own_agent);
+    let own_worker = tracked_worker_pid(own_agent, &own_socket);
+    let mut foreign_daemon = spawn_daemon(&foreign_socket, &foreign_agent, shared_tmp.path());
+    let _foreign_session = create_scripted_session(&foreign_socket, &foreign_agent);
+    let foreign_worker = tracked_worker_pid(&foreign_agent, &foreign_socket);
+
+    let status = run_cli_state_env(
+        shared_tmp.path(),
+        own_agent,
+        Some(&own_socket),
+        &["status", "--json"],
+    );
+    assert!(status.status.success(), "{}", stderr(&status));
+    let services: Vec<Value> = serde_json::from_str(&stdout(&status)).expect("status report");
+    let sockets: Vec<&str> = services
+        .iter()
+        .map(|service| service["socketPath"].as_str().expect("socket path"))
+        .collect();
+    assert_eq!(
+        sockets,
+        vec![own_socket.to_str().expect("fixture path")],
+        "a pinned root must discover supervisors only: {}",
+        stdout(&status)
+    );
+
+    let shutdown = run_cli_state_env(
+        shared_tmp.path(),
+        own_agent,
+        Some(&own_socket),
+        &["shutdown", "--force", "--json"],
+    );
+    assert!(shutdown.status.success(), "{}", stderr(&shutdown));
+    wait_until_stopped(&own_socket, &mut own_daemon);
+    assert!(wait_for_pid_exit(own_worker, Duration::from_secs(10)));
+    assert!(
+        foreign_daemon
+            .child
+            .try_wait()
+            .expect("foreign supervisor wait")
+            .is_none()
+            && pid_alive(foreign_worker),
+        "the foreign supervisor and its original worker must survive"
+    );
+    assert!(UnixStream::connect(&foreign_socket).is_ok());
+
+    // Teardown names the exact fixture socket; no machine-wide discovery.
+    run_shutdown_on_socket(&foreign_socket).expect("foreign shutdown handshake");
+    wait_until_stopped(&foreign_socket, &mut foreign_daemon);
+    assert!(wait_for_pid_exit(foreign_worker, Duration::from_secs(10)));
+}
+
 /// A fresh top-level invocation must not inherit an ancestor worker's
 /// identity: a kernel bash hands a worker's full environment to every
 /// child, so `prime-agent --mode daemon --daemon-socket B` launched from

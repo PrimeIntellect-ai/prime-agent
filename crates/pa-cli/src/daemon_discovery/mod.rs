@@ -168,7 +168,8 @@ fn inside(directory: Option<&Path>, parent: &Path) -> bool {
 }
 
 /// Worker sockets: `worker-*.sock` in the given socket dir (never the
-/// supervisor's own). The dir comes from the state root, never the ambient env.
+/// supervisor's own). Callers pass the actual worker directory, which need
+/// not be owned by the discovery root.
 pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bool {
     if socket_path.parent() != Some(socket_dir) {
         return false;
@@ -187,16 +188,14 @@ pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bo
 /// daemon. Worker sockets never appear: a worker belongs to its supervisor
 /// and stops through its tracked descriptors, so every consumer — discovery,
 /// the shutdown actions, and the `--force` residual sweep — acts on
-/// supervisors only. (A pinned root never sees worker sockets: they live in
-/// the product-default socket dir, which such a root does not own.)
+/// supervisors only. The worker directory is independent of the optional
+/// discovery directory: an agent-dir override can contain the shared worker
+/// directory even when the root is pinned elsewhere.
 pub(crate) fn scan_listening_daemons(root: &DaemonStateRoot) -> Vec<DiscoveredDaemonProcess> {
+    let worker_socket_dir = pa_daemon::platform::socket_dir();
     scan::scan_all_listening_daemons(config::APP_NAME, root)
         .into_iter()
-        .filter(|daemon| {
-            root.socket_dir
-                .as_ref()
-                .is_none_or(|dir| !is_worker_socket_path(&daemon.socket_path, dir))
-        })
+        .filter(|daemon| !is_worker_socket_path(&daemon.socket_path, &worker_socket_dir))
         .collect()
 }
 
