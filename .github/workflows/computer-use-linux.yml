@@ -1,0 +1,40 @@
+name: computer-use-linux
+
+on:
+  pull_request:
+    paths:
+      - skills/computer-use/**
+      - .github/workflows/computer-use-linux.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: computer-use-linux-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  linux-review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install X11 test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xdotool x11-utils xvfb python3-tk python3-pil maim
+      - name: Verify the exact PR head and display-free regressions
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          PYTHONPATH: skills/computer-use/src
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          /usr/bin/python3 -m unittest discover -s skills/computer-use/tests
+      - name: Verify real window delivery and capture
+        env:
+          PRIME_CUA_X11: "1"
+          PYTHONPATH: skills/computer-use/src:skills/computer-use/tests
+        run: xvfb-run -a /usr/bin/python3 -m unittest -v test_linux_x11

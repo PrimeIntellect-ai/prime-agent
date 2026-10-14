@@ -10,6 +10,15 @@ observing and operating native desktop apps. Observation reads the
 accessibility (AX) tree as element-indexed text; actions target those same
 indices. Screenshots exist as the fallback; the AX text is the primary channel.
 
+## Linux X11 limits
+
+Linux binds visible windows by WM_CLASS, which is client-provided metadata,
+not authenticated application identity. Use this backend only with trusted
+local X11 clients. Clicks and scrolls use window-addressed synthetic events;
+apps may ignore them. Dragging and keyboard entry are unavailable because
+motion cannot be scoped and secure-field status cannot be verified.
+Screenshots require maim; a failed capture does not fall back to another window.
+
 ## When to use
 
 Use this skill only for work that needs a real desktop UI:
