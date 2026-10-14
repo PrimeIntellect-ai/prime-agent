@@ -185,7 +185,7 @@ impl AgentSessionEngine {
         let Some(mirror) = self.autonomous_boundary_mirror() else {
             return false;
         };
-        // The same check as the core session's `auto_compaction_due`, over
+        // The same check as the core session's `context_pressure`, over
         // the mirrored agent state and settings (never through the mutex).
         let state = mirror.agent.state().await;
         let messages: Vec<pa_types::session::AgentMessage> = state
@@ -193,7 +193,7 @@ impl AgentSessionEngine {
             .iter()
             .filter_map(json_round_trip::<_, pa_types::session::AgentMessage>)
             .collect();
-        pa_core::session_engine::compaction::threshold_compaction_due(
+        pa_core::session_engine::compaction::context_pressure(
             &messages,
             model.context_window,
             pa_core::session_engine::compaction::request_output_budget(
@@ -203,7 +203,7 @@ impl AgentSessionEngine {
                 ),
             ),
             &mirror.compaction,
-        )
+        ) == pa_core::session_engine::compaction::ContextPressure::Reserve
     }
 
     /// The RLM settle site: deliver the continuation the in-run hook held

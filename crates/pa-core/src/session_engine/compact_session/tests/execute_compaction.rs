@@ -97,12 +97,15 @@ async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() 
         keep_recent_tokens: 20,
         ..Default::default()
     };
-    assert!(super::super::compaction::threshold_compaction_due(
-        &session.active_context().messages,
-        128_000,
-        0,
-        &settings
-    ));
+    assert_eq!(
+        super::super::compaction::context_pressure(
+            &session.active_context().messages,
+            128_000,
+            0,
+            &settings
+        ),
+        super::super::compaction::ContextPressure::Reserve
+    );
     let outcome = execute_compaction(
         &mut session,
         CompactOptions {
@@ -130,7 +133,7 @@ async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() 
         AgentMessage::Assistant(assistant) if assistant.usage.total_tokens == 126_010
     )));
     // Cross the same session/agent wire boundary as `set_messages` and
-    // `auto_compaction_due`: the live role must survive both round trips.
+    // `context_pressure`: the live role must survive both round trips.
     let loop_messages: Vec<pa_agent::types::AgentMessage> = live
         .iter()
         .map(|message| {
@@ -161,14 +164,16 @@ async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() 
             rest: Map::default(),
         }));
     }
-    assert!(!super::super::compaction::threshold_compaction_due(
-        &live, 128_000, 0, &settings
-    ));
+    assert_ne!(
+        super::super::compaction::context_pressure(&live, 128_000, 0, &settings),
+        super::super::compaction::ContextPressure::Reserve
+    );
     assistant.timestamp = summary_timestamp + 2;
     live.push(AgentMessage::Assistant(assistant));
-    assert!(super::super::compaction::threshold_compaction_due(
-        &live, 128_000, 0, &settings
-    ));
+    assert_eq!(
+        super::super::compaction::context_pressure(&live, 128_000, 0, &settings),
+        super::super::compaction::ContextPressure::Reserve
+    );
     registration.unregister();
 }
 
