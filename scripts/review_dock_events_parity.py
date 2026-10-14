@@ -111,6 +111,12 @@ def running_visible(text, kind, count):
     return re.search(r'(?<!\d)' + str(count) + r'\s+' + label + r'\b', text) is not None
 
 
+def ts_dock_visible(text):
+    # The actual TS dock header, not an arbitrary occurrence of "subagents":
+    # its optional-ripgrep startup warning mentions that word after removal.
+    return re.search(r'^\s*╭─\s+subagents\b', text, re.MULTILINE) is not None
+
+
 def visible_cost(text):
     costs = re.findall(r'\$(\d+\.\d{2})(?!\d)', text)
     assert len(costs) == 1, 'fixture frame must paint one unambiguous title cost'
@@ -186,7 +192,7 @@ def run_case(binary, kind, root, observed):
         snap('child_settled', lambda text: running_visible(text, kind, 0) and '$0.42' in text)
         server.roster_delta([], removed=['c1'])
         snap('child_removed', lambda text: cost_ready(text, ts_cached_cost if kind == 'ts' else '0.00')
-             and ('subagents' not in text if kind == 'ts' else running_visible(text, kind, 0)))
+             and (not ts_dock_visible(text) if kind == 'ts' else running_visible(text, kind, 0)))
         server.roster_delta([parent(), child('c3', 'running', 0.73)], resync=True)
         snap('roster_restored', lambda text: running_visible(text, kind, 1)
              and cost_ready(text, ts_cached_cost if kind == 'ts' else '0.73'))

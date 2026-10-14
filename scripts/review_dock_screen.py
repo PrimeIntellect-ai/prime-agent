@@ -44,8 +44,14 @@ class DockScreen:
                     # OSC titles/hyperlinks do not move terminal cells. DCS,
                     # APC and PM can carry graphics or sixel: never silently
                     # accept their unknown effect on the captured frame.
-                    osc_kind = self.pending[2:].split(';', 1)[0]
-                    if self.pending[1] != ']' or osc_kind not in ('0', '1', '2', '7', '8', '52', '133'):
+                    payload = self.pending[2:2 + end.start()]
+                    osc_kind = payload.split(';', 1)[0]
+                    # Pinned TS asks for the default foreground/background via
+                    # OSC10;? / OSC11;? (actual failed hosted receipt). Queries
+                    # do not paint or set a color; a legacy PTY may stay silent.
+                    # Color-setting variants remain unsupported and fail closed.
+                    color_query = payload in ('10;?', '11;?')
+                    if self.pending[1] != ']' or (not color_query and osc_kind not in ('0', '1', '2', '7', '8', '52', '133')):
                         self.unsupported_terminal.append(sequence)
                     self.pending = self.pending[2 + end.end():]
                     continue

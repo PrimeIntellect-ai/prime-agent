@@ -6,7 +6,7 @@ import json
 import threading
 from unittest.mock import Mock, patch
 
-from review_dock_events_parity import DockSupervisor, child, cost_ready, parent, run_case, running_visible, visible_cost
+from review_dock_events_parity import DockSupervisor, child, cost_ready, parent, run_case, running_visible, ts_dock_visible, visible_cost
 from review_dock_screen import DockScreen
 
 
@@ -147,6 +147,22 @@ class CaptureTests(unittest.TestCase):
             visible_cost('$0.42 and $0.91')
         self.assertFalse(cost_ready('partial repaint $0.', '0.42'))
         self.assertTrue(cost_ready('Dock fixture $0.42', '0.42'))
+
+    def test_startup_warning_cannot_make_removed_dock_look_present(self):
+        warning = 'Prime Agent\n and subagents remain available.\n >\n← manage'
+        self.assertIn('subagents', warning)
+        self.assertFalse(ts_dock_visible(warning))
+        self.assertTrue(ts_dock_visible(warning + '\n╭─ subagents ───╮\n│ ● 0 running │'))
+
+    def test_exact_default_color_queries_do_not_mutate_capture(self):
+        screen = DockScreen()
+        screen.feed(b'\x1b[31m1 subagents')
+        before = screen.dock_styles()
+        self.assertEqual(screen.feed(b'\x1b]10;?\x1b\\\x1b]11;?\x07'), [])
+        self.assertEqual(screen.dock_styles(), before)
+        self.assertEqual(screen.unsupported_terminal, [])
+        screen.feed(b'\x1b]10;#abcdef\x1b\\')
+        self.assertEqual(screen.unsupported_terminal, ['\x1b]10;#abcdef\x1b\\'])
 
 
 if __name__ == '__main__':
