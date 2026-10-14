@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 
 use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
-use crate::corpus::{self, CacheMode, CorpusOptions, Manifest, Profile};
+use crate::corpus::{self, CacheMode, CorpusOptions, Manifest};
 
 use super::pty::PtyChild;
 
@@ -116,17 +116,33 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
 
 /// One scenario pass; returns the sample in ms.
 fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<f64> {
+    let (sample, _) = launch(ctx, scenario, run)?;
+    Ok(sample)
+}
+
+/// The ONE launch path: the pre-started daemon for warm-* scenarios, the
+/// scenario's own resume target + first needle, the post-launch mechanics,
+/// and the daemon teardown on every path. Both `run()` (single scenario)
+/// and `run_suite()` call this.
+fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
     let socket = run_socket(ctx, run);
     std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
-    if matches!(scenario, Scenario::WarmStart | Scenario::WarmReady) {
+    if matches!(
+        scenario,
+        Scenario::WarmStart | Scenario::WarmReady | Scenario::AgentsViewWarm
+    ) {
+        // AgentsViewWarm pre-starts so both TUIs share the daemon the first
+        // populate warms; the single-scenario path cannot express that (its
+        // second launch would spawn a second daemon), so it runs the first
+        // populate only and the sample is the suite's warm number.
         start_daemon(ctx, &socket)?;
     }
-    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
-    let outcome = launch_scenario(ctx, &mut launch, scenario);
+    let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
+    let outcome = launch_scenario(ctx, &mut launched, scenario);
     let stopped = stop_daemon(&socket);
     let sample = outcome?;
     stopped?;
-    Ok(sample)
+    Ok((sample, launched))
 }
 
 // The whole-suite driver (`pa-perf run`): generates the cold and warm
@@ -140,7 +156,7 @@ fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result
 /// Propagates corpus-generation, spawn, needle-timeout, daemon, and IO
 /// failures.
 pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
-    let liveness = Duration::from_secs(options.liveness_secs.max(liveness_floor(options.profile)));
+    let liveness = Duration::from_secs(options.liveness_secs);
     let knobs = || CorpusOptions {
         seed: options.seed,
         ..options.profile.defaults()
@@ -168,22 +184,12 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
         // per launch; the cold-start/cold-ready (and warm-*) pairs share
         // one launch each.
         restore(&cold_ctx)?;
-        let (start_sample, launch) = launch_cold(&cold_ctx, Scenario::ColdStart, index)?;
-        let ready_sample = launch.ready_ms.context("the cold launch never attached")?;
-        push(
-            &mut samples,
-            index,
-            options.runs,
-            Scenario::ColdStart,
-            start_sample,
-        );
-        push(
-            &mut samples,
-            index,
-            options.runs,
-            Scenario::ColdReady,
-            ready_sample,
-        );
+        let (start_sample, launched) = launch(&cold_ctx, Scenario::ColdStart, index)?;
+        let ready_sample = launched
+            .ready_ms
+            .context("the cold launch never attached")?;
+        push(&mut samples, index, Scenario::ColdStart, start_sample);
+        push(&mut samples, index, Scenario::ColdReady, ready_sample);
         for scenario in [
             Scenario::AgentsView,
             Scenario::AgentsViewWarm,
@@ -192,26 +198,16 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
             Scenario::AtCompletion,
         ] {
             restore(&cold_ctx)?;
-            let (sample, _launch) = launch_cold(&cold_ctx, scenario, index)?;
-            push(&mut samples, index, options.runs, scenario, sample);
+            let (sample, _) = launch(&cold_ctx, scenario, index)?;
+            push(&mut samples, index, scenario, sample);
         }
         restore(&warm_ctx)?;
-        let (start_sample, launch) = launch_warm(&warm_ctx, Scenario::WarmStart, index)?;
-        let ready_sample = launch.ready_ms.context("the warm launch never attached")?;
-        push(
-            &mut samples,
-            index,
-            options.runs,
-            Scenario::WarmStart,
-            start_sample,
-        );
-        push(
-            &mut samples,
-            index,
-            options.runs,
-            Scenario::WarmReady,
-            ready_sample,
-        );
+        let (start_sample, launched) = launch(&warm_ctx, Scenario::WarmStart, index)?;
+        let ready_sample = launched
+            .ready_ms
+            .context("the warm launch never attached")?;
+        push(&mut samples, index, Scenario::WarmStart, start_sample);
+        push(&mut samples, index, Scenario::WarmReady, ready_sample);
         println!(
             "run {index}/{} complete ({:.1}s)",
             options.runs,
@@ -245,58 +241,11 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
     Ok(results)
 }
 
-/// The per-profile liveness floor: the agents-view populate is superlinear
-/// in session count (measured: 100 sessions populate in ~0.4 s; 2500 stream
-/// ~1 row/s once past a few hundred), so big profiles need generous
-/// deadlines — the floor keeps a slow-but-working run measurable instead of
-/// failing at an arbitrary small deadline. The user's `--liveness-secs`
-/// raises it further.
-fn liveness_floor(profile: Profile) -> u64 {
-    match profile {
-        Profile::Small => 120,
-        Profile::Medium => 300,
-        Profile::Large => 1_800,
-        Profile::Xl => 7_200,
-    }
-}
-
 /// Push a sample unless this is the discarded warm-up run.
-fn push(
-    samples: &mut BTreeMap<Scenario, Vec<f64>>,
-    index: usize,
-    _runs: usize,
-    scenario: Scenario,
-    sample: f64,
-) {
+fn push(samples: &mut BTreeMap<Scenario, Vec<f64>>, index: usize, scenario: Scenario, sample: f64) {
     if index > 0 {
         samples.entry(scenario).or_default().push(sample);
     }
-}
-
-/// One launch on a cold-fresh daemon (the TUI spawns its own) and the
-/// scenario's post-launch mechanics; returns (sample, launch).
-fn launch_cold(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
-    let socket = run_socket(ctx, run);
-    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
-    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
-    let outcome = launch_scenario(ctx, &mut launch, scenario);
-    let stopped = stop_daemon(&socket);
-    let sample = outcome?;
-    stopped?;
-    Ok((sample, launch))
-}
-
-/// One launch against the harness-pre-started daemon (the warm corpus).
-fn launch_warm(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
-    let socket = run_socket(ctx, run);
-    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
-    start_daemon(ctx, &socket)?;
-    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
-    let outcome = launch_scenario(ctx, &mut launch, scenario);
-    let stopped = stop_daemon(&socket);
-    let sample = outcome?;
-    stopped?;
-    Ok((sample, launch))
 }
 
 /// The resume target + first needle per scenario, then the spawn.
@@ -323,7 +272,10 @@ fn spawn_for_scenario(
             .join("failed-streams")
             .join(format!("{}-run{run}.bin", crate::report::key_of(scenario))),
     );
-    if matches!(scenario, Scenario::ColdStart | Scenario::WarmStart) {
+    if matches!(
+        scenario,
+        Scenario::ColdStart | Scenario::WarmStart | Scenario::ColdReady | Scenario::WarmReady
+    ) {
         launch.wait_ready()?;
     }
     Ok(launch)

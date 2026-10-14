@@ -124,7 +124,11 @@ const TASKS: [&str; 16] = [
 /// own `at` stamps come from the product writer; see README's determinism
 /// note.)
 const BASE_MS: u64 = 1_790_000_000_000;
-/// The hour step between session starts/mtimes (roster order is mtime-desc).
+/// The mtime step between sessions (roster order is mtime-desc; 12-minute
+/// steps keep even the xl profile's 2500 sessions inside the product's
+/// 30-day archive age rule).
+const MTIME_STEP_MS: u64 = 720_000;
+/// The header-timestamp hour step (a session's rows spread over an hour).
 const HOUR_MS: u64 = 3_600_000;
 
 /// The corpus manifest: what the bench reads (needles are DATA, never
@@ -224,12 +228,17 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
     }
     let cwd = project_dir.display().to_string();
 
-    // Onboarding is pre-answered and traces stay off: the TUI lands in chat.
+    // Onboarding is pre-answered, traces stay off, and BOTH archive rules
+    // are disabled: the daemon's boot sweep would otherwise retire the
+    // corpus's own sessions (the defaults keep 200 files / 30 days) and
+    // move them out from under the bench's manifest baseline.
     std::fs::write(
         agent_dir.join("settings.json"),
         serde_json::json!({
             "onboardingShown": true,
             "agentTraces": { "enabled": false },
+            "sessionArchiveMaxAgeDays": "off",
+            "sessionArchiveMaxSessions": "off",
         })
         .to_string(),
     )?;
@@ -240,12 +249,12 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
     let mut child_sessions = 0usize;
     let ledger = RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
 
-    let mut mtime = BASE_MS + HOUR_MS;
+    let mut mtime = BASE_MS + MTIME_STEP_MS;
     let mut huge: Option<Marker> = None;
     let mut switch_a: Option<Marker> = None;
     let mut switch_b: Option<Marker> = None;
     for index in 0..options.sessions {
-        let start = BASE_MS - index as u64 * HOUR_MS;
+        let start = BASE_MS - index as u64 * MTIME_STEP_MS;
         let (rows, name, marker) = match index {
             0 => (
                 options.huge_rows,
@@ -307,7 +316,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
             }
         }
         set_mtime(&file, mtime)?;
-        mtime -= HOUR_MS / 2;
+        mtime -= MTIME_STEP_MS;
 
         if options.artifacts {
             let artifacts_root = agent_dir.join("session-artifacts");

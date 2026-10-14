@@ -31,6 +31,10 @@ pub(crate) struct PtyChild {
     master: std::fs::File,
     pub(crate) output: Vec<u8>,
     screen: vt100::Parser,
+    /// The kitty probe is answered exactly once (the answer goes to the
+    /// child's stdin, so it never shows up in the read stream — a
+    /// stream-search for it would re-send forever).
+    kitty_answered: bool,
 }
 
 impl PtyChild {
@@ -84,6 +88,7 @@ impl PtyChild {
             master: pty.master.into(),
             output: Vec::new(),
             screen: vt100::Parser::new(rows, cols, 0),
+            kitty_answered: false,
         })
     }
 
@@ -121,10 +126,16 @@ impl PtyChild {
         what: &str,
         deadline: Instant,
     ) -> anyhow::Result<Instant> {
+        // Search only the bytes that arrived since the last check (plus the
+        // needle overlap): a fresh full-stream scan per read is quadratic,
+        // and the harness must never out-CPU the product it measures.
+        let mut scanned = mark;
         loop {
-            if find(self.output_from(mark), needle).is_some() {
+            let from = scanned.saturating_sub(needle.len().saturating_sub(1));
+            if find(&self.output[from..], needle).is_some() {
                 return Ok(Instant::now());
             }
+            scanned = self.output.len();
             if Instant::now() >= deadline {
                 let tail =
                     &self.output_from(mark)[self.output_from(mark).len().saturating_sub(4000)..];
@@ -159,12 +170,12 @@ impl PtyChild {
         match read {
             Ok(0) | Err(_) => {}
             Ok(n) => {
-                self.output.extend_from_slice(&buffer[..n]);
-                self.screen.process(&buffer[..n]);
-                if find(&self.output, KITTY_QUERY).is_some()
-                    && find(&self.output, KITTY_ANSWER).is_none()
-                {
+                let chunk = &buffer[..n];
+                self.output.extend_from_slice(chunk);
+                self.screen.process(chunk);
+                if !self.kitty_answered && find(chunk, KITTY_QUERY).is_some() {
                     self.write(KITTY_ANSWER)?;
+                    self.kitty_answered = true;
                 }
             }
         }

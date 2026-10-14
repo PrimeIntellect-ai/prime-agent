@@ -87,6 +87,11 @@ records (`parentSession`/`child` are canonical paths).
   the warm scan via the daemon's in-process cache instead.
 - `pa-perf run` generates BOTH corpora (cold for the cold scenarios, warm
   for warm-start/warm-ready) — every scenario runs on the state it needs.
+- The corpus settings disable BOTH archive rules (`sessionArchiveMaxAgeDays`
+  / `sessionArchiveMaxSessions` "off") and the mtime spread stays inside the
+  30-day age rule: the daemon's boot sweep would otherwise retire corpus
+  sessions out from under the manifest baseline (the defaults keep 200
+  files / 30 days).
 
 ## The bench harness
 
@@ -101,11 +106,7 @@ pa-perf bench --binary target/release/prime-agent --corpus DIR --scenario S --ru
 
 Scenarios (timed from a triggering action to an observable needle — literal
 paints as byte needles, cell-diffed content through a vt100 screen model;
-the liveness deadline only fails broken runs — the driver enforces per-profile
-floors: small 120 s, medium 300 s, large 1800 s, xl 7200 s, because the
-agents-view populate is superlinear in session count: ~0.4 s at 100
-sessions, roughly ~1 row/s once past a few hundred — the xl populate takes
-tens of minutes and its CI runs are budgeted accordingly):
+the liveness deadline only fails broken runs):
 
 | scenario | corpus | trigger -> needle |
 |---|---|---|
@@ -161,9 +162,8 @@ and `make deny` stays clean.
 
 ## CI
 
-The CI bench matrix budgets each profile: small/medium 10 runs, large 3,
-xl 2 (the populate superlinearity makes 10 impractical at 1000+ sessions;
-the baseline's report-only marking absorbs the wider spread).
+The bench matrix runs all four profiles at 10 runs each; the xl
+(2500-session) agents-view populate measures ~2.7 s on an 8-core sandbox.
 
 `.github/workflows/perf.yml`: nightly schedule + workflow_dispatch +
 label-gated pull requests (`perf-test` label, [labeled, synchronize] —

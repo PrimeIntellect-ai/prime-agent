@@ -91,31 +91,11 @@ jobs:
     name: bench (${{ matrix.profile }})
     needs: build
     runs-on: ubuntu-24.04
-    # The per-leg budgets scale with the profile: the agents-view populate
-    # is superlinear in session count (the big profiles' populate scenarios
-    # need hours, not minutes — fewer runs, bigger deadlines; the baseline
-    # carries their numbers report-only if the spread says so).
-    timeout-minutes: ${{ matrix.timeout }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - profile: small
-            runs: 10
-            liveness: 300
-            timeout: 60
-          - profile: medium
-            runs: 10
-            liveness: 900
-            timeout: 90
-          - profile: large
-            runs: 3
-            liveness: 3600
-            timeout: 240
-          - profile: xl
-            runs: 2
-            liveness: 10800
-            timeout: 360
+        profile: [small, medium, large, xl]
     steps:
       # The checkout provides the packaged kernel runtime (prime-agent-runtime/)
       # the release binary resolves through PI_PACKAGE_DIR, plus skills/.
@@ -138,30 +118,24 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       # The same prep ci.yml's kernel-e2e shards run: the venv must be ready
       # before the first session prewarm, or the first bench run pays the
-      # bootstrap inside its sample.
-      # The same prep ci.yml's kernel-e2e shards run: the venv must be ready
-      # before the first session prewarm, or the first bench run pays the
       # bootstrap inside its (discarded) warm-up.
       - name: Bootstrap the kernel venv
         env:
           PI_PACKAGE_DIR: ${{ github.workspace }}
         run: prime-agent --prime-agent-bootstrap
-      # The driver below generates both corpora itself (cold + warm).
+      # One driver call: pa-perf run generates the cold and warm corpora,
+      # routes every scenario to the corpus state it needs, and writes one
+      # result JSON per scenario into <out>/results/.
       - name: Run the scenarios
         env:
-          PROFILE: ${{ matrix.profile }}
           PI_PACKAGE_DIR: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          mkdir -p results
-          for scenario in cold-start warm-start agents-view agents-view-warm open-session session-switch at-completion; do
-            pa-perf bench \
-              --binary "$HOME/.local/bin/prime-agent" \
-              --corpus "$RUNNER_TEMP/corpus" \
-              --scenario "$scenario" \
-              --runs 10 \
-              --json "results/$scenario.json"
-          done
+          pa-perf run \
+            --binary "$HOME/.local/bin/prime-agent" \
+            --profile ${{ matrix.profile }} \
+            --out "$RUNNER_TEMP/perf" \
+            --runs 10
       - name: Upload the results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
