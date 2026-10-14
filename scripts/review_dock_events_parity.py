@@ -38,12 +38,18 @@ def child(ident, status, cost):
         'isSessionActive': status == 'running'}}
 
 
+def usage(cost):
+    return {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
+            'cost': {'input': 0, 'output': cost, 'cacheRead': 0, 'cacheWrite': 0, 'total': cost}}
+
+
 class DockSupervisor(Supervisor):
     def __init__(self, path, hello, root):
         assert 'agent_roster' in hello.get('serverCapabilities', []), 'actual binary does not advertise roster protocol'
         self.roster = [parent(), child('c1', 'running', 0.42)]
         self.write_lock = threading.Lock()
         self.emitted = []
+        self.context_responses = []
         super().__init__(path, hello, 'dock', root)
 
     def send(self, sock, data):
@@ -58,6 +64,19 @@ class DockSupervisor(Supervisor):
             data['data']['snapshot']['state']['sessionName'] = 'Dock fixture'
             data['data']['snapshot']['summary'].update(sessionId='fixture-durable',
                 activeSessionId='s1', sessionFile='/fixture/root.jsonl', sessionName='Dock fixture')
+        elif data.get('type') == 'response' and data.get('command') == 'get_context_tree':
+            # TS's top bar reads the context tree, whereas Rust reads roster
+            # usage. Both protocol views must describe the same fixture family.
+            children = [{
+                'id': row['summary']['sessionId'], 'label': row['agentId'],
+                'status': 'active' if row['status'] == 'running' else 'completed',
+                'ownUsage': usage(row['summary']['usage']['cost']),
+                'totalUsage': usage(row['summary']['usage']['cost']), 'children': []}
+                for row in self.roster if row['agentId'] != 's1']
+            data = dict(data, data={'id': 'root', 'label': 'Dock fixture', 'status': 'active',
+                'ownUsage': usage(0), 'totalUsage': usage(sum(
+                    node['totalUsage']['cost']['total'] for node in children)), 'children': children})
+            self.context_responses.append(data)
         with self.write_lock:
             super().send(sock, data)
 
@@ -90,6 +109,19 @@ class DockSupervisor(Supervisor):
 def running_visible(text, kind, count):
     label = 'running' if kind == 'ts' else 'subagents'
     return re.search(r'(?<!\d)' + str(count) + r'\s+' + label + r'\b', text) is not None
+
+
+def visible_cost(text):
+    costs = re.findall(r'\$(\d+\.\d{2})(?!\d)', text)
+    assert len(costs) == 1, 'fixture frame must paint one unambiguous title cost'
+    return costs[0]
+
+
+def cost_ready(text, expected):
+    try:
+        return visible_cost(text) == expected
+    except AssertionError:
+        return False  # A partial repaint is not a completed frame.
 
 
 def capture(terminal, root, offset):
@@ -130,7 +162,12 @@ def run_case(binary, kind, root, observed):
             offset = len(terminal.raw)
         snap('snapshot', lambda text: server.attaches >= 1 and running_visible(text, kind, 1) and '$0.42' in text)
         server.roster_delta([child('c2', 'running', 0.49)])
-        snap('roster_added', lambda text: running_visible(text, kind, 2) and '$0.91' in text)
+        # Pinned TS refreshTopBarCost fetches on initial bind/turn-end/status,
+        # not roster-only updates (interactive-mode.ts:1899,5771,6326). Do not
+        # invent a turn-end event to make its cached title match Rust's live one.
+        ts_cached_cost = '0.42'
+        snap('roster_added', lambda text: running_visible(text, kind, 2)
+             and cost_ready(text, ts_cached_cost if kind == 'ts' else '0.91'))
         server.goal('active')
         snap('goal_active', lambda text: 'Pursuing goal (12s)' in text)
         before_focus = terminal.screen.dock_styles()
@@ -148,14 +185,23 @@ def run_case(binary, kind, root, observed):
         server.roster_delta([child('c1', 'idle', 0.42)], removed=['c2'])
         snap('child_settled', lambda text: running_visible(text, kind, 0) and '$0.42' in text)
         server.roster_delta([], removed=['c1'])
-        snap('child_removed', lambda text: '$0.42' not in text and '2 running' not in text and '2 subagents' not in text)
+        snap('child_removed', lambda text: cost_ready(text, ts_cached_cost if kind == 'ts' else '0.00')
+             and ('subagents' not in text if kind == 'ts' else running_visible(text, kind, 0)))
         server.roster_delta([parent(), child('c3', 'running', 0.73)], resync=True)
-        snap('roster_restored', lambda text: running_visible(text, kind, 1) and '$0.73' in text)
+        snap('roster_restored', lambda text: running_visible(text, kind, 1)
+             and cost_ready(text, ts_cached_cost if kind == 'ts' else '0.73'))
         server.goal('paused')
         snap('goal_paused', lambda text: 'Goal paused (12s)' in text)
         assert not server.prompts, 'focus interactions accidentally submitted a prompt'
         assert not terminal.screen.unsupported_sgr, 'unsupported SGR makes attribute evidence incomplete'
         assert not terminal.screen.unsupported_terminal, 'unsupported terminal geometry makes frame evidence incomplete'
+        observed['title_costs'] = {phase: visible_cost(frame['text']) for phase, frame in observed['frames'].items()}
+        expected_costs = {'snapshot': '0.42', 'roster_added': '0.91', 'goal_active': '0.91',
+            'dock_focused': '0.91', 'editor_restored': '0.91', 'child_settled': '0.42',
+            'child_removed': '0.00', 'roster_restored': '0.73', 'goal_paused': '0.73'}
+        if kind == 'ts':
+            expected_costs = {phase: ts_cached_cost for phase in expected_costs}
+        assert observed['title_costs'] == expected_costs, 'actual title cost reaction differs from pinned source'
         observed['behavior_verified'] = True
     finally:
         try:
@@ -168,6 +214,7 @@ def run_case(binary, kind, root, observed):
             finally:
                 observed['emitted_events'] = server.emitted
                 observed['commands'] = server.commands
+                observed['context_responses'] = server.context_responses
                 observed['fixture_errors'] = server.errors
         assert not server.errors, server.errors
         observed['cleanup_verified'] = True
@@ -180,6 +227,7 @@ def main():
     receipt = {'verified': False, 'runs': {}, 'scope': __doc__,
         'frame_scope': '120x40 decoded text + dock SGR cells and complete raw ANSI, not pixels/font rendering.',
         'preexisting_ts_limitation': 'Pinned TS uses a boxed running/idle/inactive dock; Rust uses a one-line fixed-group dock. Layouts are not normalized into equality.',
+        'preexisting_cost_difference': 'TS binds initial family cost from get_context_tree and does not refresh it on roster-only events. Rust refreshes cost from the live roster. Exact phase costs asserted and retained without normalization or synthetic refresh events.',
         'not_verified': ['frame/style equality', 'actual daemon roster production', 'new-session/no-session fallback', 'agents-view lazy query search']}
     try:
         assert sys.platform == 'linux', 'hosted Linux binary fixture only'

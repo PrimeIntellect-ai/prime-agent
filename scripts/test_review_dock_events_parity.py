@@ -6,7 +6,7 @@ import json
 import threading
 from unittest.mock import Mock, patch
 
-from review_dock_events_parity import DockSupervisor, run_case, running_visible
+from review_dock_events_parity import DockSupervisor, child, cost_ready, parent, run_case, running_visible, visible_cost
 from review_dock_screen import DockScreen
 
 
@@ -114,6 +114,27 @@ class CaptureTests(unittest.TestCase):
         server.send(sock, {'type': 'daemon_hello', 'serverCapabilities': ['session_input_admission']})
         wire = json.loads(sock.sendall.call_args.args[0])
         self.assertEqual(wire['serverCapabilities'], ['session_input_admission', 'agent_roster'])
+
+    def test_context_tree_and_roster_describe_same_family_usage(self):
+        server = DockSupervisor.__new__(DockSupervisor)
+        server.write_lock = threading.Lock()
+        server.roster = [parent(), child('c1', 'running', 0.42), child('c2', 'running', 0.49)]
+        server.context_responses = []
+        sock = Mock()
+        server.send(sock, {'type': 'response', 'command': 'get_context_tree', 'success': True, 'data': {}})
+        tree = json.loads(sock.sendall.call_args.args[0])['data']
+        self.assertAlmostEqual(tree['totalUsage']['cost']['total'], 0.91)
+        self.assertEqual([node['ownUsage']['cost']['total'] for node in tree['children']], [0.42, 0.49])
+        self.assertEqual(len(server.context_responses), 1)
+
+    def test_cost_probe_rejects_ambiguity(self):
+        self.assertEqual(visible_cost('Dock fixture $0.42'), '0.42')
+        with self.assertRaises(AssertionError):
+            visible_cost('no cost')
+        with self.assertRaises(AssertionError):
+            visible_cost('$0.42 and $0.91')
+        self.assertFalse(cost_ready('partial repaint $0.', '0.42'))
+        self.assertTrue(cost_ready('Dock fixture $0.42', '0.42'))
 
 
 if __name__ == '__main__':
