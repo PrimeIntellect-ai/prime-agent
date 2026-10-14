@@ -7,6 +7,9 @@ use crate::chat::{render_loader, ChatEntry};
 use crate::chrome::render_splash;
 use crate::Line;
 
+/// Inputs shared by local entry caches and cross-view handoffs.
+pub(super) type LayoutOptions = (crate::theme::Theme, String, bool, bool, Option<url::Url>);
+
 #[cfg(test)]
 thread_local! {
     pub(super) static ENTRY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
