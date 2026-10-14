@@ -60,6 +60,13 @@ def owned_identity(pid, root):
         return None
 
 
+def process_command(pid):
+    try:
+        return Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')
+    except (FileNotFoundError, ProcessLookupError):
+        return '<exited during role capture>'
+
+
 def owned_processes(root):
     return {int(path.name): identity for path in Path('/proc').iterdir()
             if path.name.isdigit()
@@ -152,7 +159,7 @@ def launch(binary, kind, root, socket_path, shared_tmp, provider, trees):
     original = tree['original_processes'] = owned_processes(root)
     assert process.pid in original and worker_pid in original, 'live supervisor and worker not observed'
     tree['critical_processes'] = {pid: original[pid] for pid in (process.pid, worker_pid)}
-    tree['process_roles'] = {str(pid): {'role': 'supervisor' if pid == process.pid else 'worker' if pid == worker_pid else 'other inherited-environment process', 'cmdline': Path(f'/proc/{pid}/cmdline').read_bytes().replace(b'\0', b' ').decode(errors='replace')} for pid in original}
+    tree['process_roles'] = {str(pid): {'role': 'supervisor' if pid == process.pid else 'worker' if pid == worker_pid else 'other inherited-environment process', 'cmdline': process_command(pid)} for pid in original}
     return tree
 
 
