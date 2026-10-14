@@ -718,9 +718,11 @@ fn tracked_worker_pid(agent_dir: &Path, supervisor_socket: &Path) -> u32 {
 /// `PRIME_AGENT_DAEMON_SOCKET`, and the residual sweep treated worker
 /// sockets as daemons. One shared TMPDIR, so every worker socket any daemon
 /// spawns listens in the shared product socket dir, exactly like a real
-/// machine: A owns the product-default socket, B and C are pinned to their
-/// own sockets with live workers of their own. A shutdown must stop only
-/// the daemons its root owns, and never another daemon's workers.
+/// machine: A owns the product-default socket, B and C are pinned to
+/// sockets inside one shared directory outside the product socket dir, with
+/// live workers of their own. A shutdown must stop only the daemons its
+/// root owns — the pinned socket, never the pinned directory — and never
+/// another daemon's workers.
 #[test]
 fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     let shared_tmp = tempfile::tempdir().expect("shared tmpdir");
@@ -738,16 +740,23 @@ fn force_shutdown_from_an_env_pinned_root_stops_only_that_daemon_tree() {
     let _session_a = create_scripted_session(&socket_a, &agent_a);
     let worker_a = tracked_worker_pid(&agent_a, &socket_a);
 
+    // B and C are pinned inside one shared pins directory OUTSIDE the
+    // product socket dir: a pinned root must own its pinned socket, never
+    // the whole directory (B's shutdown must not see C in there).
+    let pins_dir = shared_tmp.path().join("pins");
+    std::fs::create_dir_all(&pins_dir).expect("pins dir");
+
     let agent_b = fixture_b.path().join("agent");
-    let socket_b = agent_b.join("daemon.sock"); // env-pinned, isolated
+    let socket_b = pins_dir.join("b.sock"); // env-pinned, isolated
     let mut daemon_b = spawn_daemon(&socket_b, &agent_b, shared_tmp.path());
     let _session_b = create_scripted_session(&socket_b, &agent_b);
     let worker_b = tracked_worker_pid(&agent_b, &socket_b);
 
     // Like the launcher-pinned daemon of the incident: C's supervisor socket
-    // sits outside the shared dir, but its worker still listens there.
+    // sits outside the product socket dir, but its worker still listens
+    // there. C shares B's pins directory.
     let agent_c = fixture_c.path().join("agent");
-    let socket_c = agent_c.join("daemon.sock");
+    let socket_c = pins_dir.join("c.sock");
     let mut daemon_c = spawn_daemon(&socket_c, &agent_c, shared_tmp.path());
     let _session_c = create_scripted_session(&socket_c, &agent_c);
     let worker_c = tracked_worker_pid(&agent_c, &socket_c);

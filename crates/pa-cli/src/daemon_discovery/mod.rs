@@ -29,15 +29,17 @@ pub(crate) struct DiscoveredDaemonProcess {
     pub uptime_seconds: Option<u64>,
 }
 
-/// The state root an invocation reads: the agent dir and the socket dir of
-/// the daemon this invocation talks to — the env-pinned socket's dir, the
-/// shared default when no pin is set. Deliberate TS divergence: TS pins the
-/// root to the shared default socket dir regardless of the pin, so an
+/// The state root an invocation reads: the agent dir and the daemon socket
+/// it points at (flag > env > default). Deliberate TS divergence: TS pins
+/// the root to the shared default socket dir regardless of the pin, so an
 /// isolated daemon's `shutdown` also stops the shared daemon.
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonStateRoot {
     pub agent_dir: PathBuf,
-    pub socket_dir: PathBuf,
+    /// The product-default socket dir, `Some` only when the resolved
+    /// socket is the product default. A root pinned elsewhere owns its
+    /// socket, never the pinned socket's directory.
+    pub socket_dir: Option<PathBuf>,
     pub default_socket_path: PathBuf,
 }
 
@@ -109,17 +111,16 @@ pub(crate) struct DaemonInfo {
 }
 
 /// The root this invocation reads, from the same socket resolution every
-/// other mode uses (flag > env > default): the resolved path is the root's
-/// default socket and its parent the root's socket dir. With no pin this
-/// equals the shared default dir, so the product-default root is unchanged.
+/// other mode uses (flag > env > default). The root always owns the
+/// resolved socket and the agent dir; the product-default socket dir joins
+/// the root only when the resolved socket IS the product default (an
+/// explicit pin to the default included) — a pinned root owns its socket,
+/// never the pinned socket's directory (two isolated daemons in one shared
+/// directory would otherwise stop each other).
 pub(crate) fn current_state_root() -> DaemonStateRoot {
     let default_socket_path = config::resolve_daemon_socket_path(None);
-    #[cfg(unix)]
-    let socket_dir = default_socket_path
-        .parent()
-        .map_or_else(pa_daemon::platform::socket_dir, Path::to_path_buf);
-    #[cfg(not(unix))]
-    let socket_dir = pa_daemon::platform::socket_dir();
+    let socket_dir = (default_socket_path == pa_daemon::platform::default_daemon_socket_path())
+        .then_some(pa_daemon::platform::socket_dir());
     DaemonStateRoot {
         agent_dir: config::get_agent_dir(),
         socket_dir,
@@ -127,8 +128,9 @@ pub(crate) fn current_state_root() -> DaemonStateRoot {
     }
 }
 
-/// A socket belongs to the root when it is the default path, sits in the socket
-/// dir, or anywhere inside the agent dir (TS ownership registry not ported).
+/// A socket belongs to the root when it is the resolved default path, sits
+/// in the product-default socket dir (a pinned root has none), or anywhere
+/// inside the agent dir (TS ownership registry not ported).
 fn state_root_matches(root: &DaemonStateRoot, socket_path: &Path) -> bool {
     if is_never_touch(socket_path) {
         return false;
@@ -142,7 +144,11 @@ fn state_root_matches(root: &DaemonStateRoot, socket_path: &Path) -> bool {
     }
     #[cfg(not(windows))]
     {
-        if socket_path == root.default_socket_path || socket_path.parent() == Some(&root.socket_dir)
+        if socket_path == root.default_socket_path
+            || root
+                .socket_dir
+                .as_ref()
+                .is_some_and(|dir| socket_path.parent() == Some(dir))
         {
             return true;
         }
@@ -181,11 +187,16 @@ pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bo
 /// daemon. Worker sockets never appear: a worker belongs to its supervisor
 /// and stops through its tracked descriptors, so every consumer — discovery,
 /// the shutdown actions, and the `--force` residual sweep — acts on
-/// supervisors only.
+/// supervisors only. (A pinned root never sees worker sockets: they live in
+/// the product-default socket dir, which such a root does not own.)
 pub(crate) fn scan_listening_daemons(root: &DaemonStateRoot) -> Vec<DiscoveredDaemonProcess> {
     scan::scan_all_listening_daemons(config::APP_NAME, root)
         .into_iter()
-        .filter(|daemon| !is_worker_socket_path(&daemon.socket_path, &root.socket_dir))
+        .filter(|daemon| {
+            root.socket_dir
+                .as_ref()
+                .is_none_or(|dir| !is_worker_socket_path(&daemon.socket_path, dir))
+        })
         .collect()
 }
 
@@ -201,10 +212,15 @@ pub(crate) fn is_daemon_process_listening(
         .any(|daemon| daemon.pid == pid && daemon.socket_path == socket_path)
 }
 
-/// Socket files in the given socket dir: live daemons and orphaned files alike.
-/// Never-touch paths are filtered here too.
+/// Socket files in the root's socket dir: live daemons and orphaned files
+/// alike. A pinned root has no socket dir (`None`), so it sweeps nothing
+/// but its own socket file (added by the caller). Never-touch paths are
+/// filtered here too.
 #[cfg(unix)]
-fn scan_socket_dir(socket_dir: &Path) -> Vec<PathBuf> {
+fn scan_socket_dir(socket_dir: Option<&Path>) -> Vec<PathBuf> {
+    let Some(socket_dir) = socket_dir else {
+        return Vec::new();
+    };
     let Ok(entries) = std::fs::read_dir(socket_dir) else {
         return Vec::new();
     };
@@ -223,7 +239,7 @@ fn scan_socket_dir(socket_dir: &Path) -> Vec<PathBuf> {
 /// default pipe (see [`discover_daemons_with`]; TS `scanSocketDir` returns
 /// [] on win32).
 #[cfg(not(unix))]
-fn scan_socket_dir(_socket_dir: &Path) -> Vec<PathBuf> {
+fn scan_socket_dir(_socket_dir: Option<&Path>) -> Vec<PathBuf> {
     Vec::new()
 }
 
@@ -449,16 +465,31 @@ fn discover_daemons_with(root: &DaemonStateRoot, named_pipes: bool) -> Vec<Daemo
         .iter()
         .map(|worker| worker.supervisor_socket_path.clone())
         .collect();
+    // The product-default socket dir's orphan sweep (worker socket files
+    // belong to their supervisors); a pinned root has no dir to sweep and
+    // considers only its own socket file, so a dead pinned daemon's stale
+    // file is still found and removable.
+    #[cfg(unix)]
+    let pinned_socket_file = is_socket_file(&root.default_socket_path);
+    #[cfg(not(unix))]
+    let pinned_socket_file = false;
+    let orphan_files: Vec<PathBuf> = root
+        .socket_dir
+        .as_deref()
+        .map(|dir| {
+            scan_socket_dir(Some(dir))
+                .into_iter()
+                .filter(|path| !is_worker_socket_path(path, dir))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut sockets: BTreeSet<PathBuf> = process_by_socket
         .keys()
         .cloned()
-        .chain(
-            scan_socket_dir(&root.socket_dir)
-                .into_iter()
-                .filter(|path| !is_worker_socket_path(path, &root.socket_dir)),
-        )
+        .chain(orphan_files)
         .chain(worker_sockets.iter().cloned())
         .chain(named_pipes.then(|| root.default_socket_path.clone()))
+        .chain(pinned_socket_file.then(|| root.default_socket_path.clone()))
         .collect();
     sockets.retain(|path| state_root_matches(root, path));
 
@@ -541,7 +572,7 @@ mod tests {
     fn fixture_root(dir: &Path) -> DaemonStateRoot {
         DaemonStateRoot {
             agent_dir: dir.join("agent"),
-            socket_dir: dir.join("agent").join("sockets"),
+            socket_dir: Some(dir.join("agent").join("sockets")),
             default_socket_path: dir.join("agent").join("sockets").join("daemon.sock"),
         }
     }
@@ -565,11 +596,9 @@ mod tests {
     #[test]
     fn state_root_matches_own_paths_only() {
         let root = fixture_root(Path::new("/fixture"));
+        let socket_dir = root.socket_dir.as_deref().expect("fixture socket dir");
         assert!(state_root_matches(&root, &root.default_socket_path));
-        assert!(state_root_matches(
-            &root,
-            &root.socket_dir.join("daemon.sock")
-        ));
+        assert!(state_root_matches(&root, &socket_dir.join("daemon.sock")));
         assert!(state_root_matches(
             &root,
             &root.agent_dir.join("nested/daemon.sock")
@@ -580,22 +609,38 @@ mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn a_pinned_root_claims_only_its_pinned_socket() {
+        let mut root = fixture_root(Path::new("/fixture"));
+        root.default_socket_path = PathBuf::from("/pins/b.sock");
+        root.socket_dir = None;
+        assert!(state_root_matches(&root, &root.default_socket_path));
+        assert!(state_root_matches(
+            &root,
+            &root.agent_dir.join("nested/daemon.sock")
+        ));
+        assert!(!state_root_matches(&root, Path::new("/pins/c.sock")));
+        assert!(!state_root_matches(&root, Path::new("/pins/daemon.sock")));
+    }
+
     #[test]
     fn never_touch_paths_are_excluded_even_when_the_root_points_at_them() {
         for dir in NEVER_TOUCH_SOCKET_DIRS {
             let dir = Path::new(dir);
             let root = DaemonStateRoot {
                 agent_dir: dir.to_path_buf(),
-                socket_dir: dir.to_path_buf(),
+                socket_dir: Some(dir.to_path_buf()),
                 default_socket_path: dir.join("daemon.sock"),
             };
+            let socket_dir = root.socket_dir.clone().expect("never-touch socket dir");
             assert!(
                 !state_root_matches(&root, &root.default_socket_path),
                 "containment must beat root matching for {dir:?}"
             );
             assert!(!state_root_matches(
                 &root,
-                &root.socket_dir.join("worker-x.sock")
+                &socket_dir.join("worker-x.sock")
             ));
         }
         assert!(is_never_touch(Path::new("/tmp/mission-daemon")));
@@ -613,7 +658,7 @@ mod tests {
             let dir = *dir;
             let root = DaemonStateRoot {
                 agent_dir: PathBuf::from(dir),
-                socket_dir: PathBuf::from(dir),
+                socket_dir: Some(PathBuf::from(dir)),
                 default_socket_path: PathBuf::from(dir).join("daemon.sock"),
             };
             assert!(
@@ -636,16 +681,16 @@ mod tests {
     fn discovery_reports_orphan_files_inside_the_given_root_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = fixture_root(tmp.path());
-        std::fs::create_dir_all(&root.socket_dir).expect("socket dir");
+        let socket_dir = root.socket_dir.clone().expect("fixture socket dir");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir");
         // Bind and drop: the listener's socket file stays behind (std
         // does not unlink it), an orphan file in the fixture root.
         drop(
-            std::os::unix::net::UnixListener::bind(root.socket_dir.join("leftover.sock"))
-                .expect("bind"),
+            std::os::unix::net::UnixListener::bind(socket_dir.join("leftover.sock")).expect("bind"),
         );
         let infos = discover_daemons(&root);
         assert_eq!(infos.len(), 1);
-        assert_eq!(infos[0].socket_path, root.socket_dir.join("leftover.sock"));
+        assert_eq!(infos[0].socket_path, socket_dir.join("leftover.sock"));
         assert_eq!(infos[0].status, DaemonStatus::OrphanFile);
         assert!(!infos[0].is_default);
     }
@@ -659,7 +704,8 @@ mod tests {
         // only the named-pipe arm's fixed endpoint does, like the Windows
         // daemon pipe.
         root.default_socket_path = root.agent_dir.join("daemon-pipe.sock");
-        std::fs::create_dir_all(&root.socket_dir).expect("socket dir");
+        let socket_dir = root.socket_dir.clone().expect("fixture socket dir");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir");
 
         // No daemon on the pipe: nothing is reported, not a fake orphan.
         assert!(discover_daemons_with(&root, true).is_empty());
@@ -673,10 +719,12 @@ mod tests {
                 drop(stream);
             }
         });
-        assert!(
-            discover_daemons_with(&root, false).is_empty(),
-            "the unix arm only sees socket-dir files and listeners"
-        );
+        // The unix arm also considers the root's own socket file (a pinned
+        // socket's orphan file must stay discoverable); only a file that does
+        // not exist is left to the named-pipe arm above.
+        let infos = discover_daemons_with(&root, false);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].socket_path, root.default_socket_path);
         let infos = discover_daemons_with(&root, true);
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].socket_path, root.default_socket_path);

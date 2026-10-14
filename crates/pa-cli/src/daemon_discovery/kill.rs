@@ -247,7 +247,7 @@ mod tests {
     fn fixture_root(dir: &Path) -> DaemonStateRoot {
         DaemonStateRoot {
             agent_dir: dir.join("agent"),
-            socket_dir: dir.join("agent").join("sockets"),
+            socket_dir: Some(dir.join("agent").join("sockets")),
             default_socket_path: dir.join("agent").join("sockets").join("daemon.sock"),
         }
     }
@@ -272,7 +272,7 @@ mod tests {
         for dir in ["/tmp/mission-tmp/prime-agent-1000", "/tmp/prime-agent-1000"] {
             let root = DaemonStateRoot {
                 agent_dir: PathBuf::from(dir),
-                socket_dir: PathBuf::from(dir),
+                socket_dir: Some(PathBuf::from(dir)),
                 default_socket_path: PathBuf::from(dir).join("daemon.sock"),
             };
             let mut stopped: Vec<(String, String)> = Vec::new();
