@@ -52,11 +52,102 @@ pub(crate) enum ReapOutcome {
     /// The process outlived SIGKILL (a D-state wedged task): its lease
     /// stays held; the operator-facing refusal keeps naming the holder.
     Survived,
+    /// The reap froze before the signal: the socket lease was displaced
+    /// (a successor took the socket) - nothing further is signaled.
+    Froze,
+    /// The freeze came from the exclusion acquisition task itself
+    /// failing (distinct from displacement or contention, visible in
+    /// the outcome log): nothing further is signaled. Constructed only
+    /// where the sidecar primitive exists (Linux).
+    #[cfg(target_os = "linux")]
+    FrozeExclusionJoin,
+}
+
+/// The reap's fan-out: one future per target, with every sidecar
+/// acquisition serialized on the shared gate (sibling steps queue
+/// instead of burning their flock budgets against each other) while the
+/// escalation WAITS stay fully concurrent.
+async fn fan_out_targets(
+    supervisor: &Arc<Supervisor>,
+    targets: &[ReapTarget],
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+    exclusion_path: &(dyn Fn() -> Option<std::path::PathBuf> + Send + Sync),
+    sidecar_gate: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) -> Vec<(ReapTarget, ReapOutcome)> {
+    futures::future::join_all(
+        targets
+            .iter()
+            .map({
+                let gate = std::sync::Arc::clone(sidecar_gate);
+                move |target| {
+                    let gate = std::sync::Arc::clone(&gate);
+                    async move {
+                        // The freeze probe runs inside stop_target before
+                        // every signal; a top-level check here skips even
+                        // the scan side of a target once the lease is
+                        // gone.
+                        if frozen() {
+                            return (target.clone(), ReapOutcome::Froze);
+                        }
+                        let outcome =
+                            stop_target(target, frozen, exclusion_path().as_deref(), &gate).await;
+                        supervisor.log_line(&format!(
+                            "boot reap: {} pid {} (start id {:?}) - {:?}",
+                            match target.kind {
+                                ReapKind::Worker => "leftover worker",
+                                #[cfg(target_os = "linux")]
+                                ReapKind::Supervisor => "wedged supervisor",
+                            },
+                            target.pid,
+                            target.start_id,
+                            outcome
+                        ));
+                        (target.clone(), outcome)
+                    }
+                }
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await
 }
 
 /// Reap the same-socket predecessors before a client or adoption races the reap.
-pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
+pub(crate) async fn reap_predecessors(
+    supervisor: &Arc<Supervisor>,
+    displaced: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> bool {
+    // The lease displacement probe: TRUE the moment the public lock path
+    // no longer names this lease's pinned inode (a successor published).
+    // Every destructive step below re-checks it - the reap must never
+    // signal a successor's lineage, whatever the boot select's monitor
+    // was doing when the displacement landed. Returns TRUE when the
+    // pass froze: the caller fails its ownership boot (nothing further
+    // runs against a possibly-successor's socket).
+    let frozen = || displaced.is_some_and(|probe| probe());
     let socket_path = supervisor.options.socket_path.clone();
+    // On Linux every destructive step runs under a SHORT-HOLD of the
+    // lock's reclaim-sidecar exclusion (a compliant successor cannot
+    // publish while it is held): the hold is bounded to the step
+    // itself, because the lease heartbeat's refresh thread skips its
+    // mtime write while the sidecar is taken - a whole-pass hold would
+    // age the lock toward the stale threshold and invite a takeover the
+    // moment it dropped. Each hold retries a brief budget (dances and
+    // release passes are milliseconds); a persistent hold freezes the
+    // step (fail closed).
+    #[cfg(target_os = "linux")]
+    let reap_exclusion_path = pa_core::platform::LockDir::path_for(&socket_path);
+    #[cfg(target_os = "linux")]
+    let exclusion_path = || Some(reap_exclusion_path.clone());
+    #[cfg(not(target_os = "linux"))]
+    let exclusion_path = || None;
+    // The sidecar-acquisition gate: the fan-out's sibling steps QUEUE on
+    // this mutex instead of burning their own acquisition budgets
+    // against each other (the sidecar's flock retry sleeps in 5ms
+    // windows - a leftover-process burst would otherwise starve a
+    // sibling's 50ms budget into a spurious Froze and abort the whole
+    // ownership boot on an intact lease). Each queued step's hold is
+    // microseconds (the signal itself), so the queue drains fast.
+    let sidecar_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     // The adoption pass's business, never the reap's: this daemon's own descriptors,
     // protected while the identity still matches (none recorded stays protected).
     let protected: HashSet<u32> =
@@ -64,50 +155,128 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let mut targets = same_socket_worker_targets(&socket_path, &protected, None);
     targets.extend(same_socket_supervisor_targets(&socket_path));
     if targets.is_empty() {
-        return;
+        // No targets is not a clean bill: the boot-level guard was
+        // dropped before this pass, and a successor may have published
+        // in between - the empty census still reports the lease state.
+        return frozen();
     }
     supervisor.log_line(&format!(
         "boot reap: {} same-socket predecessor process(es) to clear",
         targets.len()
     ));
-    // Concurrent: a stuck target's escalation must not serialize the reap.
-    let outcomes = futures::future::join_all(
-        targets
-            .iter()
-            .map(|target| async move {
-                let outcome = stop_target(target).await;
-                supervisor.log_line(&format!(
-                    "boot reap: {} pid {} (start id {:?}) - {:?}",
-                    match target.kind {
-                        ReapKind::Worker => "leftover worker",
-                        #[cfg(target_os = "linux")]
-                        ReapKind::Supervisor => "wedged supervisor",
-                    },
-                    target.pid,
-                    target.start_id,
-                    outcome
-                ));
-                (target.clone(), outcome)
-            })
-            .collect::<Vec<_>>(),
+    // Concurrent: a stuck target's escalation must not serialize the
+    // reap (only the instant signal steps serialize on the sidecar
+    // gate).
+    let outcomes = fan_out_targets(
+        supervisor,
+        &targets,
+        &frozen,
+        &exclusion_path,
+        &sidecar_gate,
     )
     .await;
-    // The dead workers' socket files leave with them (a killed process cannot clean up).
+    // The dead workers' socket files leave with them (a killed process
+    // cannot clean up). Each removal runs under the same step-scoped
+    // sidecar hold as the signals.
+    let mut froze = outcomes.iter().any(|(_, outcome)| {
+        #[cfg(target_os = "linux")]
+        {
+            matches!(
+                outcome,
+                ReapOutcome::Froze | ReapOutcome::FrozeExclusionJoin
+            )
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            matches!(outcome, ReapOutcome::Froze)
+        }
+    });
     for (target, outcome) in outcomes {
         if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
             (&target.worker_socket, outcome)
         {
+            // A lease displaced by the time the cleanup runs freezes it:
+            // the successor owns the socket's lineage now.
+            if frozen() {
+                froze = true;
+                break;
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let held = match exclusion_path() {
+                    Some(path) => {
+                        match tokio::task::spawn_blocking(move || {
+                            pa_core::platform::try_reclaim_guard(&path, Duration::from_millis(50))
+                        })
+                        .await
+                        {
+                            Ok(acquired) => acquired,
+                            Err(join_error) => {
+                                // The acquisition task failed: the
+                                // step fails closed with the cause
+                                // logged (the signal steps carry
+                                // their own typed outcome); the
+                                // lease itself may be intact, so the
+                                // generic displaced message alone
+                                // would misreport this.
+                                supervisor.log_line(&format!(
+                                    "boot reap: socket cleanup exclusion acquisition failed for {}: {join_error:#}",
+                                    socket.display()
+                                ));
+                                froze = true;
+                                break;
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                match held {
+                    Some(guard) => {
+                        // The recheck runs UNDER the guard; the removal
+                        // is instantaneous and the guard drops at the
+                        // block's end.
+                        let skipped = frozen();
+                        if skipped {
+                            froze = true;
+                        } else if is_unix_socket_file(socket) {
+                            let _ = std::fs::remove_file(socket);
+                        }
+                        drop(guard);
+                        if skipped {
+                            break;
+                        }
+                    }
+                    None if exclusion_path().is_some() => {
+                        froze = true;
+                        break;
+                    }
+                    None => {
+                        if is_unix_socket_file(socket) {
+                            let _ = std::fs::remove_file(socket);
+                        }
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
             if is_unix_socket_file(socket) {
                 let _ = std::fs::remove_file(socket);
             }
         }
     }
+    // The final sample: a displacement that landed after the last step
+    // still fails the ownership boot - the socket the sweep and
+    // adoption passes would act on may already be a successor's.
+    if frozen() {
+        froze = true;
+    }
+    froze
 }
 
 /// Stop one worker process by identity: the terminal-stop escalation (a worker that missed
 /// its routed `shutdown`) on the `STOP_FORCE_TIMEOUT` budget, not the boot reap's fast
 /// verify. `None` as the start id trusts liveness alone.
 pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutcome {
+    let private_gate = tokio::sync::Mutex::new(());
     stop_target_within(
         &ReapTarget {
             pid,
@@ -117,6 +286,9 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
         },
         TERM_GRACE,
         STOP_FORCE_TIMEOUT,
+        &|| false,
+        None,
+        &private_gate,
     )
     .await
 }
@@ -147,7 +319,8 @@ pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_
         targets
             .iter()
             .map(|target| async move {
-                let outcome = stop_target(target).await;
+                let private_gate = tokio::sync::Mutex::new(());
+                let outcome = stop_target(target, &|| false, None, &private_gate).await;
                 supervisor.log_line(&format!(
                     "give-up sweep: leftover worker pid {} (start id {:?}) of {worker_id} - {:?}",
                     target.pid, target.start_id, outcome
@@ -181,19 +354,139 @@ fn identity_current(target: &ReapTarget) -> bool {
     }
 }
 
-/// Stop one target on the boot reap's fast budgets.
-async fn stop_target(target: &ReapTarget) -> ReapOutcome {
-    stop_target_within(target, TERM_GRACE, KILL_VERIFY).await
+/// Stop one target on the boot reap's fast budgets. Each signal runs
+/// under a SHORT hold of the lock's reclaim sidecar (Linux): a compliant
+/// successor cannot publish while it is held, and the hold never spans
+/// the escalation WAITS - the lease heartbeat's refresh thread skips
+/// its mtime write while the sidecar is taken, so only step-scoped
+/// holds keep the lock from aging toward the stale threshold.
+async fn stop_target(
+    target: &ReapTarget,
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+    exclusion_path: Option<&Path>,
+    sidecar_gate: &tokio::sync::Mutex<()>,
+) -> ReapOutcome {
+    stop_target_within(
+        target,
+        TERM_GRACE,
+        KILL_VERIFY,
+        frozen,
+        exclusion_path,
+        sidecar_gate,
+    )
+    .await
 }
 
-/// Stop one target with explicit escalation budgets: gone check, SIGTERM,
+/// One signal under the step-scoped reclaim-sidecar exclusion. The
+/// acquisition runs on a blocking thread (the sidecar's flock retry
+/// spins with in-thread sleeps); the lease path is RECHECKED UNDER THE
+/// ACQUIRED GUARD before the signal (a successor may have published
+/// while this step waited for the guard); the signal itself is
+/// instantaneous and the guard is DROPPED before any wait.
+enum GuardedSignal {
+    /// The signal was sent under the held guard.
+    Signaled,
+    /// The guard could not be acquired, or the lease is displaced under
+    /// it: the step fails closed.
+    Froze,
+    /// The guard acquisition task itself failed (distinct from plain
+    /// contention - never silently converted to it): the step fails
+    /// closed with the cause visible in the outcome log. Constructed
+    /// only where the sidecar primitive exists (Linux).
+    #[cfg(target_os = "linux")]
+    JoinFailed,
+    /// The signal syscall itself failed (the escalation outcome is
+    /// unchanged - the caller reports the survival).
+    Failed,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(clippy::unused_async))]
+async fn guarded_signal(
+    pidfd: i32,
+    signal: pa_core::platform::process::Signal,
+    exclusion_path: Option<&Path>,
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+    sidecar_gate: &tokio::sync::Mutex<()>,
+) -> GuardedSignal {
+    // The sidecar-acquisition queue: sibling steps wait HERE (no budget
+    // burn) instead of contending their flock retry windows against
+    // each other.
+    let _serial = sidecar_gate.lock().await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No sidecar primitive on this platform: the probe is the only
+        // belt.
+        let _ = exclusion_path;
+        if frozen() {
+            GuardedSignal::Froze
+        } else if pa_core::platform::process::pidfd_signal(pidfd, signal) {
+            GuardedSignal::Signaled
+        } else {
+            GuardedSignal::Failed
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let Some(path) = exclusion_path else {
+            // No sidecar primitive configured for this reap: the probe
+            // is the only belt.
+            if frozen() {
+                return GuardedSignal::Froze;
+            }
+            return if pa_core::platform::process::pidfd_signal(pidfd, signal) {
+                GuardedSignal::Signaled
+            } else {
+                GuardedSignal::Failed
+            };
+        };
+        // The acquisition runs on a blocking thread (the sidecar's
+        // flock retry spins with in-thread sleeps).
+        let acquired = match tokio::task::spawn_blocking({
+            let path = path.to_path_buf();
+            move || pa_core::platform::try_reclaim_guard(&path, Duration::from_millis(50))
+        })
+        .await
+        {
+            Ok(acquired) => acquired,
+            Err(_join_error) => return GuardedSignal::JoinFailed,
+        };
+        let Some(guard) = acquired else {
+            // A persistent hold: a compliant actor is mid-dance and
+            // this signal waits for it (fail closed).
+            return GuardedSignal::Froze;
+        };
+        // The recheck runs UNDER the guard: whatever published while
+        // this step waited for the guard freezes the signal here.
+        let result = if frozen() {
+            GuardedSignal::Froze
+        } else if pa_core::platform::process::pidfd_signal(pidfd, signal) {
+            GuardedSignal::Signaled
+        } else {
+            GuardedSignal::Failed
+        };
+        drop(guard);
+        result
+    }
+}
+
+/// Stop one target with explicit escalation budgets:
 /// grace, SIGKILL, verify. The signals ride the kernel-held pidfd: a pid
 /// recycled in the check-then-signal window never receives the signal.
+/// The `frozen` probe runs before EVERY signal: a displaced socket lease
+/// (a successor took the socket) freezes the escalation mid-pass - the
+/// reap must never signal a successor's lineage.
 async fn stop_target_within(
     target: &ReapTarget,
     term_grace: Duration,
     kill_verify: Duration,
+    frozen: &(dyn Fn() -> bool + Send + Sync),
+    exclusion_path: Option<&Path>,
+    sidecar_gate: &tokio::sync::Mutex<()>,
 ) -> ReapOutcome {
+    // The exclusion holds exist only where the sidecar primitive does
+    // (Linux); elsewhere the parameter is inert.
+    #[cfg(not(target_os = "linux"))]
+    let _ = exclusion_path;
     // The handle opens BEFORE the identity check and the check runs WHILE
     // it is held: a target that dies and has its pid recycled in between
     // would otherwise leave the handle pinning the REPLACEMENT - open
@@ -216,17 +509,68 @@ async fn stop_target_within(
         pa_core::platform::process::close_pidfd(pidfd);
         return ReapOutcome::AlreadyGone;
     }
-    if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
-        if await_gone(target, term_grace).await {
-            pa_core::platform::process::close_pidfd(pidfd);
-            return ReapOutcome::Term;
+    if frozen() {
+        pa_core::platform::process::close_pidfd(pidfd);
+        return ReapOutcome::Froze;
+    }
+    match guarded_signal(
+        pidfd,
+        pa_core::platform::process::Signal::Term,
+        exclusion_path,
+        frozen,
+        sidecar_gate,
+    )
+    .await
+    {
+        GuardedSignal::Signaled => {
+            // The guard is DROPPED before every wait: the escalation
+            // budgets never starve the lease heartbeat's refresh or
+            // other targets' step budgets.
+            if await_gone(target, term_grace).await {
+                pa_core::platform::process::close_pidfd(pidfd);
+                return ReapOutcome::Term;
+            }
+            if frozen() {
+                pa_core::platform::process::close_pidfd(pidfd);
+                return ReapOutcome::Froze;
+            }
+            match guarded_signal(
+                pidfd,
+                pa_core::platform::process::Signal::Kill,
+                exclusion_path,
+                frozen,
+                sidecar_gate,
+            )
+            .await
+            {
+                GuardedSignal::Signaled => {
+                    if await_gone(target, kill_verify).await {
+                        pa_core::platform::process::close_pidfd(pidfd);
+                        return ReapOutcome::Kill;
+                    }
+                }
+                GuardedSignal::Froze => {
+                    pa_core::platform::process::close_pidfd(pidfd);
+                    return ReapOutcome::Froze;
+                }
+                #[cfg(target_os = "linux")]
+                GuardedSignal::JoinFailed => {
+                    pa_core::platform::process::close_pidfd(pidfd);
+                    return ReapOutcome::FrozeExclusionJoin;
+                }
+                GuardedSignal::Failed => {}
+            }
         }
-        if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Kill)
-            && await_gone(target, kill_verify).await
-        {
+        GuardedSignal::Froze => {
             pa_core::platform::process::close_pidfd(pidfd);
-            return ReapOutcome::Kill;
+            return ReapOutcome::Froze;
         }
+        #[cfg(target_os = "linux")]
+        GuardedSignal::JoinFailed => {
+            pa_core::platform::process::close_pidfd(pidfd);
+            return ReapOutcome::FrozeExclusionJoin;
+        }
+        GuardedSignal::Failed => {}
     }
     pa_core::platform::process::close_pidfd(pidfd);
     ReapOutcome::Survived
@@ -757,7 +1101,13 @@ mod tests {
             pa_core::platform::process::open_pidfd(pid).is_ok(),
             "the kernel-held handle opens"
         );
-        let outcome = stop_target(&target(pid)).await;
+        let outcome = stop_target(
+            &target(pid),
+            &|| false,
+            None,
+            &(tokio::sync::Mutex::new(())),
+        )
+        .await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
     }
@@ -799,7 +1149,16 @@ mod tests {
             .expect("spawn true");
         let pid = child.id();
         let _ = child.wait();
-        assert_eq!(stop_target(&target(pid)).await, ReapOutcome::AlreadyGone);
+        assert_eq!(
+            stop_target(
+                &target(pid),
+                &|| false,
+                None,
+                &(tokio::sync::Mutex::new(()))
+            )
+            .await,
+            ReapOutcome::AlreadyGone
+        );
     }
 
     #[tokio::test]
@@ -811,7 +1170,10 @@ mod tests {
         let pid = child.id();
         let mut stale = target(pid);
         stale.start_id = stale.start_id.map(|id| id + "recycled");
-        assert_eq!(stop_target(&stale).await, ReapOutcome::AlreadyGone);
+        assert_eq!(
+            stop_target(&stale, &|| false, None, &(tokio::sync::Mutex::new(()))).await,
+            ReapOutcome::AlreadyGone
+        );
         assert!(
             child.try_wait().expect("child alive").is_none(),
             "the recycled identity must not have been signaled"
@@ -819,7 +1181,13 @@ mod tests {
         let mut unobservable = target(pid);
         unobservable.start_id = None;
         assert_eq!(
-            stop_target(&unobservable).await,
+            stop_target(
+                &unobservable,
+                &|| false,
+                None,
+                &(tokio::sync::Mutex::new(()))
+            )
+            .await,
             ReapOutcome::AlreadyGone,
             "an unverifiable identity is never signaled"
         );
@@ -1030,5 +1398,176 @@ mod tests {
             &interactive,
             "/tmp/sock/daemon.sock"
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_displaced_lease_freezes_the_reap_before_any_signal() {
+        // Red-first regression for the per-step freeze: a live target with a
+        // permanently displaced lease (the probe reads TRUE after every
+        // preflight) must freeze with NO signal sent - the escalation never
+        // touches a lineage the lease does not own. With the probe checks
+        // removed, the target is signaled and the outcome drifts off Froze.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a live reap target");
+        let pid = child.id();
+        // A verifiable identity: the target passes the alive-and-current
+        // gate so the freeze check is genuinely reached mid-escalation.
+        let start_id = crate::lease::get_process_start_id(pid).expect("the live child's start id");
+        let target = ReapTarget {
+            pid,
+            start_id: Some(start_id),
+            worker_socket: None,
+            kind: ReapKind::Worker,
+        };
+        let outcome = stop_target(&target, &|| true, None, &(tokio::sync::Mutex::new(()))).await;
+        assert_eq!(
+            outcome,
+            ReapOutcome::Froze,
+            "a displaced lease must freeze the escalation"
+        );
+        assert!(
+            crate::lease::is_process_alive(pid).unwrap_or(false),
+            "no signal may ride after the freeze - the target must survive"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_in_guard_recheck_freezes_the_signal() {
+        // Red-first regression for the UNDER-GUARD recheck: the probe reads
+        // FALSE on its first (pre-guard) call and TRUE on its second (the
+        // in-guard recheck after the sidecar is held) - only a recheck that
+        // runs under the acquired guard freezes the signal; the target
+        // survives with exactly two probe calls. Deleting the in-guard
+        // recheck (the regression) leaves the probe at one call, the TERM
+        // rides, and the target dies.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a live reap target");
+        let pid = child.id();
+        let start_id = crate::lease::get_process_start_id(pid).expect("the live child's start id");
+        let target = ReapTarget {
+            pid,
+            start_id: Some(start_id),
+            worker_socket: None,
+            kind: ReapKind::Worker,
+        };
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_calls = std::sync::Arc::clone(&calls);
+        let exclusion_dir = tempfile::tempdir().unwrap();
+        let socket_path = exclusion_dir.path().join("daemon.sock");
+        std::fs::write(&socket_path, "probe socket").unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket_path);
+        let outcome = stop_target(
+            &target,
+            &move || probe_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1,
+            Some(lock_path.as_path()),
+            &(tokio::sync::Mutex::new(())),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            ReapOutcome::Froze,
+            "the in-guard recheck must freeze the signal"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the probe must run exactly twice: once pre-guard, once under the guard"
+        );
+        assert!(
+            crate::lease::is_process_alive(pid).unwrap_or(false),
+            "no signal may ride after the in-guard freeze"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_target_burst_cannot_starve_the_shared_sidecar() {
+        // Red-first regression for the fan-out starvation, driving the
+        // PRODUCTION fan-out (fan_out_targets) with isolated targets: a
+        // paced probe (each in-guard recheck holds the sidecar ~10ms - a
+        // slow verification pass) makes each 50ms step budget admit only
+        // ~5 acquisitions, so WITHOUT the shared gate most of a 32-target
+        // burst starves into a spurious Froze on an intact lease; WITH the
+        // production gate every sibling queues and every outcome is Term.
+        // The pacing is bounded arithmetic (a 10ms hold against a 50ms
+        // budget), not a scheduler race.
+        const BURST: usize = 32;
+        let mut children: Vec<ReapOnDrop> = Vec::new();
+        let mut targets = Vec::new();
+        for _ in 0..BURST {
+            // The guard wraps the child IMMEDIATELY after the successful
+            // spawn: a panic in the start-id lookup below must not leak
+            // the just-started process.
+            let guard = ReapOnDrop(Some(
+                std::process::Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn a burst target"),
+            ));
+            let pid = guard.0.as_ref().expect("the guarded child").id();
+            let start_id = crate::lease::get_process_start_id(pid).expect("start id");
+            targets.push(ReapTarget {
+                pid,
+                start_id: Some(start_id),
+                worker_socket: None,
+                kind: ReapKind::Worker,
+            });
+            children.push(guard);
+        }
+        let exclusion_dir = tempfile::tempdir().unwrap();
+        let socket_path = exclusion_dir.path().join("daemon.sock");
+        std::fs::write(&socket_path, "probe socket").unwrap();
+        let lock_path = pa_core::platform::LockDir::path_for(&socket_path);
+        let sidecar_gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let paced = || {
+            std::thread::sleep(Duration::from_millis(10));
+            false
+        };
+        let exclusion_path = move || Some(lock_path.clone());
+        let fixture = tempfile::tempdir().unwrap();
+        let agent_dir = fixture.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let supervisor = Arc::new(
+            crate::supervisor::Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: fixture.path().join("daemon.sock"),
+                agent_dir,
+            })
+            .expect("supervisor"),
+        );
+        let outcomes = fan_out_targets(
+            &supervisor,
+            &targets,
+            &paced,
+            &exclusion_path,
+            &sidecar_gate,
+        )
+        .await;
+        let starved: Vec<_> = outcomes
+            .iter()
+            .filter(|(_, outcome)| !matches!(outcome, ReapOutcome::Term))
+            .collect();
+        // Reap the children BEFORE the assertion: the red regression
+        // panics here, and leaked live sleeps would bleed into later
+        // tests.
+        for mut child in children.drain(..) {
+            if let Some(mut child) = child.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        assert!(
+            starved.is_empty(),
+            "the production fan-out gate must serialize the burst: {starved:?}"
+        );
     }
 }

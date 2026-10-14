@@ -401,6 +401,14 @@ impl Supervisor {
         self: &Arc<Self>,
         resident: &Arc<ResidentWorker>,
     ) {
+        // No new timer once admission is closed: the lease-loss fence is
+        // a one-shot snapshot of the tracked timers, so a handler arming
+        // a timer behind it would capture the supervisor for the whole
+        // disconnect grace past the lease release (the timer's stop
+        // would face the refused gate, but the task must not linger).
+        if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let owner = resident.descriptor.lock().await.owner_client_id.clone();
         let Some(owner) = owner else { return };
         if self.client_connected(&owner) {
@@ -460,11 +468,31 @@ impl Supervisor {
                 )),
             }
         });
-        let previous = resident
-            .owner_cleanup
-            .lock()
-            .unwrap()
-            .replace(task.abort_handle());
+        // The supervisor-wide registry lets the lease-loss teardown abort
+        // and join every armed timer (the per-resident slot only serves
+        // the later-arm-replaces-earlier rule): a parked timer never
+        // wakes to act after the supervisor relinquished its lease.
+        let abort_handle = task.abort_handle();
+        {
+            let mut timers = self
+                .owner_cleanup_timers
+                .lock()
+                .expect("owner-cleanup timer registry lock");
+            // The recheck runs UNDER the registry lock the lease-loss
+            // fence drains: a schedule call that crossed the top guard
+            // before the flag flip and parked on the descriptor mutex
+            // cannot register behind the one-shot drain - the in-flight
+            // arm dies here and the resident's slot is never touched.
+            if self.shutting_down.load(std::sync::atomic::Ordering::SeqCst) {
+                drop(timers);
+                task.abort();
+                let _ = task.await;
+                return;
+            }
+            timers.retain(|timer| !timer.is_finished());
+            timers.push(task);
+        }
+        let previous = resident.owner_cleanup.lock().unwrap().replace(abort_handle);
         if let Some(previous) = previous {
             previous.abort();
         }

@@ -1,6 +1,27 @@
 //! Cross-process directory locks, byte-compatible with the TS product's
 //! `proper-lockfile` 4.1.2 convention: ordinary locks are empty directories
-//! at `{file}.lock`; harness-state locks add an owner file for safe stale reclaim.
+//! at `{file}.lock`; harness-state locks add an owner file for safe stale
+//! reclaim. The stale-reclaim dance and its sidecar serialization live in
+//! the `reclaim` child module.
+
+mod lock_dir_setup;
+mod reclaim;
+
+#[cfg(target_os = "linux")]
+pub use reclaim::try_reclaim_guard;
+#[cfg(all(test, target_os = "linux"))]
+pub(super) use reclaim::{dance_fault_arm, dance_fault_clear};
+#[cfg(all(test, target_os = "linux"))]
+use reclaim::{reclaim_guard_path, released_marker};
+
+#[cfg(unix)]
+pub use lock_dir_setup::is_fresh_name_swap;
+#[cfg(target_os = "linux")]
+pub use lock_dir_setup::setup_private_dir;
+#[cfg(target_os = "linux")]
+use lock_dir_setup::{create_private_dir_guarded, write_owner_through};
+#[cfg(unix)]
+pub use lock_dir_setup::{mark_released_at, mkdir_mode_0700};
 
 use std::fs;
 use std::io;
@@ -9,6 +30,59 @@ use std::time::Duration;
 
 /// Minimum staleness threshold, like proper-lockfile's floor.
 const MIN_STALE: Duration = Duration::from_secs(2);
+
+/// Test-only, PATH-SCOPED fault injection for the stale-reclaim dance:
+/// armed for exactly one lock path (parallel tests never interfere) and
+/// cleared by the arming guard's Drop (panic-safe). `heartbeat` makes the
+/// next successful first exchange simulate the live holder's heartbeat
+/// landing mid-dance (the exchanged incumbent reads fresh - the
+/// live-lease arm runs); `swap_mode` drives the swap-home attempts: 0
+/// real, 1 fail without exchanging, 2 perform the real exchange and
+/// THEN report EIO (the ambiguous completion).
+/// Test-only, path-scoped fault: force `release_by_inode`'s unsupported
+/// arm for the listed lock paths (the fallback's unowned-inode gate is
+/// otherwise unreachable on `RENAME_EXCHANGE` mounts).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static RELEASE_UNSUPPORTED_FAULT: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test-only, path-scoped, ONE-SHOT fault injection for the create arm:
+/// on the next `setup_private_dir` call for an armed lock path, a plain
+/// directory is swapped onto the freshly claimed candidate name right
+/// before the setup runs, so the setup observes a substituted entry and
+/// reports the fresh-name swap sentinel (the create arm's regeneration
+/// path - the retry this regression pins).
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static CREATE_SETUP_SWAP: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) static FRESH_MKDIR_VANISH: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn fresh_mkdir_vanish_take(path: &Path) -> bool {
+    let Ok(mut armed) = FRESH_MKDIR_VANISH.lock() else {
+        return false;
+    };
+    matches!(armed.as_ref(), Some(armed_path) if armed_path == path)
+        .then(|| {
+            *armed = None;
+        })
+        .is_some()
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn create_setup_swap_take(path: &Path) -> bool {
+    let Ok(mut armed) = CREATE_SETUP_SWAP.lock() else {
+        return false;
+    };
+    matches!(armed.as_ref(), Some(armed_path) if armed_path == path)
+        .then(|| {
+            *armed = None;
+        })
+        .is_some()
+}
 
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time
@@ -22,10 +96,278 @@ fn probe_mtime() -> (i64, i64) {
     (seconds, 5_000_000)
 }
 
-// The `libc::timespec` field names are the syscall's own vocabulary; the struct-literal shorthand
-// below is the point.
+/// The mtime probe through the pinned handle: only the pinned inode's
+/// timestamps change, never a replacement at the public pathname.
+// The `tv_sec`/`tv_nsec` pair is the POSIX timespec vocabulary, same as
+// the path-based probe.
 #[allow(clippy::similar_names)]
 #[cfg(unix)]
+fn set_mtime_handle(dir: &fs::File, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
+    let modified = std::time::UNIX_EPOCH
+        + std::time::Duration::new(tv_sec.max(0) as u64, tv_nsec.clamp(0, 999_999_999) as u32);
+    dir.set_times(std::fs::FileTimes::new().set_modified(modified))
+}
+
+/// True while `path` still resolves to the inode the handle pins.
+#[cfg(unix)]
+fn path_pins(path: &Path, dir: &fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::symlink_metadata(path), dir.metadata()) {
+        (Ok(path_metadata), Ok(dir_metadata)) => {
+            path_metadata.dev() == dir_metadata.dev() && path_metadata.ino() == dir_metadata.ino()
+        }
+        _ => false,
+    }
+}
+
+/// Remove a lock directory's protocol notes (`owner`, `claimed-at`,
+/// `released`) through a PINNED directory handle: the fd-relative
+/// `unlinkat` calls resolve inside the pinned inode - wherever a name
+/// swap has moved it - never through a substituted entry at any public
+/// or private name. The caller pairs this with the plain pathname
+/// `remove_dir` (rmdir refuses to follow a swapped symlink; a swapped
+/// empty directory is the ruled accepted residual), leaving the
+/// directory empty for it.
+/// # Panics
+///
+/// Never in practice: the protocol's note names are static and
+/// null-free, so the `CString` conversions cannot fail.
+/// # Errors
+///
+/// Propagates every note-removal error but `NotFound` (an absent note
+/// is idempotent success).
+#[cfg(unix)]
+pub fn remove_notes_through(dir: &fs::File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    for note in ["owner", "claimed-at", "released"] {
+        let name = std::ffi::CString::new(note).expect("static note names are null-free");
+        let code = unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) };
+        if code != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove an unpublished lock candidate completely: the auxiliary
+/// files first (a directory containing them cannot be removed), then the
+/// directory. A missing candidate is a non-error (a racing reclaimer).
+/// A SWAPPED SYMLINK is refused untouched: lstat (never follow) must
+/// name a directory - every child unlink and the final remove would
+/// otherwise traverse the link and delete a victim's notes, so the
+/// swapped entry is left for the racing actor to own.
+/// # Errors
+///
+/// Returns the note-removal or directory-removal errors of the pinned
+/// cleanup; a missing or non-directory candidate is the racing-reclaimer
+/// non-error.
+#[cfg(unix)]
+pub fn remove_candidate_dir(candidate: &Path) -> io::Result<()> {
+    // The FIRST stat both proves the entry is a directory and CAPTURES
+    // its identity in one syscall: the pinned cleanup below must hold
+    // THIS inode, never whatever a pre-pin swap may have seated at
+    // the name (a fresh stat taken after the pin would name the
+    // swapped successor and pass a same-inode comparison against it).
+    let expected = {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(candidate).ok().and_then(|metadata| {
+            metadata
+                .file_type()
+                .is_dir()
+                .then_some((metadata.dev(), metadata.ino()))
+        })
+    };
+    let Some(expected) = expected else {
+        // A missing candidate is the racing-reclaimer non-error; a
+        // symlink or file at the name is a swap that must NOT be
+        // followed or removed.
+        return Ok(());
+    };
+    remove_candidate_notes_pinned(candidate, expected)?;
+    fs::remove_dir(candidate)
+}
+
+/// Remove the candidate's note files through the PINNED directory
+/// inode: the pin (`O_PATH | O_NOFOLLOW`) plus the fd-relative
+/// `unlinkat` calls make a path swap landed after the lstat unable to
+/// redirect the unlinks into a foreign directory - the note names
+/// resolve inside the pinned inode or nowhere. The final directory
+/// removal stays on the pathname: `rmdir` refuses non-directories by
+/// syscall semantics, so a swapped symlink cannot be followed, and a
+/// swapped empty directory is the accepted-risk pre-created residual.
+#[cfg(target_os = "linux")]
+fn remove_candidate_notes_pinned(candidate: &Path, expected: (u64, u64)) -> io::Result<()> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::io::AsRawFd;
+    let raw_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+        candidate.as_os_str(),
+    ))
+    .map_err(|_| io::Error::other("non-null-free candidate path"))?;
+    let fd = unsafe {
+        libc::open(
+            raw_path.as_ptr(),
+            libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        // The pin failed (EIO/EACCES): the lstat above proved the entry
+        // is a directory, and an unpinned note removal could follow a
+        // mid-window swap - remove nothing and report the pin error.
+        return Err(io::Error::last_os_error());
+    }
+    let pin = unsafe { std::fs::File::from_raw_fd(fd) };
+    {
+        use std::os::unix::fs::MetadataExt;
+        // The pinned inode must be the FIRST stat's captured identity:
+        // a swap between that stat and this pin seats a different
+        // inode at the name, and the notes of the substituted
+        // directory are never this call's to unlink. A pre-first-stat
+        // swap has no user-space witness - the ruled accepted residual.
+        let pinned_identity = pin
+            .metadata()
+            .ok()
+            .map(|metadata| (metadata.dev(), metadata.ino()));
+        if pinned_identity != Some(expected) {
+            return Err(io::Error::other(
+                "Candidate was replaced before its removal could be pinned",
+            ));
+        }
+    }
+    for note in ["owner", "claimed-at", "released"] {
+        let name = std::ffi::CString::new(note).expect("static note names are null-free");
+        let code = unsafe { libc::unlinkat(pin.as_raw_fd(), name.as_ptr(), 0) };
+        if code != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::NotFound {
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The non-Linux floor: the lstat-proven directory's notes are removed
+/// by pathname (the same verify-then-act floor the TS release takes).
+#[cfg(all(unix, not(target_os = "linux")))]
+fn remove_candidate_notes_pinned(candidate: &Path, _expected: (u64, u64)) -> io::Result<()> {
+    for note in ["owner", "claimed-at", "released"] {
+        match fs::remove_file(candidate.join(note)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+/// The dev+ino identity at `path`, or `None` when it cannot be stat'ed.
+#[cfg(unix)]
+fn identity_at(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// `renameat2` with `RENAME_NOREPLACE` (linux): publish without ever
+/// replacing an existing entry, so the atomic publish is the lock's
+/// admission signal exactly like the mkdir of the TS protocol. Hand-
+/// declared per repo policy (pinned constants, no extra dependency).
+#[cfg(target_os = "linux")]
+mod rename_noreplace {
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    /// `include/uapi/linux/fs.h`: fail with EEXIST instead of replacing
+    /// the target.
+    const RENAME_NOREPLACE: libc::c_uint = 1;
+    /// `include/uapi/linux/fs.h`: atomically swap the two paths.
+    const RENAME_EXCHANGE: libc::c_uint = 2;
+
+    pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+        let from_c = CString::new(from.as_os_str().as_bytes())?;
+        let to_c = CString::new(to.as_os_str().as_bytes())?;
+        // AT_FDCWD: both paths resolve from the process root like the
+        // utimensat probe below; relative lock paths resolve against cwd.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                RENAME_NOREPLACE,
+            )
+        };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// `renameat2(RENAME_EXCHANGE)`: atomically swap the entries at the
+    /// two paths - the stale reclaim's blocking placeholder dance. Both
+    /// paths must exist (ENOENT otherwise); the public lock path is
+    /// never vacated.
+    pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+        let a_c = CString::new(a.as_os_str().as_bytes())?;
+        let b_c = CString::new(b.as_os_str().as_bytes())?;
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                a_c.as_ptr(),
+                libc::AT_FDCWD,
+                b_c.as_ptr(),
+                RENAME_EXCHANGE,
+            )
+        };
+        if result == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+/// Atomically move a filesystem entry to `to` without ever replacing an
+/// existing entry there: a live lock at the destination fails with
+/// [`io::ErrorKind::AlreadyExists`] instead of being clobbered. Linux
+/// only - this is `renameat2(RENAME_NOREPLACE)`, which no other unix
+/// provides; there is no portable no-replace rename.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::AlreadyExists`] when `to` is occupied (the
+/// caller keeps `from`), and any underlying I/O error as-is.
+#[cfg(target_os = "linux")]
+pub fn move_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    rename_noreplace::rename(from, to)
+}
+
+/// Atomically swap the entries at two existing paths
+/// (`renameat2(RENAME_EXCHANGE)`): neither path is ever vacated, so
+/// blocking-placeholder protocols (the stale-reclaim dance, the lease
+/// release) can hold a public lock path continuously. Both paths must
+/// exist; the swap is a single kernel operation.
+/// # Errors
+///
+/// Returns [`io::ErrorKind::NotFound`] when either path does not exist,
+/// the unsupported-rename errno class on filesystems without
+/// `renameat2`, and any underlying I/O error as-is.
+#[cfg(target_os = "linux")]
+pub fn exchange_paths(a: &Path, b: &Path) -> io::Result<()> {
+    rename_noreplace::exchange(a, b)
+}
+
+// The `libc::timespec` field names are the syscall's own vocabulary;
+// the struct-literal shorthand below is the point.
+#[allow(clippy::similar_names)]
+#[cfg(all(unix, test))]
 fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     // Lock paths come from agent-dir joins, but keep the NUL case an error
@@ -165,12 +507,90 @@ mod win32 {
     }
 }
 
+/// The freshly acquired lock: the handle pinning its inode on unix.
+#[cfg(unix)]
+type Created = fs::File;
+#[cfg(not(unix))]
+type Created = ();
+
 /// An exclusive cross-process lock on `{path}.lock`, released on drop by
 /// removing the directory.
 #[derive(Debug)]
 pub struct LockDir {
     path: PathBuf,
+    /// Handle pinning the acquired lock directory's inode: the mtime
+    /// probe acts through it and long-lived holders read their identity
+    /// from it, never from the replaceable public pathname (unix only).
+    /// Optional so `release` can close it before the removal - on the
+    /// filesystems whose acquisitions took the mkdir fallback (NFS, FUSE,
+    /// CIFS) an open fd can make the remove return EBUSY and leak the
+    /// lock behind a clean exit.
+    #[cfg(unix)]
+    dir: Option<fs::File>,
     owner: Option<String>,
+}
+
+/// The live owner record for this process's reclaim placeholder: the
+/// same "pid token" shape the owner-liveness check parses, so a
+/// placeholder sitting at a public lock path during a suspended
+/// exchange/restore interval is refused by every other judge exactly
+/// like a live owned lock.
+#[cfg(target_os = "linux")]
+fn process_owner_record() -> String {
+    static PROCESS_TOKEN: std::sync::OnceLock<uuid::Uuid> = std::sync::OnceLock::new();
+    let token = PROCESS_TOKEN.get_or_init(uuid::Uuid::new_v4);
+    format!("{} {token}\n", std::process::id())
+}
+
+/// Mark this guard's directory released through the pinned handle: the
+/// fd follows the inode through every exchange, so the marker lands in
+/// this guard's directory wherever a reclaim dance has moved it. A
+/// released marker outranks a live owner record - the guard itself has
+/// declared the release, and no judge may restore or refuse the
+/// directory afterwards.
+#[cfg(target_os = "linux")]
+pub fn mark_released_through(dir: &fs::File) {
+    use std::os::unix::io::AsRawFd;
+    let name = c"released";
+    // Hardened exactly like the sidecar open: nonblocking (a planted
+    // FIFO would hang an ordinary blocking write-open forever - this
+    // runs in Drop, on the shutdown path), no-follow (a planted symlink
+    // to another owner's file must not be created through), and the
+    // created entry is fstat-verified regular - anything else at the
+    // marker name is closed and the mark is skipped (fail closed, the
+    // stale-window floor).
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_NONBLOCK | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, std::ptr::addr_of_mut!(stat)) } == 0
+        && stat.st_mode & libc::S_IFMT == libc::S_IFREG
+    {
+        unsafe { libc::close(fd) };
+    } else {
+        // A FIFO or other non-regular entry: close without writing.
+        unsafe { libc::close(fd) };
+    }
+}
+
+/// The outcome of the Linux inode-anchored release pass.
+#[cfg(target_os = "linux")]
+enum InodeRelease {
+    /// The guard's directory was removed (or was already gone).
+    Done,
+    /// No `renameat2(RENAME_EXCHANGE)` here: the caller runs the
+    /// pathname floor instead.
+    Unsupported,
+    /// An I/O error aborted the pass; nothing was removed.
+    Failed,
 }
 
 impl LockDir {
@@ -180,6 +600,42 @@ impl LockDir {
         let mut path = file.as_os_str().to_os_string();
         path.push(".lock");
         PathBuf::from(path)
+    }
+
+    #[cfg(unix)]
+    fn created(path: PathBuf, dir: Created, owner: Option<String>) -> Self {
+        Self {
+            path,
+            dir: Some(dir),
+            owner,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn created(path: PathBuf, _created: Created, owner: Option<String>) -> Self {
+        Self { path, owner }
+    }
+
+    /// Transfer the lock path and the pinned handle to a caller that
+    /// manages ownership and release itself (supervisor-lifetime leases
+    /// with inode-guarded cleanup). Unix only.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` when the handle is no longer pinned (an explicit
+    /// `release()` ran first): a released guard never panics the
+    /// transfer.
+    #[must_use]
+    #[cfg(unix)]
+    pub fn into_parts(self) -> Option<(PathBuf, fs::File)> {
+        let mut this = std::mem::ManuallyDrop::new(self);
+        let path = std::mem::take(&mut this.path);
+        // SAFETY: `this` sits in a ManuallyDrop, so no Drop ever runs on
+        // it; the handle is read out exactly once and is not
+        // double-dropped. An explicit `release()` may have taken it;
+        // that is a released guard, never a panic.
+        let dir = unsafe { std::ptr::read(&raw const this.dir) };
+        dir.map(|dir| (path, dir))
     }
 
     /// Acquire exclusively: create `{file}.lock` as an empty directory and
@@ -202,7 +658,7 @@ impl LockDir {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);
         match Self::create(&path, owner.as_deref()) {
-            Ok(()) => Ok(LockDir { path, owner }),
+            Ok(created) => Ok(Self::created(path, created, owner)),
             // Only an existing path is a lock collision; other failures
             // (missing parent, permissions) are real errors, never contention.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -210,7 +666,7 @@ impl LockDir {
                 // The judge path removed (or raced away) the incumbent: one
                 // fresh attempt; a reappearing rival is contention.
                 match Self::create(&path, owner.as_deref()) {
-                    Ok(()) => Ok(LockDir { path, owner }),
+                    Ok(created) => Ok(Self::created(path, created, owner)),
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                         Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
@@ -305,6 +761,379 @@ impl LockDir {
         Ok(())
     }
 
+    /// The lock is BUILT as a private candidate directory, pinned by the
+    /// returned handle, and PUBLISHED with a no-replace rename. The
+    /// handle therefore provably refers to the inode this call created,
+    /// and a stale takeover racing the public pathname can never make the
+    /// holder adopt a successor's lock: a lost publish is plain
+    /// contention. EEXIST from the publish is the only collision.
+    /// A short, basename-independent candidate name in the lock's own
+    /// directory: the candidate never publishes at the lock's own name,
+    /// so its component length is its own budget - a lock path whose
+    /// component is near the filesystem's limit still acquires, where
+    /// the basename-derived sibling form failed the mkdir with
+    /// `ENAMETOOLONG` before the compatible fallback protocol could
+    /// run. The mkdir is already no-replace (EEXIST is a plain
+    /// collision), so a taken name regenerates the suffix instead.
+    #[cfg(target_os = "linux")]
+    fn claim_candidate_name(path: &Path) -> io::Result<PathBuf> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        // The mkdir is the no-replace claim: EEXIST is the only
+        // collision, so a taken name regenerates the suffix. Every other
+        // error is the real acquisition failure and propagates as-is -
+        // a missing parent or a permissions denial must not masquerade
+        // as contention (the old sibling form's ENAMETOOLONG bug this
+        // helper fixes was exactly such a masquerade).
+        let mut collision: Option<io::Error> = None;
+        for attempt in 0..8 {
+            let candidate = parent.join(format!(".c{pid:x}{nanos:x}{attempt:x}"));
+            match create_private_dir_guarded(&candidate) {
+                Ok(()) => return Ok(candidate),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    collision = collision.or(Some(error));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(collision.unwrap_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "all lock candidate names are taken",
+            )
+        }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
+        let mut candidate = Self::claim_candidate_name(path)?;
+        // The candidate's setup runs through the no-follow pinned handle:
+        // a swapped symlink or file fails the type check, a swapped
+        // non-empty directory fails the emptiness check. Fail closed on
+        // every refusal - no blind remove (a leaked inert dotname beats
+        // unlinking through a possible symlink into a victim's notes).
+        // ACCEPTED RISK (conductor-ruled, the parent-dir-write
+        // precedent): a parent writer can pre-create an EMPTY
+        // directory and swap it onto the fresh name inside the
+        // mkdir->pin window - no user-space witness can prove which
+        // inode a replaceable name's mkdir created (the ctime variant
+        // was removed: clock skew rejected genuine creations on the
+        // NFS/CIFS mounts this fallback serves). The no-follow pin,
+        // the emptiness refusal, the dual-open identity check, the
+        // fail-closed cleanups, and the name entropy are the full
+        // defenseable surface; the parent-dir-write actor is out of
+        // scope by the PR's own earlier accepted-risk scoping, which
+        // this residual strictly subclasses (they can replace the
+        // public lock path outright).
+        let dir = loop {
+            // Test-only, ONE-SHOT path-scoped injection: a REAL swap -
+            // the freshly claimed candidate is moved aside and a
+            // DISTINCT directory (a different inode carrying a foreign
+            // note) takes its name - so the setup observes a genuinely
+            // substituted entry (not a seeded own creation) and reports
+            // the fresh-name swap sentinel; the arm's regeneration path
+            // runs.
+            #[cfg(all(test, target_os = "linux"))]
+            if create_setup_swap_take(path) {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let aside = parent.join(".swap-aside-injected");
+                std::fs::rename(&candidate, &aside).expect("move the own candidate aside");
+                std::fs::create_dir(&candidate).expect("seat the distinct substituted directory");
+                std::fs::write(candidate.join("foreign"), "swapped")
+                    .expect("seed the substituted entry");
+            }
+            let setup = setup_private_dir(&candidate, owner, None);
+            match setup {
+                Ok((dir, _identity)) => break dir,
+                Err(error) if is_fresh_name_swap(&error) => {
+                    // A swapped entry at the fresh private name (ELOOP
+                    // from the no-follow refusal, the emptiness or the
+                    // write-handle mismatch sentinel): PRESERVE it
+                    // untouched (a blind remove could traverse a symlink
+                    // into a victim) and REGENERATE a fresh candidate -
+                    // the swap is the same already-collision class as a
+                    // taken name, never a fatal acquisition failure.
+                    candidate = Self::claim_candidate_name(path)?;
+                }
+                Err(error) => {
+                    // An ordinary I/O failure (a pin errno, a write
+                    // failure through the pinned handle) happens to
+                    // THIS call's own creation - remove it so failed
+                    // acquisitions do not accumulate stale reclaim
+                    // never touches.
+                    let _ = remove_candidate_dir(&candidate);
+                    return Err(error);
+                }
+            }
+        };
+        let (sec, nanos) = probe_mtime();
+        if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
+            // Never leave the private candidate behind a failed probe.
+            // The pinned handle closes first: on the filesystems that
+            // take this path (NFS, FUSE, CIFS) an open fd can make the
+            // remove return EBUSY, and this is an abandoned candidate -
+            // the fd has no further use.
+            drop(dir);
+            let _ = remove_candidate_dir(&candidate);
+            return Err(error);
+        }
+        match rename_noreplace::rename(&candidate, path) {
+            Ok(()) => Ok(dir),
+            Err(error) if Self::rename_noreplace_unsupported(&error) => {
+                // This kernel or filesystem has no RENAME_NOREPLACE: use
+                // the compatible mkdir protocol instead of failing the
+                // acquisition (settings and daemon startup must keep
+                // working wherever the mkdir protocol worked before).
+                // The pinned handle closes before the candidate's
+                // removal - on these filesystems (NFS, FUSE, CIFS) an
+                // open fd can make the remove return EBUSY and fail the
+                // acquisition instead of falling back. The candidate
+                // must be gone before the mkdir protocol runs: a failed
+                // removal leaks a lock artifact beside every acquisition
+                // on this filesystem, so the acquisition fails instead
+                // of succeeding with the candidate still present.
+                drop(dir);
+                if let Err(remove_error) = remove_candidate_dir(&candidate) {
+                    if remove_error.kind() != io::ErrorKind::NotFound {
+                        return Err(remove_error);
+                    }
+                }
+                Self::create_by_mkdir(path, owner)
+            }
+            Err(error) => {
+                // An ambiguous rename failure may still have published the
+                // candidate: the pinned handle is the truth - if the path
+                // resolves to this candidate's inode, the lock was
+                // acquired, not lost, and must not be orphaned at the
+                // public path with no holder.
+                if path_pins(path, &dir) {
+                    return Ok(dir);
+                }
+                // A contender holds the path (EEXIST is the common
+                // case), or the rename failed clean: the candidate is
+                // this call's alone - the pinned handle closes first
+                // (EBUSY on the fallback mounts), the owner file goes
+                // before the directory, and the incumbent at the public
+                // path is never touched.
+                drop(dir);
+                let _ = remove_candidate_dir(&candidate);
+                Err(error)
+            }
+        }
+    }
+
+    /// True when a no-replace rename failed because the kernel or
+    /// filesystem does not implement it (EINVAL: the flag is unknown
+    /// here; ENOSYS: no renameat2 at all; EOPNOTSUPP: the filesystem
+    /// rejects the flag - NFS, FUSE and similar mounts) - the mkdir
+    /// protocol is the compatible fallback. Consumed by every
+    /// in-module classification site (the create fallback, the stale
+    /// dance, the inode release pass) AND by the daemon's
+    /// stale-socket claim (its no-rename floor) - hence the exported
+    /// surface.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn rename_noreplace_unsupported(error: &io::Error) -> bool {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::EINVAL | libc::ENOSYS | libc::EOPNOTSUPP)
+        )
+    }
+
+    /// The mkdir is the acquisition signal: EEXIST is the only collision.
+    /// The handle pins the created inode right after the mkdir. Scope
+    /// decision, stated plainly: without a no-replace rename this
+    /// protocol keeps proper-lockfile's own residual window - a
+    /// suspension longer than the staleness threshold between the mkdir
+    /// and the open can let a stale takeover win first, and the holder
+    /// then adopts the successor's lock. The identity checks catch a
+    /// displacement after the pin, not one that wins it. On linux this
+    /// path only serves filesystems whose kernel has no renameat2
+    /// support; CI's unix surface runs the candidate+publish `create`
+    /// above, which has no window.
+    #[cfg(unix)]
+    fn create_by_mkdir(path: &Path, owner: Option<&str>) -> io::Result<Created> {
+        use std::os::fd::FromRawFd;
+        // The mode is fixed AT CREATION (mkdir under the module's
+        // umask toggle): no pathname chmod follows the mkdir, so a
+        // symlink swapped onto the path after the creation can never
+        // have its TARGET permission-mutated by this protocol.
+        mkdir_mode_0700(path)?;
+        // The created-directory witness is captured IMMEDIATELY after the
+        // mkdir, before any further I/O on the path: the later owner
+        // writes give a stale takeover (a suspension past the
+        // staleness threshold) time to reclaim this directory and publish
+        // a successor, and a capture taken after that I/O would record
+        // the SUCCESSOR's identity as "created" - the adoption this
+        // function refuses. An unstattable capture (None) is contention:
+        // the acquisition retries honestly instead of pinning whatever
+        // later sits at the path.
+        let created = identity_at(path);
+        #[cfg(unix)]
+        if created.is_none() {
+            // The witness is unprovable: contention, so a contending
+            // startup retries honestly instead of dying. REMOVE NOTHING:
+            // with no positive witness, this call cannot know what now
+            // sits at the path - the exact suspension race being fixed
+            // here (B stale-reclaimed A's creation, removed the path,
+            // and published its own successor before A's witness ran)
+            // would have A unlink B's live lock. A's possibly-orphaned
+            // artifact expires through the stale window instead; a
+            // foreign directory is never touched without a witness.
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "Lock directory {} cannot be witnessed after creation",
+                    path.display()
+                ),
+            ));
+        }
+        // PIN FIRST, VERIFY, THEN WRITE: the pin precedes every owner
+        // write, and the writes go through the PINNED directory handle
+        // (fd-relative, `openat`) - never through the public pathname.
+        // A stale takeover between the witness and the pin lands as the
+        // mismatch refusal below; a takeover between the pin and the
+        // writes cannot redirect them - they target this call's inode,
+        // so a successor's published record is never corrupted.
+        // Test seam (the exact racing-reclaim window): when armed for
+        // this path, remove the fresh directory between the witness and
+        // the pin - the reclaim race this protocol must survive.
+        #[cfg(all(test, target_os = "linux"))]
+        if fresh_mkdir_vanish_take(path) {
+            let _ = remove_candidate_dir(path);
+        }
+        // The pin is a NO-FOLLOW, DIRECTORY-ONLY open: a parent-writer
+        // who swaps a FIFO onto the path between the mkdir and this
+        // open must fail (ENOTDIR) instead of hanging the acquisition
+        // indefinitely on a blocking read (the retry budget and every
+        // identity check live BELOW this open - they cannot run until
+        // it returns). A swapped symlink fails the same way: with
+        // O_DIRECTORY the kernel checks the directory requirement
+        // without following the link, so it is ENOTDIR as well, and
+        // the raw errno surfaces untouched (never blanket-mapped into
+        // a takeover or a collision: the witness-gated cleanup below
+        // cannot touch either entry, because identity_at's lstat of
+        // a symlink or a FIFO never matches the created directory's
+        // inode). A takeover that wins the open - a real directory
+        // at the path - is caught by the pinned-identity mismatch
+        // refusal below.
+        let raw_path =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+                .map_err(|_| io::Error::other("non-null-free lock path"))?;
+        let pfd = unsafe {
+            libc::open(
+                raw_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        let dir = match pfd {
+            pfd if pfd >= 0 => unsafe { fs::File::from_raw_fd(pfd) },
+            _ => {
+                let error = io::Error::last_os_error();
+                // The witness proved THIS call created the path, and the
+                // no-follow pin now finds nothing there: a racing
+                // reclaim removed the fresh directory between the mkdir
+                // and the pin. That is CONTENTION, not a fatal I/O
+                // error: reclassified so `acquire_retrying` retries the
+                // acquisition honestly instead of failing the daemon
+                // startup on every non-Linux Unix host and every
+                // mkdir-fallback mount.
+
+                if error.kind() == io::ErrorKind::NotFound {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "fresh lock directory vanished before its pin: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                // Never leave a fresh lock artifact behind a failed pin -
+                // it would wedge later acquisitions behind contention
+                // until it goes stale. Remove only the directory this
+                // call created, and only on a positive identity witness:
+                // an unstattable capture must not become one (None ==
+                // None would remove without ownership).
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = remove_candidate_dir(path);
+                }
+                return Err(error);
+            }
+        };
+        // The pinned handle must be the directory THIS call created: a
+        // suspension past the staleness threshold can let a stale
+        // takeover win between the mkdir and the pin, and the pin then
+        // holds the SUCCESSOR's inode - adopting another holder's lock
+        // (two acquisitions believing they own one lease). The captured
+        // identity is the created-directory witness: a pinned inode that
+        // does not match it means the path changed hands, so the
+        // acquisition FAILS (contending honestly) and removes NOTHING -
+        // the current content is the successor's, never ours to unlink.
+        // An fstat failure on a valid pinned fd is NOT a takeover - it
+        // is an I/O error (the NFS/FUSE fallback's own domain): report
+        // it as the error it is, cleaning the fresh artifact this call
+        // created when the path still matches the witness, never as a
+        // live collision that strands the lock.
+        let pinned_identity = match dir.metadata() {
+            Ok(metadata) => {
+                use std::os::unix::fs::MetadataExt;
+                Some((metadata.dev(), metadata.ino()))
+            }
+            Err(error) => {
+                // Close the pin BEFORE the cleanup: this is the
+                // mkdir-fallback's own domain (NFS/FUSE/CIFS), where an
+                // open fd makes remove_dir return EBUSY and would strand
+                // the fresh lock the cleanup exists to prevent.
+                drop(dir);
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = remove_candidate_dir(path);
+                }
+                return Err(error);
+            }
+        };
+        if pinned_identity != created {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "Lock directory {} was taken over while acquiring it",
+                    path.display()
+                ),
+            ));
+        }
+        // Owner writes, fd-relative through the pinned handle: they land
+        // in the directory this call created, regardless of what later
+        // happens to the public pathname.
+        if let Some(owner) = owner {
+            if let Err(error) = write_owner_through(&dir, format!("{owner}\n").as_bytes()) {
+                drop(dir);
+                if created.is_some_and(|identity| identity_at(path) == Some(identity)) {
+                    let _ = remove_candidate_dir(path);
+                }
+                return Err(error);
+            }
+        }
+        let (sec, nanos) = probe_mtime();
+        if let Err(error) = set_mtime_handle(&dir, sec, nanos) {
+            // Never leave a lock artifact behind a failed probe - but only
+            // this handle's own inode: the path may already be taken.
+            if path_pins(path, &dir) {
+                drop(dir);
+                let _ = remove_candidate_dir(path);
+            }
+            return Err(error);
+        }
+        Ok(dir)
+    }
+
+    /// The mkdir-protocol create for unix without a no-replace rename.
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
+        Self::create_by_mkdir(path, owner)
+    }
+
     fn owner_matches(path: &Path, owner: &str) -> bool {
         fs::read_to_string(path.join("owner")).is_ok_and(|recorded| recorded.trim() == owner)
     }
@@ -340,26 +1169,21 @@ impl LockDir {
         }
     }
 
-    /// The mkdir is the acquisition signal: EEXIST is the only collision.
-    #[cfg(any(unix, windows))]
-    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
-        #[cfg(unix)]
-        use std::os::unix::fs::PermissionsExt;
+    /// The mkdir is the acquisition signal; the mtime probe keeps staleness
+    /// meaningful on NTFS (directory mtimes otherwise sit on the second).
+    #[cfg(windows)]
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
         fs::create_dir(path)?;
         let result = (|| {
             if let Some(owner) = owner {
-                #[cfg(unix)]
-                {
-                    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-                }
                 fs::write(path.join("owner"), format!("{owner}\n"))?;
-                #[cfg(unix)]
-                fs::set_permissions(path.join("owner"), fs::Permissions::from_mode(0o600))?;
             }
             let (sec, nanos) = probe_mtime();
             set_mtime(path, sec, nanos)
         })();
         if result.is_err() {
+            // Never leave a lock artifact behind a failed owner write or
+            // probe.
             let _ = fs::remove_file(path.join("owner"));
             let _ = fs::remove_dir(path);
         }
@@ -367,7 +1191,9 @@ impl LockDir {
     }
 
     #[cfg(not(any(unix, windows)))]
-    fn create(path: &Path, owner: Option<&str>) -> io::Result<()> {
+    fn create(path: &Path, owner: Option<&str>) -> io::Result<Created> {
+        // No mtime probe on this platform: staleness is judged from the
+        // filesystem's own directory mtime.
         fs::create_dir(path)?;
         if let Some(owner) = owner {
             if let Err(error) = fs::write(path.join("owner"), format!("{owner}\n")) {
@@ -376,74 +1202,6 @@ impl LockDir {
             }
         }
         Ok(())
-    }
-
-    /// Decide the fate of an incumbent at `path`. Returns only when the
-    /// incumbent was removed (or vanished) and acquisition may be retried;
-    /// surfaces `WouldBlock` while a live or not-yet-stale lock holds it.
-    fn judge_and_reclaim(path: &Path, stale_after: Duration) -> io::Result<()> {
-        let metadata = match fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            // Removed meanwhile: retry the create.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if metadata.is_file() {
-            // A regular file is not a lock in this protocol (a pre-compat
-            // Rust build or foreign artifact): remove it and retry - but
-            // only when no live flock holder guards it.
-            #[cfg(unix)]
-            {
-                if Self::legacy_flock_held(path) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    ));
-                }
-            }
-            match fs::remove_file(path) {
-                Ok(()) => return Ok(()),
-                // A racing reclaim removed it first: retry the create.
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => return Err(error),
-            }
-        }
-        if metadata.is_dir() {
-            let modified = metadata.modified()?;
-            let age = std::time::SystemTime::now()
-                .duration_since(modified)
-                .unwrap_or_default();
-            if age > stale_after {
-                let owner_path = path.join("owner");
-                let recorded = fs::read_to_string(&owner_path).ok();
-                if recorded
-                    .as_deref()
-                    .is_some_and(|owner| !Self::owner_dead(owner))
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!("Lock file is already being held: {}", path.display()),
-                    ));
-                }
-                match fs::remove_file(&owner_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                // Stale: remove and let the caller retry.
-                match fs::remove_dir(path) {
-                    Ok(()) => return Ok(()),
-                    // A racing holder released it first.
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        // Live lock: contention.
-        Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            format!("Lock file is already being held: {}", path.display()),
-        ))
     }
 
     /// True while another process holds the pre-compat flock on a legacy
@@ -459,10 +1217,134 @@ impl LockDir {
             && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock)
     }
 
-    /// Release: remove the lock directory. A missing directory means someone
-    /// else already reclaimed it (the TS release tolerates ENOENT); other
-    /// failures go to the trace log (`Drop` cannot propagate).
-    pub fn release(&self) {
+    /// Release: remove the lock directory. On Linux the pinned handle's
+    /// inode identity is the ownership truth, and the removal is an
+    /// idempotent pass over every location that could hold it - the
+    /// public path and the private location a stale-reclaim dance may
+    /// have displaced it to (named by the placeholder's `claimed-at`
+    /// note): each location is claimed with one atomic rename, removed
+    /// only after the claimed inode still matches the pinned handle,
+    /// and restored without clobbering otherwise, so the exchanges of a
+    /// concurrent reclaim dance cannot make this release remove
+    /// anything but its own directory - and cannot miss it either: a
+    /// holder dropping mid-dance completes itself wherever its inode
+    /// sits, leaving no live owner record wedged behind a lost release.
+    /// The handle closes before any removal (EBUSY on the mkdir-fallback
+    /// mounts). Elsewhere the floors apply: an owned lock is removed
+    /// only when the owner file still records this guard, and a missing
+    /// directory means someone else already reclaimed it (the TS
+    /// release tolerates ENOENT); failures go to the trace log (`Drop`
+    /// cannot propagate).
+    pub fn release(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let pinned = {
+                use std::os::unix::fs::MetadataExt;
+                self.dir
+                    .as_ref()
+                    .and_then(|dir| dir.metadata().ok())
+                    .map(|metadata| (metadata.dev(), metadata.ino()))
+            };
+            // Serialize with any concurrent reclaim dance. Without the
+            // guard within the budget (the dance's process is suspended),
+            // the release marker written through the pinned fd carries
+            // the release instead: the dance consumes a marked directory
+            // instead of restoring it, and no judge refuses a marked
+            // directory behind its live pid record.
+            if let Some(guard) = try_reclaim_guard(&self.path, Duration::from_millis(100)) {
+                // The marker written through the pinned fd BEFORE the
+                // handle closes carries the release through every
+                // downstream failure: a metadata() read that could not
+                // recover the identity (this arm's inode-anchored pass
+                // never runs without it), an inode-anchored pass that
+                // Failed at placeholder creation (an unowned lock has
+                // no owner record for the gated pathname fallback to
+                // check), an unsupported mount with no record to gate
+                // on - a marked directory is consumed by the next
+                // judge instead of wedging acquisitions behind a
+                // record this process no longer has. Marking before a
+                // successful removal is harmless (the removal deletes
+                // the marker with the directory) and lets a concurrent
+                // dance consume a released incumbent.
+                if let Some(dir) = self.dir.as_ref() {
+                    mark_released_through(dir);
+                }
+                #[cfg(unix)]
+                drop(self.dir.take());
+                #[cfg(target_os = "linux")]
+                if let Some(pinned) = pinned {
+                    match self.release_by_inode(&pinned) {
+                        InodeRelease::Unsupported => {
+                            // A mount without RENAME_EXCHANGE (the mkdir
+                            // fallback's home): release by pathname under
+                            // the same guard - every protocol note first,
+                            // then the directory - or the fresh lock
+                            // leaks behind a working acquisition. An
+                            // UNOWNED lock has no owner record to gate on,
+                            // so the DIRECT inode gate applies: the public
+                            // path must still name THIS guard's pinned
+                            // inode before the removal - a stale-reclaimed
+                            // holder whose directory a successor's dance
+                            // displaced must never delete the successor's
+                            // live lock at the vacated-then-reoccupied
+                            // path.
+                            if let Some(owner) = &self.owner {
+                                if !Self::owner_matches(&self.path, owner) {
+                                    drop(guard);
+                                    return;
+                                }
+                            } else if identity_at(&self.path) != Some(pinned) {
+                                // The path names a different inode (or
+                                // nothing): not this guard's to remove.
+                                drop(guard);
+                                return;
+                            }
+                            let _ = remove_candidate_dir(&self.path);
+                        }
+                        InodeRelease::Done => {}
+                        InodeRelease::Failed => {
+                            // The pass exhausted without proving removal of
+                            // the pinned inode: the lock stays on disk
+                            // looking live. Fall back to the gated
+                            // pathname release - the DIRECT gate first
+                            // (the path still names the pinned inode:
+                            // the residue is provably this guard's
+                            // own), then the owner record (the proof
+                            // for a path the dance's identity checks
+                            // could not pin) - so the artifact does not
+                            // outlive its holder, and an unowned lock
+                            // is covered too.
+                            if identity_at(&self.path) == Some(pinned) {
+                                let _ = remove_candidate_dir(&self.path);
+                            } else if let Some(owner) = &self.owner {
+                                if Self::owner_matches(&self.path, owner) {
+                                    let _ = remove_candidate_dir(&self.path);
+                                }
+                            }
+                        }
+                    }
+                }
+                drop(guard);
+            } else {
+                if let Some(dir) = self.dir.as_ref() {
+                    mark_released_through(dir);
+                }
+                #[cfg(unix)]
+                drop(self.dir.take());
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.release_floors();
+    }
+
+    /// The non-Linux release floors: an owned lock is removed only when
+    /// the owner file still records this guard, and a missing directory
+    /// means someone else already reclaimed it (the TS release tolerates
+    /// ENOENT); failures go to the trace log (`Drop` cannot propagate).
+    #[cfg(not(target_os = "linux"))]
+    fn release_floors(&mut self) {
+        #[cfg(unix)]
+        drop(self.dir.take());
         if let Some(owner) = &self.owner {
             if !Self::owner_matches(&self.path, owner) {
                 return;
@@ -477,6 +1359,142 @@ impl LockDir {
                 tracing::warn!("failed to release lock {}: {error}", self.path.display());
             }
         }
+    }
+
+    /// The idempotent inode-anchored release pass (Linux), under the
+    /// reclaim guard: each candidate location - the public path and the
+    /// private location a dance's placeholder may have displaced this
+    /// guard to - is EXCHANGED with a blocking placeholder (never
+    /// vacated), the exchanged content is removed only when its inode
+    /// matches the pinned handle, and a mismatch is swapped back home
+    /// atomically, where occupancy cannot fail. The pass re-reads its
+    /// candidate locations every attempt until the removal completes.
+    /// On mounts without `RENAME_EXCHANGE` (NFS, FUSE - the same mounts
+    /// whose acquisitions took the mkdir fallback) the pass reports
+    /// `Unsupported` so the caller releases by pathname instead of
+    /// leaking a fresh lock behind a working acquisition.
+    #[cfg(target_os = "linux")]
+    fn release_by_inode(&self, pinned: &(u64, u64)) -> InodeRelease {
+        // Test-only, path-scoped fault: force the unsupported-rename
+        // fallback arm on mounts that actually support RENAME_EXCHANGE, so
+        // the fallback's inode gate is red-first testable.
+        #[cfg(all(test, target_os = "linux"))]
+        if RELEASE_UNSUPPORTED_FAULT
+            .lock()
+            .expect("release fault table lock")
+            .iter()
+            .any(|armed_path| armed_path == &self.path)
+        {
+            return InodeRelease::Unsupported;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |age| age.as_nanos());
+        let pid = std::process::id();
+        let mut unsupported = false;
+        for attempt in 0..8 {
+            let mut locations: Vec<PathBuf> = vec![self.path.clone()];
+            if let Some(parent) = self.path.parent() {
+                if let Ok(note) = fs::read_to_string(self.path.join("claimed-at")) {
+                    let name = note.trim();
+                    if !name.is_empty() {
+                        locations.push(parent.join(name));
+                    }
+                }
+            }
+            for location in locations {
+                if identity_at(&location) != Some(*pinned) {
+                    continue;
+                }
+                let placeholder = location.with_file_name(format!(".b{pid:x}{nanos:x}{attempt:x}"));
+                if let Err(error) = create_private_dir_guarded(&placeholder) {
+                    if error.kind() == io::ErrorKind::AlreadyExists {
+                        continue;
+                    }
+                    return InodeRelease::Failed;
+                }
+                // // The placeholder's owner record is written through the pinned
+                // no-follow, emptiness-disciplined handle (fd-relative) -
+                // no pathname chmod or write remains; the helper's
+                // returned identity is the positive witness a possible
+                // residue mark_released_at requires.
+                let placeholder_identity =
+                    match setup_private_dir(&placeholder, Some(&process_owner_record()), None) {
+                        Ok((_handle, identity)) => Some(identity),
+                        Err(error) => {
+                            // An ordinary setup failure (a pin errno, a note
+                            // write or close through the pinned handle)
+                            // happens to THIS pass's own created placeholder:
+                            // remove it through the pinned, fd-relative
+                            // helper so a failed release does not leak a
+                            // live-owned `.b...` residue beside the lock. A
+                            // fresh-name swap refusal PRESERVES the
+                            // substituted entry untouched.
+                            if !is_fresh_name_swap(&error) {
+                                let _ = remove_candidate_dir(&placeholder);
+                            }
+                            return InodeRelease::Failed;
+                        }
+                    };
+                match rename_noreplace::exchange(&location, &placeholder) {
+                    Ok(()) => {
+                        if identity_at(&placeholder) == Some(*pinned) {
+                            // This guard's directory, held at the private
+                            // name where nothing can replace it: remove it
+                            // completely, then clear the placeholder from
+                            // the location so the lock path is empty. A
+                            // FAILED placeholder removal must not report
+                            // Done: the residue carries this process's
+                            // live owner record, which every judge
+                            // refuses while this process lives - so mark
+                            // it released first (the dance consumes it)
+                            // and report Failed, letting the caller's
+                            // gated fallback retry.
+                            let _ = remove_candidate_dir(&placeholder);
+                            match remove_candidate_dir(&location) {
+                                Ok(()) => return InodeRelease::Done,
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                    return InodeRelease::Done;
+                                }
+                                Err(_) => {
+                                    mark_released_at(&location, placeholder_identity);
+                                    return InodeRelease::Failed;
+                                }
+                            }
+                        }
+                        // Not this guard's content: swap it home atomically
+                        // (both paths exist) and clear the placeholder
+                        // ONLY after the swap-back succeeded - a failed
+                        // swap-back leaves the other holder's directory
+                        // at the private name, and removing it would
+                        // unlink another holder's lock.
+                        if rename_noreplace::exchange(&location, &placeholder).is_ok() {
+                            let _ = remove_candidate_dir(&placeholder);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        let _ = remove_candidate_dir(&placeholder);
+                    }
+                    Err(error) if Self::rename_noreplace_unsupported(&error) => {
+                        let _ = remove_candidate_dir(&placeholder);
+                        unsupported = true;
+                    }
+                    Err(_) => {
+                        let _ = remove_candidate_dir(&placeholder);
+                        return InodeRelease::Failed;
+                    }
+                }
+            }
+            if unsupported {
+                return InodeRelease::Unsupported;
+            }
+        }
+        // The pass exhausted without ever removing the pinned inode (the
+        // only Done return is the matched-and-removed arm): report the
+        // failure honestly so the caller falls back to the gated
+        // pathname release instead of leaving a live-looking lock
+        // nobody holds.
+        InodeRelease::Failed
     }
 }
 
@@ -522,137 +1540,5 @@ pub fn unlock_file(file: &std::fs::File) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lock_of(file: &Path) -> PathBuf {
-        LockDir::path_for(file)
-    }
-
-    #[test]
-    fn lock_is_an_empty_directory_and_cleans_up() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("auth.json");
-        std::fs::write(&file, "{}").unwrap();
-        {
-            let _guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-            let path = lock_of(&file);
-            let metadata = std::fs::metadata(&path).unwrap();
-            assert!(metadata.is_dir(), "lock must be a directory");
-            assert!(std::fs::read_dir(&path).unwrap().next().is_none());
-        }
-        assert!(!lock_of(&file).exists(), "release removes the directory");
-    }
-
-    #[test]
-    fn mtime_matches_the_proper_lockfile_probe_shape() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("auth.json");
-        std::fs::write(&file, "{}").unwrap();
-        let _guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        let modified = std::fs::metadata(lock_of(&file))
-            .unwrap()
-            .modified()
-            .unwrap()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap();
-
-        assert_eq!(modified.as_millis() % 1000, 5);
-        assert!(
-            modified.as_millis()
-                >= std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis()
-        );
-    }
-
-    #[test]
-    fn second_acquire_reports_contention() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("settings.json");
-        std::fs::write(&file, "{}").unwrap();
-        let _guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        let error = LockDir::acquire(&file, MIN_STALE).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    #[test]
-    fn stale_lock_is_taken_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("auth.json");
-        std::fs::write(&file, "{}").unwrap();
-        let stale = lock_of(&file);
-        std::fs::create_dir(&stale).unwrap();
-        // Age it past the staleness threshold.
-        set_mtime(&stale, 1, 0).unwrap();
-        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        let metadata = std::fs::metadata(&stale).unwrap();
-        assert!(metadata.is_dir());
-        drop(guard);
-        assert!(!stale.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn live_owned_lock_cannot_be_stolen_after_stale_age() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
-        let guard =
-            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
-        set_mtime(&guard.path, 1, 0).unwrap();
-        let error = LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE)
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        guard.ensure_owned().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn dead_owned_lock_is_reclaimed_and_old_guard_cannot_remove_successor() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
-        let old =
-            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        let dead_pid = child.id();
-        child.wait().unwrap();
-        fs::write(old.path.join("owner"), format!("{dead_pid} dead-token\n")).unwrap();
-        set_mtime(&old.path, 1, 0).unwrap();
-        let next =
-            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
-        assert!(old.ensure_owned().is_err());
-        drop(old);
-        next.ensure_owned().unwrap();
-        drop(next);
-        assert!(!LockDir::path_for(&file).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unparseable_owned_lock_is_reclaimed_by_age() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("harness_state.json");
-        let path = LockDir::path_for(&file);
-        fs::create_dir(&path).unwrap();
-        fs::write(path.join("owner"), [0xff]).unwrap();
-        set_mtime(&path, 1, 0).unwrap();
-        let next =
-            LockDir::acquire_owned_retrying(&file, Duration::from_secs(10), 1, MIN_STALE).unwrap();
-        next.ensure_owned().unwrap();
-    }
-
-    #[test]
-    fn legacy_lock_file_is_removed_not_choked_on() {
-        // A pre-compat Rust build left flock FILES at the lock path (the TS
-        // product rmdir()s them and dies with ENOTDIR): acquisition must heal.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("auth.json");
-        std::fs::write(&file, "{}").unwrap();
-        std::fs::write(lock_of(&file), "legacy flock artifact").unwrap();
-        let guard = LockDir::acquire(&file, MIN_STALE).unwrap();
-        assert!(std::fs::metadata(lock_of(&file)).unwrap().is_dir());
-        drop(guard);
-        assert!(!lock_of(&file).exists());
-    }
-}
+#[path = "lock_dir_tests.rs"]
+mod tests;
