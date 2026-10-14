@@ -38,6 +38,16 @@ class ComparatorTests(unittest.TestCase):
         self.assertFalse(observed['verified'])
         self.assertEqual(second.call.call_args.kwargs['streamingBehavior'], 'followUp')
 
+    def test_rename_trigger_deviation_rejects_unexpected_data(self):
+        verifier.validate_rename_trigger('ts', None, 'session')
+        with self.assertRaises(AssertionError):
+            verifier.validate_rename_trigger('ts', {}, 'session')
+        summary = {'activeSessionId': 'session', 'sessionName': 'Write cleanup fixture', 'workerPid': 123}
+        verifier.validate_rename_trigger('rust', summary, 'session')
+        for changed in (None, {**summary, 'activeSessionId': 'another'}, {**summary, 'sessionName': 'wrong'}, {**summary, 'workerPid': None}):
+            with self.assertRaises(AssertionError):
+                verifier.validate_rename_trigger('rust', changed, 'session')
+
     def test_nonowner_probe_does_not_hide_other_errors(self):
         response = {'command': 'release_session_input_pause', 'success': False,
                     'error': 'Session input pause is owned by another client: lease'}

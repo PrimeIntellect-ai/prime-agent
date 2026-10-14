@@ -122,6 +122,17 @@ def canonical(value):
     return value
 
 
+def validate_rename_trigger(kind, data, active):
+    """Pin the existing fixture-only response deviation, without hiding others."""
+    if kind == 'ts':
+        assert data is None, 'TS rename trigger unexpectedly returned response data'
+    else:
+        assert isinstance(data, dict), 'Rust rename trigger omitted its existing summary'
+        assert data.get('activeSessionId') == active, 'Rust rename summary changed session identity'
+        assert data.get('sessionName') == 'Write cleanup fixture', 'Rust rename summary has wrong name'
+        assert isinstance(data.get('workerPid'), int), 'Rust rename summary omitted worker identity'
+
+
 def pause_released(client, active, pause_id):
     """A non-owner cannot release this lease; success means cleanup removed it."""
     try:
@@ -184,8 +195,9 @@ def run_case(binary, kind, root, observed):
         # non-input action and publishes the attached event that must fail its
         # write to A; A keeps its write half open, so no read EOF can clean up.
         a.sock.shutdown(socket.SHUT_RD)
-        responses['trigger_write'] = b.call('set_session_name',
+        trigger = observed['rename_trigger_response'] = b.call('set_session_name',
             activeSessionId=active, name='Write cleanup fixture')
+        validate_rename_trigger(kind, trigger, active)
         deadline = time.monotonic() + LIMIT
         observations = observed['disconnect_observations'] = []
         while True:
@@ -263,7 +275,8 @@ def main():
     receipt = {'scenario': 'client_write_cleanup', 'verified': False, 'cases': {},
         'scope': 'real attached-client read-half-close, rename triggers failed write, observed detach and non-owner pause-release probe, then second-client queue drain',
         'preexisting_admission_difference': 'TS rejects new prompt admission while a pause is held; fixture submits followUp only after disconnect cleanup, without redesigning Rust policy',
-        'normalization': 'only generated pauseId in compared action response data; raw JSONL preserved',
+        'normalization': 'only generated pauseId in compared cleanup/pause/queued-delivery action response data; raw JSONL preserved',
+        'fixture_trigger_response_deviation': 'Existing set_session_name returns no data in TS and a full session summary in Rust. Both expected shapes are asserted and their complete responses preserved separately; rename payload parity is outside this cleanup change.',
         'not_covered': 'admission cancellation races or direct worker attach-state introspection'}
     try:
         archive = Path(os.environ['PA_TS_ARCHIVE'])
