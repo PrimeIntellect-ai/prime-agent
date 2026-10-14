@@ -18,6 +18,7 @@ class DockScreen:
         self.sgr = {}
         self.unsupported_sgr = []
         self.unsupported_terminal = []
+        self.keyboard_controls = []
         self.autowrap = True
         self.alternate = None
         self.row = self.col = 0
@@ -59,6 +60,22 @@ class DockScreen:
                     n = nums[0] or 1
                     if intermediate and not (command == 'q' and intermediate == ' '):
                         self.unsupported_terminal.append(sequence)
+                        continue
+                    # Actual hosted TS/Rust captures contain these keyboard
+                    # protocol controls. They do not paint cells and must not
+                    # be interpreted as SGR4 (underline) after stripping >.
+                    if command == 'm' and params in ('>4;0', '>4;1', '>4;2'):
+                        self.keyboard_controls.append(sequence)
+                        continue
+                    if command == 'u' and params == '?':
+                        self.keyboard_controls.append(sequence)
+                        # The PTY driver sends legacy ordinary keys and supports
+                        # no Kitty enhancement flags: report exactly zero.
+                        replies.append(b'\x1b[?0u')
+                        continue
+                    if command == 'u' and (re.fullmatch(r'[>=]\d+(?:;\d+)?', params)
+                                           or re.fullmatch(r'<\d*', params)):
+                        self.keyboard_controls.append(sequence)
                         continue
                     if params.startswith(('?', '<', '>')) and command not in 'hlnc':
                         self.unsupported_terminal.append(sequence)

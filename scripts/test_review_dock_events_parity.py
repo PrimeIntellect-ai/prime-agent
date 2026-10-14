@@ -84,6 +84,27 @@ class CaptureTests(unittest.TestCase):
         server.close.assert_called_once()
         self.assertNotIn('cleanup_verified', observed)
 
+    def test_actual_keyboard_controls_do_not_corrupt_sgr(self):
+        screen = DockScreen()
+        screen.feed(b'\x1b[31;1m')
+        before = dict(screen.sgr)
+        replies = screen.feed(b'\x1b[>4;0m\x1b[?u\x1b[>1u\x1b[<u1 subagents')
+        self.assertEqual(screen.sgr, before)
+        self.assertEqual(screen.styles[0][0], before)
+        self.assertNotIn('4', screen.styles[0][0])
+        self.assertEqual(replies, [b'\x1b[?0u'])
+        self.assertEqual(screen.keyboard_controls,
+                         ['\x1b[>4;0m', '\x1b[?u', '\x1b[>1u', '\x1b[<u'])
+        self.assertEqual(screen.unsupported_terminal, [])
+
+    def test_partial_keyboard_query_replies_only_when_complete(self):
+        screen = DockScreen()
+        self.assertEqual(screen.feed(b'\x1b[?'), [])
+        self.assertEqual(screen.keyboard_controls, [])
+        self.assertEqual(screen.feed(b'u'), [b'\x1b[?0u'])
+        self.assertEqual(screen.feed(b'\x1b[>9;0m'), [])
+        self.assertEqual(screen.unsupported_terminal, ['\x1b[>9;0m'])
+
 
 if __name__ == '__main__':
     unittest.main()

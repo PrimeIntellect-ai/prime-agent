@@ -91,6 +91,7 @@ def capture(terminal, root, offset):
             'dock_styled_rows': terminal.screen.dock_styles(),
             'raw_ansi_since_previous_hex': bytes(terminal.raw[offset:]).hex(),
             'unsupported_sgr': terminal.screen.unsupported_sgr.copy(),
+            'keyboard_controls': terminal.screen.keyboard_controls.copy(),
             'unsupported_terminal': terminal.screen.unsupported_terminal.copy()}
 
 
