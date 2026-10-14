@@ -35,6 +35,11 @@ fn markdown_link_targets_use_the_owning_view_cwd() {
         .iter()
         .any(|link| link.url == "file:///workspace/second/url"));
     assert_eq!(targets(&mut first), first_targets);
+    first.chrome.cwd = "/workspace/second".to_string();
+    assert_eq!(targets(&mut first), second_targets);
+    assert!(targets(&mut first)
+        .iter()
+        .all(|link| link.url != "file:///workspace/first/url"));
 }
 
 /// The hardware caret never sits over the factory page: the page is an
