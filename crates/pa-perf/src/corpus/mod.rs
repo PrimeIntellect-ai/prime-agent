@@ -8,6 +8,7 @@ pub(crate) mod rows;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use clap::ValueEnum;
 use pa_daemon::rlm_ledger::RlmSpawnLedger;
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +17,7 @@ use artifacts::SubagentTree;
 use rows::SessionSpec;
 
 /// The named corpus profiles (sizes overridable knob by knob).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Profile {
     Small,
@@ -58,7 +59,7 @@ impl Profile {
 
 /// Whether the warm-up pass runs the product's window-store open over the
 /// generated session files (writing their window-cache sidecars).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum CacheMode {
     Cold,
@@ -177,14 +178,6 @@ pub struct ManifestMarkers {
     pub switch_row: String,
     /// The @-completion target file name under the project dir.
     pub at_file: String,
-    /// The agents-view search query that uniquely matches the populate
-    /// anchor (the oldest session's name).
-    pub populate_query: String,
-    /// The populate-completion needle: a fragment of the anchor's name the
-    /// query does not contain (the search bar echoes the query verbatim),
-    /// so its paint is the search RESULT row — only rendered once the
-    /// roster scan delivered the oldest session.
-    pub populate_anchor: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -271,14 +264,6 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
                 options.rows,
                 Some("switch target zqmark".to_string()),
                 Some(format!("corpus switch marker b {:x}", options.seed)),
-            ),
-            // The oldest session (last in the mtime-desc scan) carries the
-            // populate anchor: its search-result row can only paint after
-            // the roster scan completes — the agents-view completion needle.
-            index if index == options.sessions - 1 => (
-                options.rows,
-                Some(format!("anchor population {:x}", options.seed)),
-                None,
             ),
             _ => (
                 options.rows,
@@ -432,8 +417,6 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
             switch_query: "target zqmark".to_string(),
             switch_row: "switch target zqmark".to_string(),
             at_file: at_file.clone(),
-            populate_query: "anchor population".to_string(),
-            populate_anchor: format!("population {:x}", options.seed),
         },
     };
     std::fs::write(

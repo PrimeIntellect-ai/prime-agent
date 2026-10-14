@@ -91,11 +91,31 @@ jobs:
     name: bench (${{ matrix.profile }})
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    # The per-leg budgets scale with the profile: the agents-view populate
+    # is superlinear in session count (the big profiles' populate scenarios
+    # need hours, not minutes — fewer runs, bigger deadlines; the baseline
+    # carries their numbers report-only if the spread says so).
+    timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        profile: [small, medium, large, xl]
+        include:
+          - profile: small
+            runs: 10
+            liveness: 300
+            timeout: 60
+          - profile: medium
+            runs: 10
+            liveness: 900
+            timeout: 90
+          - profile: large
+            runs: 3
+            liveness: 3600
+            timeout: 240
+          - profile: xl
+            runs: 2
+            liveness: 10800
+            timeout: 360
     steps:
       # The checkout provides the packaged kernel runtime (prime-agent-runtime/)
       # the release binary resolves through PI_PACKAGE_DIR, plus skills/.
@@ -119,23 +139,14 @@ jobs:
       # The same prep ci.yml's kernel-e2e shards run: the venv must be ready
       # before the first session prewarm, or the first bench run pays the
       # bootstrap inside its sample.
-      # The same prep ci.yml's kernel-e2e shards run: uv on PATH, then the
-      # venv ready before the first session prewarm, so no bench sample pays
-      # the bootstrap.
+      # The same prep ci.yml's kernel-e2e shards run: the venv must be ready
+      # before the first session prewarm, or the first bench run pays the
+      # bootstrap inside its (discarded) warm-up.
       - name: Bootstrap the kernel venv
         env:
           PI_PACKAGE_DIR: ${{ github.workspace }}
         run: prime-agent --prime-agent-bootstrap
-      # One corpus per leg, `--cache warm` (the product's window-store open
-      # writes real sidecars): every scenario's own state stays exact —
-      # cold-start's fresh session never reads a corpus sidecar, warm-start
-      # runs against the pre-started daemon, and open-session measures the
-      # warm open (the common real state: the operator's live store carries
-      # warm window-caches on most sessions).
-      - name: Generate the corpus
-        run: |
-          set -euo pipefail
-          pa-perf corpus --profile ${{ matrix.profile }} --out "$RUNNER_TEMP/corpus" --cache warm
+      # The driver below generates both corpora itself (cold + warm).
       - name: Run the scenarios
         env:
           PROFILE: ${{ matrix.profile }}
@@ -156,8 +167,20 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: perf-results-${{ matrix.profile }}
-          path: results/*.json
+          path: ${{ runner.temp }}/perf/results/*.json
           if-no-files-found: error
+      # The raw pty streams of the launches that did not complete: the CI
+      # counterpart of the empty-tail failures (nothing debuggable in a
+      # timeout message alone).
+      - name: Upload the failure pty dumps
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-failure-streams-${{ matrix.profile }}
+          path: |
+            ${{ runner.temp }}/perf/corpus-cold/failed-streams/*
+            ${{ runner.temp }}/perf/corpus-warm/failed-streams/*
+          if-no-files-found: ignore
 
   report:
     name: report + regression gate

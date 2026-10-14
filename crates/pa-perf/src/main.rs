@@ -1,9 +1,9 @@
-//! The `pa-perf` CLI: `corpus`, `bench`, and `report`.
+//! The `pa-perf` CLI: `corpus`, `bench`, `run`, and `report`.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use pa_perf::bench::{BenchOptions, Scenario};
+use pa_perf::bench::{BenchOptions, RunOptions, Scenario};
 use pa_perf::corpus::{self, CacheMode, CorpusOptions, Profile};
 use pa_perf::report::{self, Baseline};
 
@@ -18,8 +18,11 @@ struct Cli {
 enum Command {
     /// Generate a deterministic corpus under an isolated agent dir.
     Corpus(CorpusArgs),
-    /// Drive the real release binary under a pty and measure a scenario.
+    /// Drive the real release binary under a pty and measure one scenario.
     Bench(BenchArgs),
+    /// Generate the corpora and run every scenario on the corpus state it
+    /// needs (the CI and `make perf` entry point).
+    Run(RunArgs),
     /// Compare result JSONs against the baseline; fail on >2x regressions.
     Report(ReportArgs),
 }
@@ -27,8 +30,8 @@ enum Command {
 #[derive(clap::Args)]
 struct CorpusArgs {
     /// The named profile providing the default knob values.
-    #[arg(long, default_value = "small")]
-    profile: String,
+    #[arg(long, value_enum, default_value_t = Profile::Small)]
+    profile: Profile,
     /// The corpus root: created, then canonicalized (macOS /tmp -> /private/tmp).
     #[arg(long)]
     out: PathBuf,
@@ -65,13 +68,12 @@ struct CorpusArgs {
     /// Files in the generated project dir.
     #[arg(long)]
     cwd_files: Option<usize>,
-    /// Write the per-session artifact partitions (on|off).
-    #[arg(long, default_value = "on")]
-    artifacts: String,
-    /// Run the product's window-store open over the session files,
-    /// writing their window-cache sidecars (warm|cold).
-    #[arg(long, default_value = "cold")]
-    cache: String,
+    /// Write the per-session artifact partitions.
+    #[arg(long, default_value_t = true)]
+    artifacts: bool,
+    /// Write the window-cache sidecars via the product's window-store open.
+    #[arg(long, value_enum, default_value_t = CacheMode::Cold)]
+    cache: CacheMode,
 }
 
 #[derive(clap::Args)]
@@ -83,8 +85,8 @@ struct BenchArgs {
     #[arg(long)]
     corpus: PathBuf,
     /// The scenario to measure.
-    #[arg(long)]
-    scenario: String,
+    #[arg(long, value_enum)]
+    scenario: Scenario,
     /// Sampled runs (a warm-up run is always discarded first).
     #[arg(long, default_value_t = 10)]
     runs: usize,
@@ -94,13 +96,28 @@ struct BenchArgs {
     /// The per-run liveness deadline (seconds).
     #[arg(long, default_value_t = 180)]
     liveness_secs: u64,
-    /// Dump the raw pty stream of the last run here (needle debugging).
-    #[arg(long)]
-    debug_stream: Option<PathBuf>,
-    /// Keep pumping the pty this many ms after the needle (needle
-    /// discovery: the debug stream then shows the later frames).
-    #[arg(long, default_value_t = 0)]
-    settle_ms: u64,
+}
+
+#[derive(clap::Args)]
+struct RunArgs {
+    /// The release binary under test.
+    #[arg(long, default_value = "target/release/prime-agent")]
+    binary: PathBuf,
+    /// The named corpus profile for both generated corpora.
+    #[arg(long, value_enum, default_value_t = Profile::Small)]
+    profile: Profile,
+    /// The output root: the two corpora and results/ land under it.
+    #[arg(long, default_value = "target/perf")]
+    out: PathBuf,
+    /// The deterministic seed.
+    #[arg(long, default_value_t = 7)]
+    seed: u64,
+    /// Sampled runs per scenario (a warm-up run is always discarded first).
+    #[arg(long, default_value_t = 10)]
+    runs: usize,
+    /// The per-run liveness deadline (seconds).
+    #[arg(long, default_value_t = 180)]
+    liveness_secs: u64,
 }
 
 #[derive(clap::Args)]
@@ -120,15 +137,15 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Corpus(args) => corpus_command(args),
         Command::Bench(args) => bench_command(args),
+        Command::Run(args) => run_command(args),
         Command::Report(args) => report_command(args),
     }
 }
 
 fn corpus_command(args: CorpusArgs) -> anyhow::Result<()> {
-    let profile = profile_of(&args.profile)?;
     let mut options = CorpusOptions {
         out: args.out.clone(),
-        ..profile.defaults()
+        ..args.profile.defaults()
     };
     options.seed = args.seed;
     if let Some(value) = args.sessions {
@@ -161,29 +178,18 @@ fn corpus_command(args: CorpusArgs) -> anyhow::Result<()> {
     if let Some(value) = args.cwd_files {
         options.cwd_files = value;
     }
-    options.artifacts = match args.artifacts.as_str() {
-        "on" => true,
-        "off" => false,
-        other => anyhow::bail!("unknown artifacts mode {other:?} (on|off)"),
-    };
-    options.cache = match args.cache.as_str() {
-        "cold" => CacheMode::Cold,
-        "warm" => CacheMode::Warm,
-        other => anyhow::bail!("unknown cache mode {other:?} (cold|warm)"),
-    };
+    options.artifacts = args.artifacts;
+    options.cache = args.cache;
     let manifest = corpus::generate(&options)?;
     println!(
         "corpus: profile={} sessions={} rows={} total_rows={} child_sessions={} archive={} cache={}",
-        args.profile,
+        report::profile_key(options.profile),
         manifest.counts.sessions,
         options.rows,
         manifest.counts.total_rows,
         manifest.counts.child_sessions,
         manifest.counts.archive,
-        match options.cache {
-            CacheMode::Cold => "cold",
-            CacheMode::Warm => "warm",
-        },
+        report::profile_key_cache(options.cache),
     );
     println!("huge needle: {}", manifest.markers.huge.needle);
     println!("manifest: {}", manifest.paths.manifest_file.display());
@@ -194,22 +200,33 @@ fn bench_command(args: BenchArgs) -> anyhow::Result<()> {
     let options = BenchOptions {
         binary: args.binary,
         corpus: args.corpus,
-        scenario: Scenario::parse(&args.scenario)?,
+        scenario: args.scenario,
         runs: args.runs,
         json: args.json,
         liveness_secs: args.liveness_secs,
-        debug_stream: args.debug_stream,
-        settle_ms: args.settle_ms,
     };
     let result = pa_perf::bench::run(&options)?;
     println!(
         "scenario={} profile={} median={:.1}ms p95={:.1}ms runs={}",
-        pa_perf::report::key_of(result.scenario),
+        report::key_of(result.scenario),
         result.profile,
         result.median_ms,
         result.p95_ms,
         result.runs,
     );
+    Ok(())
+}
+
+fn run_command(args: RunArgs) -> anyhow::Result<()> {
+    let options = RunOptions {
+        binary: args.binary,
+        profile: args.profile,
+        out: args.out,
+        seed: args.seed,
+        runs: args.runs,
+        liveness_secs: args.liveness_secs,
+    };
+    pa_perf::bench::run_suite(&options)?;
     Ok(())
 }
 
@@ -231,15 +248,5 @@ fn report_command(args: ReportArgs) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("regressions over 2x: {}", report.regressions.join(", "));
-    }
-}
-
-fn profile_of(name: &str) -> anyhow::Result<Profile> {
-    match name {
-        "small" => Ok(Profile::Small),
-        "medium" => Ok(Profile::Medium),
-        "large" => Ok(Profile::Large),
-        "xl" => Ok(Profile::Xl),
-        other => anyhow::bail!("unknown profile {other:?} (small|medium|large|xl)"),
     }
 }

@@ -23,12 +23,6 @@ only).
 pa-perf corpus --profile medium --out DIR [--seed N] [knob overrides]
 ```
 
-The corpus gives the OLDEST session a unique searchable name
-(`anchor population <seed>`): it is the last row the roster scan delivers, so
-its search hit is the populate-completion needle (the `Inactive (N)` heading
-count repaints only as cell diffs once the scan spans frames, which makes it
-unusable as a needle on big corpora).
-
 Writes the product's real layout under `DIR/`:
 
 ```
@@ -68,9 +62,10 @@ collide around ~22K rows and silently break branch reconstruction.
 | `--artifacts` | per-session artifact partitions (on/off) | on | on | on | on |
 | `--cache` | cold/warm (see below) | cold | cold | cold | cold |
 | `--seed` | the deterministic seed | 7 | 7 | 7 | 7 |
+| `--seed` | the deterministic seed | 7 | 7 | 7 | 7 |
 
 Total rows: small ~3.5K, medium ~250K, large ~10.1M, xl ~1.2M (medium is
-~210 MB on disk; large ~3.5 GB).
+~210 MB on disk; large ~3.5 GB; xl ~1 GB, generated in ~5 s).
 
 ### Determinism
 
@@ -90,27 +85,39 @@ records (`parentSession`/`child` are canonical paths).
   release (pa-daemon, no public writer), so generated corpora carry none —
   matching real stores (9 of 111). The `agents-view-warm` scenario measures
   the warm scan via the daemon's in-process cache instead.
+- `pa-perf run` generates BOTH corpora (cold for the cold scenarios, warm
+  for warm-start/warm-ready) — every scenario runs on the state it needs.
 
 ## The bench harness
 
 ```
-pa-perf bench --binary target/release/prime-agent --corpus DIR \
-    --scenario S --runs 10 --json OUT [--debug-stream FILE]
+# the whole suite (CI + make perf): generates the corpora, routes every
+# scenario to the corpus state it needs, writes one results/<scenario>.json
+pa-perf run --binary target/release/prime-agent --profile medium --out DIR [--runs N]
+
+# one scenario over one corpus (investigation)
+pa-perf bench --binary target/release/prime-agent --corpus DIR --scenario S --runs 10 --json OUT
 ```
 
-Scenarios (all timed from a triggering action to an observable content
-needle — event-driven via poll(2); the `--liveness-secs` deadline only
-exists so a broken run fails instead of hanging):
+Scenarios (timed from a triggering action to an observable needle — literal
+paints as byte needles, cell-diffed content through a vt100 screen model;
+the liveness deadline only fails broken runs — the driver enforces per-profile
+floors: small 120 s, medium 300 s, large 1800 s, xl 7200 s, because the
+agents-view populate is superlinear in session count: ~0.4 s at 100
+sessions, roughly ~1 row/s once past a few hundred — the xl populate takes
+tens of minutes and its CI runs are budgeted accordingly):
 
-| scenario | trigger -> needle |
-|---|---|
-| `cold-start` | exec -> the chat first paint (daemon spawn + session create + kernel prewarm included) |
-| `warm-start` | exec -> first paint, with the daemon pre-started and a `--cache warm` corpus |
-| `agents-view` | left-arrow -> the roster scan delivered the oldest session (its unique search-result row paints; the query echoes back the search bar, so only the real row carries the name fragment) |
-| `agents-view-warm` | the same daemon's second populate (its in-process scan cache warm) |
-| `open-session` | `--resume <huge session>` -> the huge session's tail marker |
-| `session-switch` | enter on the filtered switch-b row -> B's transcript marker |
-| `at-completion` | the `@` keystroke -> the corpus marker file's completion row |
+| scenario | corpus | trigger -> needle |
+|---|---|---|
+| `cold-start` | cold | exec -> the chat first paint (the splash paints before any daemon work — the product's own paint contract) |
+| `cold-ready` | cold | the same launch, exec -> the tray's session-usage pill, the first attach-only content (daemon spawn + session create + attach included) |
+| `warm-start` | warm | exec -> first paint, daemon pre-started |
+| `warm-ready` | warm | the same launch, exec -> the attach pill |
+| `agents-view` | cold | left-arrow -> the completed `Inactive (N)` roster heading in the screen model |
+| `agents-view-warm` | cold | the same daemon's second populate (its in-process scan cache warm) |
+| `open-session` | cold | `--resume <huge session>` -> the huge session's tail marker |
+| `session-switch` | cold | enter on the uniquely-filtered switch-b row -> B's transcript marker |
+| `at-completion` | cold | the `@` keystroke -> the first completion menu row |
 
 Mechanics (the repo's pty-e2e discipline): the TUI child runs in its own
 session with NO controlling tty (`setsid` pre-exec; vendored crossterm
@@ -121,10 +128,9 @@ the harness restores the corpus to the manifest's file set (the product's
 new session files, sidecars, logs, and leases are deleted) so every run
 measures identical state. A discarded warm-up run precedes the samples.
 
-Kill discipline: teardown signals only the harness's own child pids and
-process groups; the daemon is stopped by the shutdown protocol first, then,
-if the socket file survives, by pids found holding the run's socket path in
-`/proc/*/cmdline` — never a name-based kill.
+Teardown signals only the harness's own child pids; the daemon stops by the
+shutdown protocol and the run FAILS if it keeps accepting — never a
+pid/name-based kill.
 
 ## report + baseline
 
@@ -141,11 +147,23 @@ ones.
 
 ## Local run
 
-`make perf` builds the release binaries, generates the small corpus, and
-benches every scenario 10x with the table printed at the end. Run it on a
-quiet machine; the numbers are wall-clock latencies.
+`make perf` builds the release binaries and runs the whole suite
+(`pa-perf run --profile small`) with the report table printed at the end.
+Run it on a quiet machine; the numbers are wall-clock latencies.
+
+## Dependencies
+
+pa-perf adds ONE new third-party dependency: `vt100` (MIT), the screen
+model behind the content needles (the agents view's heading counts repaint
+as terminal cell diffs, which the raw byte stream cannot see). The crate
+never ships — the release lanes build `-p pa-cli --bin prime-agent` only —
+and `make deny` stays clean.
 
 ## CI
+
+The CI bench matrix budgets each profile: small/medium 10 runs, large 3,
+xl 2 (the populate superlinearity makes 10 impractical at 1000+ sessions;
+the baseline's report-only marking absorbs the wider spread).
 
 `.github/workflows/perf.yml`: nightly schedule + workflow_dispatch +
 label-gated pull requests (`perf-test` label, [labeled, synchronize] —

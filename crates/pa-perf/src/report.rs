@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bench::BenchResult;
+use crate::bench::{BenchResult, Scenario};
+use crate::corpus::Profile;
 
 /// The committed baseline: one entry per scenario/profile key.
 #[derive(Debug, Serialize, Deserialize)]
@@ -39,7 +40,8 @@ pub struct Report {
     pub regressions: Vec<String>,
 }
 
-/// Compare results against the baseline; the key is scenario/profile.
+/// Compare results against the baseline; the key is scenario/profile (the
+/// serde names — one source for the wire, the CLI, and the keys).
 #[must_use]
 pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
     let mut rows = Vec::new();
@@ -80,16 +82,30 @@ pub fn report(results: &[BenchResult], baseline: &Baseline) -> Report {
     }
 }
 
-/// The scenario half of the baseline key.
+/// The serde name of a scenario (the baseline key's scenario half — the
+/// same name the CLI and the wire use).
 #[must_use]
-pub fn key_of(scenario: crate::bench::Scenario) -> String {
-    match scenario {
-        crate::bench::Scenario::ColdStart => "cold-start".to_string(),
-        crate::bench::Scenario::WarmStart => "warm-start".to_string(),
-        crate::bench::Scenario::AgentsView => "agents-view".to_string(),
-        crate::bench::Scenario::AgentsViewWarm => "agents-view-warm".to_string(),
-        crate::bench::Scenario::OpenSession => "open-session".to_string(),
-        crate::bench::Scenario::SessionSwitch => "session-switch".to_string(),
-        crate::bench::Scenario::AtCompletion => "at-completion".to_string(),
-    }
+pub fn key_of(scenario: Scenario) -> String {
+    serde_json::to_value(scenario)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// The serde name of a profile (the baseline key's profile half).
+#[must_use]
+pub fn profile_key(profile: Profile) -> String {
+    serde_json::to_value(profile)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// The serde name of a cache mode (display only).
+#[must_use]
+pub fn profile_key_cache(mode: crate::corpus::CacheMode) -> String {
+    serde_json::to_value(mode)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
 }

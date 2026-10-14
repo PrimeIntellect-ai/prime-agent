@@ -1,23 +1,29 @@
 //! The scenario runner: pty harness, daemon lifecycle, per-run corpus
 //! restore, and the scenario mechanics. Unix-only.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::net::Shutdown;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 
-use crate::bench::{BenchCorpus, BenchOptions, BenchResult, Scenario};
-use crate::corpus::Manifest;
+use crate::bench::{BenchCorpus, BenchOptions, BenchResult, RunOptions, Scenario};
+use crate::corpus::{self, CacheMode, CorpusOptions, Manifest, Profile};
 
 use super::pty::PtyChild;
 
 /// The first paint's needle: the brand splash is the empty chat's header
 /// (the corpus settings keep the TUI out of the first-run flow). Pinned
 /// empirically against the real binary.
-pub(super) const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
+const FIRST_PAINT_NEEDLE: &[u8] = "▗▄▄█▀".as_bytes();
+
+/// The ready needle: the tray's session-usage pill ("model · tokens
+/// (percent)") — the first content the chat surface can only paint once
+/// the daemon session is attached. A fresh session's usage is always
+/// "0 (0%)".
+const READY_NEEDLE: &str = "0 (0%)";
 
 /// One bench run's anchored paths.
 struct RunCtx {
@@ -27,6 +33,26 @@ struct RunCtx {
     project_dir: PathBuf,
     agent_dir: PathBuf,
     liveness: Duration,
+}
+
+impl RunCtx {
+    /// The manifest's agent dir paths, from the corpus at `root`.
+    fn load(binary: &Path, corpus_root: &Path, liveness: Duration) -> anyhow::Result<Self> {
+        let manifest_path = corpus_root.join("corpus.json");
+        let manifest: Manifest = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .with_context(|| format!("read {}", manifest_path.display()))?,
+        )
+        .with_context(|| format!("parse {}", manifest_path.display()))?;
+        Ok(Self {
+            binary: binary.to_path_buf(),
+            project_dir: manifest.paths.project_dir.clone(),
+            agent_dir: manifest.paths.agent_dir.clone(),
+            corpus_root: corpus_root.to_path_buf(),
+            manifest,
+            liveness,
+        })
+    }
 }
 
 /// The child environment: hermetic (a clean env plus the isolation vars).
@@ -51,35 +77,26 @@ fn child_env(ctx: &RunCtx) -> Vec<(String, String)> {
     env
 }
 
-/// Run the scenario `options.runs` times (plus one discarded warm-up), then
+// The single-scenario entry (`pa-perf bench`): one scenario over the given
+// corpus — the debugging/investigation path.
+
+/// Run one scenario `options.runs` times (plus one discarded warm-up), then
 /// write the result JSON.
 ///
 /// # Errors
 ///
 /// Propagates spawn, needle-timeout, daemon, and IO failures.
-pub fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
-    let manifest_path = options.corpus.join("corpus.json");
-    let manifest: Manifest = serde_json::from_str(
-        &std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("read {}", manifest_path.display()))?,
-    )
-    .with_context(|| format!("parse {}", manifest_path.display()))?;
-    let ctx = RunCtx {
-        binary: options.binary.clone(),
-        project_dir: manifest.paths.project_dir.clone(),
-        agent_dir: manifest.paths.agent_dir.clone(),
-        corpus_root: options.corpus.clone(),
-        manifest,
-        liveness: Duration::from_secs(options.liveness_secs),
-    };
-
-    // One discarded warm-up run: the first exec of the binary (and the
-    // corpus's page cache) must not land in a sample.
+pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
+    let ctx = RunCtx::load(
+        &options.binary,
+        &options.corpus,
+        Duration::from_secs(options.liveness_secs),
+    )?;
     let mut samples = Vec::with_capacity(options.runs + 1);
     let total = options.runs + 1;
     for index in 0..total {
         let started = Instant::now();
-        let outcome = sample_once(&ctx, options, index);
+        let outcome = scenario_once(&ctx, options.scenario, index);
         if index == 0 {
             outcome?;
             continue;
@@ -92,94 +109,204 @@ pub fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
             started.elapsed().as_secs_f32()
         );
     }
-    let (median_ms, p95_ms) = stats(&samples);
-    let result = BenchResult {
-        schema: 1,
-        scenario: options.scenario,
-        profile: profile_name(ctx.manifest.profile),
-        runs: samples.len(),
-        samples_ms: samples,
-        median_ms,
-        p95_ms,
-        needle: needle_of(options.scenario, &ctx),
-        binary: options.binary.display().to_string(),
-        corpus: BenchCorpus {
-            root: options.corpus.clone(),
-            sessions: ctx.manifest.counts.sessions,
-            total_rows: ctx.manifest.counts.total_rows,
-            child_sessions: ctx.manifest.counts.child_sessions,
-            archive: ctx.manifest.counts.archive,
-        },
-    };
-    let json = serde_json::to_string_pretty(&result)?;
-    std::fs::write(&options.json, &json)
-        .with_context(|| format!("write {}", options.json.display()))?;
+    let result = build_result(&ctx, options.scenario, samples);
+    write_result(&result, &options.json)?;
     Ok(result)
 }
 
-/// The manifest profile's lowercase name (`format!("{:?}")` is `small`...).
-fn profile_name(profile: crate::corpus::Profile) -> String {
-    match profile {
-        crate::corpus::Profile::Small => "small".to_string(),
-        crate::corpus::Profile::Medium => "medium".to_string(),
-        crate::corpus::Profile::Large => "large".to_string(),
-        crate::corpus::Profile::Xl => "xl".to_string(),
-    }
-}
-
-fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
-    match scenario {
-        Scenario::ColdStart | Scenario::WarmStart => {
-            "first paint (the brand splash over the empty new session)".to_string()
-        }
-        Scenario::AgentsView | Scenario::AgentsViewWarm => format!(
-            "the populate anchor row (the oldest session's search hit: {})",
-            ctx.manifest.markers.populate_anchor
-        ),
-        Scenario::OpenSession => {
-            format!(
-                "the huge session marker {}",
-                ctx.manifest.markers.huge.needle
-            )
-        }
-        Scenario::SessionSwitch => format!(
-            "the enter drill-in to switch-b (its transcript marker {})",
-            ctx.manifest.markers.switch_b.needle
-        ),
-        Scenario::AtCompletion => format!("@ completion row {}", ctx.manifest.markers.at_file),
-    }
-}
-
-/// Median + p95 over the samples.
-fn stats(samples: &[f64]) -> (f64, f64) {
-    let mut sorted = samples.to_vec();
-    sorted.sort_by(f64::total_cmp);
-    let median = if sorted.len() % 2 == 1 {
-        sorted[sorted.len() / 2]
-    } else {
-        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
-    };
-    let p95_index = ((sorted.len() as f64 - 1.0) * 0.95).ceil() as usize;
-    (median, sorted[p95_index.min(sorted.len() - 1)])
-}
-
 /// One scenario pass; returns the sample in ms.
-fn sample_once(ctx: &RunCtx, options: &BenchOptions, run: usize) -> anyhow::Result<f64> {
-    restore(ctx)?;
-    let run_dir = ctx
-        .corpus_root
-        .join("bench-runs")
-        .join(format!("run-{run}"));
-    std::fs::create_dir_all(&run_dir)?;
-    let socket = run_dir.join("daemon.sock");
-    if matches!(
-        options.scenario,
-        Scenario::WarmStart | Scenario::AgentsViewWarm
-    ) {
+fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<f64> {
+    let socket = run_socket(ctx, run);
+    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
+    if matches!(scenario, Scenario::WarmStart | Scenario::WarmReady) {
         start_daemon(ctx, &socket)?;
     }
+    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
+    let outcome = launch_scenario(ctx, &mut launch, scenario);
+    let stopped = stop_daemon(&socket);
+    let sample = outcome?;
+    stopped?;
+    Ok(sample)
+}
 
-    let (resume, first_needle) = match options.scenario {
+// The whole-suite driver (`pa-perf run`): generates the cold and warm
+// corpora and runs every scenario on the corpus state it needs.
+
+/// Run the full scenario schedule on freshly generated corpora, writing one
+/// result JSON per scenario under `<out>/results/`.
+///
+/// # Errors
+///
+/// Propagates corpus-generation, spawn, needle-timeout, daemon, and IO
+/// failures.
+pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
+    let liveness = Duration::from_secs(options.liveness_secs.max(liveness_floor(options.profile)));
+    let knobs = || CorpusOptions {
+        seed: options.seed,
+        ..options.profile.defaults()
+    };
+    println!("=== generating the cold corpus");
+    corpus::generate(&CorpusOptions {
+        out: options.out.join("corpus-cold"),
+        ..knobs()
+    })?;
+    println!("=== generating the warm corpus");
+    corpus::generate(&CorpusOptions {
+        out: options.out.join("corpus-warm"),
+        cache: CacheMode::Warm,
+        ..knobs()
+    })?;
+    let cold_ctx = RunCtx::load(&options.binary, &options.out.join("corpus-cold"), liveness)?;
+    let warm_ctx = RunCtx::load(&options.binary, &options.out.join("corpus-warm"), liveness)?;
+
+    let mut samples: BTreeMap<Scenario, Vec<f64>> = BTreeMap::new();
+    let total = options.runs + 1;
+    for index in 0..total {
+        let started = Instant::now();
+        // The schedule: cold scenarios on the cold corpus, warm-* on the
+        // warm corpus. `launch_cold`/`launch_warm` below run one scenario
+        // per launch; the cold-start/cold-ready (and warm-*) pairs share
+        // one launch each.
+        restore(&cold_ctx)?;
+        let (start_sample, launch) = launch_cold(&cold_ctx, Scenario::ColdStart, index)?;
+        let ready_sample = launch.ready_ms.context("the cold launch never attached")?;
+        push(
+            &mut samples,
+            index,
+            options.runs,
+            Scenario::ColdStart,
+            start_sample,
+        );
+        push(
+            &mut samples,
+            index,
+            options.runs,
+            Scenario::ColdReady,
+            ready_sample,
+        );
+        for scenario in [
+            Scenario::AgentsView,
+            Scenario::AgentsViewWarm,
+            Scenario::OpenSession,
+            Scenario::SessionSwitch,
+            Scenario::AtCompletion,
+        ] {
+            restore(&cold_ctx)?;
+            let (sample, _launch) = launch_cold(&cold_ctx, scenario, index)?;
+            push(&mut samples, index, options.runs, scenario, sample);
+        }
+        restore(&warm_ctx)?;
+        let (start_sample, launch) = launch_warm(&warm_ctx, Scenario::WarmStart, index)?;
+        let ready_sample = launch.ready_ms.context("the warm launch never attached")?;
+        push(
+            &mut samples,
+            index,
+            options.runs,
+            Scenario::WarmStart,
+            start_sample,
+        );
+        push(
+            &mut samples,
+            index,
+            options.runs,
+            Scenario::WarmReady,
+            ready_sample,
+        );
+        println!(
+            "run {index}/{} complete ({:.1}s)",
+            options.runs,
+            started.elapsed().as_secs_f32()
+        );
+    }
+
+    let results_dir = options.out.join("results");
+    std::fs::create_dir_all(&results_dir)?;
+    let mut results = Vec::new();
+    for (scenario, mut samples) in samples {
+        samples.sort_by(f64::total_cmp);
+        if samples.len() != options.runs {
+            anyhow::bail!(
+                "{scenario:?} collected {} samples, expected {}",
+                samples.len(),
+                options.runs
+            );
+        }
+        let result = build_result(&cold_ctx, scenario, samples);
+        let name = crate::report::key_of(scenario);
+        write_result(&result, &results_dir.join(format!("{name}.json")))?;
+        println!(
+            "scenario={name} profile={} median={:.1}ms p95={:.1}ms",
+            crate::report::profile_key(options.profile),
+            result.median_ms,
+            result.p95_ms
+        );
+        results.push(result);
+    }
+    Ok(results)
+}
+
+/// The per-profile liveness floor: the agents-view populate is superlinear
+/// in session count (measured: 100 sessions populate in ~0.4 s; 2500 stream
+/// ~1 row/s once past a few hundred), so big profiles need generous
+/// deadlines — the floor keeps a slow-but-working run measurable instead of
+/// failing at an arbitrary small deadline. The user's `--liveness-secs`
+/// raises it further.
+fn liveness_floor(profile: Profile) -> u64 {
+    match profile {
+        Profile::Small => 120,
+        Profile::Medium => 300,
+        Profile::Large => 1_800,
+        Profile::Xl => 7_200,
+    }
+}
+
+/// Push a sample unless this is the discarded warm-up run.
+fn push(
+    samples: &mut BTreeMap<Scenario, Vec<f64>>,
+    index: usize,
+    _runs: usize,
+    scenario: Scenario,
+    sample: f64,
+) {
+    if index > 0 {
+        samples.entry(scenario).or_default().push(sample);
+    }
+}
+
+/// One launch on a cold-fresh daemon (the TUI spawns its own) and the
+/// scenario's post-launch mechanics; returns (sample, launch).
+fn launch_cold(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
+    let socket = run_socket(ctx, run);
+    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
+    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
+    let outcome = launch_scenario(ctx, &mut launch, scenario);
+    let stopped = stop_daemon(&socket);
+    let sample = outcome?;
+    stopped?;
+    Ok((sample, launch))
+}
+
+/// One launch against the harness-pre-started daemon (the warm corpus).
+fn launch_warm(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
+    let socket = run_socket(ctx, run);
+    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
+    start_daemon(ctx, &socket)?;
+    let mut launch = spawn_for_scenario(ctx, &socket, scenario, run)?;
+    let outcome = launch_scenario(ctx, &mut launch, scenario);
+    let stopped = stop_daemon(&socket);
+    let sample = outcome?;
+    stopped?;
+    Ok((sample, launch))
+}
+
+/// The resume target + first needle per scenario, then the spawn.
+fn spawn_for_scenario(
+    ctx: &RunCtx,
+    socket: &Path,
+    scenario: Scenario,
+    run: usize,
+) -> anyhow::Result<Launch> {
+    let (resume, first_needle) = match scenario {
         Scenario::OpenSession => (
             Some(ctx.manifest.markers.huge.file.clone()),
             ctx.manifest.markers.huge.needle.as_bytes().to_vec(),
@@ -190,37 +317,63 @@ fn sample_once(ctx: &RunCtx, options: &BenchOptions, run: usize) -> anyhow::Resu
         ),
         _ => (None, FIRST_PAINT_NEEDLE.to_vec()),
     };
-    let mut launch = Launch::spawn(ctx, &socket, resume.as_deref(), &first_needle)?;
-    launch.debug_stream = options.debug_stream.clone();
-    let sample = match options.scenario {
-        Scenario::ColdStart | Scenario::WarmStart | Scenario::OpenSession => launch.first_ms,
-        Scenario::AgentsView => agents_view_populate(ctx, &mut launch.child)?,
-        Scenario::AgentsViewWarm => {
-            let warm = agents_view_populate(ctx, &mut launch.child)?;
-            // The first populate warmed the daemon's in-process scan cache;
-            // the second TUI measures the warm path on the same daemon.
-            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE)?;
-            second.debug_stream = options.debug_stream.clone();
-            agents_view_populate(ctx, &mut second.child)?;
-            warm
-        }
-        Scenario::SessionSwitch => switch_to_target_b(ctx, &mut launch.child)?,
-        Scenario::AtCompletion => at_completion(ctx, &mut launch.child)?,
-    };
-    if options.settle_ms > 0 {
-        launch.child.drain(Duration::from_millis(options.settle_ms));
+    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle)?;
+    launch.stream_dump = Some(
+        ctx.corpus_root
+            .join("failed-streams")
+            .join(format!("{}-run{run}.bin", crate::report::key_of(scenario))),
+    );
+    if matches!(scenario, Scenario::ColdStart | Scenario::WarmStart) {
+        launch.wait_ready()?;
     }
-    stop_daemon(&socket);
+    Ok(launch)
+}
+
+/// The scenario mechanics after the launch needle; a completed launch
+/// never dumps its stream.
+fn launch_scenario(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
+    let sample = post_launch(ctx, launch, scenario)?;
+    launch.completed = true;
     Ok(sample)
 }
 
-/// One TUI child plus its teardown: Drop finishes the child (and dumps the
-/// raw pty stream for needle debugging), so every path — success, `?`
-/// bubbles, panics — cleans up and leaves the evidence behind.
+/// The scenario mechanics after the launch needle.
+fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow::Result<f64> {
+    match scenario {
+        Scenario::ColdStart | Scenario::WarmStart | Scenario::OpenSession => Ok(launch.first_ms),
+        Scenario::AgentsView => agents_view_populate(ctx, &mut launch.child),
+        Scenario::AgentsViewWarm => {
+            // The first populate warms the daemon's in-process scan cache;
+            // the second TUI measures the warm path on the same daemon.
+            agents_view_populate(ctx, &mut launch.child)?;
+            let socket = launch.socket.clone();
+            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE)?;
+            second.stream_dump = Some(
+                ctx.corpus_root
+                    .join("failed-streams")
+                    .join("agents-view-warm-second.bin"),
+            );
+            agents_view_populate(ctx, &mut second.child)
+        }
+        Scenario::SessionSwitch => switch_to_target_b(ctx, &mut launch.child),
+        Scenario::AtCompletion => at_completion(ctx, &mut launch.child),
+        Scenario::ColdReady | Scenario::WarmReady => Ok(launch.ready_ms.unwrap_or(launch.first_ms)),
+    }
+}
+
+/// One TUI child plus its teardown: Drop finishes the child, so every path —
+/// success, `?` bubbles, panics — cleans up.
 struct Launch {
     child: PtyChild,
-    debug_stream: Option<std::path::PathBuf>,
+    socket: PathBuf,
     first_ms: f64,
+    ready_ms: Option<f64>,
+    spawned: Instant,
+    liveness: Duration,
+    /// Where the raw pty stream lands when the launch does NOT complete (the
+    /// CI failure artifact for empty-tail debugging).
+    stream_dump: Option<PathBuf>,
+    completed: bool,
 }
 
 impl Launch {
@@ -255,79 +408,83 @@ impl Launch {
         } else {
             "the first paint"
         };
-        let result = child.wait_from(child.mark(), first_needle, what, started + ctx.liveness);
-        if let Err(error) = result {
-            let stream = std::mem::take(&mut child.output);
-            let _ = std::fs::write(
-                std::env::temp_dir().join("pa-perf-failed-stream.bin"),
-                &stream,
-            );
-            return Err(error);
-        }
+        child.wait_from(child.mark(), first_needle, what, started + ctx.liveness)?;
         Ok(Self {
-            child,
-            debug_stream: None,
             first_ms: started.elapsed().as_secs_f64() * 1000.0,
+            child,
+            socket: socket.to_path_buf(),
+            ready_ms: None,
+            spawned: started,
+            liveness: ctx.liveness,
+            stream_dump: None,
+            completed: false,
         })
+    }
+
+    /// The ready metric: exec -> the tray's session-usage pill, the first
+    /// attach-only content on the chat surface.
+    fn wait_ready(&mut self) -> anyhow::Result<()> {
+        self.child.wait_screen_contains(
+            READY_NEEDLE,
+            "the attach pill",
+            self.spawned + self.liveness,
+        )?;
+        self.ready_ms = Some(self.spawned.elapsed().as_secs_f64() * 1000.0);
+        Ok(())
     }
 }
 
 impl Drop for Launch {
     fn drop(&mut self) {
-        if let Some(path) = self.debug_stream.take() {
-            std::fs::write(path, &self.child.output).ok();
+        if !self.completed {
+            if let Some(path) = &self.stream_dump {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, &self.child.output);
+            }
         }
         self.child.finish();
     }
 }
 
-/// The left-arrow opens the agents view; the populate-completion needle is
-/// the oldest session's search-result row (its name fragment the query does
-/// not echo), which can only paint once the roster scan delivered the last
-/// (oldest) session. Returns the left-arrow -> needle time.
+/// The left-arrow opens the agents view; the populate needle is the
+/// completed `Inactive (N)` roster heading in the decoded screen (the
+/// heading count repaints as cell diffs, so the byte stream cannot see it
+/// — the screen model does). The count includes the TUI's own fresh
+/// session (rendered as one more inactive row).
 fn agents_view_populate(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let needle = ctx.manifest.markers.populate_anchor.as_bytes();
-    let mark = child.mark();
+    let needle = format!("Inactive ({})", ctx.manifest.markers.roster_inactive + 1);
     let started = Instant::now();
     child.write(b"\x1b[D")?;
-    child.wait_from(
-        mark,
-        b"Search sessions",
-        "the agents view opening",
-        Instant::now() + ctx.liveness,
-    )?;
-    child.write(ctx.manifest.markers.populate_query.as_bytes())?;
-    child.wait_from(
-        mark,
-        needle,
-        "the populate anchor row",
+    child.wait_screen_contains(
+        &needle,
+        "the agents view roster",
         Instant::now() + ctx.liveness,
     )?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// From the opened session A: open the agents view, filter the rows to the
-/// switch-b target, and time enter -> B's transcript marker. The switch-b
-/// row is one of the newest sessions, so it streams early — the filter
-/// needle does not wait for the whole roster.
+/// From the opened session A: open the agents view, uniquely filter to
+/// switch-b, and time enter -> B's transcript marker. The `zq` token in
+/// switch-b's name matches no other row (no generated text carries the
+/// letter z), so Enter always drills THE row.
 fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let mark = child.mark();
     child.write(b"\x1b[D")?;
-    // Wait the view's search composer before typing: keys written
-    // mid-transition would race the mount.
-    child.wait_from(
-        mark,
-        b"Search sessions",
-        "the agents view opening",
+    // Wait the completed roster before typing: keys racing the scan flood
+    // were the CI-runner failure (the query echoed nothing). The resumed
+    // session A renders as one IDLE row, so the completed heading counts
+    // the remaining sessions.
+    child.wait_screen_contains(
+        &format!("Inactive ({})", ctx.manifest.markers.roster_inactive - 1),
+        "the agents view roster",
         Instant::now() + ctx.liveness,
     )?;
-    // The query matches exactly one row (the `zqmark` name; the echoed
-    // query lacks the row's "switch" prefix), so the empty-picker -> hit
-    // transition paints the row fully and Enter drills THE row.
     child.write(ctx.manifest.markers.switch_query.as_bytes())?;
-    let mark = child.mark();
+    // The echoed query does not contain the row's "switch" prefix, so this
+    // needle is the picker's result row, not the echo.
     child.wait_from(
-        mark,
+        child.mark(),
         ctx.manifest.markers.switch_row.as_bytes(),
         "the switch-b picker row",
         Instant::now() + ctx.liveness,
@@ -344,26 +501,36 @@ fn switch_to_target_b(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64>
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// The `@` file-completion scenario: the trigger is the `@` keystroke; the
-/// needle is the corpus marker file's menu row.
+/// The `@` completion: the trigger is the `@` keystroke alone; the needle
+/// is the first painted completion menu row (the menu lists the project
+/// tree's entries — `src/` is a top-level dir of the generated project
+/// that the pre-menu screen never contains).
 fn at_completion(ctx: &RunCtx, child: &mut PtyChild) -> anyhow::Result<f64> {
-    let at_file = ctx.manifest.markers.at_file.as_bytes().to_vec();
-    let mark = child.mark();
     let started = Instant::now();
     child.write(b"@")?;
-    child.write(b"zzq-corpus")?;
-    child.wait_from(
-        mark,
-        &at_file,
-        "the @ completion row",
+    // The menu lists the project tree's entries — `src/` is a top-level
+    // dir of the generated project that the pre-menu screen never contains
+    // (the visible first rows are dirs, not the .rs files).
+    child.wait_screen_contains(
+        "src/",
+        "the completion menu row",
         Instant::now() + ctx.liveness,
     )?;
     Ok(started.elapsed().as_secs_f64() * 1000.0)
 }
 
+/// The per-run isolated socket path.
+fn run_socket(ctx: &RunCtx, run: usize) -> PathBuf {
+    ctx.corpus_root
+        .join("bench-runs")
+        .join(format!("run-{run}"))
+        .join("daemon.sock")
+}
+
 /// Start the daemon (own session, detached) and wait for the socket to
 /// accept — the observable readiness.
 fn start_daemon(ctx: &RunCtx, socket: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
     let args: [std::ffi::OsString; 4] = [
         "--mode".into(),
         "daemon".into(),
@@ -402,30 +569,24 @@ fn socket_accepts(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
-/// Stop the daemon on `socket`: the protocol shutdown first; then, if the
-/// socket file survives, sweep /proc for processes whose cmdline carries the
-/// run's socket path (never a name-based kill) and signal those pids.
-fn stop_daemon(socket: &Path) {
+/// Stop the daemon on `socket` by the shutdown protocol: the hello line,
+/// the shutdown command, one response read, then wait until the socket no
+/// longer accepts (the observable exit). A daemon that never stops fails
+/// the run loudly — no pid sweeps.
+fn stop_daemon(socket: &Path) -> anyhow::Result<()> {
     protocol_shutdown(socket);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if !socket.exists() {
-            break;
+        if !socket_accepts(socket) {
+            let _ = std::fs::remove_file(socket);
+            return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    if socket.exists() {
-        for pid in pids_holding(socket) {
-            let pid = nix::unistd::Pid::from_raw(pid);
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
-        }
-        std::thread::sleep(Duration::from_secs(2));
-        for pid in pids_holding(socket) {
-            let pid = nix::unistd::Pid::from_raw(pid);
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-        }
-    }
-    let _ = std::fs::remove_file(socket);
+    anyhow::bail!(
+        "the daemon on {} kept accepting after the shutdown protocol; the run is not clean",
+        socket.display()
+    )
 }
 
 /// The daemon-shutdown protocol (the e2es' `graceful_shutdown` shape): the
@@ -434,7 +595,6 @@ fn protocol_shutdown(socket: &Path) {
     let Ok(stream) = std::os::unix::net::UnixStream::connect(socket) else {
         return;
     };
-    let _ = stream.shutdown(Shutdown::Write);
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
@@ -463,27 +623,6 @@ fn protocol_shutdown(socket: &Path) {
     let _ = reader.read_line(&mut response);
 }
 
-/// Pids whose cmdline carries `path` (linux /proc sweep; empty elsewhere).
-fn pids_holding(path: &Path) -> Vec<i32> {
-    let mut pids = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return pids;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Ok(pid) = name.to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
-            let text = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            if text.contains(&path.display().to_string()) {
-                pids.push(pid);
-            }
-        }
-    }
-    pids
-}
-
 /// Restore the corpus's exact generated state: delete every file under the
 /// agent dir that the manifest does not list (the product's new session
 /// files, sidecars, logs, leases), then prune the emptied dirs.
@@ -507,4 +646,71 @@ fn restore(ctx: &RunCtx) -> anyhow::Result<()> {
         let _ = std::fs::remove_dir(dir);
     }
     Ok(())
+}
+
+/// The result object for one scenario's samples.
+fn build_result(ctx: &RunCtx, scenario: Scenario, samples: Vec<f64>) -> BenchResult {
+    let (median_ms, p95_ms) = stats(&samples);
+    BenchResult {
+        schema: 1,
+        scenario,
+        profile: crate::report::profile_key(ctx.manifest.profile),
+        runs: samples.len(),
+        median_ms,
+        p95_ms,
+        samples_ms: samples,
+        needle: needle_of(scenario, ctx),
+        binary: ctx.binary.display().to_string(),
+        corpus: BenchCorpus {
+            root: ctx.corpus_root.clone(),
+            sessions: ctx.manifest.counts.sessions,
+            total_rows: ctx.manifest.counts.total_rows,
+            child_sessions: ctx.manifest.counts.child_sessions,
+            archive: ctx.manifest.counts.archive,
+        },
+    }
+}
+
+/// Median + p95 over the samples.
+fn stats(samples: &[f64]) -> (f64, f64) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let median = if sorted.len() % 2 == 1 {
+        sorted[sorted.len() / 2]
+    } else {
+        (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+    };
+    let p95_index = ((sorted.len() as f64 - 1.0) * 0.95).ceil() as usize;
+    (median, sorted[p95_index.min(sorted.len() - 1)])
+}
+
+fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
+    match scenario {
+        Scenario::ColdStart | Scenario::WarmStart => {
+            "first paint (the brand splash over the empty new session)".to_string()
+        }
+        Scenario::ColdReady | Scenario::WarmReady => {
+            "the attach pill (the tray's session-usage row)".to_string()
+        }
+        Scenario::AgentsView | Scenario::AgentsViewWarm => format!(
+            "the completed roster heading (Inactive ({}))",
+            ctx.manifest.markers.roster_inactive + 1
+        ),
+        Scenario::OpenSession => {
+            format!(
+                "the huge session marker {}",
+                ctx.manifest.markers.huge.needle
+            )
+        }
+        Scenario::SessionSwitch => format!(
+            "the enter drill-in to switch-b (its transcript marker {})",
+            ctx.manifest.markers.switch_b.needle
+        ),
+        Scenario::AtCompletion => "the first @ completion menu row".to_string(),
+    }
+}
+
+fn write_result(result: &BenchResult, path: &Path) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(result)?;
+    std::fs::write(path, json).with_context(|| format!("write {}", path.display()))
 }

@@ -171,13 +171,8 @@ catalog-assets-gates:
 # the numbers are wall-clock latencies of the interactive surfaces.
 perf:
 	cargo build --release --locked -p pa-cli --bin prime-agent -p pa-perf --bin pa-perf
-	./target/release/pa-perf corpus --profile small --out target/perf/corpus
-	mkdir -p target/perf/results
-	for scenario in cold-start warm-start agents-view agents-view-warm open-session session-switch at-completion; do \
-		./target/release/pa-perf bench --binary target/release/prime-agent \
-			--corpus target/perf/corpus --scenario $$scenario --runs 10 \
-			--json target/perf/results/$$scenario.json || exit 1; \
-	done
+	./target/release/pa-perf run --binary target/release/prime-agent \
+		--profile small --out target/perf --runs 10
 	./target/release/pa-perf report --baseline crates/pa-perf/baseline.json \
 		--results target/perf/results/*.json
 

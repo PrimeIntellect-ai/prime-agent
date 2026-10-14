@@ -3,54 +3,41 @@
 
 use std::path::PathBuf;
 
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 /// The measured scenario set. Each is timed from a triggering action to an
-/// observable content needle (event-driven; the deadline only fails a
-/// broken run).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// observable needle — literal paints as byte needles, cell-diffed content
+/// through the vt100 screen model; the deadline only fails a broken run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scenario {
     /// No daemon, cold corpus: exec -> the chat surface's first paint.
     ColdStart,
+    /// The same launch as cold-start, timed to the attach: exec -> the
+    /// tray's session-usage pill (the first content the surface can only
+    /// paint once the daemon session is attached).
+    ColdReady,
     /// Daemon pre-started, warm corpus: exec -> the first paint.
     WarmStart,
-    /// Fresh daemon+TUI: left-arrow -> the agents view's completed roster
-    /// (`Inactive (N)` heading with the manifest's exact count).
+    /// The warm launch timed to the attach pill.
+    WarmReady,
+    /// Fresh daemon+TUI: left-arrow -> the roster scan delivered the oldest
+    /// session (its unique search-result row paints).
     AgentsView,
-    /// The same daemon's second populate (the process-cache-warm scan):
+    /// The same daemon's second populate (its in-process scan cache warm):
     /// a second TUI's left-arrow -> the completed roster.
     AgentsViewWarm,
     /// Fresh daemon: `--resume <huge session>` -> the huge marker paints.
     OpenSession,
-    /// On session A: agents view -> filter to B -> enter -> B's marker.
+    /// On session A: agents view -> uniquely filter to B -> enter -> B's
+    /// transcript marker.
     SessionSwitch,
-    /// The `@` file completion over the project tree: `@` -> the marker
-    /// file's menu row.
+    /// The `@` keystroke -> the first completion menu row.
     AtCompletion,
 }
 
-impl Scenario {
-    /// Parse the CLI name.
-    ///
-    /// # Errors
-    ///
-    /// Errors on an unknown scenario name.
-    pub fn parse(name: &str) -> anyhow::Result<Self> {
-        match name {
-            "cold-start" => Ok(Self::ColdStart),
-            "warm-start" => Ok(Self::WarmStart),
-            "agents-view" => Ok(Self::AgentsView),
-            "agents-view-warm" => Ok(Self::AgentsViewWarm),
-            "open-session" => Ok(Self::OpenSession),
-            "session-switch" => Ok(Self::SessionSwitch),
-            "at-completion" => Ok(Self::AtCompletion),
-            other => anyhow::bail!("unknown scenario {other:?}"),
-        }
-    }
-}
-
-/// Every bench knob.
+/// Every bench knob for one scenario over one corpus.
 #[derive(Debug, Clone)]
 pub struct BenchOptions {
     /// The release binary under test (`target/release/prime-agent`).
@@ -65,12 +52,26 @@ pub struct BenchOptions {
     /// The per-run liveness deadline (seconds) — a broken run fails
     /// instead of hanging.
     pub liveness_secs: u64,
-    /// When set, the raw pty stream of the LAST run lands here (needle
-    /// debugging).
-    pub debug_stream: Option<PathBuf>,
-    /// Needle-discovery aid: keep pumping the pty this many ms after the
-    /// needle (the debug stream then shows the later frames).
-    pub settle_ms: u64,
+}
+
+/// The whole-suite driver: generates the cold and warm corpora, runs every
+/// scenario on the corpus state it needs (cold scenarios on `--cache
+/// cold`, warm-* on `--cache warm`), and writes one result JSON per
+/// scenario.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    /// The release binary under test.
+    pub binary: PathBuf,
+    /// The named corpus profile.
+    pub profile: crate::corpus::Profile,
+    /// The output root: the two corpora and `results/` land under it.
+    pub out: PathBuf,
+    /// The deterministic seed.
+    pub seed: u64,
+    /// Sampled runs per scenario (one discarded warm-up always runs first).
+    pub runs: usize,
+    /// The per-run liveness deadline (seconds).
+    pub liveness_secs: u64,
 }
 
 /// The measured outcome of one scenario over one corpus.
@@ -98,8 +99,8 @@ pub struct BenchCorpus {
     pub archive: usize,
 }
 
-/// Run the scenario `options.runs` times (plus one discarded warm-up), then
-/// write the result JSON.
+/// Run one scenario over one corpus (`options.runs` sampled runs plus one
+/// discarded warm-up), then write the result JSON.
 ///
 /// # Errors
 ///
@@ -110,10 +111,24 @@ pub fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
     runner::run(options)
 }
 
-/// The bench is unix-only (the pty harness); non-unix callers get a clear
-/// error instead of a compile break.
+/// Run the whole scenario suite on freshly generated corpora (`RunOptions`).
+///
+/// # Errors
+///
+/// Propagates corpus-generation, spawn, needle-timeout, daemon, and IO
+/// failures; errors immediately on non-unix platforms.
+#[cfg(unix)]
+pub fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
+    runner::run_suite(options)
+}
+
 #[cfg(not(unix))]
 pub fn run(_options: &BenchOptions) -> anyhow::Result<BenchResult> {
+    anyhow::bail!("the bench harness is unix-only")
+}
+
+#[cfg(not(unix))]
+pub fn run_suite(_options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
     anyhow::bail!("the bench harness is unix-only")
 }
 

@@ -22,11 +22,15 @@ pub(crate) const KITTY_ANSWER: &[u8] = b"\x1b[?7u\x1b[?62;c";
 /// The idle poll slice between empty reads (poll(2) drives the wakeups).
 const IDLE_POLL: Duration = Duration::from_millis(25);
 
-/// One product child on a pty, plus the collected master stream.
+/// One product child on a pty, plus the collected master stream and the
+/// decoded screen (a vt100 model): byte needles cover literal paints; the
+/// screen model covers content that only exists as cell diffs (the agents
+/// view's heading counts).
 pub(crate) struct PtyChild {
     pub(crate) child: Child,
     master: std::fs::File,
     pub(crate) output: Vec<u8>,
+    screen: vt100::Parser,
 }
 
 impl PtyChild {
@@ -79,6 +83,7 @@ impl PtyChild {
             child,
             master: pty.master.into(),
             output: Vec::new(),
+            screen: vt100::Parser::new(rows, cols, 0),
         })
     }
 
@@ -155,6 +160,7 @@ impl PtyChild {
             Ok(0) | Err(_) => {}
             Ok(n) => {
                 self.output.extend_from_slice(&buffer[..n]);
+                self.screen.process(&buffer[..n]);
                 if find(&self.output, KITTY_QUERY).is_some()
                     && find(&self.output, KITTY_ANSWER).is_none()
                 {
@@ -165,13 +171,36 @@ impl PtyChild {
         Ok(())
     }
 
-    /// Read whatever arrives for the next `window` (needle discovery: the
-    /// debug stream then shows the later frames).
-    pub(crate) fn drain(&mut self, window: Duration) {
-        let deadline = Instant::now() + window;
-        while Instant::now() < deadline {
-            let _ = self.pump(Some(deadline));
+    /// Wait until the decoded screen contains `needle`, bounded by
+    /// `deadline`. Content needles the byte stream cannot see (cell-diffed
+    /// counters, repainted rows) live here.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the deadline passes (with the decoded screen attached).
+    pub(crate) fn wait_screen_contains(
+        &mut self,
+        needle: &str,
+        what: &str,
+        deadline: Instant,
+    ) -> anyhow::Result<Instant> {
+        loop {
+            if self.screen_text().contains(needle) {
+                return Ok(Instant::now());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timeout waiting for {what} (screen needle {needle:?}); screen:\n{}",
+                    self.screen_text(),
+                );
+            }
+            self.pump(Some(deadline))?;
         }
+    }
+
+    /// The decoded screen's text (rows joined; trailing blanks trimmed).
+    fn screen_text(&mut self) -> String {
+        self.screen.screen().contents().trim_end().to_string()
     }
 
     /// The child's pid (teardown signals this pid only).

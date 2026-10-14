@@ -264,32 +264,12 @@ fn the_warm_pass_writes_product_sidecars() {
     );
 }
 
-/// The populate anchor: the oldest session (last in the mtime-desc scan)
-/// carries the unique searchable name the agents-view completion needle
-/// matches.
-#[test]
-fn the_populate_anchor_lands_on_the_oldest_session() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let options = tiny(Profile::Small, dir.path());
-    let manifest = generate(&options).expect("generate");
-    let infos = pa_daemon::session_store::list_sessions(&manifest.paths.sessions_dir);
-    let oldest = infos.last().expect("the oldest session");
-    assert_eq!(
-        oldest.name.as_deref(),
-        Some(format!("anchor population {:x}", options.seed).as_str())
-    );
-    assert!(
-        oldest
-            .name
-            .as_deref()
-            .is_some_and(|name| name.contains(&manifest.markers.populate_anchor)),
-        "the anchor needle is part of the anchor name"
-    );
-}
-
-/// The switch-b row is the ONLY session the switch query can match: its
-/// name carries the `zq` token, and no generated corpus text (names or
-/// message bodies) contains the letter z at all.
+/// The switch-b row is the ONLY session the switch query can match. The
+/// agents-view search is a fuzzy subsequence match over each row's name
+/// AND message text, so a common token could rank another row first; the
+/// guarantee needs the `zq` token to be literally impossible elsewhere —
+/// no generated corpus text (names or message bodies) contains the letter
+/// z at all (the ISO `Z` header suffix is the one allowed z).
 #[test]
 fn the_switch_query_can_only_match_switch_b() {
     let dir = tempfile::tempdir().expect("temp dir");
