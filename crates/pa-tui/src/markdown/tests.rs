@@ -1541,3 +1541,27 @@ fn reference_definitions_invalidate_the_block_cache() {
     );
     crate::hyperlinks::set_hyperlinks_override(None);
 }
+
+#[test]
+fn a_glued_word_wider_than_the_row_wraps_to_the_next_row() {
+    // A glued unit that cannot START on the current row opens a fresh row
+    // instead of overflowing it (`abcd` glued to the code span `ef`).
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("abcd`ef`", 4, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["abcd".to_string(), "ef".to_string()]);
+    for row in &rows {
+        let w: usize = row.iter().map(|s| str_width(&s.content)).sum();
+        assert!(w <= 4, "row over the width: {w}");
+    }
+    for width in 1..12 {
+        assert_eq!(
+            markdown_row_count("abcd`ef`", width, &style),
+            render_markdown("abcd`ef`", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}

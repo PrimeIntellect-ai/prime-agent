@@ -893,6 +893,14 @@ fn push_word_piece(
             taken += c.len_utf8();
         }
         if take.is_empty() {
+            // The piece cannot start on this row: open a fresh row and retry
+            // it (a glued word never overflows its row; the count path
+            // shares this break).
+            if *col > 0 {
+                out.finish_row(/*trim*/ false);
+                *col = 0;
+                continue;
+            }
             break;
         }
         out.push(&take, style);
