@@ -5,6 +5,8 @@
 
 pub(crate) mod bash;
 mod cell;
+#[cfg(test)]
+mod golden_tests;
 
 pub use cell::parse_ipython_bash_cell;
 mod python;
