@@ -1,37 +1,33 @@
-use std::collections::BTreeMap;
-
 use super::MarkdownStyle;
 use crate::{Line, Span};
 use ratatui::style::Modifier;
 /// Inline rendering: bold, italic, strikethrough, code, links.
 #[must_use]
 pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
-    render_inline_tracked(text, style, &BTreeMap::new()).0
+    render_inline_tracked(text, style).0
 }
 
 /// The same inline render, plus origin tracking: which spans of the returned line
 /// carry a link's `(url)` bracket (`url_slots`) and which are inline-code spans
 /// (`code_slots`), in ascending span order. Style-tapering callers (headings,
 /// quotes) preserve those spans by origin — a span that merely renders in the same
-/// style is not a slot. `links` carries the document's reference definitions.
+/// style is not a slot.
 #[must_use]
 pub(crate) fn render_inline_tracked(
     text: &str,
     style: &MarkdownStyle,
-    links: &BTreeMap<String, String>,
 ) -> (Line, Vec<usize>, Vec<usize>) {
-    render_inline_ctx(text, style, false, links)
+    render_inline_ctx(text, style, false)
 }
 
 /// `in_link` mirrors marked's `lexer.state.inLink`: the gfm bare-url rule is
 /// skipped inside a link label's tokens (the angle `autolink` rule is not).
 /// Returns the `(url)`-bracket and inline-code span indices, remapped across every
-/// recursive extend. `links` carries the document's reference definitions.
+/// recursive extend.
 fn render_inline_ctx(
     text: &str,
     style: &MarkdownStyle,
     in_link: bool,
-    links: &BTreeMap<String, String>,
 ) -> (Line, Vec<usize>, Vec<usize>) {
     let mut spans: Vec<Span> = Vec::new();
     let mut url_slots: Vec<usize> = Vec::new();
@@ -98,8 +94,7 @@ fn render_inline_ctx(
                 continue;
             }
         }
-        // links: [text](url), [text][label], [label][], and the [label] shortcut, all
-        // resolved against the document's reference definitions.
+        // links: [text](url)
         if c == '[' {
             let mut j = i + 1;
             let mut label = String::new();
@@ -110,12 +105,6 @@ fn render_inline_ctx(
             let mut parsed = None;
             if j < bytes.len() && bytes[j] == ']' && j + 1 < bytes.len() && bytes[j + 1] == '(' {
                 parsed = link_destination(&bytes, j + 2);
-            } else if j < bytes.len() && bytes[j] == ']' {
-                parsed = reference_target(&bytes, j, &label).and_then(|(target, k)| {
-                    links
-                        .get(&super::normalize_label(&target))
-                        .map(|url| (url.clone(), k))
-                });
             }
             if let Some((url, k)) = parsed {
                 // An image (`![alt](url)`): marked's image token falls through to the
@@ -143,7 +132,7 @@ fn render_inline_ctx(
                 // emphasis context.
                 let href = crate::hyperlinks::resolve_link_href(&url);
                 let (label_spans, label_slots, label_codes) =
-                    render_inline_ctx(&label, style, true, links);
+                    render_inline_ctx(&label, style, true);
                 let mut label_spans = label_spans;
                 if crate::hyperlinks::hyperlinks_enabled() {
                     // OSC 8: the label stays clickable (TS `hyperlink()`).
@@ -229,7 +218,7 @@ fn render_inline_ctx(
                                 &mut spans,
                                 &mut url_slots,
                                 &mut code_slots,
-                                render_inline_ctx(&inner, style, in_link, links),
+                                render_inline_ctx(&inner, style, in_link),
                                 style.bold,
                             );
                             bold = !bold;
@@ -251,7 +240,7 @@ fn render_inline_ctx(
                         &mut spans,
                         &mut url_slots,
                         &mut code_slots,
-                        render_inline_ctx(&inner, style, in_link, links),
+                        render_inline_ctx(&inner, style, in_link),
                         style.bold,
                     );
                     bold = !bold;
@@ -261,7 +250,7 @@ fn render_inline_ctx(
                         &mut spans,
                         &mut url_slots,
                         &mut code_slots,
-                        render_inline_ctx(&inner, style, in_link, links),
+                        render_inline_ctx(&inner, style, in_link),
                         style.italic,
                     );
                     italic = !italic;
@@ -279,7 +268,7 @@ fn render_inline_ctx(
                         &mut spans,
                         &mut url_slots,
                         &mut code_slots,
-                        render_inline_ctx(&inner, style, in_link, links),
+                        render_inline_ctx(&inner, style, in_link),
                         style.strikethrough,
                     );
                     i = close + 2;
@@ -360,33 +349,7 @@ fn image_marker_before(bytes: &[char], at: usize) -> bool {
     backslashes % 2 == 0
 }
 
-/// The reference-link target after `[label]` (marked's reference forms):
-/// `[text][label]` (an empty label reuses the text), or the `[label]` shortcut
-/// when the bracket is not followed by a word character. Returns the target and
-/// the index of the closing bracket.
-fn reference_target(bytes: &[char], close: usize, label: &str) -> Option<(String, usize)> {
-    match bytes.get(close + 1) {
-        Some('[') => {
-            let mut k = close + 2;
-            while k < bytes.len() && bytes[k] != ']' {
-                k += 1;
-            }
-            (k < bytes.len()).then(|| {
-                let target: String = bytes[close + 2..k].iter().collect();
-                let target = if target.is_empty() {
-                    label.to_string()
-                } else {
-                    target
-                };
-                (target, k)
-            })
-        }
-        // The shortcut form cannot be followed by a word character.
-        Some(next) if !next.is_alphanumeric() => Some((label.to_string(), close)),
-        None => Some((label.to_string(), close)),
-        _ => None,
-    }
-}
+
 
 /// Recurse into one inline construct's inner text and merge the result into the
 /// outer span stream: the tracked slots remap across the extend, and the

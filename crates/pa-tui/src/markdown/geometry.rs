@@ -1,7 +1,7 @@
 //! Geometry uses the same wrapping traversal as painted Markdown rows.
 use super::{
-    block_cache_key, code_rows, heading_spans, parse_blocks, render_inline_tracked,
-    wrapped_span_count, Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
+    block_cache_key, code_rows, heading_spans, parse_blocks, render_inline, wrapped_span_count,
+    Block, BlockKind, MarkdownBlockCache, MarkdownStyle,
 };
 use crate::{Line, Span};
 use ratatui::style::Style;
@@ -83,7 +83,7 @@ pub(crate) fn markdown_row_count_tagged(
         return 0;
     }
     let normalized = text.replace('\t', "   ");
-    let (blocks, defs) = parse_blocks(&normalized);
+    let blocks = parse_blocks(&normalized);
     let width = width.max(1);
     let mut total = 0;
     for (index, block) in blocks.iter().enumerate() {
@@ -91,7 +91,7 @@ pub(crate) fn markdown_row_count_tagged(
         total += usize::from(block.sep_blank);
         // The key build clones the block's lines, so an empty cache skips it.
         let cached = (!cache.0.is_empty())
-            .then(|| block_cache_key(style_tag, &blocks, index, width, &defs))
+            .then(|| block_cache_key(style_tag, &blocks, index, width))
             .flatten()
             .and_then(|key| cache.0.get(&key));
         if let Some(rows) = cached {
@@ -101,7 +101,7 @@ pub(crate) fn markdown_row_count_tagged(
         let count = match &block.kind {
             BlockKind::Heading { depth } => {
                 let text = block.lines.first().cloned().unwrap_or_default();
-                wrapped_span_count(&heading_spans(&text, *depth, style, &defs), width)
+                wrapped_span_count(&heading_spans(&text, *depth, style), width)
                     + usize::from(blank_after(next, false))
             }
             BlockKind::Hr => 1,
@@ -117,13 +117,13 @@ pub(crate) fn markdown_row_count_tagged(
                     .lines
                     .iter()
                     .map(|text| {
-                        wrapped_span_count(&render_inline_tracked(text, style, &defs).0, width)
+                        wrapped_span_count(&render_inline(text, style), width)
                     })
                     .sum::<usize>()
                     + usize::from(blank_after(next, true))
             }
             BlockKind::List(list) => {
-                crate::markdown::list_row_count(list, 0, 0, width, style, &defs)
+                crate::markdown::list_row_count(list, 0, 0, width, style)
                     + usize::from(blank_after(next, true))
             }
             BlockKind::Quote => block
@@ -131,7 +131,7 @@ pub(crate) fn markdown_row_count_tagged(
                 .iter()
                 .map(|text| {
                     wrapped_span_count(
-                        &render_inline_tracked(text, style, &defs).0,
+                        &render_inline(text, style),
                         width.saturating_sub(2).max(1),
                     )
                 })

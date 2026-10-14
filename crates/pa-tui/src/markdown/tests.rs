@@ -1463,29 +1463,6 @@ fn images_render_their_alt_text_only() {
 }
 
 #[test]
-fn reference_links_resolve_and_definitions_stay_hidden() {
-    // marked collects `[label]: url` definitions document-wide (they render
-    // nothing) and resolves `[text][label]`, `[label][]`, and the `[label]`
-    // shortcut through them.
-    let style = MarkdownStyle::default();
-    crate::hyperlinks::set_hyperlinks_override(Some(false));
-    let text = "See [docs][d1], the [d1][] and [d2] itself.\n\n[d1]: https://x.dev/docs\n[d2]: https://x.dev/";
-    let rows = render_markdown(text, 60, &style);
-    let flat: Vec<String> = rows
-        .iter()
-        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
-        .collect();
-    assert_eq!(
-        flat,
-        vec![
-            "See docs (https://x.dev/docs), the d1 (https://x.dev/docs)".to_string(),
-            "and d2 (https://x.dev/) itself.".to_string(),
-        ]
-    );
-    crate::hyperlinks::set_hyperlinks_override(None);
-}
-
-#[test]
 fn a_bare_hash_renders_an_empty_heading_row() {
     // marked: `#` alone is an h1 with empty text — a blank row plus the
     // heading's trailing spacing.
@@ -1499,47 +1476,6 @@ fn a_bare_hash_renders_an_empty_heading_row() {
         flat,
         vec![String::new(), String::new(), "after".to_string()]
     );
-}
-
-#[test]
-fn reference_definitions_invalidate_the_block_cache() {
-    // A streamed definition changes how EARLIER blocks render (marked resolves
-    // document-wide): the block cache must key on the definitions, not only
-    // the block's own raw text.
-    let style = MarkdownStyle::default();
-    let mut cache = MarkdownBlockCache::default();
-    crate::hyperlinks::set_hyperlinks_override(Some(false));
-    // A settled (non-final) paragraph renders through the cache; the same
-    // paragraph must re-render once a definition arrives later in the stream.
-    let first = render_markdown_tagged(
-        "See [docs][d1].\n\nTail paragraph.",
-        60,
-        &style,
-        "",
-        &mut cache,
-    );
-    let flat: String = first[0].iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(flat, "See [docs][d1].");
-    let second = render_markdown_tagged(
-        "See [docs][d1].\n\nTail paragraph.\n\n[d1]: https://x.dev/docs",
-        60,
-        &style,
-        "",
-        &mut cache,
-    );
-    let flat: Vec<String> = second
-        .iter()
-        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
-        .collect();
-    assert_eq!(
-        flat,
-        vec![
-            "See docs (https://x.dev/docs).".to_string(),
-            String::new(),
-            "Tail paragraph.".to_string(),
-        ]
-    );
-    crate::hyperlinks::set_hyperlinks_override(None);
 }
 
 #[test]
