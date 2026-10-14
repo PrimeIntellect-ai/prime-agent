@@ -24,8 +24,10 @@ fn render_markdown(text: &str, width: usize, style: &MarkdownStyle) -> Vec<Line>
 #[test]
 fn review_markdown_legacy_links_keep_metadata_and_session_base() {
     crate::hyperlinks::set_hyperlinks_override(Some(false));
-    let mut style = MarkdownStyle::default();
-    style.link_base_url = Some(url::Url::parse("file:///workspace/project/").unwrap());
+    let mut style = MarkdownStyle {
+        link_base_url: Some(url::Url::parse("file:///workspace/project/").unwrap()),
+        ..MarkdownStyle::default()
+    };
     let line = super::render_inline("[link](url)", &style);
     assert_eq!(
         line,
@@ -153,7 +155,7 @@ fn review_markdown_deep_lists_keep_text_with_a_bounded_tree() {
                 match part {
                     ListPart::List(child) => pending.push((child, depth + 1)),
                     ListPart::Text(text) | ListPart::LazyText(text) => {
-                        literal_tail |= text == "- item95"
+                        literal_tail |= text == "- item95";
                     }
                 }
             }
