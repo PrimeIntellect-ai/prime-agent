@@ -237,6 +237,49 @@ mod tests {
         }
     }
 
+    /// The purge seam fires only for `goal.complete`, never on the way in.
+    #[tokio::test]
+    async fn goal_complete_purge_runs_only_after_goal_complete() {
+        let session = Arc::new(Mutex::new(persisted_session()));
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut runtime = SessionRuntime::new(
+            &*session.lock().await,
+            Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json"))),
+            "live-1".to_string(),
+            SessionBinding {
+                session_id: "session-1".to_string(),
+                session_file: "/w/s.jsonl".to_string(),
+                cwd: "/w".to_string(),
+            },
+        );
+        let purges = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sink = Arc::clone(&purges);
+        runtime.set_goal_complete_purge(Arc::new(move || {
+            sink.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let mut handlers = HostRequestHandlers::default();
+        runtime.register_host_handlers(session, &mut handlers);
+
+        let create = handlers.get("goal.create").unwrap().clone();
+        create(payload(serde_json::json!({
+            "type": "goal.create",
+            "objective": "pin the purge ordering"
+        })))
+        .await
+        .unwrap();
+        let get = handlers.get("goal.get").unwrap().clone();
+        get(payload(serde_json::json!({ "type": "goal.get" })))
+            .await
+            .unwrap();
+        assert_eq!(purges.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let complete = handlers.get("goal.complete").unwrap().clone();
+        complete(payload(serde_json::json!({ "type": "goal.complete" })))
+            .await
+            .unwrap();
+        assert_eq!(purges.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn goal_handlers_round_trip_through_the_registry() {
         let session = Arc::new(Mutex::new(persisted_session()));
