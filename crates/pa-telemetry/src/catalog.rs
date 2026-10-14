@@ -967,8 +967,9 @@ const SESSION_ARCHIVED: EventRule = EventRule {
 
 /// A settled ipython cell that rendered as bash (v2): its executed
 /// `bash()` line share and command count, never command text. One of the
-/// two standalone TUI events (with `agent command used`), tracked per
-/// render by the upstream #3307 addition and kept intact.
+/// standalone TUI events (with `agent command used` and
+/// `tui live tool timer`), tracked per render by the upstream #3307
+/// addition and kept intact.
 const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
     name: "tui ipython bash rendered",
     since: 2,
@@ -977,6 +978,25 @@ const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
         ("cell_lines", required(count())),
         ("count", required(count())),
     ],
+};
+
+/// `tui live tool timer` (v2): a tool call started executing, so its
+/// running card carries the live elapsed timer. The property is the fixed
+/// tool-category vocabulary ([`crate::events::ToolCategory`]), never the
+/// tool name (a custom MCP tool's name stays off the wire).
+const TUI_LIVE_TOOL_TIMER: EventRule = EventRule {
+    name: "tui live tool timer",
+    since: 2,
+    properties: &[(
+        "tool_category",
+        required(enum_rule(
+            &[
+                "read", "write", "edit", "bash", "grep", "find", "ls", "ipython", "mcp", "custom",
+                "unknown",
+            ],
+            "unknown",
+        )),
+    )],
 };
 
 /// `tui exit` (v1, enriched): one per interactive session run (each agents
@@ -1237,6 +1257,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &SESSION_ARCHIVED,
         &TUI_EXIT,
         &TUI_IPYTHON_BASH_RENDERED,
+        &TUI_LIVE_TOOL_TIMER,
     ];
     all.extend(UPDATE_EVENTS.iter());
     all
