@@ -201,11 +201,18 @@ struct ListBlock {
 }
 
 /// One list item: its own text lines (continuation lines included) and the
-/// nested lists rendered after them.
+/// One item part, in source order: a text line or a nested list.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ListPart {
+    Text(String),
+    List(ListBlock),
+}
+
+/// One list item: its parts in source order (text lines and nested lists
+/// interleaved — marked walks an item's block tokens the same way).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ListItem {
-    lines: Vec<String>,
-    children: Vec<ListBlock>,
+    parts: Vec<ListPart>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -337,8 +344,7 @@ fn parse_blocks(text: &str) -> (Vec<Block>, LinkDefs) {
         if let Some((ordered, start)) = list_marker(trimmed) {
             let indent = line.len() - line.trim_start().len();
             let first = ListItem {
-                lines: vec![trimmed[marker_width(trimmed)..].to_string()],
-                children: Vec::new(),
+                parts: vec![ListPart::Text(trimmed[marker_width(trimmed)..].to_string())],
             };
             let content_col = indent + marker_width(trimmed);
             i += 1;
@@ -562,8 +568,7 @@ fn parse_list_level(
             let marker_w = marker_width(t);
             if line_indent >= content_col {
                 let child_first = ListItem {
-                    lines: vec![t[marker_w..].to_string()],
-                    children: Vec::new(),
+                    parts: vec![ListPart::Text(t[marker_w..].to_string())],
                 };
                 *i += 1;
                 let child = parse_list_level(
@@ -578,8 +583,8 @@ fn parse_list_level(
                 items
                     .last_mut()
                     .expect("the level has its first item")
-                    .children
-                    .push(child);
+                    .parts
+                    .push(ListPart::List(child));
                 pending_blank = None;
                 continue;
             }
@@ -587,8 +592,7 @@ fn parse_list_level(
                 && (line_indent == indent || (line_indent > indent && line_indent < content_col))
             {
                 items.push(ListItem {
-                    lines: vec![t[marker_w..].to_string()],
-                    children: Vec::new(),
+                    parts: vec![ListPart::Text(t[marker_w..].to_string())],
                 });
                 content_col = line_indent + marker_w;
                 pending_blank = None;
@@ -601,8 +605,8 @@ fn parse_list_level(
             items
                 .last_mut()
                 .expect("the level has its first item")
-                .lines
-                .push(t.to_string());
+                .parts
+                .push(ListPart::Text(t.to_string()));
             pending_blank = None;
             *i += 1;
             continue;
@@ -1008,13 +1012,23 @@ fn list_row_count(
     for (index, item) in list.items.iter().enumerate() {
         let bullet_width = str_width(&list_bullet(list.ordered, list.start, index));
         let mut item_count = 0;
-        for (j, text) in item.lines.iter().enumerate() {
-            let budget = list_line_budget(width, indent_len, bullet_width, j == 0);
-            item_count +=
-                wrapped_span_count(&inline::render_inline_tracked(text, style, links).0, budget);
-        }
-        for child in &item.children {
-            item_count += list_row_count(child, depth + 1, child_outer, width, style, links);
+        let mut first_part = true;
+        for part in &item.parts {
+            match part {
+                ListPart::Text(text) => {
+                    let budget = list_line_budget(width, indent_len, bullet_width, first_part);
+                    item_count += wrapped_span_count(
+                        &inline::render_inline_tracked(text, style, links).0,
+                        budget,
+                    );
+                    first_part = false;
+                }
+                ListPart::List(child) => {
+                    item_count +=
+                        list_row_count(child, depth + 1, child_outer, width, style, links);
+                    first_part = false;
+                }
+            }
         }
         count += item_count.max(1);
     }
@@ -1040,46 +1054,56 @@ fn render_list_level(
         let bullet = list_bullet(list.ordered, list.start, index);
         let bullet_width = str_width(&bullet);
         let mut item_rows: Vec<Line> = Vec::new();
-        for (j, text) in item.lines.iter().enumerate() {
-            let spans = inline::render_inline_tracked(text, style, links).0;
-            let mut wrapped: Vec<Line> = Vec::new();
-            if j == 0 {
-                let budget = list_line_budget(width, indent_len, bullet_width, true);
-                wrap_spans(&spans, budget, style.body, &mut wrapped);
-                for (k, line) in wrapped.into_iter().enumerate() {
-                    let mut row: Line = Vec::new();
-                    if !indent.is_empty() {
-                        row.push(Span::raw(indent.clone()));
-                    }
-                    if k == 0 {
-                        row.push(Span::styled(bullet.clone(), style.list_bullet));
+        // The item's parts walk in source order; the first part carries the
+        // level's bullet (a nested list renders into the same rows before any
+        // later text lines, matching marked's token order).
+        let mut first_part = true;
+        for part in &item.parts {
+            match part {
+                ListPart::Text(text) => {
+                    let spans = inline::render_inline_tracked(text, style, links).0;
+                    let mut wrapped: Vec<Line> = Vec::new();
+                    if first_part {
+                        let budget = list_line_budget(width, indent_len, bullet_width, true);
+                        wrap_spans(&spans, budget, style.body, &mut wrapped);
+                        for (k, line) in wrapped.into_iter().enumerate() {
+                            let mut row: Line = Vec::new();
+                            if !indent.is_empty() {
+                                row.push(Span::raw(indent.clone()));
+                            }
+                            if k == 0 {
+                                row.push(Span::styled(bullet.clone(), style.list_bullet));
+                            } else {
+                                row.push(Span::raw(" ".repeat(bullet_width)));
+                            }
+                            row.extend(line);
+                            item_rows.push(row);
+                        }
                     } else {
-                        row.push(Span::raw(" ".repeat(bullet_width)));
+                        let sub_indent = format!("{indent}  ");
+                        let budget = list_line_budget(width, indent_len, bullet_width, false);
+                        wrap_spans(&spans, budget, style.body, &mut wrapped);
+                        for line in wrapped {
+                            let mut row = vec![Span::raw(sub_indent.clone())];
+                            row.extend(line);
+                            item_rows.push(row);
+                        }
                     }
-                    row.extend(line);
-                    item_rows.push(row);
+                    first_part = false;
                 }
-            } else {
-                let sub_indent = format!("{indent}  ");
-                let budget = list_line_budget(width, indent_len, bullet_width, false);
-                wrap_spans(&spans, budget, style.body, &mut wrapped);
-                for line in wrapped {
-                    let mut row = vec![Span::raw(sub_indent.clone())];
-                    row.extend(line);
-                    item_rows.push(row);
+                ListPart::List(child) => {
+                    render_list_level(
+                        child,
+                        depth + 1,
+                        child_outer,
+                        width,
+                        style,
+                        links,
+                        &mut item_rows,
+                    );
+                    first_part = false;
                 }
             }
-        }
-        for child in &item.children {
-            render_list_level(
-                child,
-                depth + 1,
-                child_outer,
-                width,
-                style,
-                links,
-                &mut item_rows,
-            );
         }
         if item_rows.is_empty() {
             let mut row: Line = Vec::new();

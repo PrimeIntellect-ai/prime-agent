@@ -1565,3 +1565,31 @@ fn a_glued_word_wider_than_the_row_wraps_to_the_next_row() {
         );
     }
 }
+
+#[test]
+fn continuation_after_a_nested_list_keeps_source_order() {
+    // marked walks an item's block tokens in source order: text, then the
+    // nested list, then the continuation text. The item model keeps that
+    // order (the continuation keeps the R3 indented-continuation shape).
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- parent\n  - child\n  after", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- parent".to_string(),
+            "    - child".to_string(),
+            "  after".to_string(),
+        ]
+    );
+    for width in 1..60 {
+        assert_eq!(
+            markdown_row_count("- parent\n  - child\n  after", width, &style),
+            render_markdown("- parent\n  - child\n  after", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
