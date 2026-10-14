@@ -1,11 +1,20 @@
-//! Stopping the discovered daemons: the pure action planners, the safe
-//! re-probing executors, and the three command drivers (`status`/`doctor`/
-//! `shutdown`).
+//! Stopping the discovered daemons (TS `cli/daemon-ps.ts` reap/shutdown
+//! half): the pure action planners, the safe re-probing executors, and the
+//! three command drivers (`status`/`doctor`/`shutdown` output).
 //!
-//! Deliberate TS divergences: the `stopHiddenSupervisors` duplicate-kill loop
-//! is not ported (the socket lease makes two owners of one path impossible);
-//! `acquireDaemonShutdownAdmission` and the supervisor-ownership registry rule
-//! have no Rust counterpart yet.
+//! Divergences from TS, deliberate:
+//! - TS's `stopHiddenSupervisors` loop kills duplicate daemons it finds
+//!   listening on one socket path (a handoff-era artifact); the Rust
+//!   supervisor's socket lease makes two owners of one path impossible, so
+//!   the loop is not ported.
+//! - The supervisor-ownership registry rule of the TS state-root matcher is
+//!   not ported (see the module docs).
+//!
+//! The shutdown admission (`acquireDaemonShutdownAdmission`, TS
+//! `daemon-supervisor-ownership.ts` - the bind-choreography audit's D3
+//! port) is now live here: `shutdown` holds the 5s/1s stop-window lease
+//! for its whole converging pass, aborting any action whose assertion
+//! finds the window lost.
 
 use std::path::Path;
 
@@ -25,8 +34,8 @@ use super::{
     discover_daemons, is_daemon_process_listening, probe_daemon, DaemonInfo, DaemonStateRoot,
 };
 
-/// `status`: the daemons discovered in the given state root as JSON or
-/// as the table.
+/// `status` (TS `runPs`): the daemons discovered in the given state root as
+/// JSON or as the table.
 pub(crate) fn run_ps(json: bool, root: &DaemonStateRoot) {
     let daemons = discover_daemons(root);
     if json {
@@ -43,8 +52,8 @@ pub(crate) fn run_ps(json: bool, root: &DaemonStateRoot) {
     println!("{}", super::format_daemon_list_table(&daemons));
 }
 
-/// `doctor --fix`: clean up clearly-safe daemons. Returns the process
-/// exit code (always 0 — failures are reported as kept lines).
+/// `doctor --fix` (TS `runReap`): clean up clearly-safe daemons. Returns the
+/// process exit code (always 0 — failures are reported as kept lines).
 pub(crate) fn run_reap(json: bool, root: &DaemonStateRoot) -> i32 {
     let daemons = discover_daemons(root);
     let mut reaped: Vec<(String, String)> = Vec::new();
@@ -69,8 +78,9 @@ pub(crate) fn run_reap(json: bool, root: &DaemonStateRoot) -> i32 {
                 }
             }
             ReapActionKind::Kill => {
-                // Re-probe right before killing: a daemon classified unreachable at
-                // discovery may have started answering; never signal one that responds.
+                // Re-probe right before killing: a daemon classified
+                // unreachable at discovery may have started answering; never
+                // signal one that now responds.
                 if probe_daemon(&action.daemon.socket_path).reachable {
                     apply(
                         reap_reachable_daemon(&action.daemon.socket_path, pid),
@@ -105,8 +115,8 @@ pub(crate) fn run_reap(json: bool, root: &DaemonStateRoot) -> i32 {
     0
 }
 
-/// Ask a reachable daemon to stop, but only after a fresh probe confirms
-/// it is idle.
+/// Ask a reachable daemon to stop, but only after a fresh probe confirms it
+/// is idle (TS `reapReachableDaemon`).
 fn reap_reachable_daemon(socket_path: &Path, pid: Option<u32>) -> StopOutcome {
     let probe = probe_daemon(socket_path);
     if !probe.reachable {
@@ -146,8 +156,9 @@ fn apply(
     }
 }
 
-/// `shutdown`. Returns the process exit code: 1 when anything failed
-/// (or the JSON confirmation error), 0 otherwise.
+/// `shutdown` (TS `runShutdownAll` + `runShutdownAllConverging`). Returns the
+/// process exit code: 1 when anything failed (or the JSON confirmation
+/// error), 0 otherwise.
 pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) -> i32 {
     let daemons = discover_daemons(root);
     match plan_shutdown_confirmation(
@@ -171,8 +182,10 @@ pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) 
             1
         }
         ShutdownConfirmationPlan::TtyError => {
-            // The public-command wrapper turns the throw into the standard `Error: …`
-            // failure (stderr + exit 1); only reachable once there are daemons to stop.
+            // TS throws this out of `runShutdownAll` and the public-command
+            // wrapper turns the throw into the standard `Error: …` failure
+            // (stderr + exit 1); only reachable once there are daemons to
+            // stop, so an empty machine shuts down cleanly without a TTY.
             eprintln!(
                 "Error: Shutdown requires confirmation in an interactive terminal. Use \"prime-agent shutdown --force\"."
             );
@@ -185,15 +198,59 @@ pub(crate) fn run_shutdown_all(json: bool, force: bool, root: &DaemonStateRoot) 
                 println!("\x1b[2mShutdown cancelled.\x1b[22m");
                 return 0;
             }
-            run_shutdown_converging(json, force, root)
+            run_shutdown_with_admission(json, force, root)
         }
-        ShutdownConfirmationPlan::None => run_shutdown_converging(json, force, root),
+        ShutdownConfirmationPlan::None => run_shutdown_with_admission(json, force, root),
     }
 }
 
-/// Run the planned actions, then (with `force`) sweep residuals until
-/// the listener set quiets down.
-fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i32 {
+/// Hold the shutdown-admission lease for the whole converging pass (TS
+/// `runShutdownAll`: `acquireDaemonShutdownAdmission` before the pass,
+/// released in the finally). While another stop window is active - an
+/// update coordinator mid-restart - the acquire waits it out (the 5 s
+/// lease, 1 s renewal); a lost lease aborts the pass, which fails the
+/// command (TS's throw out of `runShutdownAllConverging`).
+fn run_shutdown_with_admission(json: bool, force: bool, root: &DaemonStateRoot) -> i32 {
+    // The pass is scoped to its state root (the discovery's own root
+    // filter): it bumps the raced-stop generations of the reach keys it
+    // can stop - its default socket, socket dir, and agent dir, the
+    // never-touch keys excluded - which are the reach keys a
+    // coordinator whose daemon this pass can stop compares against.
+    let pass_keys = super::shutdown_pass_keys(root);
+    let pass_key_refs: Vec<&Path> = pass_keys.iter().map(std::path::PathBuf::as_path).collect();
+    let mut admission = match pa_daemon::supervisor_ownership::ShutdownAdmission::acquire(
+        pa_daemon::supervisor_ownership::ShutdownScope::Root {
+            keys: pass_key_refs,
+        },
+    ) {
+        Ok(admission) => admission,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+    let assert = || admission.assert_or_renew();
+    let outcome = run_shutdown_converging(json, force, root, &assert);
+    admission.release();
+    match outcome {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            1
+        }
+    }
+}
+
+/// TS `runShutdownAllConverging`: run the planned actions, then (with
+/// `force`) sweep residuals until the listener set quiets down. Every stop
+/// action is preceded by the admission assertion (`assertAdmission` in the
+/// TS pass); a lost stop window aborts the whole pass as `Err`.
+fn run_shutdown_converging(
+    json: bool,
+    force: bool,
+    root: &DaemonStateRoot,
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> std::result::Result<i32, String> {
     let mut stopped: Vec<(String, String)> = Vec::new();
     let mut failed: Vec<(String, String)> = Vec::new();
     let mut handled_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -216,15 +273,20 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
         let pid = action.daemon.pid;
         if let Some(pid) = pid {
             if handled_pids.contains(&pid) {
+                assert().map_err(|error| error.to_string())?;
                 remove_socket_file(&action.daemon.socket_path);
                 stopped.push((
                     socket_path.clone(),
                     format!("background service already stopped (pid {pid})"),
                 ));
                 if force {
-                    for reason in
-                        force_stop_tracked_workers(&action.daemon.socket_path, &root.agent_dir)
-                    {
+                    let reasons = force_stop_tracked_workers(
+                        &action.daemon.socket_path,
+                        &root.agent_dir,
+                        assert,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    for reason in reasons {
                         failed.push((socket_path.clone(), reason));
                     }
                 }
@@ -243,18 +305,24 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
                             pid,
                             &mut handled_pids,
                             force,
-                        ),
+                            assert,
+                        )
+                        .map_err(|error| error.to_string())?,
                         &socket_path,
                         &mut stopped,
                         &mut failed,
                     );
-                } else if remove_socket_file(&action.daemon.socket_path) {
-                    stopped.push((socket_path.clone(), "removed stale socket file".to_string()));
                 } else {
-                    failed.push((
-                        socket_path.clone(),
-                        "could not remove socket file".to_string(),
-                    ));
+                    assert().map_err(|error| error.to_string())?;
+                    if remove_socket_file(&action.daemon.socket_path) {
+                        stopped
+                            .push((socket_path.clone(), "removed stale socket file".to_string()));
+                    } else {
+                        failed.push((
+                            socket_path.clone(),
+                            "could not remove socket file".to_string(),
+                        ));
+                    }
                 }
             }
             ReapActionKind::Kill => {
@@ -265,7 +333,9 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
                             pid,
                             &mut handled_pids,
                             force,
-                        ),
+                            assert,
+                        )
+                        .map_err(|error| error.to_string())?,
                         &socket_path,
                         &mut stopped,
                         &mut failed,
@@ -273,18 +343,22 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
                 } else if let Some(pid) = pid.filter(|pid| {
                     is_daemon_process_listening(*pid, &action.daemon.socket_path, root)
                 }) {
-                    apply_stop(
-                        verified_force_kill(
-                            pid,
-                            &action.daemon.socket_path,
-                            format!("killed unreachable background service (pid {pid})"),
-                            &mut handled_pids,
-                        ),
-                        &socket_path,
-                        &mut stopped,
-                        &mut failed,
-                    );
+                    // TS asserts before the kill here; the post-kill
+                    // assert before the socket removal runs inside the
+                    // helper, so a window lost to the kill's bounded
+                    // polling aborts the pass without unlinking.
+                    assert().map_err(|error| error.to_string())?;
+                    let outcome = verified_force_kill(
+                        pid,
+                        &action.daemon.socket_path,
+                        format!("killed unreachable background service (pid {pid})"),
+                        &mut handled_pids,
+                        assert,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    apply_stop(outcome, &socket_path, &mut stopped, &mut failed);
                 } else {
+                    assert().map_err(|error| error.to_string())?;
                     remove_socket_file(&action.daemon.socket_path);
                     stopped.push((
                         socket_path.clone(),
@@ -299,7 +373,9 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
                         pid,
                         &mut handled_pids,
                         force,
-                    ),
+                        assert,
+                    )
+                    .map_err(|error| error.to_string())?,
                     &socket_path,
                     &mut stopped,
                     &mut failed,
@@ -307,23 +383,28 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
             }
         }
         if force && action.kind != ReapActionKind::Skip {
-            for reason in force_stop_tracked_workers(&action.daemon.socket_path, &root.agent_dir) {
+            let reasons =
+                force_stop_tracked_workers(&action.daemon.socket_path, &root.agent_dir, assert)
+                    .map_err(|error| error.to_string())?;
+            for reason in reasons {
                 failed.push((socket_path.clone(), reason));
             }
         }
     }
 
     if force {
-        terminate_verified_residuals(root, &mut stopped, &mut failed, &handled_pids);
+        terminate_verified_residuals(root, &mut stopped, &mut failed, &handled_pids, assert)
+            .map_err(|error| error.to_string())?;
     }
 
-    // The exit code follows the failures in both output modes.
+    // The exit code follows the failures in both output modes (TS sets
+    // process.exitCode = 1 for any failed stop).
     if json {
         println!("{}", shutdown_report_json(&stopped, &failed));
-        return i32::from(!failed.is_empty());
+        return Ok(i32::from(!failed.is_empty()));
     }
     print_shutdown_report(&stopped, &failed);
-    i32::from(!failed.is_empty())
+    Ok(i32::from(!failed.is_empty()))
 }
 
 fn apply_stop(
@@ -338,63 +419,99 @@ fn apply_stop(
     }
 }
 
-/// Stop one daemon gracefully, escalating only with `force`.
+/// Stop one daemon gracefully, escalating only with `force` (TS
+/// `stopBackgroundService`, whose `assertAdmission` runs before any stop
+/// action and is re-checked between the force kill and the socket
+/// removal inside `verified_force_kill`; a lost stop window aborts the
+/// pass).
 fn stop_background_service(
     socket_path: &Path,
     pid: Option<u32>,
     handled_pids: &mut std::collections::HashSet<u32>,
     force: bool,
-) -> StopOutcome {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<StopOutcome> {
+    assert()?;
     if shutdown_daemon(socket_path, force) {
         if let Some(pid) = pid {
             handled_pids.insert(pid);
         }
-        return StopOutcome::Reaped(format!(
+        return Ok(StopOutcome::Reaped(format!(
             "stopped background service{}",
             pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
-        ));
+        )));
     }
     if !probe_daemon(socket_path).reachable {
+        // The 5 s graceful wait above can outlast the window: the
+        // admission is re-asserted before the socket file is touched (TS
+        // stopBackgroundService asserts at every post-wait step).
+        assert()?;
         remove_socket_file(socket_path);
-        return StopOutcome::Reaped("background service already stopped".to_string());
+        return Ok(StopOutcome::Reaped(
+            "background service already stopped".to_string(),
+        ));
     }
     let Some(pid) = pid else {
-        return StopOutcome::Skipped("still listening but no pid to kill".to_string());
+        return Ok(StopOutcome::Skipped(
+            "still listening but no pid to kill".to_string(),
+        ));
     };
     if !force {
-        return StopOutcome::Skipped("did not stop gracefully; retry with --force".to_string());
+        return Ok(StopOutcome::Skipped(
+            "did not stop gracefully; retry with --force".to_string(),
+        ));
     }
+    // The last action before the kill: the window must still be ours after
+    // the wait (TS asserts between the graceful attempt and the force
+    // kill); the re-assert after the kill - immediately before the socket
+    // removal - runs inside `verified_force_kill`.
+    assert()?;
     verified_force_kill(
         pid,
         socket_path,
         format!("force-killed unresponsive background service (pid {pid})"),
         handled_pids,
+        assert,
     )
 }
 
 /// Verified force-kill for one daemon (the supervisor-side contract the
 /// worker-side `stop_tracked_process` already implements): the pid joins
-/// `handled_pids` and the socket file is removed only on confirmed death — a
-/// survivor of SIGKILL is reported failed, its socket file kept so the
-/// invisible listener stays discoverable for the sweep and the doctor.
+/// `handled_pids` and the socket file is removed only on confirmed death —
+/// a daemon that survives SIGKILL is reported as failed, with its socket
+/// file deliberately kept so the invisible listener stays discoverable
+/// for the `--force` residual sweep and the doctor's re-probe. The stop
+/// window is re-asserted after the kill's bounded polling and immediately
+/// before the unlink (TS asserts between `forceKillDaemon` and
+/// `removeSocketFile`): the poll can outlast the lease, and the socket
+/// file may by then belong to a successor daemon bound while we polled,
+/// so a lost window aborts with the file kept on disk.
 fn verified_force_kill(
     pid: u32,
     socket_path: &Path,
     success_action: String,
     handled_pids: &mut std::collections::HashSet<u32>,
-) -> StopOutcome {
+    assert: &dyn Fn() -> anyhow::Result<()>,
+) -> anyhow::Result<StopOutcome> {
     if !force_kill_daemon(pid) {
-        return StopOutcome::Skipped(format!(
+        return Ok(StopOutcome::Skipped(format!(
             "could not safely stop daemon (pid {pid}); it survived SIGKILL"
-        ));
+        )));
     }
+    // TS kills, marks the pid handled, then re-asserts before the unlink:
+    // a window lost to the kill's bounded polling keeps the socket file
+    // on disk - a successor daemon bound while we polled stays
+    // discoverable, the same containment as the survived-SIGKILL arm -
+    // and the lost window aborts the pass.
     handled_pids.insert(pid);
+    assert()?;
     remove_socket_file(socket_path);
-    StopOutcome::Reaped(success_action)
+    Ok(StopOutcome::Reaped(success_action))
 }
 
 /// Ask the daemon to stop and confirm it actually stopped listening: the ack
-/// alone is not proof; success only once the socket stops accepting.
+/// alone is not proof, so success is reported only once the socket stops
+/// accepting connections (TS `shutdownDaemon`).
 fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
     let Ok(mut client) = crate::daemon_client::DaemonClient::connect_probe(socket_path) else {
         return false;
@@ -418,7 +535,7 @@ fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
     false
 }
 
-/// Empty or anything-but-yes resolves false (default No).
+/// `promptYesNo`: empty or anything-but-yes resolves false (default No).
 pub(crate) fn prompt_yes_no(message: &str) -> bool {
     use std::io::Write as _;
     print!("{message} [y/N] ");
@@ -431,8 +548,8 @@ pub(crate) fn prompt_yes_no(message: &str) -> bool {
     normalized == "y" || normalized == "yes"
 }
 
-/// One acted-on service in the JSON reports: the socket path first,
-/// then the action, or the reason on failure.
+/// One acted-on service in the JSON reports (TS prints the socket path
+/// first, then the action, or the reason on failure).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionEntry {
@@ -447,7 +564,7 @@ struct ReasonEntry {
     reason: String,
 }
 
-/// The reap JSON report, `{reaped, skipped}` in that order.
+/// The reap JSON report (TS prints `{reaped, skipped}` in that order).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ReapReport {
@@ -455,7 +572,7 @@ struct ReapReport {
     skipped: Vec<ReasonEntry>,
 }
 
-/// The shutdown JSON report, `{stopped, failed}` in that order.
+/// The shutdown JSON report (TS prints `{stopped, failed}` in that order).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ShutdownReport {
@@ -514,20 +631,24 @@ mod tests {
             .expect("spawn a sleep child");
         let pid = child.id();
         let mut handled_pids = std::collections::HashSet::new();
+        let assert = || Ok(());
 
         let outcome = verified_force_kill(
             pid,
             &socket_path,
             "killed unreachable background service".to_string(),
             &mut handled_pids,
+            &assert,
         );
 
-        match outcome {
+        match outcome.expect("a held stop window never aborts the kill") {
             StopOutcome::Reaped(action) => {
                 assert_eq!(action, "killed unreachable background service");
             }
             StopOutcome::Skipped(reason) => panic!("expected a reaped outcome, got {reason}"),
         }
+        // Only the confirmed death joins the handled set and unlinks the
+        // socket (the contract this helper enforces).
         assert!(handled_pids.contains(&pid));
         assert!(
             !socket_path.exists(),
@@ -536,10 +657,78 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// The kill's bounded polling (the 1 s grace, SIGKILL, the death
+    /// verify) can outlast the stop window, so TS re-asserts the
+    /// admission after the kill and immediately before the socket
+    /// removal (daemon-ps.ts :950, the `stopBackgroundService` force
+    /// arm). The stub daemon accepts connections but never greets or
+    /// shuts down (mod.rs's probe stub), so the pass escalates to the
+    /// force kill; the admission counter hands the window away on the
+    /// third assert - the post-kill re-assert inside the helper - the
+    /// way a coordinator taking the lease during the kill's poll does.
+    #[cfg(unix)]
+    #[test]
+    fn stop_background_service_keeps_the_socket_when_the_window_is_lost_mid_kill() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("daemon.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let mut handled_pids = std::collections::HashSet::new();
+
+        // The window holds through the entry assert and the pre-kill
+        // assert (TS :929/:947); the post-kill re-assert (TS :950) finds
+        // it lost.
+        let calls = std::cell::Cell::new(0);
+        let lost_window = || {
+            calls.set(calls.get() + 1);
+            if calls.get() >= 3 {
+                Err(anyhow::anyhow!("shutdown admission expired"))
+            } else {
+                Ok(())
+            }
+        };
+        let outcome = stop_background_service(
+            &socket_path,
+            Some(pid),
+            &mut handled_pids,
+            true,
+            &lost_window,
+        );
+
+        // A lost stop window aborts the pass (the converging pass maps
+        // the error to exit code 1) ...
+        assert!(outcome.is_err(), "a lost stop window must abort the pass");
+        // ... but only after the kill itself ran (TS kills before the
+        // re-assert, so the child is dead) ...
+        assert!(
+            child.try_wait().expect("try wait").is_some(),
+            "the force kill must run before the lost window surfaces"
+        );
+        // ... and the socket file stays on disk (the same containment as
+        // the survived-SIGKILL arm): a successor daemon bound while we
+        // polled keeps its discoverable socket.
+        assert!(
+            socket_path.exists(),
+            "a lost stop window must not unlink the socket file"
+        );
+    }
+
     #[test]
     fn shutdown_report_json_pins_the_failure_shape() {
-        // Every failure path funnels into this report; a survived
-        // SIGKILL must surface as a `failed` reason entry.
+        // Every failure path funnels into this report (TS prints
+        // `{stopped, failed}`); the shape is the `--json` contract, so a
+        // survived SIGKILL must surface as a `failed` reason entry.
         let report = serde_json::from_str::<serde_json::Value>(&shutdown_report_json(
             &[],
             &[(
