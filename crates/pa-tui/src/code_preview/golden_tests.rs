@@ -5,10 +5,7 @@ use super::{preview_bash_command, preview_ipython_code, CodePreviewLanguage};
 
 #[test]
 fn golden_previews_match_ts() {
-    let corpus_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../pa-core/tests/golden/corpus/preview.json"
-    );
+    let corpus_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/preview.json");
     let corpus: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(corpus_path).expect("corpus file"))
             .expect("corpus JSON");

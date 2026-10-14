@@ -1,7 +1,7 @@
 //! Code-preview extraction for tool-call cards (`ipython` collapsed line).
 //! The pa-tui dependency boundary (pa-types only) keeps the session engine
-//! out of the UI, so the display-side preview algorithm lives here; pa-core
-//! holds the same algorithm for its golden-replay corpus.
+//! out of the UI, so the display-side preview algorithm lives here; the
+//! TypeScript golden corpus test lives here too.
 
 pub(crate) mod bash;
 mod cell;
