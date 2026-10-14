@@ -10,8 +10,6 @@ mod inline;
 mod tests;
 
 pub use inline::render_inline;
-pub(crate) use inline::render_inline_tracked;
-
 
 use crate::width::str_width;
 use crate::{Line, Span};
@@ -402,7 +400,6 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     blocks
 }
 
-
 /// A heading line start: `#`s followed by a space (the depth cap lives where the
 /// heading is parsed).
 pub(crate) fn heading_marker(t: &str) -> bool {
@@ -696,7 +693,7 @@ fn render_block(
         BlockKind::Heading { depth } => {
             let text = block.lines.first().cloned().unwrap_or_default();
             let spans = heading_spans(&text, *depth, style);
-            wrap_spans(&spans, width, style.heading, out);
+            wrap_spans(&spans, width, out);
             if blank_after(false) {
                 out.push(Vec::new());
             }
@@ -706,7 +703,7 @@ fn render_block(
             // carries the newlines through the width pass).
             for text in &block.lines {
                 let spans = inline::render_inline_tracked(text, style).0;
-                wrap_spans(&spans, width, style.body, out);
+                wrap_spans(&spans, width, out);
             }
             if blank_after(true) {
                 out.push(Vec::new());
@@ -722,7 +719,7 @@ fn render_block(
             // (wrapTextWithAnsi), so a continuation row starts at column 0
             // with no re-added indent.
             for row in code_rows(block, lang.as_deref(), style) {
-                wrap_spans(&row, width, style.code_block, out);
+                wrap_spans(&row, width, out);
             }
             if blank_after(false) {
                 out.push(Vec::new());
@@ -740,8 +737,7 @@ fn render_block(
             // spans and link URL brackets keep their own colors, and emphasis
             // modifiers ride on top.
             for line in &block.lines {
-                let (spans, url_slots, code_slots) =
-                    inline::render_inline_tracked(line, style);
+                let (spans, url_slots, code_slots) = inline::render_inline_tracked(line, style);
                 let mut quote_spans: Vec<Span> = Vec::new();
                 for (i, mut s) in spans.into_iter().enumerate() {
                     if s.content.is_empty() {
@@ -885,8 +881,7 @@ fn push_word(tokens: &mut Vec<WrapToken>, text: String, style: Style) {
 
 /// Wrap styled spans to `width`. Words break at whitespace; leading spaces are
 /// dropped after a wrap break. Adjacent same-style output pieces merge.
-pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>) {
-    let _ = base;
+pub fn wrap_spans(spans: &[Span], width: usize, out: &mut Vec<Line>) {
     wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
 }
 
@@ -975,13 +970,11 @@ fn list_row_count(
             match part {
                 ListPart::Text(text) => {
                     let budget = list_line_budget(width, indent_len, bullet_width, first_part);
-                    item_count +=
-                        wrapped_span_count(&render_inline(text, style), budget);
+                    item_count += wrapped_span_count(&render_inline(text, style), budget);
                     first_part = false;
                 }
                 ListPart::List(child) => {
-                    item_count +=
-                        list_row_count(child, depth + 1, child_outer, width, style);
+                    item_count += list_row_count(child, depth + 1, child_outer, width, style);
                     first_part = false;
                 }
             }
@@ -1020,7 +1013,7 @@ fn render_list_level(
                     let mut wrapped: Vec<Line> = Vec::new();
                     if first_part {
                         let budget = list_line_budget(width, indent_len, bullet_width, true);
-                        wrap_spans(&spans, budget, style.body, &mut wrapped);
+                        wrap_spans(&spans, budget, &mut wrapped);
                         for (k, line) in wrapped.into_iter().enumerate() {
                             let mut row: Line = Vec::new();
                             if !indent.is_empty() {
@@ -1037,7 +1030,7 @@ fn render_list_level(
                     } else {
                         let sub_indent = format!("{indent}  ");
                         let budget = list_line_budget(width, indent_len, bullet_width, false);
-                        wrap_spans(&spans, budget, style.body, &mut wrapped);
+                        wrap_spans(&spans, budget, &mut wrapped);
                         for line in wrapped {
                             let mut row = vec![Span::raw(sub_indent.clone())];
                             row.extend(line);
@@ -1047,14 +1040,7 @@ fn render_list_level(
                     first_part = false;
                 }
                 ListPart::List(child) => {
-                    render_list_level(
-                        child,
-                        depth + 1,
-                        child_outer,
-                        width,
-                        style,
-                        &mut item_rows,
-                    );
+                    render_list_level(child, depth + 1, child_outer, width, style, &mut item_rows);
                     first_part = false;
                 }
             }
@@ -1075,7 +1061,7 @@ fn render_list_level(
 fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec<Line>) {
     let quote_width = width.saturating_sub(2).max(1);
     let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, quote_width, style.quote, &mut wrapped);
+    wrap_spans(spans, quote_width, &mut wrapped);
     for line in wrapped {
         let mut l = vec![Span::styled("│ ", style.quote_border)];
         l.extend(line);

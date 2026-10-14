@@ -101,7 +101,7 @@ fn assert_wrap_parity(spans: &[Span], widths: &[usize]) {
         let mut legacy: Vec<Line> = Vec::new();
         legacy_wrap_spans(spans, width, &mut legacy);
         let mut current: Vec<Line> = Vec::new();
-        wrap_spans(spans, width, Style::default(), &mut current);
+        wrap_spans(spans, width, &mut current);
         assert_eq!(
             legacy, current,
             "wrap parity (styled spans) broke at width {width}: spans={spans:?}"
@@ -205,7 +205,7 @@ fn wrap_stress_megabyte_monoword_candidate_only() {
     let spans = vec![Span::styled(token.clone(), Style::default())];
     let width = 80usize;
     let mut current: Vec<Line> = Vec::new();
-    wrap_spans(&spans, width, Style::default(), &mut current);
+    wrap_spans(&spans, width, &mut current);
     // 1048576 chars at 80 columns: CEIL rows (a floor here fails the 16-char remainder)
     assert_eq!(
         current.len(),
@@ -1019,7 +1019,7 @@ fn styled_span_boundaries_keep_their_spaces() {
 
 fn wrap_spans_to_text(spans: &[Span], width: usize) -> String {
     let mut lines: Vec<Line> = Vec::new();
-    wrap_spans(spans, width, Style::default(), &mut lines);
+    wrap_spans(spans, width, &mut lines);
     lines
         .iter()
         .flat_map(|l| l.iter().map(|s| s.content.as_str()))

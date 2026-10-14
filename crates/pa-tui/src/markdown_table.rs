@@ -298,7 +298,7 @@ pub(crate) fn render_table(
     else {
         // The narrow fallback preserves the raw markdown without styling.
         for raw_line in raw {
-            wrap_spans(&[Span::raw(raw_line.clone())], width, Style::default(), out);
+            wrap_spans(&[Span::raw(raw_line.clone())], width, out);
         }
         return;
     };
@@ -377,7 +377,7 @@ pub(crate) fn render_table(
 /// delegates to the ANSI-aware wrapTextWithAnsi).
 fn wrap_cell(spans: &Line, width: usize) -> Vec<Line> {
     let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, width.max(1), Style::default(), &mut wrapped);
+    wrap_spans(spans, width.max(1), &mut wrapped);
     if wrapped.is_empty() {
         wrapped.push(Vec::new());
     }
