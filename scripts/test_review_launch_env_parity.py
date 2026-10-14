@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 import unittest
 import tempfile
-from unittest.mock import patch
-from review_launch_env_parity import current_probe, restart, verify_worker, worker_descriptor, MARKER
+from unittest.mock import patch, MagicMock
+from review_launch_env_parity import current_probe, restart, verify_worker, worker_descriptor, finish_daemon, comparable_probes, MARKER
 
 
 def requests(content=None):
@@ -78,6 +78,30 @@ class VerifierTests(unittest.TestCase):
                 patch('review_launch_env_parity.process_identity', return_value=('proc:new', 'S')):
             with self.assertRaisesRegex(AssertionError, 'reused worker PID'):
                 verify_worker(row, 'fixture', Path('/fixture/binary'), Path('/fixture/d.sock'))
+
+    def test_shutdown_ack_then_close_then_process_exit(self):
+        events = []
+        client, process = MagicMock(), MagicMock(returncode=0)
+        client.call.side_effect = lambda *a, **k: events.append('ack')
+        client.close.side_effect = lambda: events.append('client_closed')
+        process.wait.side_effect = lambda **k: events.append('process_exit')
+        finish_daemon(client, process, 'shutdown', force=True)
+        self.assertEqual(events, ['ack', 'client_closed', 'process_exit'])
+
+    def test_refused_shutdown_cannot_be_cleanup_success(self):
+        client, process = MagicMock(), MagicMock(returncode=0)
+        client.call.side_effect = AssertionError('refused')
+        with self.assertRaisesRegex(AssertionError, 'refused'):
+            finish_daemon(client, process, 'shutdown', force=True)
+        process.wait.assert_not_called()
+
+    def test_known_filter_difference_does_not_hide_other_env_difference(self):
+        ts = {'phase': {'env': {'PA_ENV_MARKER': 'same', 'PRIME_AGENT_INTERNAL_PARITY_CANARY': 'injected'}}}
+        rust = {'phase': {'env': {'PA_ENV_MARKER': 'same', 'PRIME_AGENT_INTERNAL_PARITY_CANARY': None}}}
+        self.assertEqual(comparable_probes(ts), comparable_probes(rust))
+        rust['phase']['env']['PA_ENV_MARKER'] = 'wrong'
+        self.assertNotEqual(comparable_probes(ts), comparable_probes(rust))
+        self.assertEqual(ts['phase']['env']['PRIME_AGENT_INTERNAL_PARITY_CANARY'], 'injected')
 
 
 if __name__ == '__main__':

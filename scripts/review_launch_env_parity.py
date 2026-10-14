@@ -179,6 +179,23 @@ def restart(client, active, agent, binary, config, owned, observation, tracked):
         client.call('attach', activeSessionId=active)
 
 
+def finish_daemon(client, process, kind, **payload):
+    client.call(kind, **payload)  # Successful acknowledgement is mandatory.
+    client.close()  # TS net.Server.close waits for every fixture client to end.
+    process.wait(timeout=15)
+    assert process.returncode == 0, 'supervisor did not shut down successfully'
+
+
+def comparable_probes(probes):
+    # The ordinary client filters internal vars in both products. This raw-wire
+    # injection additionally tests Rust's documented receive-side re-filter;
+    # TS merges raw maps verbatim. Both actual values are asserted and retained.
+    projected = json.loads(json.dumps(probes))
+    for probe in projected.values():
+        del probe['env']['PRIME_AGENT_INTERNAL_PARITY_CANARY']
+    return projected
+
+
 def run_case(binary, label, root, observed):
     env = env_for(root, label)
     env.update(PA_ENV_BASE='daemon-base', PA_ENV_PRECEDENCE='daemon', RLM_DEPTH='3')
@@ -201,6 +218,8 @@ def run_case(binary, label, root, observed):
     probes = observed['probes'] = {}
     tracked = set()
     secret = 'fixture-launch-secret'
+    prepared_transaction = False
+    primary_error = None
     config = {'cwd': str(root), 'agentDir': str(root / 'agent'), 'provider': 'parity-local',
         'model': 'parity-1', 'noExtensions': True, 'noContextFiles': True, 'telemetryDisabled': True}
     launch = {'PA_ENV_MARKER': secret, 'PA_ENV_PRECEDENCE': 'client', 'RLM_DEPTH': '9',
@@ -220,7 +239,8 @@ def run_case(binary, label, root, observed):
         client.call('prompt_and_wait', activeSessionId=active, message='Probe ' + phase)
         result = current_probe(provider.requests[phase], phase)
         expected = {'env': {'PA_ENV_MARKER': expected_marker, 'PA_ENV_BASE': 'daemon-base',
-            'PA_ENV_PRECEDENCE': expected_precedence, 'PRIME_AGENT_INTERNAL_PARITY_CANARY': None},
+            'PA_ENV_PRECEDENCE': expected_precedence, 'PRIME_AGENT_INTERNAL_PARITY_CANARY':
+                'must-not-inherit' if label == 'ts' and expected_marker is not None else None},
             'child_marker': expected_marker or 'ABSENT'}
         assert result == expected, (phase, result, expected)
         probes[phase] = result
@@ -242,13 +262,29 @@ def run_case(binary, label, root, observed):
         observed['promoted_recovery'] = {}
         restart(client, owner, root / 'agent', binary, config, False, observed['promoted_recovery'], tracked)
         probe(owner, 'promoted_recovered', None, 'daemon')
-        prepared = client.call('prepare_update_restart', updateId='launch-env-parity')
-        assert secret not in json.dumps(prepared), 'launch secret leaked into update roster'
-        for path in (root / 'agent').rglob('*.json'):
-            if 'daemon-workers' in path.parts:
-                assert secret not in path.read_text(), 'launch secret leaked into durable worker metadata'
+        descriptors = list((root / 'agent/daemon-workers').rglob('*.json'))
+        assert len(descriptors) >= 3, 'durable descriptor audit would be empty'
+        for path in descriptors:
+            assert secret not in path.read_text(), 'launch secret leaked into durable worker metadata'
         observed['durable_launch_secret_absent'] = True
+        prepared = client.call('prepare_update_restart', updateId='launch-env-parity')
+        prepared_transaction = True
         observed['prepare_update'] = prepared
+        if label == 'rust':
+            assert prepared.get('state') == 'prepared', 'update did not prepare'
+            rosters = list((root / 'agent/update-restarts').glob('*/prepared/launch-env-parity/roster.json'))
+            assert len(rosters) == 1, 'actual prepared Rust roster missing/ambiguous'
+            roster = json.loads(rosters[0].read_text())
+            assert len(roster['workers']) == 3, 'prepared roster omitted fixture workers'
+        else:
+            roster = prepared
+            assert len(roster['sessions']) == 3, 'prepared manifest omitted fixture sessions'
+        assert secret not in json.dumps(roster), 'launch secret leaked into actual update roster'
+        observed['update_roster'] = roster
+    except BaseException as error:
+        primary_error = error
+        observed['primary_error'] = str(error)
+        raise
     finally:
         observed['requests'] = provider.requests
         cleanup_error = None
@@ -256,8 +292,10 @@ def run_case(binary, label, root, observed):
             if client:
                 observed['wire'] = client.wire
                 if process.poll() is None:
-                    client.call('shutdown', force=True)
-                    process.wait(timeout=15)
+                    if label == 'rust' and prepared_transaction:
+                        finish_daemon(client, process, 'commit_update_restart', updateId='launch-env-parity')
+                    else:
+                        finish_daemon(client, process, 'shutdown', force=True)
                 assert process.returncode == 0, 'supervisor did not shut down successfully'
                 wait_gone(tracked)
                 observed['cleanup_verified'] = True
@@ -275,7 +313,7 @@ def run_case(binary, label, root, observed):
             provider.shutdown()
             provider.server_close()
             thread.join(timeout=2)
-        if cleanup_error:
+        if cleanup_error and primary_error is None:
             raise AssertionError('fixture cleanup failed: ' + str(cleanup_error)) from cleanup_error
 
 
@@ -287,6 +325,7 @@ def main():
         'resident/owned/promotion recovery lifetime, durable launch-env secret exclusion',
         'not_verified': ['TUI/ACP sender env collection', 'refreshed attach launchEnv recovery',
                          'rlm.spawn and minimal depth-0 root forwarding'],
+        'intentional_difference': 'Rust re-filters raw launchEnv internal-prefixed keys; TS trusts sender filtering and merges the injected canary. Exact canary values asserted per phase; raw results retained.',
         'normalization': 'Generated session IDs, roots, worker PIDs and timestamps excluded only from cross-run comparison; raw wire retained.'}
     try:
         assert sys.platform == 'linux', 'requires hosted Linux /proc ownership checks'
@@ -301,7 +340,7 @@ def main():
                 except Exception as error:
                     run['error'] = str(error)
         assert all('error' not in run for run in receipt['runs'].values()), receipt['runs']
-        assert receipt['runs']['ts']['probes'] == receipt['runs']['rust']['probes'], 'environment behavior differs'
+        assert comparable_probes(receipt['runs']['ts']['probes']) == comparable_probes(receipt['runs']['rust']['probes']), 'environment behavior differs'
         receipt['verified'] = True
     except Exception as error:
         receipt['error'] = str(error)
