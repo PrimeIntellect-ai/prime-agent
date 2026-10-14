@@ -1265,7 +1265,7 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
             EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
             _ => None,
         })
-        .last()
+        .next_back()
         .unwrap();
     assert!(
         usage < 95_232,
@@ -1294,7 +1294,7 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
 
     // The autonomous mirror shares the same live getter rather than a copied refresh.
     let mut settings =
-        pa_core::settings::SettingsManager::create(dir.path(), &dir.path().join("agent"));
+        pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
     settings.set_compaction_threshold_percent(75.0).unwrap();
     let mirror = engine.autonomous_boundary.lock().unwrap().clone().unwrap();
     let session = mirror.session.upgrade().unwrap();
