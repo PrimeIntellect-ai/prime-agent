@@ -120,7 +120,9 @@ pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) ->
 /// the invocation's state root until the set quiets down or proves stuck;
 /// report the survivors as failures. The sweep re-scans with the same root,
 /// so daemons in any other root — or on the never-touch list — are never
-/// candidates.
+/// candidates, and worker sockets never appear in the census (a supervisor's
+/// workers stop through their tracked descriptors; deliberate TS divergence:
+/// TS's sweep killed worker listeners too).
 pub(super) fn terminate_verified_residuals(
     root: &DaemonStateRoot,
     stopped: &mut Vec<(String, String)>,

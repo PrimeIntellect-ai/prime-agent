@@ -29,8 +29,11 @@ pub(crate) struct DiscoveredDaemonProcess {
     pub uptime_seconds: Option<u64>,
 }
 
-/// The state root an invocation reads: the agent dir and the default socket
-/// dir, both following HOME/TMPDIR/agent-dir overrides.
+/// The state root an invocation reads: the agent dir and the socket dir of
+/// the daemon this invocation talks to — the env-pinned socket's dir, the
+/// shared default when no pin is set. Deliberate TS divergence: TS pins the
+/// root to the shared default socket dir regardless of the pin, so an
+/// isolated daemon's `shutdown` also stops the shared daemon.
 #[derive(Debug, Clone)]
 pub(crate) struct DaemonStateRoot {
     pub agent_dir: PathBuf,
@@ -105,11 +108,22 @@ pub(crate) struct DaemonInfo {
     pub has_tracked_workers: Option<bool>,
 }
 
+/// The root this invocation reads, from the same socket resolution every
+/// other mode uses (flag > env > default): the resolved path is the root's
+/// default socket and its parent the root's socket dir. With no pin this
+/// equals the shared default dir, so the product-default root is unchanged.
 pub(crate) fn current_state_root() -> DaemonStateRoot {
+    let default_socket_path = config::resolve_daemon_socket_path(None);
+    #[cfg(unix)]
+    let socket_dir = default_socket_path
+        .parent()
+        .map_or_else(pa_daemon::platform::socket_dir, Path::to_path_buf);
+    #[cfg(not(unix))]
+    let socket_dir = pa_daemon::platform::socket_dir();
     DaemonStateRoot {
         agent_dir: config::get_agent_dir(),
-        socket_dir: pa_daemon::platform::socket_dir(),
-        default_socket_path: pa_daemon::platform::default_daemon_socket_path(),
+        socket_dir,
+        default_socket_path,
     }
 }
 
@@ -163,9 +177,16 @@ pub(crate) fn is_worker_socket_path(socket_path: &Path, socket_dir: &Path) -> bo
 }
 
 /// Listening daemons in this state root. The census is filtered to the root
-/// inside the scan: a scan from one root can never see another root's daemon.
+/// inside the scan: a scan from one root can never see another root's
+/// daemon. Worker sockets never appear: a worker belongs to its supervisor
+/// and stops through its tracked descriptors, so every consumer — discovery,
+/// the shutdown actions, and the `--force` residual sweep — acts on
+/// supervisors only.
 pub(crate) fn scan_listening_daemons(root: &DaemonStateRoot) -> Vec<DiscoveredDaemonProcess> {
     scan::scan_all_listening_daemons(config::APP_NAME, root)
+        .into_iter()
+        .filter(|daemon| !is_worker_socket_path(&daemon.socket_path, &root.socket_dir))
+        .collect()
 }
 
 /// True when the pid still listens on exactly this socket: a fresh scan against
@@ -417,13 +438,12 @@ pub(crate) fn discover_daemons(root: &DaemonStateRoot) -> Vec<DaemonInfo> {
 /// it, so an unanswered one with no listener or tracked worker is simply
 /// absent - there is no orphan file to report or remove.
 fn discover_daemons_with(root: &DaemonStateRoot, named_pipes: bool) -> Vec<DaemonInfo> {
-    let mut process_by_socket = std::collections::HashMap::new();
-    for daemon in scan_listening_daemons(root) {
-        if is_worker_socket_path(&daemon.socket_path, &root.socket_dir) {
-            continue;
-        }
-        process_by_socket.insert(daemon.socket_path.clone(), daemon);
-    }
+    // The census itself excludes worker sockets (see [`scan_listening_daemons`]).
+    let process_by_socket: std::collections::HashMap<PathBuf, DiscoveredDaemonProcess> =
+        scan_listening_daemons(root)
+            .into_iter()
+            .map(|daemon| (daemon.socket_path.clone(), daemon))
+            .collect();
     let tracked = find_all_tracked_workers(&root.agent_dir);
     let worker_sockets: BTreeSet<PathBuf> = tracked
         .iter()
