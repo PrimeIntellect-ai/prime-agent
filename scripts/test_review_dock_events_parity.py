@@ -57,9 +57,10 @@ class CaptureTests(unittest.TestCase):
         screen = DockScreen(width=20, height=3)
         screen.feed(b'\x1b[31m1 subagents\x1b[?1049h')
         self.assertEqual(screen.text().strip(), '')
-        screen.feed(b'2 subagents\x1b[?1049l')
+        screen.feed(b'\x1b[32m2 subagents\x1b[?1049l')
         self.assertEqual(screen.text().strip(), '1 subagents')
         self.assertEqual(screen.styles[0][0]['fg'], ['ansi', 31])
+        self.assertEqual(screen.sgr['fg'], ['ansi', 31])
 
     def test_partial_charset_and_palette_change_are_not_silently_ignored(self):
         screen = DockScreen()

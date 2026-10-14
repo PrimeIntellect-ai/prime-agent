@@ -21,7 +21,7 @@ class DockScreen:
         self.autowrap = True
         self.alternate = None
         self.row = self.col = 0
-        self.saved = (0, 0)
+        self.saved = (0, 0, {})
         self.pending = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
@@ -58,6 +58,9 @@ class DockScreen:
                     nums = [int(x) if x.isdigit() else 0 for x in params.lstrip("?<>").split(";")]
                     n = nums[0] or 1
                     if intermediate and not (command == 'q' and intermediate == ' '):
+                        self.unsupported_terminal.append(sequence)
+                        continue
+                    if params.startswith(('?', '<', '>')) and command not in 'hlnc':
                         self.unsupported_terminal.append(sequence)
                         continue
                     if command == "m": self.apply_sgr(nums)
@@ -106,12 +109,13 @@ class DockScreen:
                                 self.autowrap = command == 'h'
                             elif mode == 1049:
                                 if command == 'h' and self.alternate is None:
-                                    self.alternate = (self.cells, self.styles, self.row, self.col)
+                                    self.alternate = (self.cells, self.styles, self.row, self.col,
+                                                      dict(self.sgr), self.autowrap)
                                     self.cells = [[' '] * self.width for _ in range(self.height)]
                                     self.styles = [[{} for _ in range(self.width)] for _ in range(self.height)]
                                     self.row = self.col = 0
                                 elif command == 'l' and self.alternate is not None:
-                                    self.cells, self.styles, self.row, self.col = self.alternate
+                                    self.cells, self.styles, self.row, self.col, self.sgr, self.autowrap = self.alternate
                                     self.alternate = None
                             elif mode not in (12, 25, 1000, 1002, 1003, 1004, 1006, 2004, 2026):
                                 self.unsupported_terminal.append(sequence)
@@ -124,8 +128,10 @@ class DockScreen:
                 if command in '()' and len(self.pending) < 3:
                     break
                 self.pending = self.pending[2:]
-                if command == "7": self.saved = (self.row, self.col)
-                elif command == "8": self.row, self.col = self.saved
+                if command == "7": self.saved = (self.row, self.col, dict(self.sgr))
+                elif command == "8":
+                    self.row, self.col, saved_sgr = self.saved
+                    self.sgr = dict(saved_sgr)
                 elif command in "()" and self.pending:
                     charset = self.pending[0]
                     self.pending = self.pending[1:]
