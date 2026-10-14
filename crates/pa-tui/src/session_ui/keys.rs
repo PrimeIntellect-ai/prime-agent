@@ -95,6 +95,7 @@ impl SessionUi {
             || view.share_loader.is_some()
             || view.mcp_view.is_some()
             || view.factory_view.is_some()
+            || view.library_view.is_some()
             || view.onboarding.is_some();
         let left = event.button == crate::mouse::BUTTON_LEFT;
         let release_was_drag = left && !event.press && self.left_mouse_dragged;
@@ -353,6 +354,10 @@ impl SessionUi {
         // The factory page owns the frame the same way.
         if view.factory_view.is_some() {
             return self.handle_factory_view_key(key, view).await;
+        }
+        // The machine library page owns the frame the same way.
+        if view.library_view.is_some() {
+            return self.handle_library_view_key(key, view).await;
         }
         // The `/heartbeats` view owns the frame the same way.
         if view.heartbeats_picker.is_some() {
