@@ -10,8 +10,35 @@ import tempfile
 import threading
 import time
 
-from review_agent_bounce_parity import Client, Provider, LIMIT
+from review_agent_bounce_parity import Client, Provider, Handler, LIMIT
 from review_draft_disconnect_parity import digest, env_for, stop, TS_ARCHIVE_SHA256
+
+
+class CompletionHandler(Handler):
+    def do_POST(self):
+        if self.path != '/v1/chat/completions':
+            self.send_error(404)
+            return
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        with self.server.arrived:
+            self.server.requests.append(body)
+            self.server.arrived.notify_all()
+        self.server.release.wait(LIMIT * 3)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        frames = [
+            {'choices': [{'index': 0, 'delta': {'role': 'assistant',
+                'content': 'Fixture turn completed.'}, 'finish_reason': None}]},
+            {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
+        ]
+        try:
+            for frame in frames:
+                self.wfile.write(('data: ' + json.dumps(frame) + '\n\n').encode())
+            self.wfile.write(b'data: [DONE]\n\n')
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
 
 def process_identity(pid):
@@ -47,13 +74,23 @@ def wait_stopped(process):
     process.wait(timeout=LIMIT)
 
 
+def close_client(tree):
+    client = tree.get('client')
+    if client is not None:
+        tree.setdefault('closed_wire', []).extend(client.wire)
+        client.close()
+        tree['client'] = None
+
+
 def finish_tree(tree, observed):
     process, client, root = tree['process'], tree.get('client'), tree['root']
     error = None
     if process.poll() is None:
         try:
-            assert client is not None, 'no owned shutdown client'
+            if client is None:
+                client = tree['client'] = Client(tree['socket'], process)
             observed['cleanup_shutdown_response'] = client.call('shutdown', force=True)
+            close_client(tree)
             wait_stopped(process)
         except Exception as caught:
             error = caught
@@ -74,9 +111,8 @@ def finish_tree(tree, observed):
                     except ProcessLookupError:
                         pass
         error = error or RuntimeError('detached fixture processes survived: ' + str(remaining))
-    if client:
-        observed['wire'] = client.wire
-        client.close()
+    close_client(tree)
+    observed['wire'] = tree.get('closed_wire', [])
     tree['log'].close()
     observed['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')[-6000:]
     if error:
@@ -129,8 +165,10 @@ def run_case(binary, kind, root, mode, observed):
     pins = root / 'pins'
     pins.mkdir()
     provider = Provider()
+    provider.RequestHandlerClass = CompletionHandler
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     trees = []
+    primary_error = None
     try:
         foreign = launch(binary, kind, root / 'foreign', default_socket, shared_tmp, provider, trees)
         own = launch(binary, kind, root / 'own', pins / 'own.sock', shared_tmp, provider, trees)
@@ -139,6 +177,7 @@ def run_case(binary, kind, root, mode, observed):
         if mode == 'exact_socket':
             provider.release.set()
             observed['action_response'] = own['client'].call('shutdown', force=True)
+            close_client(own)
             wait_stopped(own['process'])
             kept = survivors(foreign['original_processes'], foreign['root'])
             assert kept == foreign['original_processes'], 'exact socket shutdown harmed foreign tree'
@@ -153,6 +192,11 @@ def run_case(binary, kind, root, mode, observed):
             else:
                 assert str(foreign['socket']) in paths, 'TS shared default tree was not discovered'
             provider.release.set()
+            # Root CLI creates its own shutdown client. Close fixture observers
+            # beforehand so TS net.Server.close can retire acknowledged trees.
+            close_client(own)
+            if kind == 'ts':
+                close_client(foreign)
             shutdown = observed['shutdown_cli'] = invoke(binary, ['shutdown', '--force', '--json'], own)
             assert shutdown['returncode'] == 0, shutdown
             kept = survivors(foreign['original_processes'], foreign['root'])
@@ -169,6 +213,10 @@ def run_case(binary, kind, root, mode, observed):
                     threading.Event().wait(0.025)
                 assert not survivors(foreign['original_processes'], foreign['root']), 'TS global root did not stop default tree'
         observed['provider_requests'] = provider.requests
+    except Exception as error:
+        primary_error = error
+        observed['primary_error'] = str(error)
+        raise
     finally:
         provider.release.set()
         errors = []
@@ -182,7 +230,8 @@ def run_case(binary, kind, root, mode, observed):
         provider.server_close()
         if errors:
             observed['cleanup_errors'] = errors
-            raise RuntimeError('; '.join(errors))
+            if primary_error is None:
+                raise RuntimeError('; '.join(errors))
     observed['verified'] = True
 
 
