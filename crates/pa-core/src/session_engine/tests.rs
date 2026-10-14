@@ -463,7 +463,7 @@ async fn prompt_rides_digest_row_into_the_run() {
     // events and never crosses an await.
     let (end_messages, kinds) = {
         let captured = events.lock().unwrap();
-        let Some(AgentEvent::AgentEnd { messages }) = captured
+        let Some(AgentEvent::AgentEnd { messages, .. }) = captured
             .iter()
             .rev()
             .find(|event| matches!(event, AgentEvent::AgentEnd { .. }))
@@ -547,7 +547,7 @@ async fn prompt_rides_digest_row_into_the_run() {
             .iter()
             .rev()
             .find_map(|event| match event {
-                AgentEvent::AgentEnd { messages } => Some(
+                AgentEvent::AgentEnd { messages, .. } => Some(
                     messages
                         .iter()
                         .map(|message| message.role().to_string())

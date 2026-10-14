@@ -798,6 +798,7 @@ impl SessionEngine for NoteWitnessEngine {
         }
         emit(EngineEvent::AgentEnd {
             messages: Vec::new(),
+            aborted: false,
         });
         if let Some(core) = self.withdraw_follow_up_after_end.lock().unwrap().take() {
             // A queue withdrawal can land after AgentEnd but before the runner settles.

@@ -399,7 +399,12 @@ impl SessionUi {
             } => {
                 if active_session_id == self.active_session_id {
                     self.turn_active = false;
+                    self.run_open = false;
                     view.working = None;
+                    view.retry = None;
+                    // The closed session cannot run again: its remembered
+                    // settle owes the dead surface nothing.
+                    self.settled = None;
                     match reason.as_str() {
                         "shutdown" => self.error_row(
                             "The Prime Agent daemon shut down while this window was attached. The session transcript remains saved; restart Prime Agent and reopen it from Agents View.",
@@ -504,6 +509,8 @@ impl SessionUi {
         match update {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
+                self.run_open = true;
+                self.settled = None;
                 self.turn_error_shown = false;
                 // No card from a previous run settles on this one's failure.
                 self.pending_tools.clear();
@@ -591,12 +598,26 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::TurnEnded { error } => {
+            TurnUpdate::TurnEnded {
+                error,
+                run_failed,
+                aborted,
+            } => {
                 // Only the engine's own turn_end clears the busy state: trailing frames
                 // from the previous turn must not cancel a turn admitted in between.
                 self.streaming_index = None;
                 self.turn_ends_seen += 1;
                 self.turn_active = false;
+                // A step's settle leaves the run open; an aborted or
+                // failed one ends the run without a done report.
+                if run_failed {
+                    self.run_open = false;
+                    self.settled = if aborted {
+                        None
+                    } else {
+                        Some(crate::program_status::Status::Error)
+                    };
+                }
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
@@ -636,12 +657,20 @@ impl SessionUi {
                 });
             }
             TurnUpdate::AutoRetryEnd {
-                success: _,
+                aborted,
+                success,
                 attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
+                if aborted {
+                    self.run_open = false;
+                    self.settled = None;
+                } else if !success {
+                    self.run_open = false;
+                    self.settled = Some(crate::program_status::Status::Error);
+                }
                 if final_error.is_some() {
                     self.turn_error_shown = true;
                     // The give-up's final attempt is superseded by the ONE terminal line.
@@ -726,9 +755,24 @@ impl SessionUi {
                     }
                 }
             }
-            TurnUpdate::Idle => {
+            TurnUpdate::Idle { aborted } => {
+                if aborted {
+                    self.settled = None;
+                }
                 if !self.turn_active {
                     view.working = None;
+                }
+                // The run's normal end settles the report's done; an
+                // aborted one settles idle (a stream-time abort already
+                // closed the run at its failed turn_end, but one landing
+                // between steps and tools ends through the original
+                // toolUse settle), and a goal's terminal outcome is kept.
+                if self.run_open {
+                    self.run_open = false;
+                    if !aborted {
+                        self.settled
+                            .get_or_insert(crate::program_status::Status::Done);
+                    }
                 }
             }
             TurnUpdate::GoalUpdate(goal) => {
@@ -957,6 +1001,14 @@ impl SessionUi {
             None
         };
         if abort_text.is_some() || stop_reason == Some("error") {
+            // Lifecycle failures can emit agent_end before any turn_end.
+            // Their terminal message must not leave a successful run open.
+            self.run_open = false;
+            self.settled = if abort_text.is_some() {
+                None
+            } else {
+                Some(crate::program_status::Status::Error)
+            };
             let settle_text = abort_text.clone().unwrap_or_else(|| {
                 message
                     .get("errorMessage")

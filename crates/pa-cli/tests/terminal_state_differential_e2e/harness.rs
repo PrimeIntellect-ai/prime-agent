@@ -59,7 +59,8 @@ impl DifferentialHarness {
         let server = std::thread::spawn({
             let listener = listener.try_clone().expect("clone mock listener");
             let stall = spec.stall;
-            move || MockSupervisor::serve(&listener, stall)
+            let attach_compaction_end = spec.attach_compaction_end.clone();
+            move || MockSupervisor::serve(&listener, stall, attach_compaction_end.as_ref())
         });
 
         let pty = openpty(
@@ -350,11 +351,15 @@ impl MockSupervisor {
     pub(crate) fn serve(
         listener: &std::os::unix::net::UnixListener,
         stall: &'static [&'static str],
+        attach_compaction_end: Option<&Value>,
     ) {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    std::thread::spawn(move || Self::serve_connection(stream, stall));
+                    let pending_compaction_end = attach_compaction_end.cloned();
+                    std::thread::spawn(move || {
+                        Self::serve_connection(stream, stall, pending_compaction_end);
+                    });
                 }
                 Err(_) => return,
             }
@@ -364,10 +369,16 @@ impl MockSupervisor {
     pub(crate) fn serve_connection(
         stream: std::os::unix::net::UnixStream,
         stall: &'static [&'static str],
+        mut pending_compaction_end: Option<Value>,
     ) {
         let write_stream = stream.try_clone().expect("clone mock socket");
         let mut writer = write_stream;
         let mut reader = std::io::BufReader::new(stream);
+        let mut events_seen = 0;
+        let mut run_open = false;
+        let mut retry_pending = false;
+        let mut settled_done = false;
+        let mut in_tools = false;
         write_json(
             &mut writer,
             &json!({
@@ -417,7 +428,328 @@ impl MockSupervisor {
                     );
                 }
                 "attach" => {
-                    write_json(&mut writer, &attach_data(id));
+                    write_json(
+                        &mut writer,
+                        &attach_data(id, pending_compaction_end.is_some()),
+                    );
+                }
+                "get_last_assistant_text" if pending_compaction_end.is_some() => {
+                    // The compaction the attach caught settles now: its
+                    // compaction_end, then the /copy answer.
+                    let event = pending_compaction_end.take().expect("the guard checked it");
+                    events_seen += 1;
+                    push_event(&mut writer, events_seen, &event);
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                }
+                "get_last_assistant_text" if retry_pending => {
+                    // The test's read-only /copy request triggers an external
+                    // session close while the countdown is still pending.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "session_closed", "activeSessionId": "s1",
+                            "reason": "killed",
+                        }),
+                    );
+                    retry_pending = false;
+                    run_open = false;
+                }
+                "get_last_assistant_text" if settled_done => {
+                    // The test's read-only /copy request triggers an external
+                    // session close after the run settled normally: the dead
+                    // surface must drop the settled outcome.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response", "id": id,
+                            "command": "get_last_assistant_text", "success": true,
+                            "data": { "text": "" },
+                        }),
+                    );
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "session_closed", "activeSessionId": "s1",
+                            "reason": "killed",
+                        }),
+                    );
+                    settled_done = false;
+                }
+                // The scripted run: a prompt opens a multi-step run (a
+                // step's turn_end/turn_start pair mid-run; a `finish`
+                // message also completes the thread goal on the way), a
+                // prompt while the run is open settles it normally, and
+                // an abort settles it aborted (the OSC 7501 routes). A
+                // `step` message opens a run resting between its steps
+                // (the settle landed, the next turn has not started) —
+                // the differential flicker check's shape. One state
+                // change per interaction keeps every report a
+                // deterministic needle. Typed route messages must not
+                // contain a doubled character: the TUI's kitty-printable
+                // dedup collapses an identical adjacent pair within one
+                // pty write.
+                "prompt" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "prompt",
+                            "success": true,
+                            "data": {},
+                        }),
+                    );
+                    if command.get("message").and_then(Value::as_str) == Some("lifecycle-failure") {
+                        // Agent::handle_run_failure emits the failed message and
+                        // agent_end without turn_end. The daemon adds its error
+                        // turn_end only after the admission returns the failure.
+                        let message = json!({
+                            "role": "assistant", "content": [], "stopReason": "error",
+                            "errorMessage": "lifecycle-failure-sentinel",
+                        });
+                        for event in [
+                            json!({ "type": "message_start", "message": message }),
+                            json!({ "type": "message_end", "message": message }),
+                            json!({ "type": "agent_end", "messages": [message] }),
+                            json!({ "type": "turn_end", "error": "lifecycle-failure-sentinel" }),
+                        ] {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = false;
+                    } else if matches!(
+                        command.get("message").and_then(Value::as_str),
+                        Some(
+                            "provider-failure"
+                                | "terminal-failure"
+                                | "terminal-abort"
+                                | "retry-failure"
+                                | "retry-cancel"
+                        )
+                    ) {
+                        let kind = command["message"].as_str().unwrap();
+                        let aborted = kind.ends_with("abort") || kind.ends_with("cancel");
+                        let message = json!({ "role": "assistant", "content": [], "stopReason": "error", "errorMessage": "Retry cancelled" });
+                        let events = if kind.starts_with("retry-") {
+                            // Identical text for failure and cancellation proves the
+                            // client consumes typed provenance, not error wording.
+                            // The prompt ACK arms a turn; the bare close frames end
+                            // it, and the outcome rides auto_retry_end alone.
+                            vec![
+                                json!({ "type": "auto_retry_end", "success": false, "attempt": 1, "finalError": "Retry cancelled", "aborted": aborted }),
+                                json!({ "type": "turn_end" }),
+                                json!({ "type": "agent_end" }),
+                            ]
+                        } else if kind == "provider-failure" {
+                            vec![
+                                json!({ "type": "message_end", "message": message }),
+                                json!({ "type": "turn_end", "message": message }),
+                                json!({ "type": "agent_end", "messages": [message] }),
+                            ]
+                        } else {
+                            vec![
+                                json!({ "type": "turn_end", "error": "No response produced.", "aborted": aborted }),
+                                json!({ "type": "agent_end", "aborted": aborted }),
+                            ]
+                        };
+                        for event in events {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = false;
+                        retry_pending = false;
+                    } else if run_open {
+                        if retry_pending {
+                            for event in [
+                                json!({ "type": "turn_start" }),
+                                json!({
+                                    "type": "auto_retry_end",
+                                    "success": true,
+                                    "attempt": 1,
+                                }),
+                            ] {
+                                events_seen += 1;
+                                push_event(&mut writer, events_seen, &event);
+                            }
+                            retry_pending = false;
+                        }
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "stop" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        run_open = false;
+                        settled_done = true;
+                    } else if command.get("message").and_then(Value::as_str) == Some("retry") {
+                        // A failed attempt settles before its retry countdown starts.
+                        // Keep the next attempt pending until the next prompt.
+                        for event in [
+                            json!({ "type": "turn_start" }),
+                            json!({
+                                "type": "message_end",
+                                "message": {
+                                    "role": "assistant", "content": [], "stopReason": "error",
+                                    "errorMessage": "failed-attempt-sentinel",
+                                },
+                            }),
+                            json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "error" },
+                            }),
+                            json!({ "type": "agent_end" }),
+                            json!({
+                                "type": "auto_retry_start",
+                                "attempt": 1,
+                                "maxAttempts": 2,
+                                "delayMs": 60_000,
+                                "errorMessage": "status-retry-sentinel",
+                            }),
+                        ] {
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &event);
+                        }
+                        run_open = true;
+                        retry_pending = true;
+                    } else if command.get("message").and_then(Value::as_str) == Some("batch") {
+                        // A run whose step ended on a tool batch still executing:
+                        // an abort here emits the ORIGINAL `toolUse` turn_end
+                        // and then the run's agent_end (the real abort trace).
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "message_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "tool_execution_start",
+                                "toolCallId": "t1",
+                                "toolName": "read",
+                                "args": {},
+                            }),
+                        );
+                        run_open = true;
+                        in_tools = true;
+                    } else if command.get("message").and_then(Value::as_str) == Some("step") {
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        run_open = true;
+                    } else {
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        events_seen += 1;
+                        push_event(
+                            &mut writer,
+                            events_seen,
+                            &json!({
+                                "type": "turn_end",
+                                "message": { "role": "assistant", "stopReason": "toolUse" },
+                            }),
+                        );
+                        events_seen += 1;
+                        push_event(&mut writer, events_seen, &json!({ "type": "turn_start" }));
+                        run_open = true;
+                        if command.get("message").and_then(Value::as_str) == Some("finish") {
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "goal_update",
+                                    "goal": { "status": "complete" },
+                                }),
+                            );
+                        }
+                    }
+                }
+                "abort" => {
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "abort",
+                            "success": true,
+                            "data": {},
+                        }),
+                    );
+                    if run_open {
+                        if in_tools {
+                            // An abort during a tool batch settles through the
+                            // step's original turn_end (the daemon emits the
+                            // message as it stands) and an agent_end that
+                            // carries the abort marker.
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "turn_end",
+                                    "message": { "role": "assistant", "stopReason": "toolUse" },
+                                }),
+                            );
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({ "type": "agent_end", "aborted": true }),
+                            );
+                            in_tools = false;
+                        } else {
+                            // An abort mid-stream: the aborted terminal
+                            // message settles the run.
+                            events_seen += 1;
+                            push_event(
+                                &mut writer,
+                                events_seen,
+                                &json!({
+                                    "type": "turn_end",
+                                    "message": { "role": "assistant", "stopReason": "aborted" },
+                                }),
+                            );
+                            events_seen += 1;
+                            push_event(&mut writer, events_seen, &json!({ "type": "agent_end" }));
+                        }
+                        run_open = false;
+                    }
                 }
                 _ => {
                     write_json(
@@ -443,9 +775,22 @@ pub(crate) fn write_json(writer: &mut std::os::unix::net::UnixStream, value: &Va
     writer.flush().expect("flush mock frame");
 }
 
+/// Push one unsolicited `session_event` frame with a fresh sequence.
+fn push_event(writer: &mut std::os::unix::net::UnixStream, sequence: u64, event: &Value) {
+    write_json(
+        writer,
+        &json!({
+            "type": "session_event",
+            "activeSessionId": "s1",
+            "event": event,
+            "meta": { "sequence": sequence },
+        }),
+    );
+}
+
 /// The attach snapshot: a small transcript whose last row carries a
 /// URL (the OSC 8 hyperlink pairs).
-pub(crate) fn attach_data(id: &str) -> Value {
+pub(crate) fn attach_data(id: &str, compacting: bool) -> Value {
     let messages: Vec<Value> = (0..4)
         .map(|index| {
             let text = if index == 3 {
@@ -477,7 +822,7 @@ pub(crate) fn attach_data(id: &str) -> Value {
                     "sessionName": "terminal state differential",
                     "model": null,
                     "isStreaming": false,
-                    "isCompacting": false,
+                    "isCompacting": compacting,
                     "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
                 },
                 "messages": messages,
@@ -494,11 +839,14 @@ pub(crate) fn attach_data(id: &str) -> Value {
 // The child modes (this binary re-executed as the product under test).
 
 /// One child route's spawn spec: the surface mode, the commands the mock
-/// answers by silence (the wedge), and the extra env the mode reads.
+/// answers by silence (the wedge), the extra env the mode reads, and the
+/// in-flight compaction an attach catches (its `compaction_end` event,
+/// delivered by the first `/copy`).
 pub(crate) struct ChildSpec {
     mode: &'static str,
     stall: &'static [&'static str],
     env: Vec<(&'static str, String)>,
+    attach_compaction_end: Option<Value>,
 }
 
 impl ChildSpec {
@@ -507,11 +855,19 @@ impl ChildSpec {
             mode,
             stall: &[],
             env: Vec::new(),
+            attach_compaction_end: None,
         }
     }
 
     pub(crate) fn stall(mut self, stall: &'static [&'static str]) -> ChildSpec {
         self.stall = stall;
+        self
+    }
+
+    /// Attach with `isCompacting` and settle the compaction through the
+    /// given `compaction_end` event.
+    pub(crate) fn attach_compaction_end(mut self, event: Value) -> ChildSpec {
+        self.attach_compaction_end = Some(event);
         self
     }
 

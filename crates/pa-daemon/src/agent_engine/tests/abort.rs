@@ -155,9 +155,10 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         turn_end_index < agent_end_index && agent_end_index < done_index,
         "agent_end sits between the turn_end and the DoneAborted settle: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages } = &events[agent_end_index] else {
+    let EngineEvent::AgentEnd { messages, aborted } = &events[agent_end_index] else {
         unreachable!();
     };
+    assert!(*aborted, "the producer outcome reaches the engine channel");
     assert!(
         messages
             .iter()
@@ -305,9 +306,10 @@ fn settled_turn_emits_the_run_agent_end_payload() {
         turn_end_index < agent_end_index && agent_end_index < done_index,
         "agent_end sits between the turn_end and the Done: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages } = &events[agent_end_index] else {
+    let EngineEvent::AgentEnd { messages, aborted } = &events[agent_end_index] else {
         unreachable!();
     };
+    assert!(!aborted, "the normally completed run is not cancelled");
     let roles = messages
         .iter()
         .map(|message| message["role"].as_str().unwrap_or_default())
@@ -396,7 +398,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         2,
         "one agent_end per run: {events:?}"
     );
-    let EngineEvent::AgentEnd { messages: first } = &events[agent_end_indexes[0]] else {
+    let EngineEvent::AgentEnd {
+        messages: first, ..
+    } = &events[agent_end_indexes[0]]
+    else {
         unreachable!();
     };
     let roles = first
@@ -413,7 +418,10 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         json!("error"),
         "the failed run ends on the error row"
     );
-    let EngineEvent::AgentEnd { messages: second } = &events[agent_end_indexes[1]] else {
+    let EngineEvent::AgentEnd {
+        messages: second, ..
+    } = &events[agent_end_indexes[1]]
+    else {
         unreachable!();
     };
     let roles = second

@@ -462,10 +462,13 @@ impl TurnRunner {
                         )
                 ) || matches!(
                     &event,
-                    EngineEvent::AgentEnd { messages }
+                    EngineEvent::AgentEnd { messages, .. }
                         if messages.iter().any(|message| {
                             message.get("stopReason").and_then(Value::as_str) == Some("aborted")
                         })
+                ) || matches!(
+                    &event,
+                    EngineEvent::AutoRetryEnd { aborted: true, .. }
                 );
                 let abort_settle = matches!(
                     &event,
@@ -522,7 +525,7 @@ impl TurnRunner {
                         // pane working.
                         herdr_run_end_seen.store(false, std::sync::atomic::Ordering::SeqCst);
                     }
-                    EngineEvent::AgentEnd { messages } => {
+                    EngineEvent::AgentEnd { messages, .. } => {
                         herdr
                             .lock()
                             .unwrap()
@@ -821,12 +824,22 @@ impl TurnRunner {
                     // `agent_end` (one frame per agent run — retried and
                     // continued runs included); the rows themselves
                     // already went out through their own events, so no
-                    // persist here.
+                    // persist here. A run ending under an abort carries the
+                    // marker: between steps and tools the abort keeps the
+                    // original `toolUse` turn_end, so the marker is the one
+                    // wire fact that separates the aborted settle from a
+                    // normal one.
                     EngineEvent::AgentStart => vec![json!({ "type": "agent_start" })],
-                    EngineEvent::AgentEnd { messages } => vec![json!({
-                        "type": "agent_end",
-                        "messages": messages,
-                    })],
+                    EngineEvent::AgentEnd { messages, aborted } => {
+                        let mut frame = json!({
+                            "type": "agent_end",
+                            "messages": messages,
+                        });
+                        if aborted {
+                            frame["aborted"] = json!(true);
+                        }
+                        vec![frame]
+                    }
                     // Turn-boundary frames: the terminal message and tool
                     // results ride `turn_end`; no persist here.
                     EngineEvent::TurnStart => vec![json!({ "type": "turn_start" })],
@@ -853,6 +866,7 @@ impl TurnRunner {
                     EngineEvent::DoneAborted if !engine_turn_ended => vec![json!({
                         "type": "turn_end",
                         "error": ABORTED_TURN_SETTLE_ERROR,
+                        "aborted": true,
                     })],
                     EngineEvent::Done(Ok(()) | Err(_)) | EngineEvent::DoneAborted => Vec::new(),
                     EngineEvent::AutoRetryStart {
@@ -882,6 +896,7 @@ impl TurnRunner {
                         vec![event]
                     }
                     EngineEvent::AutoRetryEnd {
+                        aborted,
                         success,
                         attempt,
                         final_error,
@@ -892,6 +907,9 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
+                        if aborted {
+                            event["aborted"] = json!(true);
+                        }
                         if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }

@@ -122,7 +122,7 @@ pub fn agent_event_json(event: &AgentEvent) -> Option<serde_json::Value> {
     }
     let value = match event {
         AgentEvent::AgentStart => serde_json::json!({ "type": "agent_start" }),
-        AgentEvent::AgentEnd { messages } => serde_json::json!({
+        AgentEvent::AgentEnd { messages, .. } => serde_json::json!({
             "type": "agent_end",
             "messages": messages.iter().map(message_value).collect::<Vec<_>>(),
         }),
