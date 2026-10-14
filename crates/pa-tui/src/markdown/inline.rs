@@ -349,8 +349,6 @@ fn image_marker_before(bytes: &[char], at: usize) -> bool {
     backslashes % 2 == 0
 }
 
-
-
 /// Recurse into one inline construct's inner text and merge the result into the
 /// outer span stream: the tracked slots remap across the extend, and the
 /// construct's own modifier applies on top of the inner styles.

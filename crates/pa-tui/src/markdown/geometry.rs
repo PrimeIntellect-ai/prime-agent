@@ -116,9 +116,7 @@ pub(crate) fn markdown_row_count_tagged(
                 block
                     .lines
                     .iter()
-                    .map(|text| {
-                        wrapped_span_count(&render_inline(text, style), width)
-                    })
+                    .map(|text| wrapped_span_count(&render_inline(text, style), width))
                     .sum::<usize>()
                     + usize::from(blank_after(next, true))
             }
@@ -130,10 +128,7 @@ pub(crate) fn markdown_row_count_tagged(
                 .lines
                 .iter()
                 .map(|text| {
-                    wrapped_span_count(
-                        &render_inline(text, style),
-                        width.saturating_sub(2).max(1),
-                    )
+                    wrapped_span_count(&render_inline(text, style), width.saturating_sub(2).max(1))
                 })
                 .sum(),
             BlockKind::Table { header, rows } => {
