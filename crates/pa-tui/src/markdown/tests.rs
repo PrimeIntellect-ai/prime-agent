@@ -6,7 +6,7 @@ fn review_markdown_escaped_delimiters_keep_their_emphasis() {
     let style = MarkdownStyle::default();
     for (text, shown, modifier) in [
         (r"*a\*b*", "a*b", Modifier::ITALIC),
-        (r"**a\**b**", "a**b", Modifier::BOLD),
+        (r"**a\*b**", "a*b", Modifier::BOLD),
         (r"***a\*b***", "a*b", Modifier::BOLD | Modifier::ITALIC),
         (r"~~a\~~b~~", "a~~b", Modifier::CROSSED_OUT),
     ] {
@@ -41,14 +41,22 @@ fn review_markdown_escaped_delimiters_keep_their_emphasis() {
 #[test]
 fn review_markdown_destinations_balance_before_a_title() {
     let style = MarkdownStyle::default();
-    let malformed = "[t](foo(bar \"title\")";
-    let spans = render_inline(malformed, &style);
+    // The pinned real TS frame accepts this destination before a quoted title.
+    let permissive = "[t](foo(bar \"title\")";
+    let spans = super::render_inline(permissive, &style);
     assert_eq!(
-        spans
-            .iter()
-            .map(|span| span.content.as_str())
-            .collect::<String>(),
-        malformed
+        spans,
+        vec![
+            Span::styled(
+                format!(
+                    "{}t{}",
+                    crate::hyperlinks::osc8_open("foo(bar"),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                style.body.add_modifier(Modifier::UNDERLINED)
+            ),
+            Span::styled(" (foo(bar)", style.link_url)
+        ],
     );
     for text in ["[t](foo(bar) \"title\")", r#"[t](foo\(bar\) "a \"b\"")"#] {
         let spans = render_inline(text, &style);
@@ -61,6 +69,43 @@ fn review_markdown_destinations_balance_before_a_title() {
         );
         assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
     }
+}
+
+#[test]
+fn review_markdown_unmatched_single_in_strong_matches_ts_emphasis_pairing() {
+    let style = MarkdownStyle::default();
+    // Actual TS styled frame: one literal star, then italic a*b; the escaped
+    // star is literal while the next star opens a nested emphasis span.
+    let spans = render_inline(r"**a\**b**", &style);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "*a*b"
+    );
+    assert_eq!(spans[0], Span::styled("*", style.body));
+    assert!(spans
+        .iter()
+        .skip(1)
+        .all(|span| span.style.add_modifier == Modifier::ITALIC));
+    let complete = render_inline("**outer *inner* tail**", &style);
+    assert_eq!(
+        complete
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "outer inner tail"
+    );
+    assert!(complete
+        .iter()
+        .all(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+    // An intraword single star is both-flanking; marked keeps this strong.
+    let intraword = render_inline("**a*b**", &style);
+    assert_eq!(
+        intraword,
+        vec![Span::styled("a*b", style.body.add_modifier(Modifier::BOLD))]
+    );
 }
 
 // Visible-text tests discard metadata only in the legacy-capability fixture;

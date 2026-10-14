@@ -219,6 +219,7 @@ fn render_inline_ctx(
                     // completed *inner* pair (or a star inside code) cannot steal
                     // the opener of the following adjacent emphasis span.
                     let mut nested_opener = false;
+                    let mut nested_opener_right_flanking = false;
                     let mut at = close_search;
                     while at < close {
                         if bytes[at] == '\\'
@@ -242,11 +243,16 @@ fn render_inline_ctx(
                                         && (c != '_' || underscore_can_open(&bytes, at));
                                 let can_close = at > 0
                                     && !bytes[at - 1].is_whitespace()
+                                    && (!bytes[at - 1].is_ascii_punctuation()
+                                        || bytes.get(at + 1).is_none_or(|next| {
+                                            next.is_whitespace() || next.is_ascii_punctuation()
+                                        }))
                                     && (c != '_' || underscore_can_close(&bytes, at, 1));
                                 if nested_opener && can_close {
                                     nested_opener = false;
                                 } else if !nested_opener && can_open {
                                     nested_opener = true;
+                                    nested_opener_right_flanking = can_close;
                                 }
                             }
                             at += length;
@@ -270,6 +276,23 @@ fn render_inline_ctx(
                             i = close + 3;
                             continue;
                         }
+                    }
+                    if run == 2 && nested_opener && !nested_opener_right_flanking {
+                        // Marked pairs an unmatched inner single opener with the
+                        // first closer: the outside becomes literal '*' + em,
+                        // not strong. Actual TS: **a\**b** => '*' + italic(a*b).
+                        buf.push(c);
+                        flush!();
+                        let inner: String = bytes[close_search..=close].iter().collect();
+                        append_inner(
+                            &mut spans,
+                            &mut url_slots,
+                            &mut code_slots,
+                            render_inline_ctx(&inner, style, in_link),
+                            style.italic,
+                        );
+                        i = close + 2;
+                        continue;
                     }
                 }
                 let inner: String = bytes[close_search..close].iter().collect();
@@ -441,9 +464,9 @@ fn link_destination(bytes: &[char], from: usize) -> Option<(String, usize)> {
             return Some((url, k));
         }
         if b == ' ' || b == '\t' {
-            if paren_depth != 0 {
-                return None;
-            }
+            // Pinned TS/marked accepts an unmatched '(' before a quoted title;
+            // its actual frame still links foo(bar in [t](foo(bar "title").
+            // Preserve that product behavior rather than imposing a stricter parser.
             break;
         }
         if b == '\\' && bytes.get(k + 1).is_some_and(char::is_ascii_punctuation) {
