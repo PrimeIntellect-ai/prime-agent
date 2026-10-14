@@ -887,18 +887,39 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
 
 #[test]
 fn escaped_parens_never_open_or_close_the_link_destination() {
-    // An escaped paren rides verbatim without counting toward the balance: `\(`
-    // does not swallow the real closer, and `[a](b\)` is plain text.
+    // Marked consumes the escape before publishing token.href. Escaped parens
+    // stay literal without affecting balance; the visible URL and OSC8 href
+    // both use that unescaped destination. A sole escaped closer is not a link.
     crate::hyperlinks::set_hyperlinks_override(Some(false));
-    let style = MarkdownStyle::default();
+    let mut style = MarkdownStyle::default();
+    style.link_base_url = Some(url::Url::parse("file:///fixture/root/").unwrap());
     let spans = render_inline("[a](b\\(c)", &style);
     assert_eq!(
         spans,
         vec![
             Span::styled("a", style.body.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(" (b\\(c)", style.link_url),
+            Span::styled(" (b(c)", style.link_url),
         ]
     );
+    for (text, destination, href) in [
+        (r"[a](b\(c)", "b(c", "file:///fixture/root/b(c"),
+        (r"[a](b\))", "b)", "file:///fixture/root/b)"),
+    ] {
+        assert_eq!(
+            super::render_inline(text, &style),
+            vec![
+                Span::styled(
+                    format!(
+                        "{}a{}",
+                        crate::hyperlinks::osc8_open(href),
+                        crate::hyperlinks::OSC8_CLOSE
+                    ),
+                    style.body.add_modifier(Modifier::UNDERLINED)
+                ),
+                Span::styled(format!(" ({destination})"), style.link_url),
+            ]
+        );
+    }
     let plain = render_inline("[a](b\\)", &style);
     assert_eq!(plain.len(), 1);
     // Not a link, but marked's escape rule still processes the backslash.
