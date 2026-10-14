@@ -134,11 +134,12 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             idle_values[1..].sort_by_key(|value| value.parse::<u32>().unwrap_or(0));
         }
     }
-    let percent = if (1.0..=100.0).contains(&current.compaction_threshold_percent) {
-        current.compaction_threshold_percent
-    } else {
-        95.0
-    };
+    let percent =
+        if pa_types::compaction::is_valid_threshold_percent(current.compaction_threshold_percent) {
+            current.compaction_threshold_percent
+        } else {
+            95.0
+        };
     let mut thresholds: Vec<f64> = (5..=100).step_by(5).map(f64::from).collect();
     if !thresholds.contains(&percent) {
         thresholds.push(percent);
@@ -148,7 +149,7 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
         SettingsMenuRow {
             id: "autocompact-threshold",
             label: "Auto-compact threshold (%)",
-            description: "Context percentage ceiling (1–100); output and reserve headroom can compact earlier",
+            description: "Context percentage (1–100); retained history and model output budgets bound the trigger",
             current: percent.to_string(),
             values: Some(thresholds.into_iter().map(|value| value.to_string()).collect()),
             submenu: None,

@@ -87,7 +87,7 @@ fn deserialize_threshold_percent<'de, D: serde::Deserializer<'de>>(
     let value = serde_json::Value::deserialize(deserializer)?;
     Ok(value
         .as_f64()
-        .filter(|percent| percent.is_finite() && (1.0..=100.0).contains(percent)))
+        .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent)))
 }
 
 /// `number | "unlimited"` autonomous limit.

@@ -14,7 +14,7 @@ impl SettingsManager {
             .compaction
             .as_ref()
             .and_then(|settings| settings.threshold_percent)
-            .filter(|percent| percent.is_finite() && (1.0..=100.0).contains(percent))
+            .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent))
             .unwrap_or(crate::session_engine::compaction::DEFAULT_THRESHOLD_PERCENT)
     }
 
@@ -23,7 +23,7 @@ impl SettingsManager {
     /// # Errors
     /// Returns an error for values outside 1–100%, non-finite values, or a failed save.
     pub fn set_compaction_threshold_percent(&mut self, percent: f64) -> Result<()> {
-        if !percent.is_finite() || !(1.0..=100.0).contains(&percent) {
+        if !pa_types::compaction::is_valid_threshold_percent(percent) {
             return Err(anyhow!(
                 "Auto-compact threshold must be a number from 1 to 100 percent"
             ));

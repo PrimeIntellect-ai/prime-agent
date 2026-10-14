@@ -149,7 +149,7 @@ fn div4(chars: u64) -> u64 {
     chars.div_ceil(4)
 }
 
-/// The effective compaction threshold: the earlier of two ceilings.
+/// The effective compaction threshold: a retention-floored percentage capped by model safety.
 /// PERCENTAGE: `context_window * threshold_percent / 100` (estimate drift on
 /// large windows). COMBINED-LIMIT: `context_window - max_output_tokens -
 /// max(reserve_tokens, COMBINED_LIMIT_HEADROOM_FLOOR)`: the output budget
@@ -162,14 +162,20 @@ pub fn compaction_threshold(
     max_output_tokens: u64,
     settings: &CompactionSettings,
 ) -> u64 {
-    let percent = if settings.threshold_percent.is_finite()
-        && (1.0..=100.0).contains(&settings.threshold_percent)
-    {
+    let percent = if pa_types::compaction::is_valid_threshold_percent(settings.threshold_percent) {
         settings.threshold_percent
     } else {
         DEFAULT_THRESHOLD_PERCENT
     };
-    let percentage = (context_window as f64 * (percent / 100.0)) as u64;
+    let requested = (context_window as f64 * (percent / 100.0)) as u64;
+    // Retained history and both summary passes must fit below the trigger,
+    // otherwise a low percentage re-summarizes the same retained context on
+    // every tool turn. Two reserves cover both summary completion budgets.
+    let retention_floor = settings
+        .keep_recent_tokens
+        .saturating_add(settings.reserve_tokens.saturating_mul(2))
+        .saturating_add(1);
+    let percentage = requested.max(retention_floor);
     let headroom = settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR);
     let combined = context_window
         .saturating_sub(max_output_tokens)
