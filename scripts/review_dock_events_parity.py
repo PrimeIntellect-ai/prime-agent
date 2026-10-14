@@ -10,6 +10,7 @@ full-frame/style equality is reported separately and never claimed by them.
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -81,14 +82,16 @@ class DockSupervisor(Supervisor):
 
 
 def running_visible(text, kind, count):
-    return (str(count) + ' running') in text if kind == 'ts' else (str(count) + ' subagents') in text
+    label = 'running' if kind == 'ts' else 'subagents'
+    return re.search(r'(?<!\d)' + str(count) + r'\s+' + label + r'\b', text) is not None
 
 
 def capture(terminal, root, offset):
     return {'text': terminal.screen.text().replace(str(root), '<fixture-root>'),
             'dock_styled_rows': terminal.screen.dock_styles(),
             'raw_ansi_since_previous_hex': bytes(terminal.raw[offset:]).hex(),
-            'unsupported_sgr': terminal.screen.unsupported_sgr.copy()}
+            'unsupported_sgr': terminal.screen.unsupported_sgr.copy(),
+            'unsupported_terminal': terminal.screen.unsupported_terminal.copy()}
 
 
 def run_case(binary, kind, root, observed):
@@ -145,15 +148,20 @@ def run_case(binary, kind, root, observed):
         snap('goal_paused', lambda text: 'Goal paused (12s)' in text)
         assert not server.prompts, 'focus interactions accidentally submitted a prompt'
         assert not terminal.screen.unsupported_sgr, 'unsupported SGR makes attribute evidence incomplete'
+        assert not terminal.screen.unsupported_terminal, 'unsupported terminal geometry makes frame evidence incomplete'
         observed['behavior_verified'] = True
     finally:
-        if terminal:
-            observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
-            terminal.close()
-        server.close()
-        observed['emitted_events'] = server.emitted
-        observed['commands'] = server.commands
-        observed['fixture_errors'] = server.errors
+        try:
+            if terminal:
+                observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
+                terminal.close()
+        finally:
+            try:
+                server.close()
+            finally:
+                observed['emitted_events'] = server.emitted
+                observed['commands'] = server.commands
+                observed['fixture_errors'] = server.errors
         assert not server.errors, server.errors
         observed['cleanup_verified'] = True
 

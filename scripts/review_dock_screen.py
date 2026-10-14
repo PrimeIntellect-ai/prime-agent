@@ -17,6 +17,9 @@ class DockScreen:
         self.styles = [[{} for _ in range(width)] for _ in range(height)]
         self.sgr = {}
         self.unsupported_sgr = []
+        self.unsupported_terminal = []
+        self.autowrap = True
+        self.alternate = None
         self.row = self.col = 0
         self.saved = (0, 0)
         self.pending = ""
@@ -36,16 +39,27 @@ class DockScreen:
                     end = re.search(r"\x07|\x1b\\", self.pending[2:])
                     if end is None:
                         break
+                    sequence = self.pending[:2 + end.end()]
+                    # OSC titles/hyperlinks do not move terminal cells. DCS,
+                    # APC and PM can carry graphics or sixel: never silently
+                    # accept their unknown effect on the captured frame.
+                    osc_kind = self.pending[2:].split(';', 1)[0]
+                    if self.pending[1] != ']' or osc_kind not in ('0', '1', '2', '7', '8', '52', '133'):
+                        self.unsupported_terminal.append(sequence)
                     self.pending = self.pending[2 + end.end():]
                     continue
                 if self.pending[1] == "[":
                     match = re.match(r"\x1b\[([0-?]*)([ -/]*)([@-~])", self.pending)
                     if match is None:
                         break
-                    params, _, command = match.groups()
+                    params, intermediate, command = match.groups()
+                    sequence = self.pending[:match.end()]
                     self.pending = self.pending[match.end():]
                     nums = [int(x) if x.isdigit() else 0 for x in params.lstrip("?<>").split(";")]
                     n = nums[0] or 1
+                    if intermediate and not (command == 'q' and intermediate == ' '):
+                        self.unsupported_terminal.append(sequence)
+                        continue
                     if command == "m": self.apply_sgr(nums)
                     elif command in "Hf":
                         self.row = min(self.height - 1, max(0, (nums[0] or 1) - 1))
@@ -56,7 +70,7 @@ class DockScreen:
                     elif command == "D": self.col = max(0, self.col - n)
                     elif command == "G": self.col = min(self.width - 1, n - 1)
                     elif command == "J":
-                        if nums[0] in (2, 3):
+                        if nums[0] == 2:
                             self.cells = [[" "] * self.width for _ in range(self.height)]
                             self.styles = [[dict(self.sgr) for _ in range(self.width)] for _ in range(self.height)]
                         elif nums[0] == 0:
@@ -65,7 +79,12 @@ class DockScreen:
                             for row in range(self.row + 1, self.height):
                                 self.cells[row] = [" "] * self.width
                                 self.styles[row] = [dict(self.sgr) for _ in range(self.width)]
+                        elif nums[0] != 3:  # ED3 clears scrollback, not visible cells.
+                            self.unsupported_terminal.append(sequence)
                     elif command == "K":
+                        if nums[0] not in (0, 1, 2):
+                            self.unsupported_terminal.append(sequence)
+                            continue
                         start, end = (0, self.width) if nums[0] == 2 else ((0, self.col + 1) if nums[0] == 1 else (self.col, self.width))
                         self.cells[self.row][start:end] = [" "] * (end - start)
                         self.styles[self.row][start:end] = [dict(self.sgr) for _ in range(end - start)]
@@ -81,12 +100,39 @@ class DockScreen:
                     elif command == "n" and nums[0] == 6:
                         replies.append(f"\x1b[{self.row + 1};{self.col + 1}R".encode())
                     elif command == "c": replies.append(b"\x1b[?1;2c")
+                    elif command in 'hl' and params.startswith('?'):
+                        for mode in nums:
+                            if mode == 7:
+                                self.autowrap = command == 'h'
+                            elif mode == 1049:
+                                if command == 'h' and self.alternate is None:
+                                    self.alternate = (self.cells, self.styles, self.row, self.col)
+                                    self.cells = [[' '] * self.width for _ in range(self.height)]
+                                    self.styles = [[{} for _ in range(self.width)] for _ in range(self.height)]
+                                    self.row = self.col = 0
+                                elif command == 'l' and self.alternate is not None:
+                                    self.cells, self.styles, self.row, self.col = self.alternate
+                                    self.alternate = None
+                            elif mode not in (12, 25, 1000, 1002, 1003, 1004, 1006, 2004, 2026):
+                                self.unsupported_terminal.append(sequence)
+                    elif command == 'q' and intermediate == ' ':
+                        pass  # Cursor presentation, not cell geometry.
+                    else:
+                        self.unsupported_terminal.append(sequence)
                     continue
                 command = self.pending[1]
+                if command in '()' and len(self.pending) < 3:
+                    break
                 self.pending = self.pending[2:]
                 if command == "7": self.saved = (self.row, self.col)
                 elif command == "8": self.row, self.col = self.saved
-                elif command in "()" and self.pending: self.pending = self.pending[1:]
+                elif command in "()" and self.pending:
+                    charset = self.pending[0]
+                    self.pending = self.pending[1:]
+                    if charset != 'B':
+                        self.unsupported_terminal.append('\x1b' + command + charset)
+                else:
+                    self.unsupported_terminal.append('\x1b' + command)
                 continue
             char, self.pending = self.pending[0], self.pending[1:]
             if char == "\r": self.col = 0
@@ -97,11 +143,23 @@ class DockScreen:
                     self.styles.pop(0); self.styles.append([dict(self.sgr) for _ in range(self.width)])
                     self.row = self.height - 1
             elif char == "\b": self.col = max(0, self.col - 1)
+            elif char == '\t': self.col = min(self.width - 1, ((self.col // 8) + 1) * 8)
             elif char >= " " and not unicodedata.combining(char):
-                if self.col >= self.width: self.col = 0; self.row = min(self.height - 1, self.row + 1)
+                if self.col >= self.width:
+                    if self.autowrap:
+                        self.col = 0
+                        self.row += 1
+                        if self.row == self.height:
+                            self.cells.pop(0); self.cells.append([' '] * self.width)
+                            self.styles.pop(0); self.styles.append([dict(self.sgr) for _ in range(self.width)])
+                            self.row = self.height - 1
+                    else:
+                        self.col = self.width - 1
                 self.cells[self.row][self.col] = char
                 self.styles[self.row][self.col] = dict(self.sgr)
                 self.col += 2 if unicodedata.east_asian_width(char) in "WF" else 1
+            elif char not in ('\x00', '\x07') and not unicodedata.combining(char):
+                self.unsupported_terminal.append(char)
         return replies
 
     def apply_sgr(self, nums):
