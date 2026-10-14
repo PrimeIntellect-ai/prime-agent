@@ -5,9 +5,9 @@
 mod common;
 
 #[tokio::test]
-async fn two_clients_in_one_process_trust_the_ssl_cert_file_ca() {
+async fn the_native_trust_store_is_read_once_per_process() {
     let mut server = common::tls_catalog_server(2).await;
-    let _ca_env = common::ca_bundle_env("SSL_CERT_FILE", &server.ca_pem);
+    let ca_env = common::ca_bundle_env("SSL_CERT_FILE", &server.ca_pem);
 
     let fetcher = pa_models::fetch::CatalogFetcher::new();
     let pa_models::fetch::FetchOutcome::Fresh { body, .. } = fetcher
@@ -19,6 +19,9 @@ async fn two_clients_in_one_process_trust_the_ssl_cert_file_ca() {
     };
     assert_eq!(body, common::TLS_TEST_BODY.as_bytes());
 
+    // The env var stays set while the bundle it points at disappears: only a
+    // process-cached root set can still trust the second client below.
+    ca_env.delete_bundle();
     let client = pa_ai::utils::tls::http_client_builder()
         .build()
         .expect("plain client");
@@ -26,7 +29,7 @@ async fn two_clients_in_one_process_trust_the_ssl_cert_file_ca() {
         .get(format!("{}/y", server.base_url))
         .send()
         .await
-        .expect("plain client GET");
+        .expect("plain client GET after the bundle is gone");
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(
         response.text().await.expect("plain client body"),
