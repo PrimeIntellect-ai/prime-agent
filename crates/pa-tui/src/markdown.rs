@@ -416,7 +416,11 @@ fn parse_blocks(text: &str) -> (Vec<Block>, LinkDefs) {
 /// Link labels match case-insensitively with inner whitespace collapsed
 /// (marked's reference-label rule).
 fn normalize_label(label: &str) -> String {
-    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn link_definition(t: &str) -> Option<(String, String)> {
@@ -682,12 +686,7 @@ fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Li
 /// collide) tapers to the heading color like any other span. Shared by
 /// the paint path and the row count, so a wrapped heading counts
 /// exactly what it paints.
-fn heading_spans(
-    text: &str,
-    depth: usize,
-    style: &MarkdownStyle,
-    links: &LinkDefs,
-) -> Vec<Span> {
+fn heading_spans(text: &str, depth: usize, style: &MarkdownStyle, links: &LinkDefs) -> Vec<Span> {
     let (mut spans, url_slots, code_slots) = inline::render_inline_tracked(text, style, links);
     // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic,
     // all over the heading color. The heading modifiers close around an inline-code

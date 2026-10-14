@@ -1511,8 +1511,13 @@ fn reference_definitions_invalidate_the_block_cache() {
     crate::hyperlinks::set_hyperlinks_override(Some(false));
     // A settled (non-final) paragraph renders through the cache; the same
     // paragraph must re-render once a definition arrives later in the stream.
-    let first =
-        render_markdown_tagged("See [docs][d1].\n\nTail paragraph.", 60, &style, "", &mut cache);
+    let first = render_markdown_tagged(
+        "See [docs][d1].\n\nTail paragraph.",
+        60,
+        &style,
+        "",
+        &mut cache,
+    );
     let flat: String = first[0].iter().map(|s| s.content.as_str()).collect();
     assert_eq!(flat, "See [docs][d1].");
     let second = render_markdown_tagged(

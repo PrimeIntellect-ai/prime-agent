@@ -112,7 +112,9 @@ fn render_inline_ctx(
                 parsed = link_destination(&bytes, j + 2);
             } else if j < bytes.len() && bytes[j] == ']' {
                 parsed = reference_target(&bytes, j, &label).and_then(|(target, k)| {
-                    links.get(&super::normalize_label(&target)).map(|url| (url.clone(), k))
+                    links
+                        .get(&super::normalize_label(&target))
+                        .map(|url| (url.clone(), k))
                 });
             }
             if let Some((url, k)) = parsed {
