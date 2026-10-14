@@ -315,19 +315,18 @@ pub async fn execute_refinement_with_rows(
             let dir = dir.to_path_buf();
             Some(
                 tokio::task::spawn_blocking(move || {
-                    crate::settings::SettingsManager::create(&cwd, &dir)
+                    let settings = crate::settings::SettingsManager::create(&cwd, &dir);
+                    anyhow::ensure!(
+                        super::refinement_gate::enabled(Some(&settings)),
+                        "Harness refinements are disabled in /settings"
+                    );
+                    Ok::<_, anyhow::Error>(settings)
                 })
-                .await?,
+                .await??,
             )
         }
         None => None,
     };
-    anyhow::ensure!(
-        settings
-            .as_ref()
-            .is_none_or(crate::settings::SettingsManager::get_harness_refinements),
-        "Harness refinements are disabled in /settings"
-    );
     let RefinementTranscript {
         messages,
         refinement_history,
@@ -415,9 +414,7 @@ pub async fn execute_refinement_with_rows(
     let (mut result, state_path) = tokio::task::spawn_blocking(move || {
         try_update_harness_state(&target_dir, target_scope, |state| {
             anyhow::ensure!(
-                settings
-                    .as_ref()
-                    .is_none_or(|settings| settings.reopen().get_harness_refinements()),
+                super::refinement_gate::enabled(settings.as_ref()),
                 "Harness refinements were disabled during planning; the result was discarded"
             );
             Ok(apply_refinement_plan(

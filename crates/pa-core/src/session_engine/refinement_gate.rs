@@ -2,11 +2,14 @@
 
 use pa_types::session::AgentMessage;
 
+/// The single live policy read for scheduling, planning, apply, and context delivery.
+pub(crate) fn enabled(settings: Option<&crate::settings::SettingsManager>) -> bool {
+    settings.is_none_or(|settings| settings.reopen().get_harness_refinements())
+}
+
 impl super::AgentSession {
     pub(crate) fn harness_refinements_enabled(&self) -> bool {
-        self.refinement_settings
-            .as_ref()
-            .is_none_or(|settings| settings.reopen().get_harness_refinements())
+        enabled(self.refinement_settings.as_ref())
     }
 }
 
@@ -47,9 +50,7 @@ pub(crate) fn convert_to_llm(
     std::sync::Arc::new(move |messages| {
         let settings = std::sync::Arc::clone(&settings);
         Box::pin(async move {
-            let enabled =
-                tokio::task::spawn_blocking(move || settings.reopen().get_harness_refinements())
-                    .await?;
+            let enabled = tokio::task::spawn_blocking(move || enabled(Some(&settings))).await?;
             let messages = if enabled {
                 messages
             } else {
@@ -172,6 +173,23 @@ mod tests {
                 .await
                 .unwrap()
                 .is_some());
+            settings.set_harness_refinements(false).unwrap();
+            assert!(engine
+                .session
+                .pending_digest_prompt_row()
+                .await
+                .unwrap()
+                .is_none());
+            settings.set_harness_refinements(true).unwrap();
+            assert!(
+                engine
+                    .session
+                    .pending_digest_prompt_row()
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "a consumed digest must not be re-armed by disabling and enabling"
+            );
             settings.set_harness_refinements(false).unwrap();
             // The history remains inspectable even though it is absent from model context.
             if resumed {

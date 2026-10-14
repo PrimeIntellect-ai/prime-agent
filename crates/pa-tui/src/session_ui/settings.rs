@@ -373,7 +373,6 @@ impl SessionUi {
                     value,
                     view,
                 );
-                let _ = self.handle_reload_command(view);
             }
             "builtin-skills" => {
                 self.persist_bool_setting(

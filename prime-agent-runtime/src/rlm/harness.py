@@ -134,18 +134,13 @@ def _agent_dir() -> Path:
 
 
 def _require_refinements_enabled() -> None:
-    """Read the same global/project master switch as the host, without caching it."""
-    enabled = True
-    cwd = Path(os.environ.get("PRIME_AGENT_SETTINGS_CWD") or os.getcwd())
-    for settings in (_agent_dir() / "settings.json", cwd / ".prime" / "agent" / "settings.json"):
-        try:
-            document = json.loads(settings.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        value = document.get("harnessRefinements") if isinstance(document, dict) else None
-        if isinstance(value, bool):
-            enabled = value
-    if not enabled:
+    """Read the host's global-only master switch, without caching it."""
+    try:
+        document = json.loads((_agent_dir() / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    value = document.get("harnessRefinements") if isinstance(document, dict) else None
+    if value is False:
         raise RuntimeError("Harness refinements are disabled in /settings")
 
 

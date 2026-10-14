@@ -423,10 +423,6 @@ impl AgentSession {
         // not interleave with a replace (duplicating in the rebuilt view
         // or vanishing under it).
         let _flight = self.compaction_flight.lock().await;
-        anyhow::ensure!(
-            self.harness_refinements_enabled(),
-            "Harness refinements are disabled in /settings"
-        );
         // The transcript's consumed artifacts are extracted under this first
         // lock straight from the retained rows: no second clone of the rows.
         let parts = self.session.lock().await.refine_transcript_parts();

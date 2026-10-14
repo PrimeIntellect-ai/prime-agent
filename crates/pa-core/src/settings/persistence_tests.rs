@@ -149,7 +149,7 @@ fn harness_refinements_persist_without_clobbering_other_settings() {
 }
 
 #[test]
-fn harness_refinements_resolve_project_overrides_and_wrong_types() {
+fn harness_refinements_ignore_project_overrides_and_resolve_global_wrong_types() {
     let dir = tempfile::tempdir().unwrap();
     let agent_dir = dir.path().join("agent");
     let project_dir = dir.path().join(".prime/agent");
@@ -165,12 +165,19 @@ fn harness_refinements_resolve_project_overrides_and_wrong_types() {
         r#"{"harnessRefinements":true}"#,
     )
     .unwrap();
-    let manager = SettingsManager::create(dir.path(), &agent_dir);
-    assert!(manager.get_harness_refinements());
+    let mut manager = SettingsManager::create(dir.path(), &agent_dir);
+    assert!(!manager.get_harness_refinements());
+    manager.set_harness_refinements(true).unwrap();
     std::fs::write(
         project_dir.join("settings.json"),
+        r#"{"harnessRefinements":false}"#,
+    )
+    .unwrap();
+    assert!(manager.reopen().get_harness_refinements());
+    std::fs::write(
+        agent_dir.join("settings.json"),
         r#"{"harnessRefinements":"false"}"#,
     )
     .unwrap();
-    assert!(!manager.reopen().get_harness_refinements());
+    assert!(manager.reopen().get_harness_refinements());
 }

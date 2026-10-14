@@ -1644,7 +1644,7 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
                 package_harness.snapshot()
 
-    def test_project_override_uses_the_session_cwd_and_ignores_wrong_types(self):
+    def test_project_settings_cannot_override_the_global_master_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
             agent_dir = Path(tmp) / "agent"
             project_dir = Path(tmp) / "project" / ".prime" / "agent"
@@ -1654,11 +1654,19 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
             project_settings = project_dir / "settings.json"
             project_settings.write_text('{"harnessRefinements":true}')
             with patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": str(agent_dir), "PRIME_AGENT_SETTINGS_CWD": str(Path(tmp) / "project")}):
+                with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                    HarnessState(Path(tmp) / "harness_state.json", scope="global")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":true}')
+                project_settings.write_text('{"harnessRefinements":false}')
                 state = HarnessState(Path(tmp) / "harness_state.json", scope="global")
-                state.create_memory("Note", "Project wins", id="note")
-                project_settings.write_text('{"harnessRefinements":"true"}')
+                state.create_memory("Note", "Global preference wins", id="note")
+                self.assertEqual(state.get("memory", "note").content, "Global preference wins")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":false}')
+                project_settings.write_text('{"harnessRefinements":true}')
                 with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
                     state.get("memory", "note")
+                (agent_dir / "settings.json").write_text('{"harnessRefinements":"false"}')
+                self.assertEqual(state.get("memory", "note").content, "Global preference wins")
 
     def test_disable_blocks_cached_reads_and_writes_without_deleting_state(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
@@ -1674,6 +1682,25 @@ class HarnessRefinementsSettingTests(unittest.TestCase):
             self.assertEqual(state.file_path.read_bytes(), before)
             settings.write_text('{"harnessRefinements":true}')
             self.assertEqual(state.get("memory", "note").content, "Saved memory")
+
+    def test_disabled_refinements_refuse_factory_runs_before_launch(self):
+        import asyncio
+        from rlm import factory
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"PRIME_AGENT_CODING_AGENT_DIR": tmp}):
+            settings = Path(tmp) / "settings.json"
+            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":true}')
+            state = HarnessState(Path(tmp) / "harness_state.json")
+            state.create_factory("Saved factory", "Saved spec", id="saved", dag=FACTORY_DAG)
+            before = state.file_path.read_bytes()
+            executor = factory.FactoryExecutor(harness=state)
+            settings.write_text('{"factory":{"enabled":true},"harnessRefinements":false}')
+            with patch.object(factory, "_DEFAULT_EXECUTOR", executor):
+                for name in ("saved", "review-sweep"):
+                    with self.assertRaisesRegex(RuntimeError, "disabled in /settings"):
+                        asyncio.run(factory.run_factory(name))
+            self.assertEqual(executor._runs, {})
+            self.assertEqual(state.file_path.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -458,11 +458,9 @@ impl super::AgentSession {
     /// The deferred first-turn digest as the prompt row that rides the turn's
     /// admission; disabled sessions defer the pending flag until enabled.
     pub(crate) async fn pending_digest_prompt_row(&self) -> anyhow::Result<Option<AgentMessage>> {
-        // Keep delivery deferred while disabled. Re-enabling during a busy
-        // session may prevent /reload, but the next admission must still load state.
+        // Preserve the pending flag while disabled; a consumed delivery must
+        // never be re-armed merely by toggling the setting off and on.
         if !self.harness_refinements_enabled() {
-            self.digest_pending
-                .store(true, std::sync::atomic::Ordering::SeqCst);
             return Ok(None);
         }
         if !self

@@ -7,10 +7,11 @@ use anyhow::{anyhow, Result};
 use super::manager::SettingsManager;
 
 impl SettingsManager {
-    /// Whether harness refinements may be created or loaded into context (default on).
+    /// Global preference controlling refinement creation and context loading (default on).
+    /// Project settings cannot override the user's master switch.
     #[must_use]
     pub fn get_harness_refinements(&self) -> bool {
-        self.settings().harness_refinements.unwrap_or(true)
+        self.global_settings().harness_refinements.unwrap_or(true)
     }
 
     /// Persist the master harness switch to the global settings scope.

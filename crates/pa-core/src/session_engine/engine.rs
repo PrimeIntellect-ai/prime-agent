@@ -244,6 +244,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     );
 
     let refinement_settings = settings.reopen();
+    let _ = turn_boundary.refinement_settings.set(settings.reopen());
     let service_tier_preference = settings.get_default_service_tier();
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
@@ -560,7 +561,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let (existing_messages, has_thinking_entry, has_service_tier_entry) = {
         let session = wiring.session.lock().await;
         let messages = super::compact_session::rebuilt_context_after_compaction(&session);
-        let messages = if refinement_settings.get_harness_refinements() {
+        let messages = if super::refinement_gate::enabled(Some(&refinement_settings)) {
             messages
         } else {
             super::refinement_gate::without_refinements(messages)
@@ -694,8 +695,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         agent.clone(),
         wiring.session.clone(),
         resources.prompts.clone(),
-        refinement_settings
-            .get_harness_refinements()
+        super::refinement_gate::enabled(Some(&refinement_settings))
             .then_some(digest_context.clone()),
     )
     .await?;
@@ -704,6 +704,13 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // Keep the context descriptor even while disabled, so re-enabling can load it.
     session.harness_digest = Some(digest_context);
     session.refinement_settings = Some(refinement_settings);
+    // A disabled startup has never delivered its filtered digest. Defer that
+    // first delivery without re-arming digests already consumed in a live session.
+    if !session.harness_refinements_enabled() {
+        session
+            .digest_pending
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     // Every compaction path reads the session's resolved compaction
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.

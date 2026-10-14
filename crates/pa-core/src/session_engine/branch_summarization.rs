@@ -410,8 +410,9 @@ pub async fn generate_branch_summary(
         Some(context) => {
             let context = context.clone();
             tokio::task::spawn_blocking(move || {
-                crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir)
-                    .get_harness_refinements()
+                let settings =
+                    crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
+                super::refinement_gate::enabled(Some(&settings))
             })
             .await
             .unwrap_or(false)
