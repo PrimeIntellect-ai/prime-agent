@@ -936,8 +936,10 @@ fn escaped_parens_never_open_or_close_the_link_destination() {
     // stay literal without affecting balance; the visible URL and OSC8 href
     // both use that unescaped destination. A sole escaped closer is not a link.
     crate::hyperlinks::set_hyperlinks_override(Some(false));
-    let mut style = MarkdownStyle::default();
-    style.link_base_url = Some(url::Url::parse("file:///fixture/root/").unwrap());
+    let style = MarkdownStyle {
+        link_base_url: Some(url::Url::parse("file:///fixture/root/").unwrap()),
+        ..MarkdownStyle::default()
+    };
     let spans = render_inline("[a](b\\(c)", &style);
     assert_eq!(
         spans,
