@@ -198,7 +198,15 @@ def capture(kind, binary, root, hello, text, width):
         terminal.wait("Markdown history fully painted", lambda: START in terminal.screen.text()
                       and END in terminal.screen.text(), server)
         if terminal.screen.style_errors: raise RuntimeError(terminal.screen.style_errors)
-        result.update(executed=True, styled_region=terminal.screen.region(), commands=server.commands,
+        region = terminal.screen.region()
+        painted = [style for row in region for char, style in row if not char.isspace()]
+        if not painted:
+            raise RuntimeError("Markdown corpus body was not painted")
+        if "**bold***italic*" in text and not all(any(style and modifier in style[2] for style in painted)
+                                                 for modifier in (1, 3)):
+            raise RuntimeError("actual PTY did not render both bold and italic modifiers")
+        result.update(executed=True, styled_region=region, commands=server.commands,
+                      osc8_observed=any(style and style[3] for style in painted),
                       screen=terminal.screen.text())
     except Exception as error: result["error"] = f"{type(error).__name__}: {error}"
     finally:
