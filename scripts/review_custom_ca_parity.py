@@ -16,9 +16,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
 from review_restore_notice_parity import texts
+from review_agent_bounce_parity import Client
+from review_draft_disconnect_parity import stop
 
 PROMPT = 'Complete the custom CA transport fixture.'
 ANSWER = 'Custom CA transport completed.'
@@ -102,11 +105,52 @@ class Server(http.server.ThreadingHTTPServer):
             raise
 
 
-def completed_messages(stdout):
-    events = [json.loads(line) for line in stdout.splitlines() if line.startswith('{')]
-    return [event['message'] for event in events if event.get('type') == 'message_end'
-            and isinstance(event.get('message'), dict)
-            and event['message'].get('role') == 'assistant']
+def owned_processes(root):
+    expected = {('PI_CODING_AGENT_DIR=' + str(root / 'agent')).encode(),
+                ('PRIME_AGENT_CODING_AGENT_DIR=' + str(root / 'agent')).encode()}
+    found = {}
+    for path in Path('/proc').iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            environment = set((path / 'environ').read_bytes().split(b'\0'))
+            if expected.isdisjoint(environment):
+                continue
+            start = (path / 'stat').read_text().rsplit(')', 1)[1].split()[19]
+            found[int(path.name)] = start
+        except (OSError, IndexError):
+            continue
+    return found
+
+
+def confirm_cleanup(root, observed):
+    deadline = time.monotonic() + 10
+    remaining = owned_processes(root)
+    while remaining and time.monotonic() < deadline:
+        threading.Event().wait(0.025)
+        remaining = owned_processes(root)
+    observed['remaining_owned_processes'] = remaining
+    # Failure stays red, even when fixture-owned fallback cleanup succeeds.
+    if remaining:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            for pid, start in remaining.items():
+                if owned_processes(root).get(pid) == start:
+                    try:
+                        os.kill(pid, sig)
+                    except ProcessLookupError:
+                        pass
+            deadline = time.monotonic() + 5
+            while owned_processes(root) and time.monotonic() < deadline:
+                threading.Event().wait(0.025)
+        observed['remaining_after_fallback'] = owned_processes(root)
+    assert not remaining, 'owned detached processes survived normal shutdown'
+    assert 'shutdown_error' not in observed, observed.get('shutdown_error')
+
+
+def terminal_assistant(messages):
+    assistants = [row for row in messages if row.get('role') == 'assistant']
+    assert len(assistants) == 1, 'expected one terminal assistant message'
+    return assistants[0]
 
 
 def request_contract(request):
@@ -145,28 +189,39 @@ def run_case(binary, label, root, trusted, key, cert, ca_cert, unrelated, observ
         'models': [{'id': 'ca-fixture', 'name': 'CA fixture', 'reasoning': False,
                     'contextWindow': 128000, 'maxTokens': 4096}]}}}))
     (agent / 'settings.json').write_text(json.dumps({'defaultProvider': 'fixture',
-        'defaultModel': 'ca-fixture', 'prewarmPythonKernel': False}))
-    command = [str(binary), '--mode', 'json', '--provider', 'fixture', '--model',
-               'ca-fixture', '--session-dir', str(sessions), PROMPT]
-    process = None
+        'defaultModel': 'ca-fixture', 'prewarmPythonKernel': False,
+        'retry': {'enabled': False}}))
+    process, client = None, None
+    log_path = root / 'daemon.log'
+    log = log_path.open('wb')
     try:
-        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, start_new_session=True)
+        socket_path = root / 'd.sock'
+        process = subprocess.Popen([str(binary), '--mode', 'daemon', '--daemon-socket', str(socket_path)],
+                                   cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        client = Client(socket_path, process)
+        created = client.call('create', name='custom-ca-fixture', config={
+            'cwd': str(cwd), 'agentDir': str(agent), 'sessionDir': str(sessions),
+            'provider': 'fixture', 'model': 'ca-fixture', 'noExtensions': True,
+            'noSkills': True, 'noTools': True, 'noContextFiles': True, 'telemetryDisabled': True})
+        active = created.get('activeSessionId') or created.get('id')
+        assert active, created
+        client.call('attach', activeSessionId=active)
         try:
-            stdout, stderr = process.communicate(timeout=75)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate(timeout=5)
-            observation.update(stdout=stdout, stderr=stderr, timed_out=True)
-            raise AssertionError('actual binary timed out')
-        observation.update(exit_code=process.returncode, stdout=stdout, stderr=stderr,
-                           requests=server.requests, handshake_attempts=server.handshake_attempts,
+            client.call('prompt_and_wait', activeSessionId=active, message=PROMPT)
+        except AssertionError:
+            # Certificate failure can surface as an unsuccessful wait response.
+            # It is only valid after the actual terminal assistant error below;
+            # any other command/transport failure remains red.
+            response = client.wire[-1]
+            assert not trusted and response.get('type') == 'response' and response.get('success') is False, response
+            observation['prompt_wait_failure'] = response
+        result = client.call('get_messages', activeSessionId=active)
+        observation.update(messages=result, requests=server.requests,
+                           handshake_attempts=server.handshake_attempts,
                            handshake_failures=server.handshake_failures)
-        messages = completed_messages(stdout)
-        assert len(messages) == 1, 'expected one completed assistant message'
-        message = messages[0]
+        message = terminal_assistant(result['messages'])
         if trusted:
-            assert process.returncode == 0, 'trusted custom-root process failed'
             assert message.get('stopReason') == 'stop', message
             answer = '\n'.join(texts(message.get('content')))
             assert answer == ANSWER, message
@@ -182,12 +237,28 @@ def run_case(binary, label, root, trusted, key, cert, ca_cert, unrelated, observ
         return {'outcome': 'certificate_refused', 'http_requests': 0,
                 'assistant_stop_reason': message['stopReason']}
     finally:
-        if process is not None and process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate(timeout=5)
+        observation['owned_before_shutdown'] = owned_processes(root)
+        if process and process.poll() is None and client:
+            try:
+                client.call('shutdown', force=True)
+                observation['wire'] = client.wire
+                client.close()
+                process.wait(timeout=15)
+                observation['shutdown'] = 'owned supervisor and workers stopped'
+            except Exception as error:
+                observation['shutdown_error'] = str(error)
+        if process:
+            stop(process)
+            observation['daemon_exit_code'] = process.returncode
+        if client:
+            observation['wire'] = client.wire
+            client.close()
+        log.close()
+        observation['daemon_log'] = log_path.read_text(errors='replace')[-10000:]
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        confirm_cleanup(root, observation)
 
 
 def main():
@@ -195,6 +266,8 @@ def main():
     parser.add_argument('--receipt', type=Path, required=True)
     args = parser.parse_args()
     result = {'verified': False, 'runs': {}, 'scope': __doc__,
+              'retry_scope': 'Set documented retry.enabled=false identically in both real runtimes; compare certificate outcome, not retry policy.',
+              'execution_scope': 'Explicit owned daemon, ordinary create/attach/prompt_and_wait/get_messages, graceful shutdown acknowledgement then close socket before waiting.',
               'prompt_scope': 'Compare current fixture prompt once, auth, model, stream and outcome. Harness digests/unrelated layers excluded; raw messages retained.',
               'cache_scope': 'Each case starts a fresh actual process. No assertion about in-process native-store refresh or TS native-root caching.'}
     try:
