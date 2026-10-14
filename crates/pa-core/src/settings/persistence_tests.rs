@@ -180,6 +180,9 @@ fn harness_refinements_ignore_project_overrides_and_resolve_global_wrong_types()
     )
     .unwrap();
     assert!(manager.reopen().get_harness_refinements());
+}
+
+#[test]
 fn compaction_percentage_preserves_siblings_and_survives_reload() {
     let (storage, mut manager) =
         fixture(r#"{"compaction":{"enabled":false,"reserveTokens":1234,"future":"keep"}}"#);

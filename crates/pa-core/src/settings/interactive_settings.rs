@@ -21,6 +21,8 @@ impl SettingsManager {
     pub fn set_harness_refinements(&mut self, enabled: bool) -> Result<()> {
         self.global_mut().harness_refinements = Some(enabled);
         self.save_global_scope(&["harnessRefinements"])
+    }
+
     /// The percentage ceiling for automatic compaction (default 95%).
     #[must_use]
     pub fn get_compaction_threshold_percent(&self) -> f64 {

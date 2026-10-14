@@ -64,6 +64,11 @@ impl ClientSettings for CliClientSettings {
                 let mut properties = pa_telemetry::Properties::new();
                 properties.set("enabled", serde_json::json!(enabled));
                 client.track("harness refinements changed", properties);
+            });
+        }
+        Ok(())
+    }
+
     fn compaction_threshold_percent(&self) -> f64 {
         self.manager().get_compaction_threshold_percent()
     }

@@ -674,6 +674,9 @@ fn harness_refinement_row_cycles_both_values_in_the_agents_tab() {
             value: "true".to_string()
         }
     );
+}
+
+#[test]
 fn threshold_control_uses_five_point_steps_and_wraps_at_preset_boundaries() {
     let values = SettingsCurrentValues {
         compaction_threshold_percent: 95.0,
