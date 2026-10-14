@@ -1,5 +1,82 @@
 use super::*;
 
+#[test]
+fn review_markdown_adjacent_emphasis_keeps_the_next_opener() {
+    let style = MarkdownStyle::default();
+    let spans = render_inline("**bold***italic*", &style);
+    let actual: Vec<_> = spans
+        .iter()
+        .map(|s| (s.content.as_str(), s.style.add_modifier))
+        .collect();
+    assert_eq!(
+        actual,
+        vec![("bold", Modifier::BOLD), ("italic", Modifier::ITALIC)]
+    );
+    // A real nested opener still owns the first star of the triple closer.
+    let spans = render_inline("**outer *inner***", &style);
+    assert_eq!(
+        spans.iter().map(|s| s.content.as_str()).collect::<String>(),
+        "outer inner"
+    );
+    assert!(spans
+        .last()
+        .unwrap()
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD | Modifier::ITALIC));
+}
+
+#[test]
+fn review_markdown_link_titles_skip_escaped_quotes() {
+    let style = MarkdownStyle::default();
+    for text in [r#"[t](url "a \"b\"")"#, r"[t](url 'a \'b\'')"] {
+        let mut spans = render_inline(text, &style);
+        crate::hyperlinks::strip_osc8(&mut spans);
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_str()).collect::<String>(),
+            "t (url)"
+        );
+        assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+}
+
+#[test]
+fn review_markdown_deep_lists_keep_text_with_a_bounded_tree() {
+    let text: String = (0..96)
+        .map(|n| format!("{}- item{n}\n", "  ".repeat(n)))
+        .collect();
+    let blocks = parse_blocks(&text);
+    let mut pending = Vec::new();
+    for block in &blocks {
+        if let BlockKind::List(list) = &block.kind {
+            pending.push((list, 0));
+        }
+    }
+    let mut deepest = 0;
+    let mut literal_tail = false;
+    while let Some((list, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        for item in &list.items {
+            for part in &item.parts {
+                match part {
+                    ListPart::List(child) => pending.push((child, depth + 1)),
+                    ListPart::Text(text) => literal_tail |= text == "- item95",
+                }
+            }
+        }
+    }
+    assert!(deepest <= 64, "nested tree depth was {deepest}");
+    assert!(
+        literal_tail,
+        "overflow nesting must preserve literal content"
+    );
+    let style = MarkdownStyle::default();
+    assert_eq!(
+        markdown_row_count(&text, 16_000, &style),
+        render_markdown(&text, 16_000, &style).len()
+    );
+}
+
 /// The pre-fix overlong-word break loop from origin/rust (the quadratic re-measure version): the
 /// output oracle for [`wrap_spans_into`]'s arithmetic-tracked rewrite — every corpus below must
 /// wrap to byte- and style-identical `Line`s on both algorithms. The oracle stays quadratic, so
