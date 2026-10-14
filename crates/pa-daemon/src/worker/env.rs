@@ -73,7 +73,9 @@ pub const WORKER_SUPERVISOR_LOST_EXIT_MS_ENV: &str =
 /// propagate by inheritance (the supervisor-lost window, the leases
 /// switch, the registry dir). One list next to the constants it names: a
 /// new handshake var joins `worker_launch_env` and this list together.
-pub const INHERITED_WORKER_ENV: &[&str] = &[
+/// Private — [`strip_inherited_worker_env`] is its only reader, so the
+/// binary entry stays the one owner of the strip.
+const INHERITED_WORKER_ENV: &[&str] = &[
     WORKER_ROLE_ENV,
     WORKER_TOKEN_ENV,
     WORKER_INSTANCE_ID_ENV,
