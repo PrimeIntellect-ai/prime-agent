@@ -11,6 +11,11 @@ the preceding seven-day window, and MAU with the preceding 30-day window. Succes
 rate changes use percentage points. A zero baseline shows `new (baseline 0)`;
 no completed runs gives an unavailable success rate.
 
+The Slack message marks increases with 🟢 ↑ and decreases with 🔴 ↓; unchanged
+values keep a neutral arrow. These indicate direction, not whether a change is
+good or bad. A divider separates the metrics from the dashboard link. Methodology
+stays in this document rather than appearing as a footer in each report.
+
 Active users count anonymous installations that emitted `agent run completed`,
 including successful, failed, and aborted runs. They do not count verified people.
 Tokens sum `total_tokens`, including recorded cache usage; they do not measure
