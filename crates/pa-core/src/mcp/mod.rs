@@ -567,8 +567,8 @@ impl McpManager {
     /// Register the `mcp.*` host-request handlers: `refresh`/`config`/`begin_login` dispatch
     /// plumbing plus the inventory surface the kernel's generic `mcp` module reaches for.
     ///
-    /// The inventory handlers capture this manager so each request serves LIVE views; view
-    /// computation reads the blocking auth-store snapshot.
+    /// The `config` and inventory handlers capture this manager so each request serves
+    /// live views; inventory view computation reads the blocking auth-store snapshot.
     ///
     /// # Panics
     ///
@@ -606,22 +606,13 @@ impl McpManager {
             Ok(number.min(max_limit as u64) as usize)
         }
 
-        let (
-            auth,
-            acp_servers,
-            usage_refresh,
-            acp_servers_for_config,
-            integrations,
-            usage_config,
-            begin_login,
-        ) = {
+        let (auth, acp_servers, usage_refresh, acp_servers_for_config, usage_config, begin_login) = {
             let manager = manager.lock().unwrap();
             (
                 manager.auth_storage.clone(),
                 manager.acp_servers.clone(),
                 manager.usage_report.clone(),
                 manager.acp_servers.clone(),
-                manager.integrations.clone(),
                 manager.usage_report.clone(),
                 manager.begin_login.clone(),
             )
@@ -666,10 +657,11 @@ impl McpManager {
                 })
             }),
         );
+        let manager_for_config = std::sync::Arc::clone(manager);
         handlers.register(
             "mcp.config",
             host_handler(move |payload| {
-                let integrations = integrations.clone();
+                let manager = std::sync::Arc::clone(&manager_for_config);
                 let acp_servers = acp_servers_for_config.clone();
                 let usage_config = usage_config.clone();
                 Box::pin(async move {
@@ -693,7 +685,11 @@ impl McpManager {
                         }
                         return Ok(config);
                     }
-                    let Some(integration) = integrations.get(&server) else {
+                    let integration = {
+                        let manager = manager.lock().unwrap();
+                        manager.integrations.get(&server).cloned()
+                    };
+                    let Some(integration) = integration else {
                         return Ok(json!({}));
                     };
                     if !integration.user_declared {
