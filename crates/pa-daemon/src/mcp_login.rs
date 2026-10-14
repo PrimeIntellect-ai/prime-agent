@@ -280,7 +280,6 @@ mod tests {
         let login = tokio::spawn(async move {
             begin_login(HostRequestPayload {
                 data: json!({ "server": "fixture" }),
-                cell_source_code: None,
             })
             .await
         });
@@ -407,7 +406,6 @@ mod tests {
         let begin_login = handlers.get("mcp.begin_login").expect("wired").clone();
         let error = begin_login(HostRequestPayload {
             data: json!({ "server": "nope" }),
-            cell_source_code: None,
         })
         .await
         .unwrap_err()

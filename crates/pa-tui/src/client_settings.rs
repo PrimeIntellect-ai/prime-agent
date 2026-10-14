@@ -18,6 +18,13 @@ pub trait ClientSettings: Send + Sync {
         anyhow::bail!("Harness refinement settings are unavailable")
     }
 
+    /// Automatic compaction percentage ceiling; output headroom may trigger earlier.
+    fn compaction_threshold_percent(&self) -> f64;
+    /// Persist the percentage globally.
+    ///
+    /// # Errors
+    /// Returns an error for invalid percentages or failed persistence.
+    fn set_compaction_threshold_percent(&self, percent: f64) -> Result<()>;
     /// `theme` (TS `getTheme`/`setTheme`).
     fn theme(&self) -> Option<String>;
     /// Persists `theme` to the global scope.

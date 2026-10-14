@@ -14,10 +14,7 @@ use pa_types::ai::{
 use pa_types::session::AgentMessage as SessionMessage;
 
 fn payload(data: Value) -> HostRequestPayload {
-    HostRequestPayload {
-        data,
-        cell_source_code: None,
-    }
+    HostRequestPayload { data }
 }
 
 fn model_info() -> ModelInfo {

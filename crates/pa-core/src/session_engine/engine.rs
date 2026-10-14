@@ -248,6 +248,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // Captured before `settings` moves into the resource loader: the
     // compaction budget and the auto-refine gates.
     let compaction_settings = settings.settings().compaction.clone().unwrap_or_default();
+    let compaction_threshold_percent = settings.get_compaction_threshold_percent();
     let auto_refine_gates =
         super::refine::AutoRefineGates::from_settings(settings.settings().auto_refine.as_ref());
     // Request timing: the settings half of the flag is read once here
@@ -717,6 +718,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // settings (TS `getCompactionSettings`): `/compact` matches the
     // `compact.*` turn-boundary tool's `keepRecentTokens`/`reserveTokens`.
     session.set_compaction_settings(crate::session_engine::compaction::CompactionSettings {
+        threshold_percent: compaction_threshold_percent,
         enabled: compaction_settings.enabled.unwrap_or(true),
         reserve_tokens: compaction_settings
             .reserve_tokens
