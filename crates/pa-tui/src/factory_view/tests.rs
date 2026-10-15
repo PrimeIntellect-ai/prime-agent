@@ -686,6 +686,19 @@ fn the_key_loop_resolves_the_orchestration_actions() {
             run_id: "run-def67890".to_string()
         }
     );
+    // Right mirrors Enter and Left mirrors Esc: Right opens the action
+    // rows, Left backs out to the feed, then Left closes the page.
+    assert_eq!(view.handle_key("right", &kb()), FactoryViewAction::None);
+    assert!(
+        frame_text(&mut view).join("\n").contains("actions: second-run"),
+        "right did not open the action rows"
+    );
+    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::None);
+    assert!(
+        !frame_text(&mut view).join("\n").contains("actions: second-run"),
+        "left did not back out of the action rows"
+    );
+    assert_eq!(view.handle_key("left", &kb()), FactoryViewAction::Close);
     // Esc backs out of the action rows to the feed, then closes.
     let _ = view.handle_key("enter", &kb());
     assert_eq!(view.handle_key("escape", &kb()), FactoryViewAction::None);
