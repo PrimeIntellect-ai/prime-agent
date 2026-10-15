@@ -58,7 +58,6 @@ impl ReplKernelManager {
     pub(crate) async fn enqueue_request(
         &self,
         request: Request,
-        code: &str,
         opts: ExecuteOptions,
         execution_timeout_ms: Option<u64>,
     ) -> anyhow::Result<InternalExecuteResult> {
@@ -104,7 +103,7 @@ impl ReplKernelManager {
         if lock(&self.inner.guarded).protocol_repair.is_some() && !opts.protocol_repair {
             drop(queue_guard);
             self.wait_for_protocol_repair(opts.signal.as_ref()).await?;
-            return Box::pin(self.enqueue_request(request, code, opts, execution_timeout_ms)).await;
+            return Box::pin(self.enqueue_request(request, opts, execution_timeout_ms)).await;
         }
 
         self.wait_for_active_execution_to_clear_for_reuse(opts.signal.as_ref())
@@ -131,7 +130,7 @@ impl ReplKernelManager {
         let merged = merge_signals(opts.signal.as_ref(), timeout_signal.clone());
         let mut opts = opts;
         opts.signal = merged;
-        let result = self.execute_inner(request, code, opts, started).await;
+        let result = self.execute_inner(request, opts, started).await;
         if let Some(signal) = &timeout_signal {
             signal.abort();
         }
@@ -146,7 +145,6 @@ impl ReplKernelManager {
     async fn execute_inner(
         &self,
         request: Request,
-        code: &str,
         opts: ExecuteOptions,
         started: Instant,
     ) -> anyhow::Result<InternalExecuteResult> {
@@ -184,7 +182,6 @@ impl ReplKernelManager {
         };
         let execution = Arc::new(ActiveExecution {
             request_id: request_id.clone(),
-            code: code.to_string(),
             started,
             max_chars,
             namespace_code,
@@ -230,10 +227,6 @@ impl ReplKernelManager {
                 // one (see busy-after-interrupt).
                 inner.force_abort(&execution);
             });
-        }
-
-        if !execution.opts.internal {
-            lock(&self.inner.guarded).last_cell_code = Some(code.to_string());
         }
 
         let mut frame = request.to_json();

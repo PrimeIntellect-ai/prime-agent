@@ -626,7 +626,6 @@ impl SessionUi {
         view.queue_selected = None;
         view.chrome.chat_name = self.session_display();
         view.chrome.context = self.context;
-        self.update_subagent_summary(view);
         // The rebuilt transcript invalidates the announcement row tracking;
         // the goal state itself carries over (seeded at attach).
         self.goal_view.reset_row_tracking();

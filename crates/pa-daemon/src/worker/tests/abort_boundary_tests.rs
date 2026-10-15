@@ -682,3 +682,307 @@ async fn cancel_owned_admission_aborts_the_running_prompt() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The faux-script worker for the abort-and-send probes: a fresh created
+/// session whose first response holds for 60s (the streaming turn the
+/// abort cuts) and whose next turn answers `reply`. The faux registry is
+/// process-global: hold `FAUX_TEST_LOCK` across the flow.
+async fn held_turn_worker(
+    active_session_id: &str,
+    name: &str,
+    reply: &str,
+) -> (std::sync::Arc<Worker>, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pa-worker-abort-am-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = WorkerConfig {
+        socket_path: dir.join("worker.sock"),
+        supervisor_socket_path: PathBuf::new(),
+        token: "token".to_string(),
+        worker_instance_id: String::new(),
+        active_session_id: active_session_id.to_string(),
+        agent_dir: dir.join("agent"),
+        recovery_journal_path: dir.join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "held reply", "delayMs": 60000 },
+                reply,
+            ],
+        })),
+    };
+    let worker = std::sync::Arc::new(Worker::new(config, None));
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": "/tmp", "name": name }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    (worker, dir)
+}
+
+/// Start the held turn and wait until its run registers (ENG-5991's
+/// `waitForToolStart` discipline): the abort must land on the live run.
+async fn start_registered_held_turn(worker: &Worker, active_session_id: &str, prompt: &str) {
+    let held = worker
+        .dispatch(
+            "prompt",
+            &json!({ "activeSessionId": active_session_id, "message": prompt }),
+        )
+        .await;
+    assert!(held.success, "prompt failed: {held:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let registered = worker
+            .agent_engine
+            .as_ref()
+            .and_then(|engine| {
+                engine
+                    .turn_agent
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .and_then(|agent| agent.signal())
+            .is_some();
+        if registered {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the held turn's run never registered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Queue one agent message from `source-agent` on the busy session.
+async fn queue_agent_message(worker: &Worker, active_session_id: &str, body: &str) {
+    let delivered = worker
+        .dispatch(
+            "worker_deliver_message",
+            &json!({
+                "targetActiveSessionId": active_session_id,
+                "message": body,
+                "sender": {
+                    "activeSessionId": "source-session",
+                    "sessionName": "source-agent",
+                },
+            }),
+        )
+        .await;
+    assert!(
+        delivered.success,
+        "worker_deliver_message failed: {delivered:?}"
+    );
+}
+
+/// The delivered `agent_message` card (the custom row the turn renders) and
+/// the transcript's assistant texts, in one read.
+async fn agent_message_transcript(worker: &Worker) -> (Option<Value>, Vec<String>) {
+    let messages = worker.dispatch("get_messages", &json!({})).await;
+    assert!(messages.success, "get_messages failed: {messages:?}");
+    let wire = messages
+        .data
+        .as_ref()
+        .and_then(|data| data.get("messages"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let row = wire
+        .iter()
+        .find(|row| row.get("customType").and_then(Value::as_str) == Some("agent_message"))
+        .cloned();
+    let replies: Vec<String> = wire
+        .iter()
+        .filter(|message| crate::types::message_role(message) == Some("assistant"))
+        .map(crate::types::message_text)
+        .collect();
+    (row, replies)
+}
+
+/// The Esc shape: a queued agent message rides the abort-and-send funnel —
+/// the aborted turn settles, then the parked row delivers as the next turn
+/// (TS's ctrl+c must never strand agent mail behind the suspension).
+#[tokio::test]
+// the faux registry is process-global: the guard must span the async flow
+#[allow(clippy::await_holding_lock)]
+async fn abort_and_send_queued_delivers_the_parked_agent_message() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (worker, dir) =
+        held_turn_worker("abort-am-session", "abort-am", "agent message reply").await;
+    let mut subscription = worker.events.subscribe();
+    start_registered_held_turn(
+        &worker,
+        "abort-am-session",
+        "held turn for the agent-message abort probe",
+    )
+    .await;
+    queue_agent_message(&worker, "abort-am-session", "the parked agent body").await;
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    assert_eq!(aborted.command, "abort_and_send_queued");
+    let idle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.dispatch("wait_for_idle", &json!({})),
+    )
+    .await;
+    assert!(idle.is_ok(), "the session never went idle after the abort");
+    assert!(idle.unwrap().success, "wait_for_idle failed");
+    // The next turn's prompt IS the agent-message prompt: the delivered card
+    // renders the sender-labeled body, and the turn ran to its reply.
+    let (row, replies) = agent_message_transcript(&worker).await;
+    let row = row.expect("the parked agent message delivered as the agent_message row");
+    assert_eq!(
+        crate::types::message_text(&row),
+        "[agent-message from source-agent]\n\nthe parked agent body",
+        "the delivered row renders the sender-labeled prompt: {row:?}"
+    );
+    assert!(
+        replies.iter().any(|reply| reply == "agent message reply"),
+        "the agent-message turn ran to its reply: {replies:?}"
+    );
+    // The aborted held turn ends BEFORE the agent message's turn starts.
+    let events = session_events_since(&mut subscription);
+    let agent_starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(agent_starts.len(), 2, "one turn per delivery: {events:?}");
+    let aborted_row = events
+        .iter()
+        .position(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_end")
+                && event["message"]["role"] == "assistant"
+                && event["message"].get("stopReason").and_then(Value::as_str) == Some("aborted")
+        })
+        .expect("the held turn never surfaced its aborted row");
+    assert!(
+        aborted_row < agent_starts[1],
+        "the abort must end the held turn before the agent message's turn starts: {events:?}"
+    );
+    // The queue drained and the suspension is gone.
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "the queue must fully drain"
+        );
+        assert!(
+            !core.queued_input_suspended,
+            "the abort-and-send suspension never cleared"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A held input pause defers, never parks, the abort-and-send funnel: the
+/// abort clears the suspension, the pump holds the delivery while the pause
+/// stands, and the pause release delivers the parked agent message.
+#[tokio::test]
+// the faux registry is process-global: the guard must span the async flow
+#[allow(clippy::await_holding_lock)]
+async fn abort_and_send_queued_under_a_held_pause_delivers_on_the_release() {
+    let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (worker, dir) =
+        held_turn_worker("abort-pause-session", "abort-pause", "agent message reply").await;
+    start_registered_held_turn(
+        &worker,
+        "abort-pause-session",
+        "held turn for the pause abort probe",
+    )
+    .await;
+    // The input pause holds the pump while the abort lands.
+    let pause = worker
+        .dispatch(
+            "acquire_session_input_pause",
+            &json!({ "leaseKey": "abort-pause-lease" }),
+        )
+        .await;
+    assert!(
+        pause.success,
+        "acquire_session_input_pause failed: {pause:?}"
+    );
+    let pause_id = pause
+        .data
+        .as_ref()
+        .and_then(|data| data.get("pauseId"))
+        .and_then(Value::as_str)
+        .expect("the pause id")
+        .to_string();
+    queue_agent_message(&worker, "abort-pause-session", "the parked agent body").await;
+    let aborted = worker.dispatch("abort_and_send_queued", &json!({})).await;
+    assert!(aborted.success, "abort_and_send_queued failed: {aborted:?}");
+    // The aborted turn settles; the pause holds the parked row.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let (busy, queued) = {
+            let core = worker.core.lock().unwrap();
+            (core.busy, core.steering.len())
+        };
+        if !busy && queued == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the aborted turn never settled with the agent row parked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let (row, _) = agent_message_transcript(&worker).await;
+    assert!(
+        row.is_none(),
+        "the agent message must not deliver while the pause holds"
+    );
+    // The release arms notify the pump; the parked row delivers.
+    let released = worker
+        .dispatch(
+            "release_session_input_pause",
+            &json!({ "pauseId": pause_id }),
+        )
+        .await;
+    assert!(
+        released.success,
+        "release_session_input_pause failed: {released:?}"
+    );
+    let idle = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        worker.dispatch("wait_for_idle", &json!({})),
+    )
+    .await;
+    assert!(
+        idle.is_ok(),
+        "the session never went idle after the pause released"
+    );
+    assert!(idle.unwrap().success, "wait_for_idle failed");
+    let (row, replies) = agent_message_transcript(&worker).await;
+    let row = row.expect("the parked agent message delivered after the release");
+    assert_eq!(
+        crate::types::message_text(&row),
+        "[agent-message from source-agent]\n\nthe parked agent body",
+        "the delivered row renders the sender-labeled prompt: {row:?}"
+    );
+    assert!(
+        replies.iter().any(|reply| reply == "agent message reply"),
+        "the agent-message turn ran to its reply: {replies:?}"
+    );
+    {
+        let core = worker.core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "the queue must fully drain"
+        );
+        assert!(
+            !core.queued_input_suspended,
+            "the abort must clear the suspension under the pause"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

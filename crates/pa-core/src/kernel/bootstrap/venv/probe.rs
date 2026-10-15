@@ -19,6 +19,9 @@ fn run_quiet(command: &str, args: &[&str]) -> bool {
         .stderr(Stdio::null());
     // Hidden window on Windows (TS `spawnHidden`).
     crate::platform::process::set_no_window(&mut child);
+    if cfg!(windows) {
+        child.env("PYTHONUTF8", "1");
+    }
     matches!(child.status(), Ok(status) if status.success())
 }
 

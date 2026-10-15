@@ -1,4 +1,303 @@
 use super::*;
+use std::fmt::Write as FmtWrite;
+
+#[test]
+fn review_markdown_escaped_delimiters_keep_their_emphasis() {
+    let style = MarkdownStyle::default();
+    for (text, shown, modifier) in [
+        (r"*a\*b*", "a*b", Modifier::ITALIC),
+        (r"**a\*b**", "a*b", Modifier::BOLD),
+        (r"***a\*b***", "a*b", Modifier::BOLD | Modifier::ITALIC),
+        (r"~~a\~~b~~", "a~~b", Modifier::CROSSED_OUT),
+    ] {
+        let spans = render_inline(text, &style);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>(),
+            shown
+        );
+        assert!(
+            spans
+                .iter()
+                .all(|span| span.style.add_modifier.contains(modifier)),
+            "{text}"
+        );
+    }
+    // Two backslashes escape each other; the following star closes emphasis.
+    let spans = render_inline(r"*a\\* tail", &style);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "a\\ tail"
+    );
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    assert_eq!(spans.last().unwrap().style.add_modifier, Modifier::empty());
+}
+
+#[test]
+fn review_markdown_destinations_balance_before_a_title() {
+    let style = MarkdownStyle::default();
+    // The pinned real TS frame accepts this destination before a quoted title.
+    let permissive = "[t](foo(bar \"title\")";
+    let spans = super::render_inline(permissive, &style);
+    assert_eq!(
+        spans,
+        vec![
+            Span::styled(
+                format!(
+                    "{}t{}",
+                    crate::hyperlinks::osc8_open("foo(bar"),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                style.body.add_modifier(Modifier::UNDERLINED)
+            ),
+            Span::styled(" (foo(bar)", style.link_url)
+        ],
+    );
+    for capability in [false, true] {
+        crate::hyperlinks::set_hyperlinks_override(Some(capability));
+        for text in ["[t](foo(bar) \"title\")", r#"[t](foo\(bar\) "a \"b\"")"#] {
+            let mut spans = super::render_inline(text, &style);
+            let ranges = crate::hyperlinks::frame_link_ranges(&[spans.clone()]);
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0].url, "foo(bar)");
+            // Visible text excludes zero-width metadata under either capability.
+            crate::hyperlinks::strip_osc8(&mut spans);
+            assert_eq!(
+                spans,
+                vec![
+                    Span::styled("t", style.body.add_modifier(Modifier::UNDERLINED)),
+                    Span::styled(" (foo(bar))", style.link_url)
+                ]
+            );
+        }
+    }
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn review_markdown_unmatched_single_in_strong_matches_ts_emphasis_pairing() {
+    let style = MarkdownStyle::default();
+    // Actual TS styled frame: one literal star, then italic a*b; the escaped
+    // star is literal while the next star opens a nested emphasis span.
+    let spans = render_inline(r"**a\**b**", &style);
+    assert_eq!(
+        spans
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "*a*b"
+    );
+    assert_eq!(spans[0], Span::styled("*", style.body));
+    assert!(spans
+        .iter()
+        .skip(1)
+        .all(|span| span.style.add_modifier == Modifier::ITALIC));
+    let complete = render_inline("**outer *inner* tail**", &style);
+    assert_eq!(
+        complete
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>(),
+        "outer inner tail"
+    );
+    assert!(complete
+        .iter()
+        .all(|span| span.style.add_modifier.contains(Modifier::BOLD)));
+    // An intraword single star is both-flanking; marked keeps this strong.
+    let intraword = render_inline("**a*b**", &style);
+    assert_eq!(
+        intraword,
+        vec![Span::styled("a*b", style.body.add_modifier(Modifier::BOLD))]
+    );
+    // Pinned marked18.0.7 tokens also use literal '*' + nested em for the
+    // ordinary left-only inner opener; it is not restricted to an escape case.
+    let ordinary = render_inline("**a *b**", &style);
+    assert_eq!(
+        ordinary,
+        vec![
+            Span::styled("*", style.body),
+            Span::styled("a ", style.body.add_modifier(Modifier::ITALIC)),
+            Span::styled("b", style.body.add_modifier(Modifier::ITALIC)),
+        ]
+    );
+}
+
+// Visible-text tests discard metadata only in the legacy-capability fixture;
+// raw metadata contracts use super::render_inline/render_markdown explicitly.
+fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
+    let mut line = super::render_inline(text, style);
+    if !crate::hyperlinks::hyperlinks_enabled() {
+        crate::hyperlinks::strip_osc8(&mut line);
+    }
+    line
+}
+
+fn render_markdown(text: &str, width: usize, style: &MarkdownStyle) -> Vec<Line> {
+    let mut rows = super::render_markdown(text, width, style);
+    if !crate::hyperlinks::hyperlinks_enabled() {
+        for row in &mut rows {
+            crate::hyperlinks::strip_osc8(row);
+        }
+    }
+    rows
+}
+
+#[test]
+fn review_markdown_legacy_links_keep_metadata_and_session_base() {
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let mut style = MarkdownStyle {
+        link_base_url: Some(url::Url::parse("file:///workspace/project/").unwrap()),
+        ..MarkdownStyle::default()
+    };
+    let line = super::render_inline("[link](url)", &style);
+    assert_eq!(
+        line,
+        vec![
+            Span::styled(
+                format!(
+                    "{}link{}",
+                    crate::hyperlinks::osc8_open("file:///workspace/project/url"),
+                    crate::hyperlinks::OSC8_CLOSE
+                ),
+                style.body.add_modifier(Modifier::UNDERLINED)
+            ),
+            Span::styled(" (url)", style.link_url),
+        ]
+    );
+    let mut cache = MarkdownBlockCache::default();
+    let text = "[link](url)\n\ntail";
+    let before = super::render_markdown_tagged(text, 80, &style, "", &mut cache);
+    style.link_base_url = Some(url::Url::parse("file:///workspace/other/").unwrap());
+    let after = super::render_markdown_tagged(text, 80, &style, "", &mut cache);
+    assert_ne!(before, after);
+    assert_eq!(after, super::render_markdown(text, 80, &style));
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn review_markdown_outdented_nested_text_matches_captured_ts_frame() {
+    let text = "1. parent\n   - child\n     - leaf\n   continuation\n2. sibling";
+    let style = MarkdownStyle::default();
+    let rows = render_markdown(text, 80, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|row| row.iter().map(|span| span.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "1. parent",
+            "    - child",
+            "          - leaf",
+            "continuation",
+            "2. sibling"
+        ]
+    );
+    for width in [40, 80, 120] {
+        assert_eq!(
+            markdown_row_count(text, width, &style),
+            render_markdown(text, width, &style).len()
+        );
+    }
+}
+
+#[test]
+fn review_markdown_adjacent_emphasis_keeps_the_next_opener() {
+    let style = MarkdownStyle::default();
+    let spans = render_inline("**bold***italic*", &style);
+    let actual: Vec<_> = spans
+        .iter()
+        .map(|s| (s.content.as_str(), s.style.add_modifier))
+        .collect();
+    assert_eq!(
+        actual,
+        vec![("bold", Modifier::BOLD), ("italic", Modifier::ITALIC)]
+    );
+    // A real nested opener still owns the first star of the triple closer.
+    let spans = render_inline("**outer *inner***", &style);
+    assert_eq!(
+        spans.iter().map(|s| s.content.as_str()).collect::<String>(),
+        "outer inner"
+    );
+    assert!(spans
+        .last()
+        .unwrap()
+        .style
+        .add_modifier
+        .contains(Modifier::BOLD | Modifier::ITALIC));
+    for text in ["**outer *inner* tail***next*", "**outer `*` tail***next*"] {
+        let spans = render_inline(text, &style);
+        let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+        let expected = if text.contains('`') {
+            "outer * tailnext"
+        } else {
+            "outer inner tailnext"
+        };
+        assert_eq!(joined, expected);
+        let next = spans.last().unwrap();
+        assert_eq!(next.content, "next");
+        assert_eq!(next.style.add_modifier, Modifier::ITALIC);
+    }
+}
+
+#[test]
+fn review_markdown_link_titles_skip_escaped_quotes() {
+    let style = MarkdownStyle::default();
+    for text in [r#"[t](url "a \"b\"")"#, r"[t](url 'a \'b\'')"] {
+        let mut spans = render_inline(text, &style);
+        crate::hyperlinks::strip_osc8(&mut spans);
+        assert_eq!(
+            spans.iter().map(|s| s.content.as_str()).collect::<String>(),
+            "t (url)"
+        );
+        assert!(spans[0].style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+}
+
+#[test]
+fn review_markdown_deep_lists_keep_text_with_a_bounded_tree() {
+    let text = (0..96).fold(String::new(), |mut text, n| {
+        writeln!(text, "{}- item{n}", "  ".repeat(n)).expect("writing a String cannot fail");
+        text
+    });
+    let blocks = parse_blocks(&text);
+    let mut pending = Vec::new();
+    for block in &blocks {
+        if let BlockKind::List(list) = &block.kind {
+            pending.push((list, 0));
+        }
+    }
+    let mut deepest = 0;
+    let mut literal_tail = false;
+    while let Some((list, depth)) = pending.pop() {
+        deepest = deepest.max(depth);
+        for item in &list.items {
+            for part in &item.parts {
+                match part {
+                    ListPart::List(child) => pending.push((child, depth + 1)),
+                    ListPart::Text(text) | ListPart::LazyText(text) => {
+                        literal_tail |= text == "- item95";
+                    }
+                }
+            }
+        }
+    }
+    assert!(deepest <= 64, "nested tree depth was {deepest}");
+    assert!(
+        literal_tail,
+        "overflow nesting must preserve literal content"
+    );
+    let style = MarkdownStyle::default();
+    assert_eq!(
+        markdown_row_count(&text, 16_000, &style),
+        render_markdown(&text, 16_000, &style).len()
+    );
+}
 
 /// The pre-fix overlong-word break loop from origin/rust (the quadratic re-measure version): the
 /// output oracle for [`wrap_spans_into`]'s arithmetic-tracked rewrite — every corpus below must
@@ -101,7 +400,7 @@ fn assert_wrap_parity(spans: &[Span], widths: &[usize]) {
         let mut legacy: Vec<Line> = Vec::new();
         legacy_wrap_spans(spans, width, &mut legacy);
         let mut current: Vec<Line> = Vec::new();
-        wrap_spans(spans, width, Style::default(), &mut current);
+        wrap_spans(spans, width, &mut current);
         assert_eq!(
             legacy, current,
             "wrap parity (styled spans) broke at width {width}: spans={spans:?}"
@@ -205,7 +504,7 @@ fn wrap_stress_megabyte_monoword_candidate_only() {
     let spans = vec![Span::styled(token.clone(), Style::default())];
     let width = 80usize;
     let mut current: Vec<Line> = Vec::new();
-    wrap_spans(&spans, width, Style::default(), &mut current);
+    wrap_spans(&spans, width, &mut current);
     // 1048576 chars at 80 columns: CEIL rows (a floor here fails the 16-char remainder)
     assert_eq!(
         current.len(),
@@ -249,7 +548,7 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
         .iter()
         .map(|s| crate::hyperlinks::strip_osc8_content(&s.content))
         .collect();
-    assert_eq!(visible, "docs [https://x.dev/a]");
+    assert_eq!(visible, "docs (https://x.dev/a)");
     // A narrow heading wraps like any row: the bracket — closing `]` included —
     // lands on its own row instead of clipping (count==paint at every width).
     let rows = render_markdown("# [docs](https://x.dev/a)", 20, &style);
@@ -264,7 +563,7 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
         .collect();
     assert_eq!(
         visible,
-        vec!["docs".to_string(), "[https://x.dev/a]".to_string()]
+        vec!["docs".to_string(), "(https://x.dev/a)".to_string()]
     );
     for width in 1..40 {
         assert_eq!(
@@ -284,21 +583,26 @@ fn heading_link_wraps_keeps_the_affordance_and_counts() {
 }
 
 #[test]
-fn heading_tapers_code_and_body_that_merely_match_the_link_url_style() {
+fn heading_keeps_code_and_bracket_spans_by_origin() {
     // A theme can collide `mdCode`/`mdBody` onto the same color as `mdLinkUrl`; the
-    // taper reads the bracket slots by origin, not style equality.
+    // taper reads the code and bracket spans by origin, not style equality: the
+    // codespan keeps its own color while plain text and labels taper to the h1
+    // heading style (bold + underline), the label keeping its underline affordance.
     let mut style = MarkdownStyle::default();
     style.code = style.link_url;
     style.body = style.link_url;
     crate::hyperlinks::set_hyperlinks_override(Some(false));
     let lines = render_markdown("# `c` [d](https://x.dev/a)", 40, &style);
+    let taper = style
+        .heading
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
     assert_eq!(
         lines,
         vec![vec![
-            Span::styled("c", style.heading),
-            Span::styled(" ", style.heading),
-            Span::styled("d", style.heading.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(" [https://x.dev/a]", style.link_url),
+            Span::styled("c", style.code),
+            Span::styled(" ", taper),
+            Span::styled("d", taper),
+            Span::styled(" (https://x.dev/a)", style.link_url),
         ]]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -544,7 +848,7 @@ fn inline_bold_code_link() {
     let style = MarkdownStyle::default();
     let spans = render_inline("a **b** `c` [d](http://e)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " [http://e]"]);
+    assert_eq!(texts, vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -559,7 +863,7 @@ fn legacy_link_row_is_underlined_and_shows_the_url() {
         vec![
             "see ".to_string(),
             "docs".to_string(),
-            " [https://x.dev/a]".to_string()
+            " (https://x.dev/a)".to_string()
         ]
     );
     assert!(spans[1].style.add_modifier.contains(Modifier::UNDERLINED));
@@ -585,7 +889,7 @@ fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
     assert_eq!(
         joined,
         format!(
-            "see {}docs{} [https://x.dev/a]",
+            "see {}docs{} (https://x.dev/a)",
             crate::hyperlinks::osc8_open("https://x.dev/a"),
             crate::hyperlinks::OSC8_CLOSE
         )
@@ -597,7 +901,7 @@ fn osc8_gated_link_row_wraps_the_label_in_a_hyperlink_and_shows_the_url() {
     assert_eq!(spans[2].style.fg, style.link_url.fg);
     // The sequences are zero-width: the row measures like plain text plus the
     // bracketed URL.
-    assert_eq!(str_width(&joined), str_width("see docs [https://x.dev/a]"));
+    assert_eq!(str_width(&joined), str_width("see docs (https://x.dev/a)"));
     // Windows drive-letter targets classify as file paths; the label is
     // the URL, so no bracket follows it.
     let drive = render_inline("[c:\\src](c:\\src)", &style);
@@ -622,7 +926,7 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
         spans,
         vec![
             Span::styled("math", style.body.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(format!(" [{url}]"), style.link_url),
+            Span::styled(format!(" ({url})"), style.link_url),
         ]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -639,7 +943,7 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
                 ),
                 style.body.add_modifier(Modifier::UNDERLINED),
             ),
-            Span::styled(format!(" [{url}]"), style.link_url),
+            Span::styled(format!(" ({url})"), style.link_url),
         ]
     );
     crate::hyperlinks::set_hyperlinks_override(None);
@@ -647,21 +951,45 @@ fn balanced_parens_in_a_link_destination_stay_intact() {
 
 #[test]
 fn escaped_parens_never_open_or_close_the_link_destination() {
-    // An escaped paren rides verbatim without counting toward the balance: `\(`
-    // does not swallow the real closer, and `[a](b\)` is plain text.
+    // Marked consumes the escape before publishing token.href. Escaped parens
+    // stay literal without affecting balance; the visible URL and OSC8 href
+    // both use that unescaped destination. A sole escaped closer is not a link.
     crate::hyperlinks::set_hyperlinks_override(Some(false));
-    let style = MarkdownStyle::default();
+    let style = MarkdownStyle {
+        link_base_url: Some(url::Url::parse("file:///fixture/root/").unwrap()),
+        ..MarkdownStyle::default()
+    };
     let spans = render_inline("[a](b\\(c)", &style);
     assert_eq!(
         spans,
         vec![
             Span::styled("a", style.body.add_modifier(Modifier::UNDERLINED)),
-            Span::styled(" [b\\(c]", style.link_url),
+            Span::styled(" (b(c)", style.link_url),
         ]
     );
+    for (text, destination, href) in [
+        (r"[a](b\(c)", "b(c", "file:///fixture/root/b(c"),
+        (r"[a](b\))", "b)", "file:///fixture/root/b)"),
+    ] {
+        assert_eq!(
+            super::render_inline(text, &style),
+            vec![
+                Span::styled(
+                    format!(
+                        "{}a{}",
+                        crate::hyperlinks::osc8_open(href),
+                        crate::hyperlinks::OSC8_CLOSE
+                    ),
+                    style.body.add_modifier(Modifier::UNDERLINED)
+                ),
+                Span::styled(format!(" ({destination})"), style.link_url),
+            ]
+        );
+    }
     let plain = render_inline("[a](b\\)", &style);
     assert_eq!(plain.len(), 1);
-    assert_eq!(plain[0].content, "[a](b\\)");
+    // Not a link, but marked's escape rule still processes the backslash.
+    assert_eq!(plain[0].content, "[a](b)");
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -675,12 +1003,12 @@ fn the_url_bracket_scrubs_terminal_control_bytes() {
     let url = "https://x.dev/\u{1b}]52;c;base64";
     let spans = render_inline(&format!("[a]({url})"), &style);
     let bracket = spans.last().expect("bracket span");
-    assert_eq!(bracket.content, " [https://x.dev/%1B]52;c;base64]");
+    assert_eq!(bracket.content, " (https://x.dev/%1B]52;c;base64)");
     // The bare-url autolink form hardens the same way (the regex tail only excludes
     // whitespace); the www form's href gains its scheme, so the bracket shows.
     let www = render_inline("www.x.dev/\u{1b}]52;c=base64", &style);
     let bracket = www.last().expect("bracket span");
-    assert_eq!(bracket.content, " [http://www.x.dev/%1B]52;c=base64]");
+    assert_eq!(bracket.content, " (http://www.x.dev/%1B]52;c=base64)");
     assert!(
         !bracket.content.contains('\u{1b}'),
         "no raw escape byte in the visible bracket"
@@ -715,7 +1043,7 @@ fn link_url_bracket_wraps_and_counts_like_text() {
         visible,
         vec![
             "see docs".to_string(),
-            "[https://x.dev/a]".to_string(),
+            "(https://x.dev/a)".to_string(),
             "tail".to_string()
         ],
         "the bracket wraps like normal text"
@@ -749,7 +1077,7 @@ fn long_link_url_wraps_without_breaking_the_clickable_region() {
         .collect();
     // The wrap drops the boundary gap (a wrapped row never carries its leading or
     // trailing space), so the visible text is `docs` then the bracketed URL.
-    assert_eq!(visible, format!("docs[{url}]"));
+    assert_eq!(visible, format!("docs({url})"));
     for width in 1..40 {
         assert_eq!(
             markdown_row_count(&format!("[docs]({url})"), width, &style),
@@ -853,7 +1181,7 @@ fn www_autolink_gains_scheme_and_shows_the_url_in_both_forms() {
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
     assert_eq!(
         texts,
-        vec!["www.example.com/path", " [http://www.example.com/path]"]
+        vec!["www.example.com/path", " (http://www.example.com/path)"]
     );
     assert!(
         spans[0].style.add_modifier.contains(Modifier::UNDERLINED),
@@ -867,7 +1195,7 @@ fn www_autolink_gains_scheme_and_shows_the_url_in_both_forms() {
     assert_eq!(
         joined,
         format!(
-            "{}www.example.com/path{} [http://www.example.com/path]",
+            "{}www.example.com/path{} (http://www.example.com/path)",
             crate::hyperlinks::osc8_open("http://www.example.com/path"),
             crate::hyperlinks::OSC8_CLOSE
         )
@@ -941,7 +1269,7 @@ fn bare_url_is_not_autolinked_inside_a_link_label() {
     let style = MarkdownStyle::default();
     let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
     let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
-    assert_eq!(texts, vec!["see https://in.dev/x", " [https://out.dev/y]"]);
+    assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
     crate::hyperlinks::set_hyperlinks_override(None);
 }
 
@@ -1013,7 +1341,7 @@ fn styled_span_boundaries_keep_their_spaces() {
 
 fn wrap_spans_to_text(spans: &[Span], width: usize) -> String {
     let mut lines: Vec<Line> = Vec::new();
-    wrap_spans(spans, width, Style::default(), &mut lines);
+    wrap_spans(spans, width, &mut lines);
     lines
         .iter()
         .flat_map(|l| l.iter().map(|s| s.content.as_str()))
@@ -1035,6 +1363,532 @@ fn wrapping() {
 fn quote_block() {
     let style = MarkdownStyle::default();
     let lines = render_markdown("> wisdom", 40, &style);
-    assert_eq!(lines[0][0].content, "▐ ");
+    assert_eq!(lines[0][0].content, "│ ");
     assert_eq!(lines[0][1].content, "wisdom");
+}
+
+#[test]
+fn emphasis_renders_chalk_modifiers() {
+    // TS `theme.bold/italic/strikethrough` are chalk; chalk emits its SGR modifiers in
+    // any color terminal (supports-color level >= 1 whenever stdout is a TTY), so
+    // `**bold**`, `*italic*`, and `~~strike~~` carry BOLD/ITALIC/CROSSED_OUT.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("**b** *i* ~~s~~", 40, &style);
+    assert_eq!(lines.len(), 1);
+    let spans = &lines[0];
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    assert_eq!(find("b").style.add_modifier, Modifier::BOLD);
+    assert_eq!(find("i").style.add_modifier, Modifier::ITALIC);
+    assert_eq!(find("s").style.add_modifier, Modifier::CROSSED_OUT);
+    assert_eq!(find("b").style.fg, style.body.fg);
+}
+
+#[test]
+fn headings_taper_by_level_like_the_theme_functions() {
+    // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic —
+    // all over the heading color.
+    let style = MarkdownStyle::default();
+    for (md, expected) in [
+        ("# one", Modifier::BOLD | Modifier::UNDERLINED),
+        ("## two", Modifier::BOLD),
+        ("### three", Modifier::BOLD),
+        ("#### four", Modifier::BOLD | Modifier::ITALIC),
+        ("##### five", Modifier::ITALIC),
+        ("###### six", Modifier::ITALIC),
+    ] {
+        let lines = render_markdown(md, 40, &style);
+        let span = &lines[0][0];
+        assert_eq!(span.style.fg, style.heading.fg, "{md}");
+        assert_eq!(span.style.add_modifier, expected, "{md}");
+    }
+    // Seven hashes is not a heading (marked: `#{1,6}`).
+    let lines = render_markdown("####### seven", 40, &style);
+    assert_eq!(lines[0][0].content, "####### seven");
+    assert_eq!(lines[0][0].style.fg, style.body.fg);
+}
+
+#[test]
+fn heading_keeps_inline_code_color() {
+    // TS `renderInlineTokens` codespan: `theme.code(text) + stylePrefix` — the heading
+    // modifiers close around the codespan, and it keeps the mdCode color.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("# a `c` b", 40, &style);
+    let spans = &lines[0];
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    let code = find("c");
+    assert_eq!(code.style.fg, style.code.fg);
+    assert_eq!(code.style.add_modifier, Modifier::empty());
+    let text = find("a ");
+    assert_eq!(text.style.fg, style.heading.fg);
+    assert_eq!(
+        text.style.add_modifier,
+        Modifier::BOLD | Modifier::UNDERLINED
+    );
+}
+
+#[test]
+fn quote_renders_the_ts_style_and_box_border() {
+    // TS blockquote: border `│ `; the whole quote content renders in the quote color
+    // and italic (`theme.quote(theme.italic(...))` re-applied after every inline reset),
+    // with emphasis modifiers riding on top; a codespan keeps its own color.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> q **b** `c`", 40, &style);
+    let spans = &lines[0];
+    assert_eq!(spans[0].content, "│ ");
+    assert_eq!(spans[0].style.fg, style.quote_border.fg);
+    let find = |content: &str| {
+        spans
+            .iter()
+            .find(|s| s.content == content)
+            .unwrap_or_else(|| panic!("no span {content}: {spans:?}"))
+    };
+    let q = find("q ");
+    assert_eq!(q.style.fg, style.quote.fg);
+    assert_eq!(q.style.add_modifier, Modifier::ITALIC);
+    let b = find("b");
+    assert_eq!(b.style.fg, style.quote.fg);
+    assert_eq!(b.style.add_modifier, Modifier::BOLD | Modifier::ITALIC);
+    let c = find("c");
+    assert_eq!(c.style.fg, style.code.fg);
+    assert_eq!(c.style.add_modifier, Modifier::ITALIC);
+}
+
+#[test]
+fn link_fallback_prints_parens_and_parses_titles() {
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("[t](https://x.dev/a)", 40, &style);
+    let visible: String = lines[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(visible, "t (https://x.dev/a)");
+    // marked's link rule: a quoted title after the destination parses out of the URL.
+    let lines = render_markdown(r#"[t](https://x.dev/a "Title")"#, 40, &style);
+    let visible: String = lines[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(visible, "t (https://x.dev/a)");
+    crate::hyperlinks::set_hyperlinks_override(None);
+}
+
+#[test]
+fn hr_caps_at_eighty_columns() {
+    // TS hr: `"─".repeat(Math.min(width, 80))`.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("---", 120, &style);
+    assert_eq!(lines[0][0].content.chars().count(), 80);
+    let lines = render_markdown("---", 40, &style);
+    assert_eq!(lines[0][0].content.chars().count(), 40);
+}
+
+#[test]
+fn quote_lazy_continuation_stays_inside_the_quote() {
+    // marked's blockquote token lazily consumes following non-blank lines that do
+    // not start another block: the paragraph stays inside the quote border.
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> quoted\ncontinued", 40, &style);
+    assert_eq!(lines.len(), 2, "rows: {lines:?}");
+    for row in &lines {
+        assert_eq!(row[0].content, "│ ", "border on every quote row");
+    }
+    let joined: String = lines[1]
+        .iter()
+        .skip(1)
+        .map(|s| s.content.as_str())
+        .collect();
+    assert_eq!(joined, "continued");
+    // A new block still escapes the quote (CommonMark lazy rules).
+    let lines = render_markdown("> quoted\n- list", 40, &style);
+    assert_eq!(lines[1][0].content, "- ");
+    let joined: String = lines[1].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "- list");
+}
+
+#[test]
+fn quote_blank_line_renders_a_bare_border_row() {
+    let style = MarkdownStyle::default();
+    let lines = render_markdown("> a\n>\n> b", 40, &style);
+    assert_eq!(lines.len(), 3, "rows: {lines:?}");
+    assert_eq!(lines[1], vec![Span::styled("│ ", style.quote_border)]);
+    let joined: String = lines[2]
+        .iter()
+        .skip(1)
+        .map(|s| s.content.as_str())
+        .collect();
+    assert_eq!(joined, "b");
+}
+
+#[test]
+fn nested_lists_render_indented_and_keep_parent_numbering() {
+    // marked nests indented markers; TS `renderList` frames each nesting level
+    // (`indent + "  "` per ancestor), giving nested rows their own indent and
+    // bullets. The parent's numbering never shifts.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- alpha\n  - beta\n    - gamma\n- delta", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- alpha".to_string(),
+            "    - beta".to_string(),
+            "          - gamma".to_string(),
+            "- delta".to_string(),
+        ]
+    );
+    let rows = render_markdown(
+        "1. first\n2. second\n   - nested under second\n3. third",
+        60,
+        &style,
+    );
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "1. first".to_string(),
+            "2. second".to_string(),
+            "    - nested under second".to_string(),
+            "3. third".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn an_ordered_list_after_an_unordered_list_is_its_own_block() {
+    // marked ends a list at a same-indent marker of a different type.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- bullet\n1. ordered", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["- bullet".to_string(), "1. ordered".to_string()]);
+    assert_eq!(rows[1][0].content, "1. ");
+    assert_eq!(rows[1][0].style.fg, style.list_bullet.fg);
+}
+
+#[test]
+fn loose_lists_keep_blank_lines_internal() {
+    // A blank line between items does not break the list (marked's loose list):
+    // no blank rows render between items.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- item one\n\n- item two\n\n- item three", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- item one".to_string(),
+            "- item two".to_string(),
+            "- item three".to_string(),
+        ]
+    );
+    // Blank lines before a following block belong to the gap, not the list.
+    let rows = render_markdown("- item one\n\nafter", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec!["- item one".to_string(), String::new(), "after".to_string()]
+    );
+}
+
+#[test]
+fn list_item_continuation_lines_render_as_their_own_rows() {
+    // TS `renderList` prefixes each item line beyond the first with `indent + "  "`.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- item\n  continued", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["- item".to_string(), "  continued".to_string()]);
+    // Long continuation lines wrap; the wrapped rows keep the item-line prefix.
+    let rows = render_markdown(
+        "- item\n  continued text that is long enough to wrap here",
+        22,
+        &style,
+    );
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat[1].trim(), "continued text that");
+    for row in &rows {
+        let w: usize = row.iter().map(|s| str_width(&s.content)).sum();
+        assert!(w <= 22, "row over the width: {w}");
+    }
+    // count==paint at every width.
+    for width in 1..60 {
+        assert_eq!(
+            markdown_row_count("- item\n  continued", width, &style),
+            render_markdown("- item\n  continued", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
+
+#[test]
+fn punctuation_after_a_styled_span_never_wraps_alone() {
+    // TS `splitIntoTokensWithAnsi` never splits a word at an ANSI boundary: the
+    // text after a bold/code close stays glued to the preceding word when the
+    // row wraps, so a trailing period can never land alone on its own row.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("alpha beta **gamma**.", 16, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["alpha beta".to_string(), "gamma.".to_string()]);
+    let rows = render_markdown("alpha beta `code`.", 12, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["alpha beta".to_string(), "code.".to_string()]);
+    for width in 1..40 {
+        for text in ["alpha beta **gamma**.", "alpha beta `code`."] {
+            assert_eq!(
+                markdown_row_count(text, width, &style),
+                render_markdown(text, width, &style).len(),
+                "count==paint at width {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn backslash_escapes_render_the_punctuation_literally() {
+    // marked's escape rule: a backslash before ASCII punctuation consumes the
+    // backslash — the punctuation never opens emphasis, code, or a heading.
+    let style = MarkdownStyle::default();
+    let spans = render_inline(
+        r"\*not emphasis\* snake\_case \#five no code via \` here",
+        &style,
+    );
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(
+        joined,
+        r"*not emphasis* snake_case #five no code via ` here"
+    );
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty(), "{joined}");
+    }
+    // A trailing unescaped backslash is a hard break: the paragraph consumes it.
+    let rows = render_markdown("tail\\\nnext", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["tail".to_string(), "next".to_string()]);
+}
+
+#[test]
+fn intraword_underscores_do_not_emphasize() {
+    // CommonMark flanking: `_` between word characters can neither open nor
+    // close emphasis, so snake_case prose keeps its underscores.
+    let style = MarkdownStyle::default();
+    let spans = render_inline("intra_word_underscores and snake_case_name", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "intra_word_underscores and snake_case_name");
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty(), "{joined}");
+    }
+    // Boundary underscores still emphasize.
+    let spans = render_inline("_real italic_ tail", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "real italic tail");
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    // Doubled underscores keep the same flanking rule.
+    let spans = render_inline("__bold__ tail", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "bold tail");
+    assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn a_triple_close_pairs_the_inner_single_delimiter() {
+    // `**outer *inner***`: the closer run's extra star closes the inner em and
+    // the outer keeps the last two — marked renders bold(outer + italic(inner)).
+    let style = MarkdownStyle::default();
+    let spans = render_inline("**bold with *nested italic***", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "bold with nested italic");
+    for s in &spans {
+        assert!(s.style.add_modifier.contains(Modifier::BOLD), "{joined}");
+    }
+    let inner = spans
+        .iter()
+        .find(|s| s.content.contains("nested italic"))
+        .expect("inner span");
+    assert!(inner.style.add_modifier.contains(Modifier::ITALIC));
+}
+
+#[test]
+fn tilde_fences_render_as_code_blocks() {
+    // marked accepts `~~~` fences exactly like ```` ``` ```` (same language rule).
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("~~~\nplain code\n~~~", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat.len(), 1, "rows: {flat:?}");
+    assert_eq!(flat[0].trim(), "plain code");
+    // The fence rows render in the code_block style, and count==paint holds.
+    let code_spans: Vec<&crate::Span> = rows[0]
+        .iter()
+        .filter(|s| !s.content.trim().is_empty())
+        .collect();
+    assert!(code_spans.iter().all(|s| s.style.fg == style.code_block.fg));
+    for width in 1..40 {
+        assert_eq!(
+            markdown_row_count("~~~\nplain code\n~~~", width, &style),
+            render_markdown("~~~\nplain code\n~~~", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
+
+#[test]
+fn images_render_their_alt_text_only() {
+    // marked's image token: the custom TS renderer falls through to the alt text —
+    // no `!`, no link affordance, no URL bracket.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("An image ![alt text](https://x.dev/i.png) here", 40, &style);
+    let flat: String = rows[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(flat, "An image alt text here");
+    for s in &rows[0] {
+        assert!(
+            !s.style.add_modifier.contains(Modifier::UNDERLINED),
+            "{flat}"
+        );
+    }
+    let spans = render_markdown("![only](https://x.dev/b.png)", 40, &style);
+    let flat: String = spans[0].iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(flat, "only");
+}
+
+#[test]
+fn a_bare_hash_renders_an_empty_heading_row() {
+    // marked: `#` alone is an h1 with empty text — a blank row plus the
+    // heading's trailing spacing.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("#\n\nafter", 40, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![String::new(), String::new(), "after".to_string()]
+    );
+}
+
+#[test]
+fn a_glued_word_wider_than_the_row_wraps_to_the_next_row() {
+    // A glued unit that cannot START on the current row opens a fresh row
+    // instead of overflowing it (`abcd` glued to the code span `ef`).
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("abcd`ef`", 4, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(flat, vec!["abcd".to_string(), "ef".to_string()]);
+    for row in &rows {
+        let w: usize = row.iter().map(|s| str_width(&s.content)).sum();
+        assert!(w <= 4, "row over the width: {w}");
+    }
+    for width in 1..12 {
+        assert_eq!(
+            markdown_row_count("abcd`ef`", width, &style),
+            render_markdown("abcd`ef`", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
+
+#[test]
+fn continuation_after_a_nested_list_keeps_source_order() {
+    // marked walks an item's block tokens in source order: text, then the
+    // nested list, then the continuation text. The item model keeps that
+    // order; a lazy soft continuation resumes at column zero in the TS frame.
+    let style = MarkdownStyle::default();
+    let rows = render_markdown("- parent\n  - child\n  after", 60, &style);
+    let flat: Vec<String> = rows
+        .iter()
+        .map(|r| r.iter().map(|s| s.content.as_str()).collect())
+        .collect();
+    assert_eq!(
+        flat,
+        vec![
+            "- parent".to_string(),
+            "    - child".to_string(),
+            "after".to_string(),
+        ]
+    );
+    for width in 1..60 {
+        assert_eq!(
+            markdown_row_count("- parent\n  - child\n  after", width, &style),
+            render_markdown("- parent\n  - child\n  after", width, &style).len(),
+            "count==paint at width {width}"
+        );
+    }
+}
+
+#[test]
+fn an_underscore_opener_keeps_searching_for_a_closer() {
+    // `_foo_bar_`: the first candidate closer is intraword (cannot close),
+    // so the opener keeps searching — marked renders em(`foo_bar`).
+    let style = MarkdownStyle::default();
+    let spans = render_inline("_foo_bar_", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "foo_bar");
+    assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    // The intraword rejection still holds when no closer exists.
+    let spans = render_inline("snake_case_name", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "snake_case_name");
+    for s in &spans {
+        assert_eq!(s.style.add_modifier, Modifier::empty());
+    }
+}
+
+#[test]
+fn an_escaped_bang_before_a_link_is_not_an_image() {
+    // The image marker is decided from the SOURCE text: `\!` is an escaped
+    // bang (literal), not an image marker — the link still renders as a link.
+    let style = MarkdownStyle::default();
+    crate::hyperlinks::set_hyperlinks_override(Some(false));
+    let spans = render_inline(r"Wow\![docs](https://x.dev/a)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "Wow!docs (https://x.dev/a)");
+    assert!(spans
+        .iter()
+        .any(|s| s.style.add_modifier.contains(Modifier::UNDERLINED)));
+    crate::hyperlinks::set_hyperlinks_override(None);
+    // An unescaped bang still marks an image: alt text only.
+    let spans = render_inline("![alt](https://x.dev/b)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "alt");
+    // An escaped backslash before the bang stays an image marker.
+    let spans = render_inline(r"\\![alt](https://x.dev/c)", &style);
+    let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(joined, "\\alt");
 }

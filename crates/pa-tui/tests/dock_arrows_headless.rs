@@ -2,6 +2,8 @@
 //! directive 2026-09-26): every rendered section is one press away in
 //! both directions (empty sections visited, cycle wraps), and entering
 //! opens its view; the TS dock has no section traversal (Rust divergence).
+//! The event-driven pins below hold the dock's update contract: every dock
+//! input repaints on its own daemon event, never on a per-wake recompute.
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -39,14 +41,28 @@ struct MockSupervisor {
     /// The live `goal_update` event to serve on attach (`None` mounts no goal row — the all-zero
     /// dock).
     goal: Option<Value>,
+    /// Successive `roster_subscribe` snapshots, one per attach; an exhausted list keeps serving
+    /// the last one, and an empty list serves the empty roster.
+    roster: Vec<Value>,
+    /// Live frames to push right after the `roster_subscribe` response (the events the dock pins
+    /// drive): each attach re-sends them.
+    pushes: Vec<Value>,
 }
 
 impl MockSupervisor {
-    fn bind(socket: &std::path::Path, heartbeats: Option<Value>, goal: Option<Value>) -> Self {
+    fn bind(
+        socket: &std::path::Path,
+        heartbeats: Option<Value>,
+        goal: Option<Value>,
+        roster: Vec<Value>,
+        pushes: Vec<Value>,
+    ) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             heartbeats,
             goal,
+            roster,
+            pushes,
         }
     }
 
@@ -82,6 +98,7 @@ impl MockSupervisor {
         write_json(&mut writer, &hello);
 
         let mut line = String::new();
+        let mut subscribe = 0usize;
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -133,6 +150,28 @@ impl MockSupervisor {
                             "data": self.heartbeats.clone().unwrap_or_else(|| json!({})),
                         }),
                     );
+                }
+                "roster_subscribe" => {
+                    let snapshot = self
+                        .roster
+                        .get(subscribe)
+                        .or_else(|| self.roster.last())
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    subscribe += 1;
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "roster_subscribe",
+                            "success": true,
+                            "data": snapshot,
+                        }),
+                    );
+                    for frame in &self.pushes {
+                        write_json(&mut writer, frame);
+                    }
                 }
                 _ => {
                     write_json(
@@ -306,12 +345,24 @@ fn run_plan(
     heartbeats: Option<Value>,
     goal: Option<Value>,
 ) -> pa_tui::interactive::InteractiveOutcome {
+    run_plan_with_roster(steps, heartbeats, goal, Vec::new(), Vec::new())
+}
+
+/// `run_plan` plus the `roster_subscribe` snapshots and the live frames pushed after each
+/// subscription reply (the event-driven dock pins' mock surface).
+fn run_plan_with_roster(
+    steps: Vec<HeadlessStep>,
+    heartbeats: Option<Value>,
+    goal: Option<Value>,
+    roster: Vec<Value>,
+    pushes: Vec<Value>,
+) -> pa_tui::interactive::InteractiveOutcome {
     // The ambient TMUX variable adds a startup notice; scrub it so runs are the same inside tmux
     // and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
-    let supervisor = MockSupervisor::bind(&socket, heartbeats, goal);
+    let supervisor = MockSupervisor::bind(&socket, heartbeats, goal, roster, pushes);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -538,5 +589,173 @@ fn an_all_zero_dock_renders_and_opens_the_empty_scoped_agents_view() {
             active_session_id: Some("s1".to_string()),
             session_name: Some("dock arrows session".to_string()),
         })
+    );
+}
+
+/// The attached session's own roster row: the family root the title cost bills.
+fn parent_row() -> Value {
+    json!({
+        "agentId": "s1",
+        "status": "idle",
+        "summary": {
+            "sessionId": "sess-1",
+            "activeSessionId": "s1",
+            "sessionFile": "/tmp/sess-1.jsonl",
+            "lifecycle": "live",
+            "runtimeKind": "top-level",
+        },
+    })
+}
+
+/// One direct subagent of the attached session: the dock's running count and the family cost.
+fn child_row(id: &str, status: &str, cost: f64) -> Value {
+    json!({
+        "agentId": id,
+        "status": status,
+        "summary": {
+            "sessionId": format!("{id}-sess"),
+            "activeSessionId": format!("{id}-live"),
+            "sessionFile": format!("/tmp/{id}.jsonl"),
+            "lifecycle": "live",
+            "runtimeKind": "subagent",
+            "parentActiveSessionId": "s1",
+            "usage": { "cost": cost },
+        },
+    })
+}
+
+/// One `roster_update` push (the supervisor's live roster deltas).
+fn roster_push(changed: &[Value]) -> Value {
+    json!({ "type": "roster_update", "changed": changed, "removed": [], "resync": false })
+}
+
+/// The `roster_subscribe` snapshot reply's data object.
+fn roster_snapshot(rows: &[Value]) -> Value {
+    json!({ "roster": rows })
+}
+
+/// One `goal_update` session event that starts pursuing a goal.
+fn goal_event_push(seconds: u64) -> Value {
+    json!({
+        "type": "session_event",
+        "activeSessionId": "s1",
+        "event": {
+            "type": "goal_update",
+            "goal": {
+                "active": true,
+                "status": "active",
+                "goalId": "g-dock",
+                "objective": "ship the event-driven dock",
+                "tokensUsed": 0,
+                "timeUsedSeconds": seconds,
+                "continuationsUsed": 0,
+            },
+        },
+    })
+}
+
+/// The dock's event-driven update contract, pinned ahead of the run loop's per-wake recompute
+/// removal: a `roster_update` push alone repaints the running count and the title's family cost.
+#[test]
+fn a_roster_push_alone_remounts_the_dock_count_and_the_title_cost() {
+    let steps = vec![
+        HeadlessStep::WaitRender {
+            needle: "\u{25c6} 1 subagents".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::WaitRender {
+            needle: "$0.42".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let pushes = vec![roster_push(&[
+        parent_row(),
+        child_row("c1", "running", 0.42),
+    ])];
+    let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
+    let last = outcome.frames.last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("\u{25c6} 1 subagents") && last.contains("$0.42"),
+        "the roster push repainted the dock's running count and the title's family cost:\n{}",
+        outcome.frames.join("\n")
+    );
+}
+
+/// A `goal_update` event alone mounts the dock's goal row.
+#[test]
+fn b_a_goal_update_alone_mounts_the_dock_goal_row() {
+    let steps = vec![HeadlessStep::WaitRender {
+        needle: "shells  \u{b7}  Pursuing goal (12s)".to_string(),
+        timeout_ms: 5_000,
+    }];
+    let pushes = vec![goal_event_push(12)];
+    let outcome = run_plan_with_roster(steps, None, None, Vec::new(), pushes);
+    let last = outcome.frames.last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("shells  \u{b7}  Pursuing goal (12s)"),
+        "the goal update mounted the dock's goal row:\n{}",
+        outcome.frames.join("\n")
+    );
+}
+
+/// A child's settle — the roster push flipping it running to idle — drops the dock's running count
+/// on its own event.
+#[test]
+fn c_a_child_settle_alone_drops_the_dock_running_count() {
+    let steps = vec![HeadlessStep::WaitRender {
+        needle: "\u{25c6} 0 subagents".to_string(),
+        timeout_ms: 5_000,
+    }];
+    let roster = vec![roster_snapshot(&[
+        parent_row(),
+        child_row("c1", "running", 0.42),
+    ])];
+    let pushes = vec![roster_push(&[child_row("c1", "idle", 0.42)])];
+    let outcome = run_plan_with_roster(steps, None, None, roster, pushes);
+    let last = outcome.frames.last().cloned().unwrap_or_default();
+    assert!(
+        last.contains("\u{25c6} 0 subagents"),
+        "the settle push dropped the dock's running count:\n{}",
+        outcome.frames.join("\n")
+    );
+}
+
+/// The attach fold: the `roster_subscribe` snapshot's running counts mount in the open's FIRST
+/// frame, and a session switch's fresh snapshot re-mounts them in the switch's first rebuilt
+/// frame — the counts follow the newly attached session.
+#[test]
+fn d_the_attach_mounts_the_snapshot_counts_in_its_first_frame_and_a_switch_follows() {
+    let steps = vec![
+        HeadlessStep::WaitRender {
+            needle: "\u{25c6} 2 subagents".to_string(),
+            timeout_ms: 5_000,
+        },
+        HeadlessStep::Submit("/new".to_string()),
+        HeadlessStep::WaitRender {
+            needle: "\u{25c6} 1 subagents".to_string(),
+            timeout_ms: 5_000,
+        },
+    ];
+    let roster = vec![
+        roster_snapshot(&[
+            parent_row(),
+            child_row("c1", "running", 0.42),
+            child_row("c2", "running", 0.1),
+        ]),
+        roster_snapshot(&[parent_row(), child_row("c1", "running", 0.42)]),
+    ];
+    let outcome = run_plan_with_roster(steps, None, None, roster, Vec::new());
+    let first_count = outcome
+        .frames
+        .iter()
+        .position(|frame| frame.contains("\u{25c6} 1 subagents"));
+    let first_note = outcome
+        .frames
+        .iter()
+        .position(|frame| frame.contains("started session s1"));
+    assert!(
+        matches!((first_count, first_note), (Some(count), Some(note)) if count <= note),
+        "the switch's first rebuilt frame carries the new snapshot's counts:\n{}",
+        outcome.frames.join("\n")
     );
 }

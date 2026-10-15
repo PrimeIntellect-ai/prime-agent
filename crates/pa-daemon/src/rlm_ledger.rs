@@ -20,7 +20,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -681,16 +681,26 @@ impl RlmSpawnLedger {
     /// snapshotted counts as live. An unreadable (oversized) ledger reads
     /// as not-live.
     pub fn edge_is_live(&self, child_id: &str, child: &str) -> bool {
-        let child = canonical_session_path(Path::new(child));
+        let canonical_child = canonical_session_path(Path::new(child));
         self.seed_once().is_ok()
             && self.replay_cached().is_ok_and(|state| {
-                state.edges.iter().any(|edge| {
+                let is_live = |edge: &RlmLedgerEdge| {
                     edge.child_id == child_id
                         && edge.deleted.is_none()
-                        && canonical_session_path(Path::new(&edge.child)) == child
+                        && canonical_session_path(Path::new(&edge.child)) == canonical_child
                         && is_file(Path::new(&edge.child))
                         && is_file(Path::new(&edge.parent))
-                })
+                };
+                // Most reads prove liveness through the index. Its keys
+                // were canonicalized at replay, though: a file replaced
+                // by a symlink does not change the ledger's stat identity.
+                // A stale key or tombstoned alias cannot prove absence;
+                // preserve the original read-time path comparison then.
+                state
+                    .index
+                    .get(&edge_key(child_id, child))
+                    .is_some_and(|&at| is_live(&state.edges[at]))
+                    || state.edges.iter().any(is_live)
             })
     }
 
@@ -711,19 +721,19 @@ impl RlmSpawnLedger {
 
     /// Replay behind the stat guard: a file whose identity snapshot is
     /// unchanged reuses the cached edges. A missing file replays empty.
-    fn replay_cached(&self) -> Result<ReplayState> {
+    fn replay_cached(&self) -> Result<Arc<ReplayState>> {
         let identity = file_identity(&self.path)?;
         let mut cache = self.cache.lock().expect("ledger cache lock");
         if let (Some(identity), Some(cached)) = (&identity, cache.as_ref()) {
             if *identity == cached.identity {
-                return Ok(cached.state.clone());
+                return Ok(Arc::clone(&cached.state));
             }
         }
-        let state = self.replay()?;
+        let state = Arc::new(self.replay()?);
         if let Some(identity) = identity {
             *cache = Some(ReplaySnapshot {
                 identity,
-                state: state.clone(),
+                state: Arc::clone(&state),
             });
         }
         Ok(state)

@@ -44,6 +44,49 @@ fn stash(left: &mut AgentView, sequence: u64) -> (String, String, u64) {
 }
 
 #[test]
+fn a_changed_link_base_rejects_the_held_layout() {
+    let first_path = std::env::temp_dir().join("markdown-first");
+    let second_path = std::env::temp_dir().join("markdown-second");
+    let first_url = url::Url::from_directory_path(&first_path)
+        .unwrap()
+        .join("url")
+        .unwrap()
+        .to_string();
+    let second_url = url::Url::from_directory_path(&second_path)
+        .unwrap()
+        .join("url")
+        .unwrap()
+        .to_string();
+    let _guard = HANDOFF_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset();
+    let entry = || ChatEntry::User {
+        text: "[link](url)".to_string(),
+    };
+    let mut left = view();
+    left.chrome.cwd = first_path.to_string_lossy().into_owned();
+    left.push_entry(entry());
+    let (session_id, generation, sequence) = stash(&mut left, 7);
+    let mut reentry = view();
+    reentry.chrome.cwd = second_path.to_string_lossy().into_owned();
+    reentry.push_entry(entry());
+    reentry.adopt_layout_handoff(&session_id, &generation, sequence);
+    assert!(
+        reentry.pending_handoff.is_some(),
+        "attach key matches before render-shape validation"
+    );
+    ENTRY_RENDERS.with(|count| count.set(0));
+    let rows = reentry.visible_transcript_window(80, 6).0;
+    assert_eq!(reentry.handoff_seeds, 0);
+    assert!(ENTRY_RENDERS.with(std::cell::Cell::get) > 0);
+    let links = crate::hyperlinks::frame_link_ranges(&rows);
+    assert!(links.iter().any(|link| link.url == second_url));
+    assert!(links.iter().all(|link| link.url != first_url));
+    reset();
+}
+
+#[test]
 fn the_reentry_window_serves_the_held_packs_byte_identically() {
     let _guard = HANDOFF_TEST_LOCK
         .lock()
