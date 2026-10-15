@@ -426,6 +426,7 @@ mod tests {
         let execution = crate::session_commands::run_session_command(
             &engine,
             &refine_command(),
+            &[],
             &mut |event| {
                 events.push(event);
                 true
@@ -467,10 +468,15 @@ mod tests {
         let (engine, _dir) =
             trigger_engine(&json!({ "responses": [ {"text": "not json"} ] }), 1, true);
         let mut events: Vec<EngineEvent> = Vec::new();
-        crate::session_commands::run_session_command(&engine, &refine_command(), &mut |event| {
-            events.push(event);
-            true
-        });
+        crate::session_commands::run_session_command(
+            &engine,
+            &refine_command(),
+            &[],
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
         let errors: Vec<String> = events
             .iter()
             .filter_map(|event| match event {

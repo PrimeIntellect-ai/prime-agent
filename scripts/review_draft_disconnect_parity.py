@@ -387,6 +387,21 @@ class Supervisor:
                         response["data"] = fixture_state(self.root, active)
                         with self.lock:
                             response["data"]["messageCount"] = len(self.messages)
+                    elif name == "get_messages":
+                        # pa-daemon worker::commands::handle_get_messages and TS
+                        # daemon-mode get_messages return the actual transcript.
+                        # Fixture turns only append; no branches/pagination are used.
+                        with self.lock:
+                            response["data"] = {"messages": list(self.messages)}
+                    elif name == "get_session_context":
+                        # pa-daemon state_getters::handle_get_session_context's
+                        # context envelope. This fixture has no compaction or
+                        # model/thinking/tier change rows: build_session_context
+                        # preserves its turns and uses off/None/None defaults.
+                        with self.lock:
+                            response["data"] = {"context": {
+                                "messages": list(self.messages), "thinkingLevel": "off",
+                                "serviceTier": None, "model": None}}
                     elif name == "get_mcp_connections": response["data"] = {"connections": []}
                     elif name == "detach": response["data"] = {}
                     elif name == "set_auto_compaction":

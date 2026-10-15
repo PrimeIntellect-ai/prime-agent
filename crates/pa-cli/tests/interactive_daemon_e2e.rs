@@ -3069,6 +3069,164 @@ async fn tui_renames_session_through_slash_command() {
     assert_eq!(state["sessionName"], "my session");
 }
 
+// `/new` with arguments (TS `parseNewSessionCommand`): the `--name` value renames
+// the new session through the `/name` path, the verbatim suffix submits as the
+// initial prompt, and a parse error keeps the draft without creating a session.
+#[tokio::test]
+async fn tui_new_command_honors_name_and_prompt() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    // Each created session replays the script from its first response, so one
+    // shared reply serves both prompt-bearing runs.
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "scripted reply" },
+    ] });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let options = base_options(&supervisor, dir.path(), &session_dir);
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // A parse error must not create a session.
+            pa_tui::interactive::HeadlessStep::Submit(
+                r#"/new --name "one" --name "two""#.to_string(),
+            ),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // `--name` plus the `--`-separated initial prompt.
+            pa_tui::interactive::HeadlessStep::Submit(
+                r#"/new --name "my session" -- do something"#.to_string(),
+            ),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // A bare suffix is the initial prompt; the session stays unnamed.
+            pa_tui::interactive::HeadlessStep::Submit("/new plain prompt".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // A name without a prompt names the new session and submits nothing.
+            pa_tui::interactive::HeadlessStep::Submit("/new --name solo".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome = run_headless_bounded(options, plan)
+        .await
+        .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains(r#"Duplicate /new option: "--name""#),
+        "the duplicate --name error row rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("do something"),
+        "the initial prompt's user message rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("plain prompt"),
+        "the bare-suffix prompt's user message rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("scripted reply"),
+        "the scripted replies rendered:\n{rendered}"
+    );
+    // The create arm persists each session's file eagerly, so one file per
+    // created session: the startup session plus the three /new runs; the
+    // parse error added none.
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in std::fs::read_dir(&session_dir)
+        .expect("read session dir")
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let id = content
+            .lines()
+            .next()
+            .and_then(|header| serde_json::from_str::<serde_json::Value>(header).ok())
+            .and_then(|header| header["id"].as_str().map(str::to_string))
+            .unwrap_or_default();
+        files.push((id, content));
+    }
+    assert_eq!(files.len(), 4, "the parse error created no session");
+    // The name-and-prompt run: its file carries the initial prompt, the
+    // scripted reply, and the session_info rename.
+    let (named_id, named) = files
+        .iter()
+        .find(|(_, content)| content.contains("do something"))
+        .map(|(id, content)| (id.clone(), content.as_str()))
+        .expect("the named run persisted the initial prompt");
+    assert!(
+        named.contains("scripted reply"),
+        "the scripted reply persisted alongside the prompt"
+    );
+    assert!(
+        named.lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|value| value["type"] == "session_info" && value["name"] == "my session")
+        }),
+        "the session_info row named the new session"
+    );
+    // The bare-suffix run: the prompt submitted, the session left unnamed.
+    let (_, bare) = files
+        .iter()
+        .find(|(_, content)| content.contains("plain prompt"))
+        .map(|(id, content)| (id.clone(), content.as_str()))
+        .expect("the bare-suffix run persisted the initial prompt");
+    assert!(
+        bare.contains("scripted reply"),
+        "the bare-suffix scripted reply persisted"
+    );
+    assert!(
+        bare.lines().all(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .map_or(true, |value| value["type"] != "session_info")
+        }),
+        "the bare-suffix session stayed unnamed"
+    );
+    // The name-only run: named, and no prompt ever submitted.
+    let (_, solo) = files
+        .iter()
+        .find(|(_, content)| {
+            content.lines().any(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|value| value["type"] == "session_info" && value["name"] == "solo")
+            })
+        })
+        .map(|(id, content)| (id.clone(), content.as_str()))
+        .expect("the name-only run persisted the rename");
+    assert!(
+        solo.lines().all(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .map_or(true, |value| value["type"] != "message")
+        }),
+        "the name-only run submitted no prompt"
+    );
+    // The daemon state reports the names (the roster summary's field).
+    let (client, _client_events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
+        .await
+        .expect("connect");
+    let state = client
+        .request_ok(DaemonCommand::GetState {
+            id: None,
+            active_session_id: named_id,
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_state");
+    assert_eq!(state["sessionName"], "my session");
+    let state = client
+        .request_ok(DaemonCommand::GetState {
+            id: None,
+            active_session_id: outcome.active_session_id.clone(),
+            rest: serde_json::Map::default(),
+        })
+        .await
+        .expect("get_state");
+    assert_eq!(state["sessionName"], "solo");
+}
+
 #[tokio::test]
 async fn tui_side_question_pane_flow() {
     let dir = tempfile::TempDir::new().expect("temp dir");

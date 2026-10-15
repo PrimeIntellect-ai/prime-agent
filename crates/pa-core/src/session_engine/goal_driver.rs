@@ -436,9 +436,12 @@ impl GoalDriver {
             },
         )?;
         if next_status == GoalStatus::Active {
-            return Ok(
-                create_goal_context_message(&self.state, GoalContextKind::Continuation).ok(),
-            );
+            return Ok(create_goal_context_message(
+                &self.state,
+                GoalContextKind::Continuation,
+                &[],
+            )
+            .ok());
         }
         Ok(None)
     }
@@ -559,7 +562,8 @@ impl GoalDriver {
                 ..self.state.clone()
             },
         )?;
-        let message = create_goal_context_message(&self.state, GoalContextKind::Continuation).ok();
+        let message =
+            create_goal_context_message(&self.state, GoalContextKind::Continuation, &[]).ok();
         // The mint is owed to the calling surface until it admits the turn; a rollback un-mints it.
         if message.is_some() {
             self.mark_continuation_pending();

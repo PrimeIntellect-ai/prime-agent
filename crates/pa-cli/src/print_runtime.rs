@@ -1490,6 +1490,7 @@ async fn run_prompts_and_emit(
                 global_harness_dir.clone(),
                 &autonomous_state,
                 &command,
+                &images,
             )
             .await;
             if let Some(error) = execution.error {

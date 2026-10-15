@@ -226,6 +226,11 @@ pub trait SessionEngine: Send + Sync {
         let _ = path;
     }
 
+    /// Capture the worker-owned durable leaf before the current prompt rows
+    /// persist. Lazy engines restore model context only through this boundary;
+    /// admission supplies the current rows once. This must not build a session.
+    fn set_prompt_context_boundary(&self, _leaf_id: Option<String>) {}
+
     /// A session being revived restores the model its file pins before the
     /// startup chain, so it does not silently land on the startup-chain
     /// default. `saved` skips a second windowed open; `None` reads the file.
