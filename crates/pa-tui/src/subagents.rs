@@ -229,25 +229,6 @@ pub fn descendant_positions_with_depth(
     positions
 }
 
-/// The descendant positions of `parent`, depth-free (the flat
-/// consumers).
-#[must_use]
-pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
-    descendant_positions_with_depth(summaries, parent)
-        .into_iter()
-        .map(|(position, _)| position)
-        .collect()
-}
-
-/// The summaries that descend from `parent`.
-#[must_use]
-pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) -> Vec<&'a Value> {
-    descendant_positions(summaries, parent)
-        .into_iter()
-        .map(|position| summaries[position])
-        .collect()
-}
-
 /// The roster entries that descend from `parent`, with each entry's
 /// depth below it (1 = a direct child).
 ///
@@ -270,15 +251,6 @@ pub fn descendant_entries_with_depth<'a>(
     descendant_positions_with_depth(&summaries, parent)
         .into_iter()
         .map(|(position, depth)| (with_summaries[position], depth))
-        .collect()
-}
-
-/// The roster entries that descend from `parent`.
-#[must_use]
-pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
-    descendant_entries_with_depth(roster, parent)
-        .into_iter()
-        .map(|(entry, _)| entry)
         .collect()
 }
 

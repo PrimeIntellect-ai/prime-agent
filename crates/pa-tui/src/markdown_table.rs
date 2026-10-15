@@ -297,7 +297,7 @@ pub(crate) fn render_table(
     else {
         // The narrow fallback preserves the raw markdown without styling.
         for raw_line in raw {
-            wrap_spans(&[Span::raw(raw_line.clone())], width, Style::default(), out);
+            wrap_spans(&[Span::raw(raw_line.clone())], width, out);
         }
         return;
     };
@@ -309,11 +309,9 @@ pub(crate) fn render_table(
     };
     out.push(vec![Span::raw(join('┌', '┬', '┐'))]);
 
-    // The observed TS binary output (0.9.5, the parity ground truth) draws the header row exactly
-    // like the data rows. The TS source's `theme.bold(headerCell)` never reaches the wire, so the
-    // port must not emit the bold modifier.
-
-    // Header row: wrapped and padded like the data rows (no header bold).
+    // Header row: TS `renderTable` wraps every header cell in `theme.bold(...)`
+    // (padding included); data rows stay unstyled.
+    let bold = Style::default().add_modifier(style.bold);
     let header_cells: Vec<Vec<Line>> = header_spans
         .iter()
         .zip(&column_widths)
@@ -328,9 +326,12 @@ pub(crate) fn render_table(
             }
             let text = cell.get(line_idx).cloned().unwrap_or_default();
             let pad = column_widths[col].saturating_sub(spans_width(&text));
-            row.extend(text);
+            row.extend(text.iter().cloned().map(|mut s| {
+                s.style = s.style.add_modifier(style.bold);
+                s
+            }));
             if pad > 0 {
-                row.push(Span::raw(" ".repeat(pad)));
+                row.push(Span::styled(" ".repeat(pad), bold));
             }
         }
         row.push(Span::raw(" │"));
@@ -375,7 +376,7 @@ pub(crate) fn render_table(
 /// delegates to the ANSI-aware wrapTextWithAnsi).
 fn wrap_cell(spans: &Line, width: usize) -> Vec<Line> {
     let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, width.max(1), Style::default(), &mut wrapped);
+    wrap_spans(spans, width.max(1), &mut wrapped);
     if wrapped.is_empty() {
         wrapped.push(Vec::new());
     }
@@ -442,27 +443,23 @@ mod tests {
     }
 
     #[test]
-    fn header_row_matches_the_observed_ts_binary_output() {
-        // The TS binary draws the header exactly like the data rows: cell text in the body color,
-        // unstyled padding, no bold anywhere.
+    fn header_row_renders_bold_and_data_rows_do_not() {
+        // TS `renderTable` wraps every header cell in `theme.bold(...)`; data rows
+        // keep the plain cell styles.
         let style = MarkdownStyle::default();
         let mut out = Vec::new();
         let header = vec!["a".to_string(), "b".to_string()];
         let rows_in = vec![vec!["1".to_string(), "2".to_string()]];
         let raw = vec!["| a | b |".to_string()];
         render_table(&header, &rows_in, &raw, 40, &style, &mut out);
-        for row in &out {
-            for span in row {
-                assert!(
-                    !span.style.add_modifier.contains(Modifier::BOLD),
-                    "no bold in table rows: {row:?}"
-                );
-            }
-        }
-        // Cell text carries the body color; borders and padding are plain.
+        // Borders stay plain; the header cells are bold.
         assert_eq!(out[1][0].style, Style::default());
+        assert!(out[1][1].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(out[1][1].style.fg, style.body.fg);
-        assert_eq!(out[1][3].style.fg, style.body.fg);
+        assert!(!out[1][2].style.add_modifier.contains(Modifier::BOLD));
+        // Data rows are not bold.
+        assert_eq!(out[3][1].style.fg, style.body.fg);
+        assert!(!out[3][1].style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

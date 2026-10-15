@@ -120,7 +120,9 @@ pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) ->
 /// the invocation's state root until the set quiets down or proves stuck;
 /// report the survivors as failures. The sweep re-scans with the same root,
 /// so daemons in any other root — or on the never-touch list — are never
-/// candidates.
+/// candidates, and worker sockets never appear in the census (a supervisor's
+/// workers stop through their tracked descriptors; deliberate TS divergence:
+/// TS's sweep killed worker listeners too).
 pub(super) fn terminate_verified_residuals(
     root: &DaemonStateRoot,
     stopped: &mut Vec<(String, String)>,
@@ -245,7 +247,7 @@ mod tests {
     fn fixture_root(dir: &Path) -> DaemonStateRoot {
         DaemonStateRoot {
             agent_dir: dir.join("agent"),
-            socket_dir: dir.join("agent").join("sockets"),
+            socket_dir: Some(dir.join("agent").join("sockets")),
             default_socket_path: dir.join("agent").join("sockets").join("daemon.sock"),
         }
     }
@@ -270,7 +272,7 @@ mod tests {
         for dir in ["/tmp/mission-tmp/prime-agent-1000", "/tmp/prime-agent-1000"] {
             let root = DaemonStateRoot {
                 agent_dir: PathBuf::from(dir),
-                socket_dir: PathBuf::from(dir),
+                socket_dir: Some(PathBuf::from(dir)),
                 default_socket_path: PathBuf::from(dir).join("daemon.sock"),
             };
             let mut stopped: Vec<(String, String)> = Vec::new();

@@ -164,12 +164,12 @@ pub fn oversized_stream() -> Vec<u8> {
     response
 }
 
-const TLS_TEST_BODY: &str = "{\"schemaVersion\":1,\"models\":[]}";
+pub const TLS_TEST_BODY: &str = "{\"schemaVersion\":1,\"models\":[]}";
 
-struct TlsCatalogServer {
-    base_url: String,
-    ca_pem: String,
-    task: tokio::task::JoinHandle<()>,
+pub struct TlsCatalogServer {
+    pub base_url: String,
+    pub ca_pem: String,
+    pub task: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for TlsCatalogServer {
@@ -193,7 +193,7 @@ impl Drop for FixtureEnvironment {
     }
 }
 
-async fn tls_catalog_server() -> TlsCatalogServer {
+pub async fn tls_catalog_server(connections: usize) -> TlsCatalogServer {
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params
@@ -222,15 +222,17 @@ async fn tls_catalog_server() -> TlsCatalogServer {
     let port = listener.local_addr().expect("tls addr").port();
     let response = ok_json(TLS_TEST_BODY, None);
     let task = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.expect("catalog connection");
-        let mut stream = acceptor
-            .accept(socket)
-            .await
-            .expect("catalog TLS handshake");
-        let mut buffer = [0u8; 8_192];
-        assert!(stream.read(&mut buffer).await.expect("catalog request") > 0);
-        stream.write_all(&response).await.expect("catalog response");
-        stream.flush().await.expect("catalog flush");
+        for _ in 0..connections {
+            let (socket, _) = listener.accept().await.expect("catalog connection");
+            let mut stream = acceptor
+                .accept(socket)
+                .await
+                .expect("catalog TLS handshake");
+            let mut buffer = [0u8; 8_192];
+            assert!(stream.read(&mut buffer).await.expect("catalog request") > 0);
+            stream.write_all(&response).await.expect("catalog response");
+            stream.flush().await.expect("catalog flush");
+        }
     });
     TlsCatalogServer {
         base_url: format!("https://127.0.0.1:{port}"),
@@ -239,20 +241,23 @@ async fn tls_catalog_server() -> TlsCatalogServer {
     }
 }
 
-pub async fn fetch_trusting_test_ca(env_var: &str) {
-    let mut server = tls_catalog_server().await;
+pub struct CaBundleEnv {
+    bundle: tempfile::NamedTempFile,
+    _environment: FixtureEnvironment,
+}
+
+impl CaBundleEnv {
+    // The env var keeps pointing at the deleted path: the next native load
+    // must fail to find the CA on its own.
+    pub fn delete_bundle(&self) {
+        std::fs::remove_file(self.bundle.path()).expect("delete ca bundle");
+    }
+}
+
+pub fn ca_bundle_env(env_var: &str, ca_pem: &str) -> CaBundleEnv {
     let bundle = tempfile::NamedTempFile::new().expect("ca bundle");
-    let pem = if env_var == "NODE_EXTRA_CA_CERTS" {
-        // Keep native-loader input pure; only Node extra-cert parsing retains a prefix.
-        format!(
-            "{}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
-            server.ca_pem
-        )
-    } else {
-        server.ca_pem.clone()
-    };
-    std::fs::write(bundle.path(), pem).expect("write ca bundle");
-    let _environment = FixtureEnvironment(
+    std::fs::write(bundle.path(), ca_pem).expect("write ca bundle");
+    let environment = FixtureEnvironment(
         [
             "NODE_EXTRA_CA_CERTS",
             "SSL_CERT_FILE",
@@ -284,6 +289,24 @@ pub async fn fetch_trusting_test_ca(env_var: &str) {
     std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
     std::env::set_var("no_proxy", "127.0.0.1,localhost");
     std::env::set_var(env_var, bundle.path());
+    CaBundleEnv {
+        bundle,
+        _environment: environment,
+    }
+}
+
+pub async fn fetch_trusting_test_ca(env_var: &str) {
+    let mut server = tls_catalog_server(1).await;
+    let pem = if env_var == "NODE_EXTRA_CA_CERTS" {
+        // Keep native-loader input pure; only Node extra-cert parsing retains a prefix.
+        format!(
+            "{}-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n",
+            server.ca_pem
+        )
+    } else {
+        server.ca_pem.clone()
+    };
+    let _ca_env = ca_bundle_env(env_var, &pem);
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let fetcher = CatalogFetcher::new();
         let outcome = fetcher.fetch(&format!("{}/x", server.base_url), None).await;

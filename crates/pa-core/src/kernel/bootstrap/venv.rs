@@ -84,6 +84,11 @@ async fn run_async(command: &str, args: &[String]) -> anyhow::Result<()> {
         child.args(&args).stdin(Stdio::null());
         // Hidden window on Windows (TS `spawnHidden`).
         crate::platform::process::set_no_window(&mut child);
+        // CPython must read UTF-8 .pth files even under a Windows legacy
+        // code page (TS bootstrap.ts:429).
+        if cfg!(windows) {
+            child.env("PYTHONUTF8", "1");
+        }
         let status = child
             .status()
             .with_context(|| format!("failed to spawn {command}"))?;

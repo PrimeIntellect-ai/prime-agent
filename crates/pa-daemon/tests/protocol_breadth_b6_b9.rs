@@ -524,6 +524,116 @@ fn wave_b8_held_pause_gates_queued_input() {
 }
 
 #[test]
+fn disconnect_mid_write_releases_the_held_input_pause() {
+    let _serial = serial_lock();
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+
+    // A scripted session whose first reply is slow: the turn stays busy while
+    // client A queues a prompt, holds the input pause, and half-closes.
+    let socket = dir.path().join("gate.sock");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _hello) = Client::connect(&socket);
+    let script_path = dir.path().join("gate-script.json");
+    std::fs::write(
+        &script_path,
+        json!({ "responses": [
+            { "text": "slow", "delayMs": 1500 },
+            { "text": "second", "delayMs": 10 },
+            { "text": "third", "delayMs": 10 },
+        ] })
+        .to_string(),
+    )
+    .expect("write script");
+    client.send_command(
+        "create-1",
+        &json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": agent_dir.join("sessions").to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create-1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
+
+    // Client A subscribes (attach), starts the slow turn, queues an admitted
+    // prompt_and_wait behind it, and holds the input-pause lease.
+    let (mut a, _hello) = Client::connect(&socket);
+    a.send_command(
+        "at-1",
+        &json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    assert_eq!(a.read_response("at-1")["success"], true, "attach failed");
+    a.send_command(
+        "p-1",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
+    );
+    let _ = a.read_response("p-1");
+    a.send_command(
+        "p-2",
+        &json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
+    );
+    a.send_command(
+        "pa-1",
+        &json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "gate" }),
+    );
+    let response = a.read_response("pa-1");
+    assert_eq!(response["success"], true, "{response}");
+
+    // A half-closes its read side but keeps the write half open: the
+    // supervisor's read arm never sees EOF, while every later write to A
+    // fails (EPIPE).
+    a.writer
+        .shutdown(std::net::Shutdown::Read)
+        .expect("half-close the read side");
+
+    // Client B's prompt queues behind the busy turn; its enqueue publishes a
+    // session action update to the attached A, and that write fails - the
+    // disconnect-under-write path whose cleanup must release A's pause.
+    let (mut b, _hello) = Client::connect(&socket);
+    b.send_command(
+        "p-3",
+        &json!({ "type": "prompt", "activeSessionId": session_id, "message": "second client" }),
+    );
+    let response = b.read_response("p-3");
+    assert_eq!(response["success"], true, "{response}");
+
+    // The idle wait returns once the session is quiescent; the pause-held
+    // queue admits again only if A's disconnect ran its cleanup. The queue
+    // read then proves B's queued prompt ran instead of staying held.
+    b.send_command(
+        "w-1",
+        &json!({ "type": "wait_for_idle", "activeSessionId": session_id }),
+    );
+    let response = b.read_response("w-1");
+    assert_eq!(response["success"], true, "{response}");
+    b.send_command(
+        "q-1",
+        &json!({ "type": "get_queue", "activeSessionId": session_id }),
+    );
+    let response = b.read_response("q-1");
+    assert_eq!(
+        response["data"]["steering"],
+        json!([]),
+        "the disconnecting client's pause still holds the queue: {response}"
+    );
+    assert_eq!(
+        response["data"]["followUp"],
+        json!([]),
+        "the disconnecting client's pause still holds the queue: {response}"
+    );
+}
+
+#[test]
 fn wave_b9_session_navigation_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");

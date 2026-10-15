@@ -761,6 +761,20 @@ const AGENT_COMMAND_USED: EventRule = EventRule {
     properties: &[("command_name", required(free_string(64)))],
 };
 
+/// Adoption of the automatic compaction percentage setting; no session content.
+const AUTOCOMPACT_THRESHOLD_CHANGED: EventRule = EventRule {
+    name: "autocompact threshold changed",
+    since: 2,
+    properties: &[(
+        "threshold_percent",
+        required(PropKind::Number {
+            max: 100,
+            integer: false,
+            nullable: false,
+        }),
+    )],
+};
+
 /// The onboarding journey's real stages only.
 const ONBOARDING_STAGE: EventRule = EventRule {
     name: "onboarding stage",
@@ -1219,14 +1233,22 @@ const UPDATE_EVENTS: &[EventRule] = &[
     },
 ];
 
+const HARNESS_REFINEMENTS_CHANGED: EventRule = EventRule {
+    name: "harness refinements changed",
+    since: 2,
+    properties: &[("enabled", required(boolean()))],
+};
+
 /// Every catalogued event, flattened.
 #[must_use]
 pub fn catalog() -> Vec<&'static EventRule> {
     let mut all: Vec<&'static EventRule> = vec![
+        &HARNESS_REFINEMENTS_CHANGED,
         &AGENT_STARTED,
         &AGENT_RUN_COMPLETED,
         &AGENT_SESSION_ENDED,
         &AGENT_COMMAND_USED,
+        &AUTOCOMPACT_THRESHOLD_CHANGED,
         &ONBOARDING_STAGE,
         &ONBOARDING_COMPLETED,
         &AGENT_STARTUP_STAGE,

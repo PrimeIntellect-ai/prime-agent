@@ -122,6 +122,8 @@ impl Supervisor {
                     if let Err(error) = persist_worker(&resident.descriptor_path, &descriptor) {
                         return Self::owned_failure(command_id, type_name, &error.to_string());
                     }
+                    // The promotion clear (TS `promoteOwnedWorker`).
+                    resident.clear_launch_env();
                     true
                 }
                 None => {

@@ -1,7 +1,7 @@
 //! Domain types for the agent loop.
 //!
 //! Serde field names use camelCase so serialized messages match the TS wire
-//! format exactly (important for the proxy protocol and session JSONL parity).
+//! format exactly (important for session JSONL parity).
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

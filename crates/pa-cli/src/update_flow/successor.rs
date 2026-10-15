@@ -37,8 +37,8 @@ pub fn identity_from_hello(hello: &Value) -> UpdateProcessIdentity {
     }
 }
 
-/// Spawn the successor supervisor detached (the TS launcher deletes the worker
-/// role env; the roster path is the one addition, spec §6).
+/// Spawn the successor supervisor detached (the roster path is the one
+/// addition, spec §6); the binary entry strips any inherited worker env.
 ///
 /// # Errors
 /// Returns an error when the successor supervisor cannot be spawned.
@@ -55,15 +55,7 @@ pub fn spawn_supervisor(
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env_remove(pa_daemon::worker::WORKER_ROLE_ENV)
-        .env_remove(pa_daemon::worker::WORKER_TOKEN_ENV)
-        .env_remove(pa_daemon::worker::WORKER_ACTIVE_SESSION_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_RECOVERY_JOURNAL_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SUPERVISOR_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SOCKET_ENV)
-        .env_remove(pa_daemon::worker::WORKER_INSTANCE_ID_ENV)
-        .env_remove(pa_daemon::worker::WORKER_SCRIPT_ENV);
+        .stderr(std::process::Stdio::null());
     if let Some(roster_path) = roster_path {
         command.env(UPDATE_ROSTER_ENV, roster_path);
     }

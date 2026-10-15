@@ -69,12 +69,12 @@ fn replayed_table_renders_boxed_aligned_rows() {
     // Links render the legacy observability form under the gate (tmux
     // parity): the label, then the bracketed URL in the dim slot.
     assert!(
-        flat.contains("docs [https://example.com/docs]"),
+        flat.contains("docs (https://example.com/docs)"),
         "link row: {flat}"
     );
     // The second link wraps mid-row at this width, so only its URL tail
     // stays contiguous.
-    assert!(flat.contains("example.com/log]"), "link row 2: {flat}");
+    assert!(flat.contains("example.com/log)"), "link row 2: {flat}");
 }
 
 #[test]

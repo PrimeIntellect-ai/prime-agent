@@ -805,7 +805,7 @@ fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
     let by_name = |name: &str| {
         filtered
             .iter()
-            .find(|record| record.search.name == name)
+            .find(|record| crate::agents_view_state::record_search_text(record).name == name)
             .unwrap_or_else(|| panic!("missing record {name}"))
     };
     assert!(by_name("policy sweep").search_score.is_some());

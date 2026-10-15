@@ -223,6 +223,8 @@ pub fn kernel_provisioner(
     cwd: std::path::PathBuf,
     agent_dir: &std::path::Path,
     shell_path: Option<std::path::PathBuf>,
+    command_prefix: Option<String>,
+    serper_api_key: Option<String>,
     session_artifact_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
     on_background_work_settled: Option<crate::kernel::shared::BackgroundWorkSettledCallback>,
@@ -245,12 +247,15 @@ pub fn kernel_provisioner(
             env.insert(key.to_string(), value.to_string_lossy().to_string());
         }
     }
+    if let Some(serper_api_key) = serper_api_key {
+        env.insert("SERPER_API_KEY".to_string(), serper_api_key);
+    }
     Arc::new(KernelProvisioner::new(
         cwd,
         IpythonKernelProvisionerOptions {
             python: None,
             env,
-            command_prefix: None,
+            command_prefix,
             shell_path,
             session_id: Some(session_id),
             host_handlers: handlers,
@@ -265,6 +270,34 @@ pub fn kernel_provisioner(
             on_bootstrap_result,
         },
     ))
+}
+
+/// TS `_addWebsearchKeyEnv` (agent-session.ts:11137-11158): the serper key
+/// rides the kernel env only when a websearch skill is loaded, the ambient
+/// env does not already carry one, and the stored `serper` credential is an
+/// api key that resolves non-empty. The websearch skill's own `!command`
+/// key refs cannot resolve in-kernel, so the host resolves them here; the
+/// caller reads the credential and runs this off the async runtime, because
+/// a `!command` key can block.
+#[must_use]
+pub(crate) fn websearch_api_key(
+    skills: &[Skill],
+    credential: Option<crate::auth::AuthCredential>,
+) -> Option<String> {
+    if std::env::var("SERPER_API_KEY").is_ok_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    if !skills.iter().any(|skill| skill.name == "websearch") {
+        return None;
+    }
+    match credential {
+        Some(crate::auth::AuthCredential::ApiKey { key, .. }) => {
+            crate::auth::resolve_config_value::resolve_config_value(&key)
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        }
+        _ => None,
+    }
 }
 
 impl IpythonKernelProvisioner for KernelProvisioner {

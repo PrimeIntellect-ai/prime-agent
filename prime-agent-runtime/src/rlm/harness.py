@@ -133,6 +133,17 @@ def _agent_dir() -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def _require_refinements_enabled() -> None:
+    """Read the host's global-only master switch, without caching it."""
+    try:
+        document = json.loads((_agent_dir() / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    value = document.get("harnessRefinements") if isinstance(document, dict) else None
+    if value is False:
+        raise RuntimeError("Harness refinements are disabled in /settings")
+
+
 def _resolve_global_flag(global_: bool = False, extra: dict[str, Any] | None = None) -> bool:
     extra = dict(extra or {})
     if "global" in extra:
@@ -418,9 +429,13 @@ class HarnessState:
         # writes (e.g. the host `/refine` command) and avoid clobbering them.
         self._loaded_mtime: int | None = None
         self._held_lock: tuple[Path, str] | None = None
-        self.load()
+        # The proxy's empty fallback must remain constructible for kernel API
+        # introspection while disabled; every actual read/write still checks the gate.
+        if not in_memory:
+            self.load()
 
     def _ensure_local_writable(self) -> None:
+        _require_refinements_enabled()
         if self._local_write_error is not None:
             raise RuntimeError(self._local_write_error)
 
@@ -441,6 +456,7 @@ class HarnessState:
         stale snapshot. We re-read whenever the on-disk mtime no longer matches the
         value recorded at our last load/save.
         """
+        _require_refinements_enabled()
         if self._disk_mtime() != self._loaded_mtime:
             self.load()
 
@@ -522,6 +538,7 @@ class HarnessState:
                 self._held_lock = None
 
     def load(self) -> "HarnessState":
+        _require_refinements_enabled()
         if self.file_path is None or not self.file_path.exists():
             self._loaded_mtime = None
             return self
@@ -608,6 +625,7 @@ class HarnessState:
         return target
 
     def save(self) -> "HarnessState":
+        _require_refinements_enabled()
         if self.file_path is None:
             # in_memory fallback: nothing to persist.
             return self
@@ -1329,6 +1347,7 @@ def get_harness_state(
     state_dir: str | Path | None = None, *, global_: bool = False, **kwargs: Any
 ) -> HarnessState:
     """Return the cached local harness state, or global when requested."""
+    _require_refinements_enabled()
     global_ = _resolve_global_flag(global_, kwargs)
     file_path = _state_file(state_dir, global_=global_)
     scope: HarnessScope = "global" if global_ else "local"

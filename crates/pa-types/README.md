@@ -3,6 +3,9 @@
 The single shared vocabulary crate. Nothing else is shared between crates.
 
 ## Scope
+
+`compaction::is_valid_threshold_percent` is the shared percentage-domain validator
+used by settings deserialization, persistence, runtime policy, and the TUI.
 Wire and domain types + serde only: AI messages/content blocks/tool calls/usage/stream events, session JSONL entry schema, daemon wire protocol messages, worker frames.
 
 Daemon wire mechanics shared by the serving side (pa-daemon) and clients (pa-tui/pa-cli) live here because pa-tui depends on pa-types alone:
