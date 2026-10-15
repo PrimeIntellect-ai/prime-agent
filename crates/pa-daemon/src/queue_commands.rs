@@ -91,9 +91,9 @@ impl Worker {
                 ),
             };
             if status == "applied" {
-                // A replace onto another lane moves the item to the back
-                // of the target lane. The non-overlapping direction pairs
-                // only - `target != lane` holds for every reached arm.
+                // A replace onto another lane is an arrival there: the item
+                // keeps its priority and enqueues by it. The non-overlapping
+                // direction pairs only - `target != lane` holds for every reached arm.
                 if mutation_type == "replace" {
                     if let Some(target) =
                         wire_lane(mutation.get("lane")).filter(|target| *target != lane)
@@ -104,10 +104,11 @@ impl Worker {
                             _ => None,
                         };
                         if let Some(item) = item {
-                            match target {
-                                Lane::Steering => core.steering.push_back(item),
-                                Lane::FollowUp => core.follow_up.push_back(item),
-                            }
+                            let target_lane = match target {
+                                Lane::Steering => &mut core.steering,
+                                Lane::FollowUp => &mut core.follow_up,
+                            };
+                            crate::worker::enqueue_priority(target_lane, item);
                         }
                     }
                 }
