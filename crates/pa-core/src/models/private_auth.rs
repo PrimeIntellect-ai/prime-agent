@@ -9,11 +9,12 @@ use hmac::{Hmac, Mac};
 use pa_types::ai::Model;
 use sha2::Sha256;
 
-use super::prime_inference::is_private_prime_inference_model_id;
-use super::prime_inference_catalog::{
-    build_prime_inference_models_with_minimum, fetch_prime_inference_model_catalog,
-    parse_prime_inference_model_catalog, PrimeInferenceCatalogEntry,
+use pa_models::prime_inference::{
+    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceEntry,
 };
+
+use super::prime_inference::is_private_prime_inference_model_id;
+use super::prime_inference_catalog::fetch_prime_inference_model_catalog;
 
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE: &str = "prime-inference-private-models.json";
 pub const PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS: u64 = 5 * 60_000;
@@ -63,8 +64,8 @@ pub async fn fetch_authorized_private_prime_inference_models(
     headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
     let fetch =
         fetch_prime_inference_model_catalog(base_url, Some(&headers), timeout_ms, true).await;
-    let (payload, entries) = match fetch {
-        Ok(result) => result,
+    let payload = match fetch {
+        Ok((payload, _entries)) => payload,
         Err(error) => {
             // 401/403 mean "no entitlements", not a failure.
             if error.contains("with status 401") || error.contains("with status 403") {
@@ -73,6 +74,23 @@ pub async fn fetch_authorized_private_prime_inference_models(
             return Err(error);
         }
     };
+    private_models_from_catalog_payload(&payload, public_model_ids)
+}
+
+/// Build the team's private models from a live `/models` payload. The
+/// declaration-aware pa-models parse keeps each route's supported
+/// parameters and reasoning declarations, so the built models request
+/// reasoning exactly the way their routes declare it.
+///
+/// # Errors
+///
+/// Propagates the catalog parse failure (a duplicate id, a payload without
+/// a `data` array); the caller keeps its previous models.
+fn private_models_from_catalog_payload(
+    payload: &serde_json::Value,
+    public_model_ids: &HashSet<String>,
+) -> Result<Vec<Model>, String> {
+    let parsed = parse_prime_inference_model_catalog(payload, true)?;
     let public_ids: HashSet<String> = public_model_ids
         .iter()
         .map(|id| id.to_lowercase())
@@ -82,7 +100,7 @@ pub async fn fetch_authorized_private_prime_inference_models(
         .iter()
         .map(|model| (model.id.to_lowercase(), model))
         .collect();
-    let entries_by_id: HashMap<String, &PrimeInferenceCatalogEntry> = entries
+    let entries_by_id: HashMap<String, &PrimeInferenceEntry> = parsed
         .iter()
         .map(|entry| (entry.id.to_lowercase(), entry))
         .collect();
@@ -98,10 +116,12 @@ pub async fn fetch_authorized_private_prime_inference_models(
         if public_ids.contains(&lower) || !is_private_prime_inference_model_id(&lower) {
             continue;
         }
-        if let Some(parsed) = entries_by_id.get(&lower) {
-            private_entries.push((*parsed).clone());
+        if let Some(parsed_entry) = entries_by_id.get(&lower) {
+            private_entries.push((*parsed_entry).clone());
         } else if let Some(template) = bundled_by_id.get(&lower) {
-            private_entries.push(PrimeInferenceCatalogEntry {
+            // A private id the strict parse dropped (e.g. unusable pricing)
+            // still resolves through its bundled template's pricing.
+            private_entries.push(PrimeInferenceEntry {
                 id: id.to_string(),
                 input: template.cost.input.0,
                 output: template.cost.output.0,
@@ -109,10 +129,7 @@ pub async fn fetch_authorized_private_prime_inference_models(
             });
         }
     }
-    Ok(
-        build_prime_inference_models_with_minimum(&bundled, &private_entries, true, Some(0))
-            .unwrap_or_default(),
-    )
+    Ok(build_prime_inference_models(&bundled, &private_entries, true, Some(0)).unwrap_or_default())
 }
 
 /// A cached authorization: fingerprint-scoped models with a refresh timestamp.
@@ -248,18 +265,11 @@ fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAu
     let fingerprint = parsed.get("fingerprint")?.as_str()?.to_string();
     let refreshed_at = parsed.get("refreshedAt")?.as_u64()?;
     let data = parsed.get("data")?.as_array()?;
-    let entries = parse_prime_inference_model_catalog(&serde_json::json!({ "data": data }), true)
-        .ok()?
-        .into_iter()
-        .filter(|entry| is_private_prime_inference_model_id(&entry.id))
-        .collect::<Vec<_>>();
-    let models = build_prime_inference_models_with_minimum(
-        &super::prime_inference::private_prime_inference_models(),
-        &entries,
-        true,
-        Some(0),
-    )
-    .unwrap_or_default();
+    // Full built models (compat and thinking levels included) persist
+    // verbatim, so a restart keeps the live routes' reasoning declarations.
+    // A pre-declaration cache's reduced entries fail to deserialize and the
+    // caller refetches.
+    let models: Vec<Model> = serde_json::from_value(serde_json::Value::Array(data.clone())).ok()?;
     Some(PrivatePrimeAuthorizationCache {
         fingerprint,
         models,
@@ -274,31 +284,12 @@ pub fn write_private_prime_authorization_cache(
     models_json_path: &Path,
     cache: &PrivatePrimeAuthorizationCache,
 ) {
-    let data: Vec<serde_json::Value> = cache
-        .models
-        .iter()
-        .map(|model| {
-            serde_json::json!({
-                "id": model.id,
-                "display_name": model.name,
-                "pricing": {
-                    "input_usd_per_mtok": model.cost.input.0,
-                    "output_usd_per_mtok": model.cost.output.0,
-                    "cache_read_usd_per_mtok": model.cost.cache_read.0,
-                    "cache_write_usd_per_mtok": model.cost.cache_write.0,
-                },
-                "specs": {
-                    "context_window": model.context_window,
-                    "max_output_tokens": model.max_tokens,
-                    "modalities": { "input": model.input.iter().map(|i| match i { pa_types::ai::ModelInput::Text => "text", pa_types::ai::ModelInput::Image => "image" }).collect::<Vec<_>>(), "output": ["text"] },
-                    "supports_reasoning": model.reasoning,
-                }
-            })
-        })
-        .collect();
+    // Full built models, compat and thinking levels included: the cache
+    // is a verbatim snapshot of the declaration-aware build, not a reduced
+    // mirror of the wire catalog.
     let document = serde_json::json!({
         "fingerprint": cache.fingerprint,
-        "data": data,
+        "data": cache.models,
         "refreshedAt": cache.refreshed_at,
     });
     let path = private_prime_authorization_cache_path(models_json_path);
@@ -351,33 +342,40 @@ mod tests {
         assert!(written.ends_with('}') && !written.contains('\n'));
     }
 
-    /// A cache entry priced `0.0` resolves to a model whose costs are zero —
-    /// never a template's or a fallback's pricing.
+    /// A cached model priced `0.0` resolves to a model whose costs are
+    /// zero — never a template's or a fallback's pricing.
     #[test]
     fn zero_priced_private_cache_models_resolve_free() {
         let dir = tempfile::TempDir::new().unwrap();
         let models_json = dir.path().join("models.json");
+        let free = Model {
+            id: "internal/glm-5.3-fast".to_string(),
+            name: "GLM 5.3 Fast (internal)".to_string(),
+            api: "openai-completions".to_string(),
+            provider: "prime-inference".to_string(),
+            base_url: "https://api.pinference.ai/api/v1".to_string(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![pa_types::ai::ModelInput::Text],
+            cost: pa_types::ai::ModelCost {
+                input: pa_types::JsNumber(0.0),
+                output: pa_types::JsNumber(0.0),
+                cache_read: pa_types::JsNumber(0.0),
+                cache_write: pa_types::JsNumber(0.0),
+            },
+            context_window: 1_048_576,
+            max_tokens: 131_072,
+            max_tokens_explicit: false,
+            featured: None,
+            headers: None,
+            compat: None,
+        };
         std::fs::write(
             private_prime_authorization_cache_path(&models_json),
             serde_json::json!({
                 "fingerprint": "fingerprint-a",
                 "refreshedAt": 1,
-                "data": [{
-                    "id": "internal/glm-5.3-fast",
-                    "display_name": "GLM 5.3 Fast (internal)",
-                    "pricing": {
-                        "input_usd_per_mtok": 0.0,
-                        "output_usd_per_mtok": 0.0,
-                        "cache_read_usd_per_mtok": 0.0,
-                        "cache_write_usd_per_mtok": 0.0,
-                    },
-                    "specs": {
-                        "context_window": 1_048_576,
-                        "max_output_tokens": 131_072,
-                        "modalities": { "input": ["text"], "output": ["text"] },
-                        "supports_reasoning": true,
-                    },
-                }],
+                "data": [free],
             })
             .to_string(),
         )
@@ -477,6 +475,110 @@ mod tests {
                 .expect("cache readable")
                 .fingerprint,
             "fingerprint-a"
+        );
+    }
+
+    fn declaration_payload() -> serde_json::Value {
+        serde_json::json!({
+            "data": [{
+                "id": "internal/deepseek-v4.1-flash",
+                "display_name": "DeepSeek V4.1 Flash (internal)",
+                "pricing": {
+                    "input_usd_per_mtok": 0.0,
+                    "output_usd_per_mtok": 0.0,
+                    "cache_read_usd_per_mtok": 0.0,
+                    "cache_write_usd_per_mtok": 0.0,
+                },
+                "specs": {
+                    "context_window": 1_048_576,
+                    "max_output_tokens": 131_072,
+                    "modalities": { "input": ["text"], "output": ["text"] },
+                    "supports_reasoning": true,
+                },
+                "reasoning": {
+                    "supported_efforts": ["none", "low", "high", "max"],
+                    "default_effort": "high",
+                    "default_enabled": false,
+                    "mandatory": false,
+                },
+                "supported_parameters": [
+                    "max_tokens", "temperature", "tools", "tool_choice",
+                    "reasoning", "reasoning_effort",
+                ],
+            }],
+        })
+    }
+
+    /// The live route declarations reach the built private model: a route
+    /// that declares `reasoning_effort` must keep a compat that sends it,
+    /// and the declared efforts become the thinking-level map.
+    #[test]
+    fn private_models_carry_live_reasoning_declarations() {
+        let models = private_models_from_catalog_payload(&declaration_payload(), &HashSet::new())
+            .expect("payload builds");
+        let model = &models[0];
+        assert_eq!(model.id, "internal/deepseek-v4.1-flash");
+        assert!(model.reasoning);
+        let compat = model.compat.as_ref().expect("declaration-aware compat");
+        assert_eq!(
+            compat.raw.get("supportsReasoningEffort"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(!compat.raw.contains_key("thinkingFormat"));
+        let levels = model
+            .thinking_level_map
+            .as_ref()
+            .expect("declared efforts become the level map");
+        assert_eq!(
+            levels.get(&pa_types::ai::ModelThinkingLevel::High),
+            Some(&Some("high".to_string()))
+        );
+        assert_eq!(
+            levels.get(&pa_types::ai::ModelThinkingLevel::Max),
+            Some(&Some("max".to_string()))
+        );
+        assert_eq!(
+            levels.get(&pa_types::ai::ModelThinkingLevel::Minimal),
+            Some(&None)
+        );
+    }
+
+    /// The cache round-trips the declaration-aware build verbatim, so a
+    /// restart keeps the live route's compat and level map.
+    #[test]
+    fn authorization_cache_round_trips_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let models_json = dir.path().join("models.json");
+        let models = private_models_from_catalog_payload(&declaration_payload(), &HashSet::new())
+            .expect("payload builds");
+        write_private_prime_authorization_cache(
+            &models_json,
+            &PrivatePrimeAuthorizationCache {
+                fingerprint: "fingerprint-a".to_string(),
+                models,
+                refreshed_at: 1,
+            },
+        );
+        let cache = read_private_prime_authorization_cache(&models_json).expect("cache readable");
+        let model = cache
+            .models
+            .iter()
+            .find(|model| model.id == "internal/deepseek-v4.1-flash")
+            .expect("the cached model resolves");
+        let compat = model
+            .compat
+            .as_ref()
+            .expect("compat survives the round trip");
+        assert_eq!(
+            compat.raw.get("supportsReasoningEffort"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            model
+                .thinking_level_map
+                .as_ref()
+                .and_then(|map| map.get(&pa_types::ai::ModelThinkingLevel::High)),
+            Some(&Some("high".to_string()))
         );
     }
 }
