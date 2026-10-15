@@ -112,7 +112,7 @@ pub fn install_prefix() -> PathBuf {
 }
 
 /// The target triple for one platform pair (`std::env::consts`' vocabulary:
-/// the installer's own `uname -s`/`-m` mapping over the same four targets).
+/// the installer's own `uname -s`/`-m` mapping).
 #[must_use]
 pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
     match (os, arch) {
@@ -121,6 +121,7 @@ pub fn target_for(os: &str, arch: &str) -> Option<&'static str> {
         ("linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
         ("linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
         ("windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
+        ("windows", "aarch64") => Some("aarch64-pc-windows-msvc"),
         _ => None,
     }
 }
@@ -147,7 +148,7 @@ pub fn no_build_message(os: &str, arch: &str) -> String {
         "no rust build is published for {os} {arch} (the release channel \
          builds aarch64-apple-darwin, x86_64-apple-darwin, \
          aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, and \
-         x86_64-pc-windows-msvc)"
+         x86_64-pc-windows-msvc or aarch64-pc-windows-msvc)"
     )
 }
 
@@ -806,10 +807,13 @@ mod tests {
         // The unsupported pairs refuse; the message names the machine and
         // the full matrix (the Windows build included, so a refused
         // Windows-adjacent machine sees the MSVC target it needs).
-        assert_eq!(target_for("windows", "aarch64"), None);
+        assert_eq!(
+            target_for("windows", "aarch64"),
+            Some("aarch64-pc-windows-msvc")
+        );
         assert_eq!(target_for("freebsd", "x86_64"), None);
-        let message = no_build_message("windows", "aarch64");
-        assert!(message.contains("windows aarch64"), "{message}");
+        let message = no_build_message("freebsd", "x86_64");
+        assert!(message.contains("freebsd x86_64"), "{message}");
         assert!(message.contains("x86_64-pc-windows-msvc"), "{message}");
     }
 
@@ -1155,15 +1159,15 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             target_for("linux", "aarch64"),
             Some("aarch64-unknown-linux-gnu")
         );
-        // The Windows pair ships the MSVC build (the release channel's
-        // fifth target since the windows ship).
+        // Both Windows architectures use the MSVC build.
         assert_eq!(
             target_for("windows", "x86_64"),
             Some("x86_64-pc-windows-msvc")
         );
-        // Windows ARM64 (the only unsupported Windows shape) and every
-        // other OS refuse.
-        assert_eq!(target_for("windows", "aarch64"), None);
+        assert_eq!(
+            target_for("windows", "aarch64"),
+            Some("aarch64-pc-windows-msvc")
+        );
         assert!(
             current_target().is_ok(),
             "the test matrix runs on a supported platform"

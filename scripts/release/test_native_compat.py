@@ -2,6 +2,7 @@
 """Packaging regressions; real old-installer execution lives in test_legacy_upgrade."""
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from assemble_artifacts import BUNDLED_CATALOG_FILES, pack_tarball, stage_tree
+from assemble_artifacts import BUNDLED_CATALOG_FILES, main, pack_tarball, stage_tree
 from native_compat import validate_compatibility_archive
 
 
@@ -81,6 +82,33 @@ class NativeCompatibilityTests(unittest.TestCase):
         validate_compatibility_archive(archive)
         self.assertTrue((staging / "prime-agent.exe").is_file())
         self.assertFalse((staging / "photon_rs_bg.wasm").exists())
+
+    def test_windows_arm64_assembly_emits_installable_archive_and_manifest(self):
+        output = self.root / "dist"
+        args = argparse.Namespace(
+            repo_root=self.root, target="aarch64-pc-windows-msvc", binary=self.binary,
+            runtime_dir=None, catalog_assets=self.root, version="1.0.0", sha=None,
+            decoder=None, out_dir=output,
+        )
+        with patch("assemble_artifacts.parse_args", return_value=args), \
+             patch("assemble_artifacts.validate_bundled_catalog_dir", return_value={}):
+            self.assertEqual(main(), 0)
+        filename = "prime-agent-1.0.0-win32-arm64.tar.gz"
+        archive = output / filename
+        validate_compatibility_archive(archive)
+        with tarfile.open(archive) as tar:
+            self.assertEqual(tar.extractfile("prime-agent.exe").read(), self.binary.read_bytes())
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        self.assertEqual(json.loads((output / "manifest.json").read_text()), {
+            "version": "v1.0.0",
+            "binaries": [{
+                "version": "v1.0.0", "platform": "win32-arm64",
+                "target": "aarch64-pc-windows-msvc", "file": filename,
+                "sha256": digest,
+                "executableSha256": hashlib.sha256(self.binary.read_bytes()).hexdigest(),
+            }],
+        })
+        self.assertEqual((output / "SHA256SUMS").read_text(), f"{digest}  {filename}\n")
 
     def test_promotion_validates_native_archives_beside_source_distribution(self):
         _, archive, _ = self.assemble()

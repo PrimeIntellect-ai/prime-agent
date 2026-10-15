@@ -28,7 +28,7 @@
 //! The structural gates run everywhere. The behavior gates execute the
 //! workflow's own step scripts against simulated downloads for both layout
 //! modes (the port of the TS test's per-channel triad: production-only,
-//! beta-only, both - here one target, five targets, none) and skip with a
+//! beta-only, both - here one target, six targets, none) and skip with a
 //! logged reason where the box's python3 is below the floor the step
 //! scripts need (python 3.12: the merge step unpacks with
 //! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it).
@@ -48,15 +48,16 @@ const VERSION: &str = "0.9.9";
 const NATIVE_COMPAT_STEP: &str = "Verify historical native updater compatibility";
 
 /// The current build matrix (release.yml's `build-gnu` + `build-darwin` +
-/// `build-windows` jobs): the five standalone targets. The single-artifact
-/// case stands in for a trimmed matrix; the five-target case is today's
+/// `build-windows` jobs): the six standalone targets. The single-artifact
+/// case stands in for a trimmed matrix; the six-target case is today's
 /// full release.
-const TARGETS: [&str; 5] = [
+const TARGETS: [&str; 6] = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
     "x86_64-apple-darwin",
     "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ];
 
 /// The release-platform alias (`assemble_artifacts.py` `TARGET_ALIASES`).
@@ -67,6 +68,7 @@ fn platform_alias(target: &str) -> &'static str {
         "aarch64-apple-darwin" => "darwin-arm64",
         "x86_64-apple-darwin" => "darwin-x64",
         "x86_64-pc-windows-msvc" => "win32-x64",
+        "aarch64-pc-windows-msvc" => "win32-arm64",
         _ => panic!("no fixture alias for target {target}"),
     }
 }
@@ -76,7 +78,7 @@ fn platform_alias(target: &str) -> &'static str {
 /// ships `prime-agent.exe`.
 fn binary_name(target: &str) -> &'static str {
     match target {
-        "x86_64-pc-windows-msvc" => "prime-agent.exe",
+        "x86_64-pc-windows-msvc" | "aarch64-pc-windows-msvc" => "prime-agent.exe",
         _ => "prime-agent",
     }
 }
@@ -751,13 +753,13 @@ fn single_artifact_release_finds_the_downloaded_manifest() {
         .is_file());
 }
 
-/// The full five-target release (the TS test's both-channels case): every
+/// The full six-target release (the TS test's both-channels case): every
 /// artifact arrives in its own named directory, the merged manifest must
-/// carry all five binaries (the Windows row included), and every
+/// carry all six binaries (the Windows row included), and every
 /// platform's payload unpacks under its target triple with the staged
 /// binary name (`prime-agent.exe` on the MSVC target).
 #[test]
-fn five_target_release_finds_all_downloaded_manifests() {
+fn six_target_release_finds_all_downloaded_manifests() {
     let Some(_python3) = python3_binary((3, 12)) else {
         return;
     };
@@ -785,7 +787,7 @@ fn five_target_release_finds_all_downloaded_manifests() {
     assert_eq!(
         merged,
         expected_merged_manifest(&rows),
-        "the merged manifest must carry all five targets' binaries"
+        "the merged manifest must carry all six targets' binaries"
     );
     assert_eq!(
         fs::read_to_string(cwd.path().join("release-out/SHA256SUMS"))
@@ -921,15 +923,15 @@ fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
     assert_eq!(
         merged["binaries"],
         serde_json::json!(expected),
-        "the merged manifest must carry all five targets' binaries"
+        "the merged manifest must carry all six targets' binaries"
     );
     let stdout = assert_success(
         &run_step_with_env(cwd.path(), emit, &[("RELEASE_VERSION", beta_tag)]),
         "emit the channel manifest",
     );
     assert!(
-        stdout.contains("channel manifest beta.json: v0.9.9-beta.7, 5 artifacts"),
-        "the emission must report all five artifacts\n{stdout}"
+        stdout.contains("channel manifest beta.json: v0.9.9-beta.7, 6 artifacts"),
+        "the emission must report all six artifacts\n{stdout}"
     );
     let document: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(cwd.path().join("release-out/beta.json"))
@@ -945,23 +947,26 @@ fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
     let v2 = document["binaries_v2"]
         .as_array()
         .expect("binaries_v2 rows");
-    assert_eq!(v2.len(), 5, "binaries_v2 carries every platform row");
-    let win_row = v2
-        .iter()
-        .find(|row| row["platform"] == "win32-x64")
-        .expect("the beta manifest carries the win32-x64 row");
-    assert_eq!(
-        win_row["file"], "prime-agent-0.9.9-beta.7-win32-x64.tar.gz",
-        "the Windows row must use the channel naming contract"
-    );
-    let windows_row = rows
-        .iter()
-        .find(|row| row["platform"] == "win32-x64")
-        .expect("the fixture carries the windows row");
-    assert_eq!(
-        win_row["sha256"], windows_row["sha256"],
-        "the Windows row must carry the artifact's own checksum"
-    );
+    assert_eq!(v2.len(), 6, "binaries_v2 carries every platform row");
+    for platform in ["win32-x64", "win32-arm64"] {
+        let win_row = v2
+            .iter()
+            .find(|row| row["platform"] == platform)
+            .expect("the beta manifest carries both Windows architectures");
+        assert_eq!(
+            win_row["file"],
+            format!("prime-agent-0.9.9-beta.7-{platform}.tar.gz"),
+            "the Windows row must use the channel naming contract"
+        );
+        let windows_row = rows
+            .iter()
+            .find(|row| row["platform"] == platform)
+            .expect("the fixture carries the Windows row");
+        assert_eq!(
+            win_row["sha256"], windows_row["sha256"],
+            "the Windows row must carry the artifact's own checksum"
+        );
+    }
     let v1 = document["binaries"].as_array().expect("v1 binaries rows");
     assert_eq!(
         v1.len(),
@@ -995,7 +1000,7 @@ fn the_channel_manifest_carries_the_windows_row_on_both_channels() {
     assert_eq!(
         merged["binaries"],
         serde_json::json!(expected),
-        "the merged manifest must carry all five targets' binaries"
+        "the merged manifest must carry all six targets' binaries"
     );
     assert_success(
         &run_step_with_env(
@@ -1066,7 +1071,7 @@ fn the_channel_manifest_refuses_a_release_missing_the_windows_row() {
         "emit the channel manifest",
     );
     assert!(
-        output.contains("the release is missing artifact rows for ['win32-x64']"),
-        "the refusal must name the missing win32-x64 row\n{output}"
+        output.contains("the release is missing artifact rows for ['win32-arm64', 'win32-x64']"),
+        "the refusal must name both missing Windows rows\n{output}"
     );
 }

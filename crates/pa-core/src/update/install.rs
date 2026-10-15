@@ -14,6 +14,7 @@ pub const KNOWN_PLATFORMS: &[&str] = &[
     "linux-arm64",
     "linux-x64",
     "win32-x64",
+    "win32-arm64",
 ];
 
 /// The TS release-platform alias of the running build (baseline/musl variants
@@ -39,6 +40,10 @@ pub fn current_platform_alias() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
         "win32-x64"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        "win32-arm64"
     }
 }
 

@@ -769,7 +769,7 @@ fetch() {
 # gets the x86_64 build, which is the correct build for that runtime.
 # Windows runs this script only from a POSIX shell (Git Bash / MSYS2 /
 # Cygwin): uname -s reports MINGW*_NT-*, MSYS_NT-*, or CYGWIN_NT-*, and
-# the x86_64 build is the MSVC target. The Windows-native route is
+# Windows builds use MSVC targets. The Windows-native route is
 # install.ps1 (irm | iex); this arm keeps the sh one-liner working for
 # Git Bash users. Every later section reads WINDOWS / BINARY_NAME (the
 # path spellings, the payload check, the launcher, the takeover gates).
@@ -786,11 +786,13 @@ case "$OS:$ARCH" in
   Linux:aarch64) TARGET=aarch64-unknown-linux-gnu; CHANNEL_PLATFORM=linux-arm64 ;;
   MINGW64_NT*:x86_64|MINGW_NT*:x86_64|MSYS_NT*:x86_64|CYGWIN_NT*:x86_64)
     TARGET=x86_64-pc-windows-msvc; CHANNEL_PLATFORM=win32-x64; WINDOWS=yes ;;
+  MINGW*_NT*:aarch64|MINGW*_NT*:arm64|MSYS_NT*:aarch64|MSYS_NT*:arm64|CYGWIN_NT*:aarch64|CYGWIN_NT*:arm64)
+    TARGET=aarch64-pc-windows-msvc; CHANNEL_PLATFORM=win32-arm64; WINDOWS=yes ;;
   *)
     die "no rust build is published for ${OS} ${ARCH} (detected via uname);
 the release channel builds aarch64-apple-darwin, x86_64-apple-darwin,
 aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, and
-x86_64-pc-windows-msvc (the Windows build installs through this script
+x86_64-pc-windows-msvc or aarch64-pc-windows-msvc (Windows builds install through this script
 under Git Bash/MSYS2/Cygwin — uname MINGW*_NT*/MSYS_NT*/CYGWIN_NT* — or
 through install.ps1 in PowerShell)"
     ;;

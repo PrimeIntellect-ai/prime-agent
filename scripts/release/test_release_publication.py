@@ -5,11 +5,47 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO / '.github/workflows/release.yml'
+
+
+class ChannelManifestTests(unittest.TestCase):
+    def test_windows_arm64_is_published_on_both_channels_and_required(self):
+        # Execute the producer's Python body directly so this gate also runs
+        # on native Windows without relying on POSIX subprocess fixtures.
+        shell = step_script('Emit the channel manifest (latest.json stable / beta.json nightly)')
+        script = shell.split("python3 - <<'PY'\n", 1)[1].split('\nPY', 1)[0]
+        for version, filename in [('1.0.0', 'latest.json'), ('1.0.0-beta.1', 'beta.json')]:
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / 'release-out'
+                output.mkdir()
+                platforms = ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64',
+                             'win32-x64', 'win32-arm64']
+                rows = [{'platform': platform,
+                         'file': f'prime-agent-{version}-{platform}.tar.gz',
+                         'sha256': 'a' * 64} for platform in platforms]
+                manifest = output / 'manifest.json'
+                manifest.write_text(json.dumps({'version': f'v{version}', 'binaries': rows}))
+                env = dict(os.environ, RELEASE_VERSION=f'v{version}')
+                result = subprocess.run([sys.executable, '-c', script], cwd=directory,
+                                        env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads((output / filename).read_text()), {
+                    'version': f'v{version}', 'package': 'prime-agent',
+                    'tarball': f'releases/v{version}/prime-agent-{version}.tgz',
+                    'binaries': rows[:4], 'binaries_v2': rows,
+                })
+                (output / filename).unlink()
+                manifest.write_text(json.dumps({'version': f'v{version}', 'binaries': rows[:-1]}))
+                result = subprocess.run([sys.executable, '-c', script], cwd=directory,
+                                        env=env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("missing artifact rows for ['win32-arm64']", result.stderr)
+                self.assertFalse((output / filename).exists())
 
 
 def step_script(name):
@@ -109,7 +145,7 @@ class PublicationTests(unittest.TestCase):
         self.out = self.root / 'release-out'
         self.out.mkdir()
         names = [f'prime-agent-{self.version[1:]}-{p}.tar.gz' for p in
-                 ('darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64')]
+                 ('darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64', 'win32-arm64')]
         names += [f'prime-agent-{self.version[1:]}.tgz', 'prime-agent-linux.debug.gz',
                   'manifest.json', 'beta.json', 'sbom-spdx-linux.json']
         for name in names:

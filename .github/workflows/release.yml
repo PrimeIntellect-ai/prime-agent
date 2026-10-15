@@ -1,7 +1,7 @@
 # Release pipeline for Prime Agent (Rust).
 #
 # THE TWO BUILD ROUTES (one promote gate):
-#   - a plain vX.Y.Z tag (stable) BUILDS its own 5-target matrix: the stable
+#   - a plain vX.Y.Z tag (stable) BUILDS its own 6-target matrix: the stable
 #     cadence is rare, and its cut must not depend on a continuous run the
 #     staleness gate may have skipped (a superseded push builds nothing) or
 #     artifact retention may have evicted;
@@ -416,6 +416,8 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             runs-on: windows-2022
+          - target: aarch64-pc-windows-msvc
+            runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -434,6 +436,20 @@ jobs:
       - name: Resolve the Python interpreter
         shell: bash
         run: echo "PY=$(command -v python3 || command -v python)" >> "$GITHUB_ENV"
+      # ring's Windows ARM64 C/assembly build requires Clang, even with MSVC installed.
+      - name: Configure Clang for Windows ARM64
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $clangBin = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (-not (Test-Path (Join-Path $clangBin 'clang.exe'))) {
+            throw "The Windows ARM64 runner must provide LLVM/Clang"
+          }
+          $clangBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & (Join-Path $clangBin 'clang.exe') --version
+      - name: Verify Windows installer architecture selection
+        shell: pwsh
+        run: ./scripts/release/test_windows_architecture.ps1
       # Only the shipped binary links here (the build-gnu/build-darwin rule).
       # THE STATIC VC RUNTIME (the operator's real-machine report,
       # 2026-10-06: the dynamically linked launcher died at process start -
@@ -818,7 +834,7 @@ jobs:
           if version != bare:
               sys.exit(f"merged manifest version {merged['version']} != tag {tag}")
           known = {
-              "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64",
+              "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64", "win32-arm64",
           }
           # Hard invariant (Option C posture): the update channels NEVER
           # reference a split-debug decoder - it is a separate release

@@ -229,18 +229,15 @@ if ($env:PRIME_AGENT_UV_BIN_DIR -and $env:PRIME_AGENT_UV_BIN_DIR.Contains(';')) 
 # version, the channel manifest (<base>/latest.json or <base>/beta.json)
 # the rows; the version resolution below reads the pair per channel.
 
-# The platform this script serves: the channel manifest's win32-x64 row
-# (the TS NATIVE_PLATFORMS spelling pa-core::update::install reads) — a
-# fixed target, checked here so an ARM64 Windows machine fails loudly
-# instead of downloading a payload it cannot start.
-$platform = 'win32-x64'
 # The OS architecture, not the process's: 32-bit PowerShell on x64 Windows
 # (WOW64) reports PROCESSOR_ARCHITECTURE=x86 and the OS arm rides
 # PROCESSOR_ARCHITEW6432 — the 64-bit OS must not be refused (Macroscope:
 # the WOW64 shape).
 $effectiveArchitecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-if ($effectiveArchitecture -ne 'AMD64') {
-    Fail "this machine reports architecture '$effectiveArchitecture'; the Windows channel ships the x86_64 (win32-x64) build only"
+$platform = switch ($effectiveArchitecture) {
+    'AMD64' { 'win32-x64' }
+    'ARM64' { 'win32-arm64' }
+    default { Fail "unsupported Windows architecture '$effectiveArchitecture'; expected AMD64 or ARM64" }
 }
 
 # The channel naming contract gives the artifact row's file name: the row

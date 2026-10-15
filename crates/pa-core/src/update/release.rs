@@ -222,6 +222,43 @@ mod tests {
     }
 
     #[test]
+    fn windows_arm64_manifest_validates_the_archive_before_selection() {
+        let artifact = ReleaseArtifact {
+            platform: "win32-arm64".into(),
+            file: "prime-agent-1.2.3-win32-arm64.tar.gz".into(),
+            sha256: "a".repeat(64),
+        };
+        let mut manifest = serde_json::json!({
+            "version": "v1.2.3",
+            "binaries_v2": [{
+                "platform": artifact.platform,
+                "file": artifact.file,
+                "sha256": artifact.sha256,
+            }],
+        });
+        let release = parse_channel_manifest(manifest.to_string().as_bytes()).unwrap();
+        let expected = LatestRelease {
+            version: "1.2.3".into(),
+            artifacts: vec![artifact],
+        };
+        assert_eq!(release, expected);
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        assert_eq!(
+            artifact_for_platform(&release).unwrap(),
+            &expected.artifacts[0]
+        );
+
+        manifest["binaries_v2"][0]["file"] = "prime-agent-1.2.3-win32-x64.tar.gz".into();
+        assert_eq!(
+            parse_channel_manifest(manifest.to_string().as_bytes()),
+            Some(LatestRelease {
+                version: "1.2.3".into(),
+                artifacts: vec![],
+            })
+        );
+    }
+
+    #[test]
     fn parse_channel_manifest_keeps_the_reader_guards() {
         // A row the reader cannot verify empties the artifacts (TS parity).
         let lying_row = serde_json::json!({

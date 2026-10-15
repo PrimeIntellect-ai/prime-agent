@@ -52,7 +52,15 @@ On Windows, install from PowerShell:
 irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
 ```
 
-The Windows installer downloads the latest stable Windows x64 build and verifies its checksum before installation.
+The Windows installer selects the native x64 or ARM64 build and verifies its checksum before installation.
+
+For a local Windows ARM64 build, install the Rust `aarch64-pc-windows-msvc` toolchain,
+Visual Studio C++ ARM64 build tools and Windows SDK, and LLVM/Clang (`clang.exe`
+must be on PATH; the `ring` dependency requires it on this target). Then run:
+
+```powershell
+cargo build --release --locked --target aarch64-pc-windows-msvc -p pa-cli --bin prime-agent
+```
 
 ## Why Prime Agent
 

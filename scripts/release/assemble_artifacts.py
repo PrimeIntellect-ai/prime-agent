@@ -126,6 +126,7 @@ TARGET_ALIASES = {
     "aarch64-apple-darwin": "darwin-arm64",
     "x86_64-apple-darwin": "darwin-x64",
     "x86_64-pc-windows-msvc": "win32-x64",
+    "aarch64-pc-windows-msvc": "win32-arm64",
 }
 
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
