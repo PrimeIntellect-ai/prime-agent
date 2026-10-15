@@ -8,7 +8,6 @@
 //! `RlmSpawnLedger`, pa-core's `WindowedSessionStore` for the warm
 //! sidecars). The bench harness drives the real release binary under a pty.
 
-#[cfg(unix)]
 pub mod bench;
 pub mod corpus;
 pub mod report;
