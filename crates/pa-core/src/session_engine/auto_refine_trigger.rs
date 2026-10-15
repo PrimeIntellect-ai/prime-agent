@@ -5,9 +5,8 @@
 use pa_types::ai::Model;
 
 use crate::refinement::executor::AutoRefineReview;
-use crate::refinement::RefinementResult;
 
-use super::refine::{now_millis, AutoRefineRound};
+use super::refine::{now_millis, AutoRefineRound, CommittedRefinement};
 use super::AgentSession;
 
 /// The boundary a pending trigger is serviced at.
@@ -119,8 +118,9 @@ impl AgentSession {
     }
 
     /// Consume the armed trigger at one boundary. `Ok(None)` is every silent
-    /// outcome; `Ok(Some(result))` ran the refinement; `Err` is a failed
-    /// review or refinement run (cooldown stamped either way).
+    /// outcome; `Ok(Some(committed))` ran the refinement (the committed result
+    /// plus the rows the commit persisted); `Err` is a failed review or
+    /// refinement run (cooldown stamped either way).
     ///
     /// # Errors
     ///
@@ -135,7 +135,7 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
         surface: CompactAutoRefineSurface,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+    ) -> anyhow::Result<Option<CommittedRefinement>> {
         let cancel = self.refinement_signal();
         let gates = self.auto_refine_gates();
         let (retained_review, settled_turns, branch_version) = {
@@ -263,7 +263,7 @@ impl AgentSession {
             outcome
         };
         match outcome {
-            Ok(AutoRefineRound::Ran(result)) => Ok(Some(result)),
+            Ok(AutoRefineRound::Ran(committed)) => Ok(Some(committed)),
             // The declined round is silent; a deferred round is consumed above
             // (the arm exists for match exhaustiveness).
             Ok(AutoRefineRound::Declined | AutoRefineRound::Deferred(_)) => Ok(None),
@@ -352,7 +352,7 @@ mod tests {
         session: &AgentSession,
         model: &Model,
         surface: CompactAutoRefineSurface,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+    ) -> anyhow::Result<Option<CommittedRefinement>> {
         session
             .consume_compact_auto_refine(model, None, std::path::PathBuf::new(), surface)
             .await
@@ -497,14 +497,38 @@ mod tests {
             serde_json::json!({"text": review}),
             serde_json::json!({"text": plan}),
         ]);
-        let result = consume(&session, &model, CompactAutoRefineSurface::Checkpoint)
+        let committed = consume(&session, &model, CompactAutoRefineSurface::Checkpoint)
             .await
             .expect("the round ran")
             .expect("the review approved");
-        assert!(result.applied_edits.iter().any(|edit| edit.applied));
+        assert!(committed
+            .result
+            .applied_edits
+            .iter()
+            .any(|edit| edit.applied));
         let (pending, last_review_at, turns) = state(&session);
         assert!(!pending);
         assert!(last_review_at.is_some(), "the success stamped the cooldown");
         assert_eq!(turns, 0, "the counter reset");
+        // The committed rows are the ones the commit persisted, selected
+        // from the durable entries by id — outcome first, then the notice.
+        let durable: Vec<pa_types::session::CustomMessage> = session
+            .entries()
+            .await
+            .iter()
+            .filter_map(|entry| match entry {
+                pa_types::session::FileEntry::CustomMessage { payload, .. }
+                    if payload.custom_type == "refinement_outcome"
+                        || payload.custom_type == "refinement_notice" =>
+                {
+                    Some(crate::session::create_custom_message(payload, entry))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            committed.rows, durable,
+            "the committed rows must equal the persisted rows, timestamp included"
+        );
     }
 }

@@ -269,8 +269,8 @@ impl Worker {
         let result = tokio::task::spawn_blocking(move || engine.run_refinement(options))
             .await
             .unwrap_or_else(|error| Err(anyhow::anyhow!("refinement task failed: {error}")));
-        let result = match result {
-            Ok(result) => result,
+        let committed = match result {
+            Ok(committed) => committed,
             Err(error) => {
                 if let Some((session_id, generation)) = &origin {
                     crate::worker::emit_refinement_event_for_generation(
@@ -286,32 +286,10 @@ impl Worker {
                 return response_failure(None, "refine", &format!("{error:#}"), None);
             }
         };
-        // The refinement's durable rows: the TUI outcome, plus the model-facing
-        // notice when edits applied.
-        if let (Some((session_id, generation)), Ok(typed)) = (
-            &origin,
-            serde_json::from_value::<pa_core::refinement::RefinementResult>(result.clone()),
-        ) {
-            let outcome =
-                pa_core::session_engine::refine::create_refinement_outcome_message(&typed);
-            if let Ok(value) =
-                serde_json::to_value(pa_types::session::AgentMessage::Custom(outcome))
-            {
-                crate::worker::emit_refinement_row_for_generation(
-                    &self.core,
-                    &self.events,
-                    session_id,
-                    Some(generation),
-                    &value,
-                );
-            }
-            if typed.applied_edits.iter().any(|edit| edit.applied) {
-                let notice = pa_core::session_engine::refine::create_refinement_notice_message(
-                    &typed,
-                    pa_core::session_engine::refine::RefinementSource::User,
-                );
+        if let Some((session_id, generation)) = &origin {
+            for row in committed.rows {
                 if let Ok(value) =
-                    serde_json::to_value(pa_types::session::AgentMessage::Custom(notice))
+                    serde_json::to_value(pa_types::session::AgentMessage::Custom(row))
                 {
                     crate::worker::emit_refinement_row_for_generation(
                         &self.core,
@@ -327,10 +305,10 @@ impl Worker {
                 &self.events,
                 session_id,
                 Some(generation),
-                crate::worker::refine_complete_event(&typed),
+                crate::worker::refine_complete_event(&committed.result),
             );
         }
-        response_success(None, "refine", Some(result))
+        response_success(None, "refine", serde_json::to_value(&committed.result).ok())
     }
 
     /// `reload`: re-read the session's live inputs — the request auth

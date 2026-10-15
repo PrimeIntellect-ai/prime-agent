@@ -3,7 +3,6 @@
 //! settle in a background task (the inline-before-`Done` shape held the next prompt behind the
 //! whole review); ACP consumes it at the serialized checkpoint between turns.
 
-use pa_core::refinement::RefinementResult;
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
 
 use crate::agent_engine::AgentSessionEngine;
@@ -68,7 +67,7 @@ impl AgentSessionEngine {
     /// the pa-core consumption. `Ok(None)` is every silent outcome.
     pub(crate) fn consume_compact_auto_refine_round(
         &self,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+    ) -> anyhow::Result<Option<pa_core::session_engine::refine::CommittedRefinement>> {
         if !self.compact_auto_refine_pending() {
             return Ok(None);
         }

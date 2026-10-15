@@ -16,7 +16,7 @@ mod park;
 mod queue;
 
 /// A minimal turn runner over a fresh session core: exactly what `run_turn` touches.
-fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
+pub(in crate::worker) fn burst_runner(engine: Arc<dyn SessionEngine>) -> TurnRunner {
     let core = Arc::new(Mutex::new(SessionCore {
         active_session_id: "burst-session".to_string(),
         generation: "gen".to_string(),
