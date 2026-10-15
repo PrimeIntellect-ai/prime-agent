@@ -223,6 +223,10 @@ class Supervisor:
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
+    def extra_command(self, command, response):
+        """Subclass-owned protocol additions, handled before unknown-command errors."""
+        return False
+
     def send(self, sock, data):
         sock.sendall((json.dumps(data) + "\n").encode())
 
@@ -393,6 +397,8 @@ class Supervisor:
                         if not isinstance(command.get("enabled"), bool):
                             raise RuntimeError("set_auto_compaction requires a boolean")
                         response.pop("data", None)
+                    elif self.extra_command(command, response):
+                        pass
                     else:
                         self.errors.append(f"unexpected command: {name}")
                         response.update(success=False, error=f"Unsupported fixture command: {name}")

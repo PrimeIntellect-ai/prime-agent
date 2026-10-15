@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
@@ -31,13 +32,14 @@ class FactorySupervisor(Supervisor):
         data = copy.deepcopy(data)
         if data.get('type') == 'daemon_hello':
             data['serverCapabilities'] = ['session_input_admission', 'factory_activity']
-        if data.get('type') == 'response' and data.get('command') == 'factory_activity':
-            self.errors.remove('unexpected command: factory_activity')
-            command = self.commands[-1]
-            assert command['action'] in ('graph', 'watch'), command
-            data.update(success=True, data=copy.deepcopy(GRAPH))
-            data.pop('error', None)
         super().send(sock, data)
+
+    def extra_command(self, command, response):
+        if command['type'] != 'factory_activity':
+            return False
+        assert command['action'] in ('graph', 'watch'), command
+        response['data'] = copy.deepcopy(GRAPH)
+        return True
 
 
 def hello(binary, root, env, observed):
@@ -105,12 +107,17 @@ def observe(binary, kind, root, observed):
     finally:
         try:
             if terminal:
-                observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
                 if terminal.process.poll() is None:
                     terminal.send('\x03\x03')
                     deadline = time.monotonic() + 8
                     while terminal.process.poll() is None and time.monotonic() < deadline:
                         terminal.pump()
+                while select.select([terminal.master], [], [], 0)[0]:
+                    before = len(terminal.raw)
+                    terminal.pump()
+                    if len(terminal.raw) == before:
+                        break
+                observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
                 observed['ui_exit_code'] = terminal.process.poll()
                 os.close(terminal.master)
         finally:
