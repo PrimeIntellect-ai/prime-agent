@@ -1214,3 +1214,97 @@ fn a_not_due_recheck_keeps_threshold_checks_armed() {
         "a failed or skipped summary suppresses the rest of the run"
     );
 }
+
+#[test]
+fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
+    let _faux = FAUX_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (engine, dir) = faux_engine_with_settings(
+        &serde_json::json!({
+            "responses": vec![serde_json::json!({"text": "short response"}); 80],
+        }),
+        16_384,
+    );
+    std::fs::write(
+        dir.path().join("agent/settings.json"),
+        serde_json::json!({"compaction": {
+            "enabled": true, "thresholdPercent": 5,
+            "reserveTokens": 16_384, "keepRecentTokens": 20_000
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let engine = std::sync::Arc::new(engine);
+    engine.register_arc();
+    let mut events = Vec::new();
+    let mut compacted = false;
+    for turn in 0..30 {
+        admit(
+            &engine,
+            format!("turn {turn} {}", "x".repeat(12_000)),
+            &mut events,
+        );
+        if let Some(EngineEvent::Compaction { event, entry }) = events
+            .iter()
+            .find(|event| matches!(event, EngineEvent::Compaction { .. }))
+        {
+            assert!(event["result"]["summary"]
+                .as_str()
+                .unwrap()
+                .contains("short response"));
+            assert!(entry["firstKeptEntryId"].is_string());
+            compacted = true;
+            break;
+        }
+    }
+    assert!(compacted, "the 5% setting ran an actual compaction");
+    let usage = events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    assert!(
+        usage < 95_232,
+        "compaction occurred before the unchanged default trigger"
+    );
+    for turn in 0..4 {
+        admit(&engine, format!("short continuation {turn}"), &mut events);
+    }
+    let starts = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::CompactionStart { .. }))
+        .count();
+    let ends = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::Compaction { .. }))
+        .count();
+    assert_eq!(
+        (starts, ends),
+        (1, 1),
+        "short turns do not recompact retained history"
+    );
+    assert_eq!(
+        assistant_texts(&events).last().map(String::as_str),
+        Some("short response")
+    );
+
+    // The autonomous mirror shares the same live getter rather than a copied refresh.
+    let mut settings =
+        pa_core::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
+    settings.set_compaction_threshold_percent(75.0).unwrap();
+    let mirror = engine.autonomous_boundary.lock().unwrap().clone().unwrap();
+    let session = mirror.session.upgrade().unwrap();
+    assert_eq!(
+        session.session.compaction_settings(),
+        pa_core::session_engine::compaction::CompactionSettings {
+            threshold_percent: 75.0,
+            reserve_tokens: 16_384,
+            keep_recent_tokens: 20_000,
+            ..Default::default()
+        }
+    );
+}

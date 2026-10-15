@@ -40,6 +40,7 @@ pub struct MarkdownStyle {
     /// over the highlight.js grammar). `None` renders every code line uniform in `code_block`
     /// — the TS no-valid-language fallback, and the quiet thinking theme.
     pub(crate) syntax: Option<crate::tool_card::highlight::SyntaxPalette>,
+    pub(crate) link_base_url: Option<url::Url>,
 }
 
 impl Default for MarkdownStyle {
@@ -67,18 +68,17 @@ impl MarkdownStyle {
             quote_border: theme.fg_style(C::MdQuoteBorder),
             hr: theme.fg_style(C::MdHr),
             list_bullet: theme.fg_style(C::MdListBullet),
-            // The TS source styles `**bold**`/`*ital*`/`~~strike~~` (and the heading taper)
-            // through chalk; in the deployed TS binary the chalk modifiers never reach the
-            // wire — only its raw-ANSI colors render (probe vs the installed 0.9.5 binary:
-            // headings render in mdHeading alone, inline strong/em/strike render plain, inline
-            // code stays colored). The markers survive parsing but carry no modifier.
-            bold: Modifier::empty(),
-            italic: Modifier::empty(),
-            strikethrough: Modifier::empty(),
+            // TS `theme.bold/italic/strikethrough` are chalk; chalk emits its SGR
+            // modifiers in any color terminal (its supports-color level is >= 1
+            // whenever stdout is a TTY), so emphasis carries real modifiers.
+            bold: Modifier::BOLD,
+            italic: Modifier::ITALIC,
+            strikethrough: Modifier::CROSSED_OUT,
             code_block_indent: "  ".to_string(),
             syntax: Some(crate::tool_card::highlight::SyntaxPalette::from_theme(
                 theme,
             )),
+            link_base_url: None,
         }
     }
 }
@@ -113,7 +113,13 @@ pub fn render_markdown_tagged(
         if block.sep_blank {
             lines.push(Vec::new());
         }
-        let key = block_cache_key(style_tag, &blocks, i, content_width);
+        let key = block_cache_key(
+            style_tag,
+            &blocks,
+            i,
+            content_width,
+            style.link_base_url.as_ref(),
+        );
         if let Some(cached) = key.as_ref().and_then(|key| cache.0.get(key)) {
             lines.extend_from_slice(cached);
             continue;
@@ -150,6 +156,7 @@ pub struct MarkdownBlockCache(std::collections::HashMap<BlockKey, Vec<Line>>);
 /// inputs structurally, so a field added later is covered automatically.
 #[derive(PartialEq, Eq, Hash)]
 struct BlockKey {
+    link_base_url: Option<url::Url>,
     style_tag: String,
     width: usize,
     kind: BlockKind,
@@ -166,6 +173,7 @@ fn block_cache_key(
     blocks: &[Block],
     index: usize,
     width: usize,
+    link_base_url: Option<&url::Url>,
 ) -> Option<BlockKey> {
     if index + 1 == blocks.len() {
         return None;
@@ -173,6 +181,7 @@ fn block_cache_key(
     let next = blocks.get(index + 1);
     let block = &blocks[index];
     Some(BlockKey {
+        link_base_url: link_base_url.cloned(),
         style_tag: style_tag.to_string(),
         width,
         kind: block.kind.clone(),
@@ -184,17 +193,40 @@ fn block_cache_key(
     })
 }
 
+/// One list level: its marker type and the items parsed at one indent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ListBlock {
+    ordered: bool,
+    start: usize,
+    items: Vec<ListItem>,
+}
+
+/// One item part, in source order: a text line or a nested list.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ListPart {
+    Text(String),
+    /// A lazy soft line within nested item text: TS inline newlines resume at column zero.
+    LazyText(String),
+    List(ListBlock),
+}
+
+/// One list item: its parts in source order (text lines and nested lists
+/// interleaved — marked walks an item's block tokens the same way).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ListItem {
+    parts: Vec<ListPart>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BlockKind {
-    Heading,
+    Heading {
+        depth: usize,
+    },
     Paragraph,
     Code {
         lang: Option<String>,
     },
-    List {
-        ordered: bool,
-        start: usize,
-    },
+    List(ListBlock),
     Quote,
     Hr,
     Table {
@@ -213,8 +245,8 @@ struct Block {
 }
 
 fn parse_blocks(text: &str) -> Vec<Block> {
-    let mut blocks = Vec::new();
     let src_lines: Vec<&str> = text.lines().collect();
+    let mut blocks = Vec::new();
     let mut i = 0usize;
     while i < src_lines.len() {
         let line = src_lines[i];
@@ -230,7 +262,12 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 .take_while(|l| l.trim().is_empty())
                 .count()
                 > 0;
-        if let Some(fence) = trimmed.strip_prefix("```") {
+        if let Some(fence) = trimmed
+            .strip_prefix("```")
+            .map(|rest| (rest, "```"))
+            .or_else(|| trimmed.strip_prefix("~~~").map(|rest| (rest, "~~~")))
+        {
+            let (fence, closer) = fence;
             let lang = if fence.is_empty() {
                 None
             } else {
@@ -238,7 +275,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             };
             let mut code = Vec::new();
             i += 1;
-            while i < src_lines.len() && !src_lines[i].trim().starts_with("```") {
+            while i < src_lines.len() && !src_lines[i].trim().starts_with(closer) {
                 code.push(src_lines[i].to_string());
                 i += 1;
             }
@@ -251,11 +288,14 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             continue;
         }
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
-        if hashes > 0 && trimmed.len() > hashes && trimmed.as_bytes()[hashes] == b' ' {
+        if heading_marker(trimmed) && hashes <= 6 {
+            let content = trimmed
+                .get(hashes + 1..)
+                .map_or_else(String::new, std::string::ToString::to_string);
             blocks.push(Block {
-                kind: BlockKind::Heading,
+                kind: BlockKind::Heading { depth: hashes },
                 sep_blank,
-                lines: vec![trimmed[hashes + 1..].to_string()],
+                lines: vec![content],
             });
             i += 1;
             continue;
@@ -269,20 +309,25 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             i += 1;
             continue;
         }
-        if let Some(q) = trimmed.strip_prefix('>') {
-            let mut qlines = vec![q.trim_start().to_string()];
-            i += 1;
-            while i < src_lines.len()
-                && !src_lines[i].trim().is_empty()
-                && src_lines[i].trim().starts_with('>')
-            {
-                qlines.push(
-                    src_lines[i]
-                        .trim()
-                        .trim_start_matches('>')
-                        .trim_start()
-                        .to_string(),
-                );
+        if trimmed.starts_with('>') {
+            // One quote block: `>`-prefixed lines plus marked's lazy continuation —
+            // following non-blank lines that do not start another block stay inside
+            // the quote (the blockquote token consumes until a blank line).
+            let mut qlines = Vec::new();
+            while i < src_lines.len() {
+                let t = src_lines[i].trim();
+                if t.is_empty() {
+                    break;
+                }
+                if let Some(q) = t.strip_prefix('>') {
+                    qlines.push(q.trim_start().to_string());
+                    i += 1;
+                    continue;
+                }
+                if interrupts_paragraph(t, src_lines.get(i + 1)) {
+                    break;
+                }
+                qlines.push(t.to_string());
                 i += 1;
             }
             blocks.push(Block {
@@ -292,34 +337,26 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             });
             continue;
         }
-        if let Some(marker) = list_marker(trimmed) {
-            let (ordered, start) = marker;
-            let mut items: Vec<String> = Vec::new();
-            let mut item = trimmed[marker_width(trimmed)..].to_string();
+        if let Some((ordered, start)) = list_marker(trimmed) {
+            let indent = line.len() - line.trim_start().len();
+            let first = ListItem {
+                parts: vec![ListPart::Text(trimmed[marker_width(trimmed)..].to_string())],
+            };
+            let content_col = indent + marker_width(trimmed);
             i += 1;
-            while i < src_lines.len() {
-                let l = src_lines[i];
-                let t = l.trim();
-                if t.is_empty() {
-                    break;
-                }
-                if list_marker(t).is_some() {
-                    items.push(std::mem::take(&mut item));
-                    item = t[marker_width(t)..].to_string();
-                    i += 1;
-                } else if l.starts_with("  ") || l.starts_with('\t') {
-                    item.push(' ');
-                    item.push_str(t);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            items.push(item);
+            let list = parse_list_level(
+                &src_lines,
+                &mut i,
+                first,
+                ordered,
+                start,
+                ListNesting { indent, depth: 0 },
+                content_col,
+            );
             blocks.push(Block {
-                kind: BlockKind::List { ordered, start },
+                kind: BlockKind::List(list),
                 sep_blank,
-                lines: items,
+                lines: Vec::new(),
             });
             continue;
         }
@@ -347,19 +384,22 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         while i < src_lines.len() {
             let l = src_lines[i];
             let t = l.trim();
-            if t.is_empty()
-                || t.starts_with("```")
-                || t.starts_with('>')
-                || t.starts_with('#')
-                || list_marker(t).is_some()
-                || is_hr(t)
-                || crate::markdown_table::is_table_start(t, src_lines.get(i + 1))
-            {
+            if t.is_empty() || interrupts_paragraph(t, src_lines.get(i + 1)) {
                 break;
             }
             para_lines.push(t.to_string());
             last_raw = l;
             i += 1;
+        }
+        // A trailing unescaped backslash is a hard break (marked consumes it with
+        // the newline); the paragraph's last line has no following row, so its
+        // backslash stays literal.
+        let hard_break_count = para_lines.len().saturating_sub(1);
+        for line in para_lines.iter_mut().take(hard_break_count) {
+            let backslashes = line.chars().rev().take_while(|&c| c == '\\').count();
+            if backslashes % 2 == 1 {
+                line.pop();
+            }
         }
         let last = para_lines.last_mut().expect("paragraph has a line");
         last.push_str(&last_raw[last_raw.trim_end().len()..]);
@@ -372,11 +412,31 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     blocks
 }
 
+/// A heading line start: `#`s followed by a space (the depth cap lives where the
+/// heading is parsed).
+pub(crate) fn heading_marker(t: &str) -> bool {
+    let hashes = t.chars().take_while(|&c| c == '#').count();
+    hashes > 0 && (t.len() == hashes || t.as_bytes()[hashes] == b' ')
+}
+
 pub(crate) fn is_hr(t: &str) -> bool {
     let chars: Vec<char> = t.chars().filter(|&c| c != ' ').collect();
     (chars.len() >= 3)
         && chars.iter().all(|&c| c == '-' || c == '*' || c == '_')
         && (chars[0] == '-' || chars[0] == '*' || chars[0] == '_')
+}
+
+/// A line that interrupts a paragraph (marked: a new block never continues one) —
+/// the shared stop predicate for paragraph parsing and a blockquote's lazy
+/// continuation.
+fn interrupts_paragraph(t: &str, next: Option<&&str>) -> bool {
+    t.starts_with("```")
+        || t.starts_with("~~~")
+        || t.starts_with('>')
+        || t.starts_with('#')
+        || list_marker(t).is_some()
+        || is_hr(t)
+        || crate::markdown_table::is_table_start(t, next)
 }
 
 pub(crate) fn list_marker(t: &str) -> Option<(bool, usize)> {
@@ -405,6 +465,162 @@ fn marker_width(t: &str) -> usize {
         2
     } else {
         t.find(". ").map_or(t.len(), |p| p + 2)
+    }
+}
+
+/// The bullet for one item of a list level (TS `renderList`: the token's start
+/// number plus the item index, so sibling markers' own numbers are ignored).
+fn list_bullet(ordered: bool, start: usize, index: usize) -> String {
+    if ordered {
+        format!("{}. ", start + index)
+    } else {
+        "- ".to_string()
+    }
+}
+
+/// One list level's row geometry: the column its rows indent to (the level's own
+/// indent plus the accumulated `indent + "  "` frames of its ancestors, TS
+/// `renderList`), and the indent its children's rows inherit from that frame.
+fn list_level_geometry(depth: usize, outer: usize) -> (usize, usize) {
+    (outer + 2 * depth, outer + 2 * depth + 2)
+}
+
+/// One item line's wrap budget: the first line shares its row with the level
+/// indent and the bullet; later lines carry `indent + "  "`.
+fn list_line_budget(
+    width: usize,
+    indent_len: usize,
+    bullet_width: usize,
+    first_line: bool,
+) -> usize {
+    let used = if first_line {
+        indent_len + bullet_width
+    } else {
+        indent_len + 2
+    };
+    width.saturating_sub(used).max(1)
+}
+
+#[derive(Clone, Copy)]
+struct ListNesting {
+    indent: usize,
+    depth: usize,
+}
+
+/// Parse one list level (marked's list rule): marker lines of the level's own
+/// type start items (a marker line indented between the level indent and the
+/// current item's content column is absorbed as a sibling — marked renumbers
+/// by index), blank lines stay internal (marked's loose list), indented
+/// non-marker lines continue the current item as their own lines, and a marker
+/// line at or past the content column opens a nested level. Anything else ends
+/// the level; a trailing run of blanks is left for the gap before the next
+/// block.
+fn parse_list_level(
+    src_lines: &[&str],
+    i: &mut usize,
+    first: ListItem,
+    ordered: bool,
+    start: usize,
+    nesting: ListNesting,
+    first_content_col: usize,
+) -> ListBlock {
+    let ListNesting { indent, depth } = nesting;
+    let mut items = vec![first];
+    // The column the current item's content starts at: a line indented to it is
+    // the item's continuation or a nested list; a marker line between the level
+    // indent and it is absorbed as a sibling (marked renumbers by index).
+    let mut content_col = first_content_col;
+    let mut pending_blank: Option<usize> = None;
+    while *i < src_lines.len() {
+        let line = src_lines[*i];
+        let t = line.trim();
+        let line_indent = line.len() - line.trim_start().len();
+        if t.is_empty() {
+            pending_blank.get_or_insert(*i);
+            *i += 1;
+            continue;
+        }
+        if let Some((child_ordered, child_start)) = list_marker(t) {
+            let marker_w = marker_width(t);
+            if line_indent >= content_col {
+                // Keep untrusted message content from building an unbounded recursive tree.
+                // Beyond this level the source marker stays literal; count, paint and Drop
+                // therefore share the same bounded tree without losing the item text.
+                if depth >= 64 {
+                    items
+                        .last_mut()
+                        .expect("the level has its first item")
+                        .parts
+                        .push(ListPart::Text(t.to_string()));
+                    pending_blank = None;
+                    *i += 1;
+                    continue;
+                }
+                let child_first = ListItem {
+                    parts: vec![ListPart::Text(t[marker_w..].to_string())],
+                };
+                *i += 1;
+                let child = parse_list_level(
+                    src_lines,
+                    i,
+                    child_first,
+                    child_ordered,
+                    child_start,
+                    ListNesting {
+                        indent: line_indent,
+                        depth: depth + 1,
+                    },
+                    line_indent + marker_w,
+                );
+                items
+                    .last_mut()
+                    .expect("the level has its first item")
+                    .parts
+                    .push(ListPart::List(child));
+                pending_blank = None;
+                continue;
+            }
+            if child_ordered == ordered
+                && (line_indent == indent || (line_indent > indent && line_indent < content_col))
+            {
+                items.push(ListItem {
+                    parts: vec![ListPart::Text(t[marker_w..].to_string())],
+                });
+                content_col = line_indent + marker_w;
+                pending_blank = None;
+                *i += 1;
+                continue;
+            }
+            break;
+        }
+        if line_indent >= content_col {
+            items
+                .last_mut()
+                .expect("the level has its first item")
+                .parts
+                .push(ListPart::Text(t.to_string()));
+            pending_blank = None;
+            *i += 1;
+            continue;
+        }
+        if depth > 0 && pending_blank.is_none() && !interrupts_paragraph(t, src_lines.get(*i + 1)) {
+            items
+                .last_mut()
+                .expect("the level has its first item")
+                .parts
+                .push(ListPart::LazyText(t.to_string()));
+            *i += 1;
+            continue;
+        }
+        break;
+    }
+    if let Some(blank) = pending_blank {
+        *i = blank;
+    }
+    ListBlock {
+        ordered,
+        start,
+        items,
     }
 }
 
@@ -475,18 +691,33 @@ fn code_rows(block: &Block, lang: Option<&str>, style: &MarkdownStyle) -> Vec<Li
 /// collide) tapers to the heading color like any other span. Shared by
 /// the paint path and the row count, so a wrapped heading counts
 /// exactly what it paints.
-fn heading_spans(text: &str, style: &MarkdownStyle) -> Vec<Span> {
-    let (mut spans, url_slots) = inline::render_inline_with_url_slots(text, style);
+fn heading_spans(text: &str, depth: usize, style: &MarkdownStyle) -> Vec<Span> {
+    let (mut spans, url_slots, code_slots) = inline::render_inline_tracked(text, style);
+    // TS heading styleFn: h1 bold+underline, h2/h3 bold, h4 bold+italic, h5/h6 italic,
+    // all over the heading color. The heading modifiers close around an inline-code
+    // span and a link's URL bracket — both keep their own colors (tracked by origin);
+    // an underlined link label keeps the underline affordance.
+    let taper = style.heading.add_modifier(match depth {
+        1 => Modifier::BOLD | Modifier::UNDERLINED,
+        2 | 3 => Modifier::BOLD,
+        4 => Modifier::BOLD | Modifier::ITALIC,
+        _ => Modifier::ITALIC,
+    });
     // The slot indices arrive ascending, so one cursor walks them in
     // step with the span iteration — a link-heavy heading stays linear.
     let mut url_slot = 0;
+    let mut code_slot = 0;
     for (i, s) in spans.iter_mut().enumerate() {
         if url_slots.get(url_slot) == Some(&i) {
             url_slot += 1;
             continue;
         }
+        if code_slots.get(code_slot) == Some(&i) {
+            code_slot += 1;
+            continue;
+        }
         let underlined = s.style.add_modifier.contains(Modifier::UNDERLINED);
-        s.style = style.heading;
+        s.style = taper;
         if underlined {
             s.style = s.style.add_modifier(Modifier::UNDERLINED);
         }
@@ -503,14 +734,10 @@ fn render_block(
 ) {
     let blank_after = |exclude_lists| geometry::blank_after(next, exclude_lists);
     match &block.kind {
-        BlockKind::Heading => {
-            // The TS source tapers headings by level (h1 bold+underline, h2/h3 bold, h4
-            // bold+italic, h5/h6 italic), all through chalk; in the deployed TS binary the
-            // chalk modifiers never reach the wire, so every level renders in the heading
-            // color alone (probe vs the installed 0.9.5 binary).
+        BlockKind::Heading { depth } => {
             let text = block.lines.first().cloned().unwrap_or_default();
-            let spans = heading_spans(&text, style);
-            wrap_spans(&spans, width, style.heading, out);
+            let spans = heading_spans(&text, *depth, style);
+            wrap_spans(&spans, width, out);
             if blank_after(false) {
                 out.push(Vec::new());
             }
@@ -519,8 +746,8 @@ fn render_block(
             // Each soft-break line renders and wraps on its own (TS's paragraph token
             // carries the newlines through the width pass).
             for text in &block.lines {
-                let spans = render_inline(text, style);
-                wrap_spans(&spans, width, style.body, out);
+                let spans = inline::render_inline_tracked(text, style).0;
+                wrap_spans(&spans, width, out);
             }
             if blank_after(true) {
                 out.push(Vec::new());
@@ -536,39 +763,42 @@ fn render_block(
             // (wrapTextWithAnsi), so a continuation row starts at column 0
             // with no re-added indent.
             for row in code_rows(block, lang.as_deref(), style) {
-                wrap_spans(&row, width, style.code_block, out);
+                wrap_spans(&row, width, out);
             }
             if blank_after(false) {
                 out.push(Vec::new());
             }
         }
-        BlockKind::List { ordered, start } => {
-            for (i, item) in block.lines.iter().enumerate() {
-                let bullet = if *ordered {
-                    format!("{}. ", start + i)
-                } else {
-                    "- ".to_string()
-                };
-                let spans = render_inline(item, style);
-                wrap_list_item(&bullet, &spans, width, style, out);
-            }
+        BlockKind::List(list) => {
+            render_list_level(list, 0, 0, width, style, out);
             if blank_after(true) {
                 out.push(Vec::new());
             }
         }
         BlockKind::Quote => {
+            // TS renders the whole quote content in the quote color and italic
+            // (its quoteStyle re-applies after every inline reset); inline-code
+            // spans and link URL brackets keep their own colors, and emphasis
+            // modifiers ride on top.
             for line in &block.lines {
-                let spans = render_inline(line, style);
+                let (spans, url_slots, code_slots) = inline::render_inline_tracked(line, style);
                 let mut quote_spans: Vec<Span> = Vec::new();
-                for mut s in spans {
-                    s.style = style.quote.patch(s.style);
+                for (i, mut s) in spans.into_iter().enumerate() {
+                    if s.content.is_empty() {
+                        continue;
+                    }
+                    s.style = s.style.add_modifier(Modifier::ITALIC);
+                    if !url_slots.contains(&i) && !code_slots.contains(&i) {
+                        s.style.fg = style.quote.fg;
+                    }
                     quote_spans.push(s);
                 }
                 wrap_quote(&quote_spans, width, style, out);
             }
         }
         BlockKind::Hr => {
-            let bar: String = "─".repeat(width.max(1));
+            // TS hr: `"─".repeat(Math.min(width, 80))`.
+            let bar: String = "─".repeat(width.min(80));
             out.push(vec![Span::styled(bar, style.hr)]);
         }
         BlockKind::Table { header, rows } => {
@@ -580,10 +810,122 @@ fn render_block(
     }
 }
 
+/// One wrap token: a run of spaces, or a word run whose pieces may cross span
+/// boundaries — TS `splitIntoTokensWithAnsi` never splits a word at an ANSI
+/// boundary, so a styled span's trailing punctuation stays glued to the word.
+#[derive(Debug)]
+pub(super) enum WrapToken {
+    Gap(String, Style),
+    Word(Vec<(String, Style)>),
+}
+
+/// Split styled spans into wrap tokens: words and space runs, with words that
+/// touch across a span boundary glued into one token.
+#[must_use]
+pub(super) fn tokenize_spans(spans: &[Span]) -> Vec<WrapToken> {
+    let mut tokens: Vec<WrapToken> = Vec::new();
+    for span in spans {
+        let mut word = String::new();
+        for ch in span.content.chars() {
+            if ch == ' ' {
+                if !word.is_empty() {
+                    push_word(&mut tokens, std::mem::take(&mut word), span.style);
+                }
+                match tokens.last_mut() {
+                    Some(WrapToken::Gap(text, _)) => text.push(' '),
+                    _ => tokens.push(WrapToken::Gap(" ".to_string(), span.style)),
+                }
+            } else {
+                word.push(ch);
+            }
+        }
+        if !word.is_empty() {
+            push_word(&mut tokens, word, span.style);
+        }
+    }
+    tokens
+}
+
+/// Place one piece of a glued word unit, breaking overlong pieces across rows;
+/// escape sequences copy through atomically at zero width (OSC 8 sequences must
+/// never split mid-sequence).
+///
+/// The remaining width is tracked arithmetically: measured once (the caller's
+/// `w`), decremented by each row's emitted width, with `rest` sliced — never
+/// re-measured per row (an unbroken token longer than the wrap width would
+/// otherwise wrap in `O(token_len * rows)` time). For content whose per-char
+/// widths sum to its grapheme width — every printable-ASCII/escape/tab token,
+/// the catastrophic class — the arithmetic is exact; a row split inside a
+/// multi-char grapheme cluster is the one non-additive case, so a tentative
+/// exit is confirmed against one true measure before the leftover is pushed
+/// (the correctness backstop, never the hot path).
+fn push_word_piece(
+    text: &str,
+    style: Style,
+    width: usize,
+    col: &mut usize,
+    out: &mut geometry::WrapOutput<'_>,
+) {
+    let mut rest: &str = text;
+    let mut rest_width = str_width(rest);
+    loop {
+        if rest_width + *col <= width {
+            if str_width(rest) + *col <= width {
+                break;
+            }
+            // A non-additive cluster split drifted the arithmetic: re-sync from the
+            // true measure and keep breaking.
+            rest_width = str_width(rest);
+        }
+        let mut take = String::new();
+        let mut tw = 0usize;
+        let mut taken = 0usize;
+        while taken < rest.len() {
+            if let Some(len) = crate::width::escape_len(&rest[taken..]) {
+                take.push_str(&rest[taken..taken + len]);
+                taken += len;
+                continue;
+            }
+            let c = rest[taken..].chars().next().expect("char at boundary");
+            let cw = crate::width::char_width(c);
+            if tw + cw + *col > width {
+                break;
+            }
+            take.push(c);
+            tw += cw;
+            taken += c.len_utf8();
+        }
+        if take.is_empty() {
+            // The piece cannot start on this row: open a fresh row and retry
+            // it (a glued word never overflows its row; the count path
+            // shares this break).
+            if *col > 0 {
+                out.finish_row(/*trim*/ false);
+                *col = 0;
+                continue;
+            }
+            break;
+        }
+        out.push(&take, style);
+        out.finish_row(/*trim*/ false);
+        *col = 0;
+        rest = &rest[taken..];
+        rest_width -= tw;
+    }
+    *col += str_width(rest);
+    out.push(rest, style);
+}
+
+fn push_word(tokens: &mut Vec<WrapToken>, text: String, style: Style) {
+    match tokens.last_mut() {
+        Some(WrapToken::Word(pieces)) => pieces.push((text, style)),
+        _ => tokens.push(WrapToken::Word(vec![(text, style)])),
+    }
+}
+
 /// Wrap styled spans to `width`. Words break at whitespace; leading spaces are
 /// dropped after a wrap break. Adjacent same-style output pieces merge.
-pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>) {
-    let _ = base;
+pub fn wrap_spans(spans: &[Span], width: usize, out: &mut Vec<Line>) {
     wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
 }
 
@@ -611,122 +953,159 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         out.finish_row(/*trim*/ false);
         return;
     }
-    // tokens: (text, style); alternating words and whitespace-run gaps. TS
-    // `splitIntoTokensWithAnsi` keeps each whitespace RUN whole (a run at a span boundary
-    // joins the previous gap token), never collapsing it to a single space.
-    let mut tokens: Vec<(String, Style)> = Vec::new();
-    for span in spans {
-        let mut word = String::new();
-        for ch in span.content.chars() {
-            if ch == ' ' {
-                if !word.is_empty() {
-                    tokens.push((std::mem::take(&mut word), span.style));
-                }
-                match tokens.last_mut() {
-                    Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
-                    _ => tokens.push((" ".to_string(), span.style)),
-                }
-            } else {
-                word.push(ch);
-            }
-        }
-        if !word.is_empty() {
-            tokens.push((word, span.style));
-        }
-    }
+    let tokens = tokenize_spans(spans);
 
     let mut col = 0usize;
     let mut i = 0usize;
     while i < tokens.len() {
-        let (text, style) = &tokens[i];
-        let w = str_width(text);
-        if col + w > width && out.has_content {
-            // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the boundary
-            // space, so the styled content ends at the last word and the plain padding follows.
-            out.finish_row(/*trim*/ true);
-            col = 0;
-            // drop leading whitespace at the new line start
-            if text.trim().is_empty() {
-                i += 1;
-                continue;
+        match &tokens[i] {
+            WrapToken::Word(pieces) => {
+                // The glued unit wraps as one word: it moves to the next row
+                // together, never splitting at a span boundary.
+                let w: usize = pieces.iter().map(|(t, _)| str_width(t)).sum();
+                if col + w > width && out.has_content {
+                    // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the
+                    // boundary space, so the styled content ends at the last word.
+                    out.finish_row(/*trim*/ true);
+                    col = 0;
+                }
+                for (piece, style) in pieces {
+                    push_word_piece(piece, *style, width, &mut col, out);
+                }
+            }
+            WrapToken::Gap(text, style) => {
+                let w = str_width(text);
+                if col + w > width && out.has_content {
+                    // A wrapped row never carries its trailing gap: TS wrapTextWithAnsi drops the
+                    // boundary space, so the styled content ends at the last word.
+                    out.finish_row(/*trim*/ true);
+                    col = 0;
+                    // drop leading whitespace at the new line start
+                    if text.trim().is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                }
+                push_word_piece(text, *style, width, &mut col, out);
             }
         }
-        // break overlong words; escape sequences copy through atomically
-        // at zero width (OSC 8 sequences must never split mid-sequence)
-        let style = *style;
-        let mut rest: &str = text.as_str();
-        // The remaining width is tracked arithmetically: measured once (the caller's `w`),
-        // decremented by each row's emitted width, with `rest` sliced — never re-measured per row
-        // (an unbroken token longer than the wrap width would otherwise wrap in O(token_len * rows)
-        // time). For content whose per-char widths sum to its grapheme width — every
-        // printable-ASCII/escape/tab token, the catastrophic class — the arithmetic is exact; a row
-        // split inside a multi-char grapheme cluster is the one non-additive case, so a tentative
-        // exit is confirmed against one true measure before the leftover is pushed (the correctness
-        // backstop, never the hot path).
-        let mut rest_width = w;
-        loop {
-            if rest_width + col <= width {
-                if str_width(rest) + col <= width {
-                    break;
-                }
-                // A non-additive cluster split drifted the arithmetic: re-sync from the
-                // true measure and keep breaking.
-                rest_width = str_width(rest);
-            }
-            let mut take = String::new();
-            let mut tw = 0usize;
-            let mut taken = 0usize;
-            while taken < rest.len() {
-                if let Some(len) = crate::width::escape_len(&rest[taken..]) {
-                    take.push_str(&rest[taken..taken + len]);
-                    taken += len;
-                    continue;
-                }
-                let c = rest[taken..].chars().next().expect("char at boundary");
-                let cw = crate::width::char_width(c);
-                if tw + cw + col > width {
-                    break;
-                }
-                take.push(c);
-                tw += cw;
-                taken += c.len_utf8();
-            }
-            if take.is_empty() {
-                break;
-            }
-            out.push(&take, style);
-            out.finish_row(/*trim*/ false);
-            col = 0;
-            rest = &rest[taken..];
-            rest_width -= tw;
-        }
-        col += str_width(rest);
-        out.push(rest, style);
         i += 1;
     }
     out.finish_row(/*trim*/ false);
 }
 
-fn wrap_list_item(
-    bullet: &str,
-    spans: &[Span],
+/// The row count of one list level — the same geometry [`render_list_level`]
+/// paints (level indent, bullet widths, budgets), counted without collecting
+/// rows. An item with no lines still renders its bare bullet row.
+fn list_row_count(
+    list: &ListBlock,
+    depth: usize,
+    outer: usize,
+    width: usize,
+    style: &MarkdownStyle,
+) -> usize {
+    let (indent_len, child_outer) = list_level_geometry(depth, outer);
+    let mut count = 0;
+    for (index, item) in list.items.iter().enumerate() {
+        let bullet_width = str_width(&list_bullet(list.ordered, list.start, index));
+        let mut item_count = 0;
+        let mut first_part = true;
+        for part in &item.parts {
+            match part {
+                ListPart::Text(text) => {
+                    let budget = list_line_budget(width, indent_len, bullet_width, first_part);
+                    item_count += wrapped_span_count(&render_inline(text, style), budget);
+                    first_part = false;
+                }
+                ListPart::List(child) => {
+                    item_count += list_row_count(child, depth + 1, child_outer, width, style);
+                    first_part = false;
+                }
+                ListPart::LazyText(text) => {
+                    item_count += wrapped_span_count(&render_inline(text, style), width);
+                    first_part = false;
+                }
+            }
+        }
+        count += item_count.max(1);
+    }
+    count
+}
+
+/// Render one list level (TS `renderList`): every item line beyond the first
+/// prefixes with `indent + "  "` (each nesting level accumulates one frame), the
+/// item's first line carries the level's bullet, wrapped rows keep the
+/// bullet-width continuation indent, and empty items render the bare bullet.
+fn render_list_level(
+    list: &ListBlock,
+    depth: usize,
+    outer: usize,
     width: usize,
     style: &MarkdownStyle,
     out: &mut Vec<Line>,
 ) {
-    let bullet_width = str_width(bullet);
-    let content_width = width.saturating_sub(bullet_width).max(1);
-    let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, content_width, style.body, &mut wrapped);
-    for (i, line) in wrapped.into_iter().enumerate() {
-        if i == 0 {
-            let mut l = vec![Span::styled(bullet.to_string(), style.list_bullet)];
-            l.extend(line);
-            out.push(l);
+    let (indent_len, child_outer) = list_level_geometry(depth, outer);
+    let indent = " ".repeat(indent_len);
+    for (index, item) in list.items.iter().enumerate() {
+        let bullet = list_bullet(list.ordered, list.start, index);
+        let bullet_width = str_width(&bullet);
+        let mut item_rows: Vec<Line> = Vec::new();
+        // The item's parts walk in source order; the first part carries the
+        // level's bullet (a nested list renders into the same rows before any
+        // later text lines, matching marked's token order).
+        let mut first_part = true;
+        for part in &item.parts {
+            match part {
+                ListPart::Text(text) => {
+                    let spans = inline::render_inline_tracked(text, style).0;
+                    let mut wrapped: Vec<Line> = Vec::new();
+                    if first_part {
+                        let budget = list_line_budget(width, indent_len, bullet_width, true);
+                        wrap_spans(&spans, budget, &mut wrapped);
+                        for (k, line) in wrapped.into_iter().enumerate() {
+                            let mut row: Line = Vec::new();
+                            if !indent.is_empty() {
+                                row.push(Span::raw(indent.clone()));
+                            }
+                            if k == 0 {
+                                row.push(Span::styled(bullet.clone(), style.list_bullet));
+                            } else {
+                                row.push(Span::raw(" ".repeat(bullet_width)));
+                            }
+                            row.extend(line);
+                            item_rows.push(row);
+                        }
+                    } else {
+                        let sub_indent = format!("{indent}  ");
+                        let budget = list_line_budget(width, indent_len, bullet_width, false);
+                        wrap_spans(&spans, budget, &mut wrapped);
+                        for line in wrapped {
+                            let mut row = vec![Span::raw(sub_indent.clone())];
+                            row.extend(line);
+                            item_rows.push(row);
+                        }
+                    }
+                    first_part = false;
+                }
+                ListPart::List(child) => {
+                    render_list_level(child, depth + 1, child_outer, width, style, &mut item_rows);
+                    first_part = false;
+                }
+                ListPart::LazyText(text) => {
+                    wrap_spans(&render_inline(text, style), width, &mut item_rows);
+                    first_part = false;
+                }
+            }
+        }
+        if item_rows.is_empty() {
+            let mut row: Line = Vec::new();
+            if !indent.is_empty() {
+                row.push(Span::raw(indent.clone()));
+            }
+            row.push(Span::styled(bullet, style.list_bullet));
+            out.push(row);
         } else {
-            let mut l = vec![Span::styled(" ".repeat(bullet_width), style.body)];
-            l.extend(line);
-            out.push(l);
+            out.extend(item_rows);
         }
     }
 }
@@ -734,9 +1113,9 @@ fn wrap_list_item(
 fn wrap_quote(spans: &[Span], width: usize, style: &MarkdownStyle, out: &mut Vec<Line>) {
     let quote_width = width.saturating_sub(2).max(1);
     let mut wrapped: Vec<Line> = Vec::new();
-    wrap_spans(spans, quote_width, style.quote, &mut wrapped);
+    wrap_spans(spans, quote_width, &mut wrapped);
     for line in wrapped {
-        let mut l = vec![Span::styled("▐ ", style.quote_border)];
+        let mut l = vec![Span::styled("│ ", style.quote_border)];
         l.extend(line);
         out.push(l);
     }

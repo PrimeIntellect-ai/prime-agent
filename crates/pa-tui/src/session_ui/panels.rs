@@ -248,6 +248,7 @@ impl SessionUi {
                     self.open_scoped_agents_view(view);
                 } else {
                     self.subagents_focused = false;
+                    self.update_subagent_summary(view);
                     self.note(
                         "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
                         view,

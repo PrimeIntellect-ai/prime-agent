@@ -14,10 +14,7 @@ use pa_types::ai::{
 use pa_types::session::AgentMessage as SessionMessage;
 
 fn payload(data: Value) -> HostRequestPayload {
-    HostRequestPayload {
-        data,
-        cell_source_code: None,
-    }
+    HostRequestPayload { data }
 }
 
 fn model_info() -> ModelInfo {
@@ -405,6 +402,64 @@ async fn refine_run_and_status_round_trip_inside_a_tool_call() {
         })
     );
     assert!(requests.take_refine().await.is_none());
+}
+
+#[tokio::test]
+async fn disabled_refine_run_reports_refusal_and_does_not_schedule() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings =
+        crate::settings::SettingsManager::create(dir.path(), dir.path().join("agent"));
+    settings.set_harness_refinements(false).unwrap();
+    let requests = Arc::new(TurnBoundaryRequests::new());
+    assert!(requests.refinement_settings.set(settings.reopen()).is_ok());
+    let provider = Arc::new(ScriptedProvider::new(agent_model()));
+    let probe = probe_tool(
+        &requests,
+        "probe",
+        "refine.run",
+        json!({"instructions":"remember this"}),
+    );
+    let agent = Arc::new(Agent::new(AgentOptions {
+        initial_state: AgentInitialState {
+            system_prompt: Some("s".to_string()),
+            model: Some(agent_model()),
+            tools: Some(vec![probe.tool.clone()]),
+            ..Default::default()
+        },
+        stream_fn: Some(provider.stream_fn()),
+        ..Default::default()
+    }));
+    requests.bind(TurnBoundaryRuntime {
+        agent: Arc::clone(&agent),
+        session: Arc::new(Mutex::new(session_with_history(false))),
+        context_window: Some(100_000),
+        model_info: model_info(),
+    });
+    provider.push_tool_call_turn(None, vec![("disabled-call", "probe", json!({}))]);
+    provider.push_text_turn("done");
+    agent.prompt("request a refinement").await.unwrap();
+    agent.wait_for_idle().await;
+    assert_eq!(
+        probe.result().await,
+        json!({
+            "scheduled":false,
+            "reason":"Harness refinements are disabled in /settings"
+        })
+    );
+    assert_eq!(requests.take_refine().await, None);
+    // The already-registered handler observes the live setting on the next turn.
+    settings.set_harness_refinements(true).unwrap();
+    provider.push_tool_call_turn(None, vec![("enabled-call", "probe", json!({}))]);
+    provider.push_text_turn("done");
+    agent.prompt("request a refinement again").await.unwrap();
+    agent.wait_for_idle().await;
+    assert_eq!(
+        requests.take_refine().await,
+        Some(PendingRefine {
+            instructions: Some("remember this".to_string()),
+            global: false
+        })
+    );
 }
 
 #[tokio::test]
