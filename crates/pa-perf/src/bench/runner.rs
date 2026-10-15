@@ -160,6 +160,10 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
     let outcome: anyhow::Result<(f64, Launch)> = (|| {
         let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
         let sample = launch_scenario(ctx, &mut launched, scenario)?;
+        // The measured client must disconnect before daemon shutdown.
+        // Keeping it alive while waiting for daemon exit can hold server
+        // connection draining open or start the client's reconnect path.
+        launched.child.finish();
         Ok((sample, launched))
     })();
     let stopped = stop_daemon(&socket);
@@ -188,7 +192,7 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
     };
     let result = outcome?;
     stopped?;
-    exited?;
+    exited.with_context(|| format!("{scenario:?} run {run} daemon cleanup"))?;
     Ok(result)
 }
 
@@ -823,6 +827,36 @@ mod tests {
         assert_eq!(
             nix::sys::signal::kill(pid, None),
             Err(nix::errno::Errno::ESRCH)
+        );
+    }
+
+    #[test]
+    fn a_measured_ui_disconnects_before_waiting_for_daemon_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut ctx = tiny_context(dir.path());
+        let binary = dir.path().join("mock-product.py");
+        std::fs::write(
+            &binary,
+            include_str!("../../tests/fixtures/draining_daemon.py"),
+        )
+        .expect("write the mock modes");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("make the mock executable");
+        ctx.binary = binary;
+        ctx.liveness = Duration::from_secs(10);
+        let (sample, launched) = launch(&ctx, Scenario::WarmStart, 0)
+            .expect("the daemon must drain its measured UI connection before exit");
+        assert!(sample >= 0.0);
+        assert!(
+            launched.ready_ms.is_some(),
+            "the actual mock paint/attach ran"
+        );
+        assert_eq!(
+            std::fs::read_to_string(run_socket(&ctx, 0).with_extension("drained"))
+                .expect("the mock daemon reached normal drain completion"),
+            "all UI/control connections closed\n"
         );
     }
 
