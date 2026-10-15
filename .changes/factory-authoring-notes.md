@@ -1,0 +1,1 @@
+- Factory resident states now reject `retries`, and the factory help plus the pr-manager seed's fixing prompt spell out the recovery posture a re-run needs when an earlier attempt already changed the working tree.
