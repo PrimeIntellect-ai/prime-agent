@@ -45,7 +45,11 @@ impl RunCtx {
         )
         .with_context(|| format!("parse {}", manifest_path.display()))?;
         Ok(Self {
-            binary: binary.to_path_buf(),
+            // Spawns run in the generated project directory. Resolve the
+            // caller's path before changing cwd (including `make perf`).
+            binary: binary
+                .canonicalize()
+                .with_context(|| format!("resolve benchmark binary {}", binary.display()))?,
             project_dir: manifest.paths.project_dir.clone(),
             agent_dir: manifest.paths.agent_dir.clone(),
             corpus_root: corpus_root.to_path_buf(),
@@ -137,12 +141,15 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
         // populate only and the sample is the suite's warm number.
         start_daemon(ctx, &socket)?;
     }
-    let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
-    let outcome = launch_scenario(ctx, &mut launched, scenario);
+    let outcome: anyhow::Result<(f64, Launch)> = (|| {
+        let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
+        let sample = launch_scenario(ctx, &mut launched, scenario)?;
+        Ok((sample, launched))
+    })();
     let stopped = stop_daemon(&socket);
-    let sample = outcome?;
+    let result = outcome?;
     stopped?;
-    Ok((sample, launched))
+    Ok(result)
 }
 
 // The whole-suite driver (`pa-perf run`): generates the cold and warm
@@ -555,8 +562,18 @@ fn protocol_shutdown(socket: &Path) {
     };
     let mut reader = BufReader::new(stream);
     let mut writer = write_half;
+    // The hello can stall too: bound every read, not just the reply.
+    if reader
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .is_err()
+    {
+        return;
+    }
     let mut hello = String::new();
-    let _ = reader.read_line(&mut hello); // daemon_hello
+    if !matches!(reader.read_line(&mut hello), Ok(bytes) if bytes > 0) {
+        return;
+    }
     let command = serde_json::json!({
         "type": "command",
         "id": "bench-shutdown",
@@ -668,4 +685,58 @@ fn needle_of(scenario: Scenario, ctx: &RunCtx) -> String {
 fn write_result(result: &BenchResult, path: &Path) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(result)?;
     std::fs::write(path, json).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_binary_path_is_anchored_before_entering_the_corpus_project() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        corpus::generate(&CorpusOptions {
+            out: dir.path().to_path_buf(),
+            sessions: 3,
+            rows: 100,
+            huge_rows: 100,
+            tree_parents: 0,
+            archive: 0,
+            cwd_files: 1,
+            ..crate::corpus::Profile::Small.defaults()
+        })
+        .expect("generate the tiny corpus");
+        // A relative file is sufficient: loading does not execute it.
+        let binary = Path::new("Cargo.toml");
+        let ctx = RunCtx::load(binary, dir.path(), Duration::ZERO).expect("load corpus");
+        assert_eq!(
+            ctx.binary,
+            binary.canonicalize().expect("anchor the binary")
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_never_sends_hello_cannot_hang_shutdown() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Keep the Unix socket path short on macOS too.
+        let socket = dir.path().join("s");
+        let listener = UnixListener::bind(&socket).expect("mock listener");
+        let (release, released) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().expect("accept shutdown client");
+            // The bounded watchdog also lets this test terminate on the
+            // old implementation, where hello has no read timeout.
+            let _ = released.recv_timeout(Duration::from_secs(8));
+        });
+        let started = Instant::now();
+        protocol_shutdown(&socket);
+        let elapsed = started.elapsed();
+        let _ = release.send(());
+        peer.join().expect("mock peer exited");
+        assert!(
+            elapsed < Duration::from_secs(7),
+            "hello blocked for {elapsed:?}"
+        );
+    }
 }

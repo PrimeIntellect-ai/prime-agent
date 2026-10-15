@@ -79,10 +79,10 @@ impl PtyChild {
                 Ok(())
             });
         }
-        let child = command.spawn()?;
-        drop(pty.slave);
         let fd = pty.master.as_raw_fd();
         fcntl(fd, F_SETFL(OFlag::O_NONBLOCK))?;
+        let child = command.spawn()?;
+        drop(pty.slave);
         Ok(Self {
             child,
             master: pty.master.into(),
@@ -224,6 +224,11 @@ impl PtyChild {
 
     /// Stop the child: SIGTERM, a short grace, then SIGKILL; reap it.
     pub(crate) fn finish(&mut self) {
+        // Drop also cleans up failures before Launch has been constructed.
+        // Avoid signalling an already-reaped child if finish ran earlier.
+        if self.child.try_wait().is_ok_and(|status| status.is_some()) {
+            return;
+        }
         let _ = nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid()),
             nix::sys::signal::Signal::SIGTERM,
@@ -240,6 +245,12 @@ impl PtyChild {
     }
 }
 
+impl Drop for PtyChild {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
 fn slave_as_stdio(slave: &OwnedFd) -> Stdio {
     slave.try_clone().expect("clone pty slave").into()
 }
@@ -249,4 +260,32 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_initial_paint_timeout_reaps_the_owned_child() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/cat"),
+            &[],
+            &[],
+            dir.path(),
+            120,
+            36,
+        )
+        .expect("spawn the mock, never the product");
+        let pid = nix::unistd::Pid::from_raw(child.pid());
+        assert!(child
+            .wait_from(0, b"missing first paint", "first paint", Instant::now())
+            .is_err());
+        drop(child);
+        assert_eq!(
+            nix::sys::signal::kill(pid, None),
+            Err(nix::errno::Errno::ESRCH)
+        );
+    }
 }
