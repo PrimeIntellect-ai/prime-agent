@@ -1,6 +1,8 @@
-import copy
+import io
+import json
+from types import SimpleNamespace
 import unittest
-from review_factory_validation_parity import validate
+from review_factory_validation_parity import validate, Handler
 
 
 class FactoryValidationGuards(unittest.TestCase):
@@ -21,6 +23,20 @@ class FactoryValidationGuards(unittest.TestCase):
         value[1]['stored'] = False
         with self.assertRaises(AssertionError):
             validate(value)
+
+    def test_unexpected_child_request_is_rejected_before_a_model_response(self):
+        body = json.dumps({'messages': [{'role': 'user', 'content': 'unexpected child'}]}).encode()
+        handler = Handler.__new__(Handler)
+        handler.path = '/v1/chat/completions'
+        handler.headers = {'Content-Length': str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.server = SimpleNamespace(requests=[], parent_requests=[], errors=[])
+        statuses = []
+        handler.send_error = statuses.append
+        handler.do_POST()
+        self.assertEqual(statuses, [422])
+        self.assertEqual(handler.server.parent_requests, [])
+        self.assertEqual(handler.server.errors, ['unexpected child or unrelated provider request'])
 
     def test_requires_correct_diagnostic_and_all_cases(self):
         for index in (0, 2):
