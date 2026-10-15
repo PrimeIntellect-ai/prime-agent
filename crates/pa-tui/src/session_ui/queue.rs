@@ -1,7 +1,6 @@
-//! Browsing, reordering, and editing the parked steering/follow-up messages. The browse walks every
-//! parked item (the full queue stays inspectable), but the reorder/apply gates are user-origin only
-//! (operator directive 2026-09-28: internal prompts render read-only — the system owns them); see
-//! [`crate::queued::QueueSelectionItem::internal`].
+//! Browsing, reordering, and editing the parked steering/follow-up messages. The browse walks the
+//! user-typed items only (operator decision 2026-10-16): internal prompts are a separate channel,
+//! shown only as the strip's condensed row.
 use super::{
     anyhow, AgentView, DaemonCommand, Duration, Map, QueueBrowseDirection, QueueLane, Result,
     SessionUi, Value, UI_REQUEST_TIMEOUT_MS,
@@ -83,12 +82,6 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
-        // An internal item never reorders (a human reorder of a child-exit notice
-        // could mis-steer the agent); the selection stays for the read-only browse.
-        if selected.internal {
-            self.note("Internal prompts are read-only; reorder not applied", view);
-            return Ok(());
-        }
         let status = self
             .queue_mutation(
                 selected.lane,
@@ -138,19 +131,6 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
-        // An internal prompt is never steered, re-queued, or deleted through the browse (see the
-        // module doc). The refusal follows the failed-edit contract: the typed text stays in the
-        // editor, the note says why, the selection stays.
-        if selected.internal {
-            view.editor.set_text(text);
-            self.note(
-                "Internal prompts are read-only; edit kept in the editor",
-                view,
-            );
-            self.sync_queue_selection(view);
-            self.dirty = true;
-            return Ok(());
-        }
         let trimmed = text.trim();
         // `images` stays absent on a replace: the server keeps the item's
         // attachments (some markers cannot be resolved by this client).
