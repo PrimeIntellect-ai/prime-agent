@@ -88,9 +88,13 @@ pub async fn fetch_authorized_private_prime_inference_models(
             return Err(error);
         }
     };
-    let Some(data) = payload.get("data").and_then(|data| data.as_array()) else {
-        return Ok(AuthorizedPrivatePrimeInferenceModels::default());
-    };
+    // A malformed catalog is a failure, not an empty authorization: the
+    // registry's error path preserves the previous entitlements, while an
+    // empty success would wipe them and pin the wipe into the cache.
+    let data = payload
+        .get("data")
+        .and_then(|data| data.as_array())
+        .ok_or_else(|| "Invalid Prime Inference model catalog".to_string())?;
     let public_ids: HashSet<String> = public_model_ids
         .iter()
         .map(|id| id.to_lowercase())
