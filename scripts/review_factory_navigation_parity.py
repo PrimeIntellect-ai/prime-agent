@@ -32,14 +32,11 @@ class FactorySupervisor(Supervisor):
         data = copy.deepcopy(data)
         if data.get('type') == 'daemon_hello':
             data['serverCapabilities'] = ['session_input_admission', 'factory_activity']
+        if data.get('type') == 'response' and data.get('command') == 'factory_activity':
+            # The base fixture already recognizes this lane with an empty
+            # legacy response. Supply its graph shape without mutating errors.
+            data['data'] = copy.deepcopy(GRAPH)
         super().send(sock, data)
-
-    def extra_command(self, command, response):
-        if command['type'] != 'factory_activity':
-            return False
-        assert command['action'] in ('graph', 'watch'), command
-        response['data'] = copy.deepcopy(GRAPH)
-        return True
 
 
 def hello(binary, root, env, observed):
@@ -102,6 +99,8 @@ def observe(binary, kind, root, observed):
         terminal.send('FACTORY_CLOSED_INPUT_BARRIER')
         snap('left_closes_page', lambda text: 'FACTORY_CLOSED_INPUT_BARRIER' in text and RUN not in text)
         assert not server.prompts, 'navigation submitted a prompt'
+        assert all(c.get('action') in ('graph', 'watch') for c in server.commands
+                   if c.get('type') == 'factory_activity'), server.commands
         assert not terminal.screen.unsupported_sgr and not terminal.screen.unsupported_terminal
         observed['behavior_verified'] = True
     finally:
