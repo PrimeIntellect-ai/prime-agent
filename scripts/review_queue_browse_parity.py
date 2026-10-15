@@ -10,6 +10,7 @@ import argparse
 import copy
 import json
 import os
+import select
 from pathlib import Path
 import subprocess
 import sys
@@ -51,25 +52,26 @@ class QueueSupervisor(Supervisor):
                 data['data']['snapshot']['state']['sessionActions'] = self.actions()
             elif name in ('get_state', 'get_connection_state'):
                 data['data']['sessionActions'] = self.actions()
-            elif name in ('get_queue', 'mutate_queued_message'):
-                # The shared transport fixture rejects commands it does not own.
-                # This subclass owns ONLY these two additional command shapes.
-                self.errors.remove('unexpected command: ' + name)
-                command = self.commands[-1]
-                if name == 'get_queue':
-                    data.update(success=True, data=copy.deepcopy(self.queue))
-                else:
-                    assert command['lane'] == 'steering', command
-                    assert command['mutation']['type'] == 'move', command
-                    index = command['index']
-                    assert self.queue['steering'][index] == command['expectedText'], command
-                    target = index + command['mutation']['direction']
-                    assert 0 <= target < len(self.queue['steering']), command
-                    self.queue['steering'][index], self.queue['steering'][target] = self.queue['steering'][target], self.queue['steering'][index]
-                    self.mutations.append(copy.deepcopy(command))
-                    data.update(success=True, data={'status': 'applied'})
-                data.pop('error', None)
         super().send(sock, data)
+
+
+    def extra_command(self, command, response):
+        name = command['type']
+        if name == 'get_queue':
+            response['data'] = copy.deepcopy(self.queue)
+            return True
+        if name != 'mutate_queued_message':
+            return False
+        assert command['lane'] == 'steering', command
+        assert command['mutation']['type'] == 'move', command
+        index = command['index']
+        assert self.queue['steering'][index] == command['expectedText'], command
+        target = index + command['mutation']['direction']
+        assert 0 <= target < len(self.queue['steering']), command
+        self.queue['steering'][index], self.queue['steering'][target] = self.queue['steering'][target], self.queue['steering'][index]
+        self.mutations.append(copy.deepcopy(command))
+        response['data'] = {'status': 'applied'}
+        return True
 
 
 def discover_hello(binary, root, env, observed):
@@ -157,12 +159,18 @@ def observe(binary, kind, root, internal_only, observed):
     finally:
         try:
             if terminal:
-                observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
                 if terminal.process.poll() is None:
                     terminal.send('\x03\x03')
                     deadline = time.monotonic() + 8
                     while terminal.process.poll() is None and time.monotonic() < deadline:
                         terminal.pump()
+                # Drain already-readable final output after process exit too.
+                while select.select([terminal.master], [], [], 0)[0]:
+                    before = len(terminal.raw)
+                    terminal.pump()
+                    if len(terminal.raw) == before:
+                        break  # PTY EOF remains readable.
+                observed['raw_ansi_complete_hex'] = bytes(terminal.raw).hex()
                 observed['ui_exit_code'] = terminal.process.poll()
                 # Do not call the older Terminal.close() force-stop helper.
                 # Strict cleanup observes graceful exit or leaves this case RED.

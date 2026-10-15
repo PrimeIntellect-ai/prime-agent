@@ -1,5 +1,5 @@
 import unittest
-from review_queue_browse_parity import check_mutation, USER_A
+from review_queue_browse_parity import check_mutation, QueueSupervisor, USER_A, USER_B, INTERNAL
 
 
 class QueueBrowseGuardTest(unittest.TestCase):
@@ -21,6 +21,21 @@ class QueueBrowseGuardTest(unittest.TestCase):
             command[field] = value
             with self.assertRaises(AssertionError):
                 check_mutation('rust', command)
+
+
+    def test_subclass_handles_its_commands_without_transient_transport_errors(self):
+        server = QueueSupervisor.__new__(QueueSupervisor)
+        server.queue = {'steering': [USER_A, INTERNAL, USER_B], 'followUp': []}
+        server.mutations, server.errors = [], []
+        response = {'success': True, 'data': {}}
+        self.assertTrue(server.extra_command({'type': 'get_queue'}, response))
+        self.assertEqual(response['data'], server.queue)
+        self.assertIsNot(response['data']['steering'], server.queue['steering'])
+        self.assertTrue(server.extra_command(self.command(2), response))
+        self.assertEqual(response['data'], {'status': 'applied'})
+        self.assertEqual(server.queue, {'steering': [USER_B, INTERNAL, USER_A], 'followUp': []})
+        self.assertEqual(server.errors, [])
+        self.assertFalse(server.extra_command({'type': 'unsupported'}, response))
 
 
 if __name__ == '__main__':
