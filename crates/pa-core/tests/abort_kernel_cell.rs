@@ -173,6 +173,7 @@ async fn abort_during_a_kernel_cell_settles_the_turn_immediately() {
         mcp_manager: None,
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         queued_goal_context_purge: None,
         queued_steering_probe: None,
         should_stop_after_turn: None,

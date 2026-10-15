@@ -147,6 +147,10 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         model_ops: Arc::new(tokio::sync::Mutex::new(())),
         session_ops: Arc::new(tokio::sync::Mutex::new(())),
     });
+    // The background-bash completion lane: each built engine's wake
+    // kicks the queued-work pump, so an idle session runs the
+    // completion row's turn.
+    commands::serve_background_bash_wakes(&state);
     // With no create command, the FIRST `get_available_models` would pay
     // the whole awaited refresh chain; this spawn warms the caches early.
     tokio::spawn(async move {

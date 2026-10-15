@@ -24,6 +24,9 @@ pub struct RpcEngineHandle {
     pub model: Model,
     pub api_key: Option<String>,
     pub provider_target: Arc<std::sync::RwLock<Option<ProviderTarget>>>,
+    /// The built engine's background-bash wake: its completion and
+    /// settle seams fire it, and the pump listener parks on it.
+    pub bash_wake: Arc<tokio::sync::Notify>,
     /// The cross-process ownership lease on the opened session file
     /// (`None` for fresh/in-memory sessions the factory created itself).
     pub session_lease: Option<crate::lease::SessionLease>,
@@ -344,7 +347,13 @@ impl RpcSession {
         if adopted_lease.is_some() {
             replacement.session_lease = adopted_lease;
         }
+        // The background-bash listener parks on the retired handle's wake:
+        // fire it so the listener re-reads the LIVE handle (a stored
+        // permit, because it may not be parked yet). Its kick against the
+        // retired engine is dropped by the pump's liveness checks.
+        let retired_bash_wake = Arc::clone(&handle.bash_wake);
         *handle = replacement;
+        retired_bash_wake.notify_one();
         *self.subscription.lock().await = Some(subscription);
         Ok(())
     }

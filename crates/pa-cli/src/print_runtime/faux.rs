@@ -8,7 +8,8 @@ use pa_core::session_engine::provider_adapter::{
 };
 
 use crate::print_runtime::{
-    ChildLane, HeadlessEmbedding, HeadlessEngine, ProviderTargetSlot, RunOptions,
+    ChildLane, HeadlessEmbedding, HeadlessEmbeddingFields, HeadlessEngine, ProviderTargetSlot,
+    RunOptions,
 };
 
 /// The parsed `PRIME_AGENT_FAUX_SCRIPT` (the whole-process verification
@@ -124,20 +125,17 @@ pub(crate) async fn build_faux_engine_with(
     let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring with the real provider
     // path so binary-level tests can verify persistence without the network.
-    let (rlm_subagent_host, extra_host_handlers, rlm_depth) = match embedding {
-        HeadlessEmbedding::Rpc => (None, None, None),
-        HeadlessEmbedding::Root { node } => {
-            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(node);
-            (Some(host), Some(handlers), None)
-        }
-        HeadlessEmbedding::Child(overrides) => {
-            let (host, handlers) = crate::print_rlm::inline_subagent_wiring(&overrides.node);
-            (Some(host), Some(handlers), Some(overrides.node.depth))
-        }
-    };
+    let HeadlessEmbeddingFields {
+        rlm_subagent_host,
+        extra_host_handlers,
+        rlm_depth,
+        bash_wake,
+        rpc_bash_wake,
+        on_late_sent_agent_message,
+    } = super::headless_embedding_fields(embedding);
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
-            on_late_sent_agent_message: None,
+            on_late_sent_agent_message,
             cron_store: None,
             // Faux verification harness: no product telemetry.
             semantic_edges: None,
@@ -169,7 +167,10 @@ pub(crate) async fn build_faux_engine_with(
             model_info: Some(model.clone()),
             // A Rust-only verification harness: no background kernel boot in tests.
             prewarm_ipython_kernel: None,
-            on_background_work_settled: None,
+            // The background-bash wake pair, the same seam the real
+            // provider path wires (the scripted e2es drive the wake).
+            bash_notice_wake: Some(std::sync::Arc::clone(&bash_wake)),
+            on_background_work_settled: Some(bash_wake),
             queued_goal_context_purge: None,
             queued_steering_probe: None,
             should_stop_after_turn: None,
@@ -183,6 +184,7 @@ pub(crate) async fn build_faux_engine_with(
         model,
         api_key: None,
         provider_target,
+        rpc_bash_wake,
     })
 }
 

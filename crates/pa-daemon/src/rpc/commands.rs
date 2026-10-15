@@ -177,6 +177,32 @@ pub fn kick_queue_pump(
     });
 }
 
+/// Serve the live engine's background-bash wakes: every wake kicks the
+/// queued-work pump, so the `[bash-done]` row a completion steers onto
+/// the agent runs as a turn with no client command driving it. The
+/// handle's wake is re-read each cycle, so a replacement rebinds.
+pub fn serve_background_bash_wakes(state: &Arc<RpcState>) {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        loop {
+            let (bash_wake, engine) = {
+                let handle = state.session.handle().await;
+                (Arc::clone(&handle.bash_wake), Arc::clone(&handle.engine))
+            };
+            let notified = bash_wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            // A wake that fired between the handle read and the armed
+            // park already queued its row: kick before parking.
+            if engine.session.agent().has_queued_messages() {
+                kick_queue_pump(&state, &engine);
+            }
+            notified.await;
+            kick_queue_pump(&state, &engine);
+        }
+    });
+}
+
 /// Dispatch one command to its handler; the unknown-type error answers with no id.
 pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand) -> Value {
     let id = command.id.clone();

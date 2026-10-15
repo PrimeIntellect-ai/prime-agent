@@ -136,6 +136,7 @@ async fn faux_engine_with_telemetry(
         model_info: Some(model.clone()),
         prewarm_ipython_kernel: None,
         on_background_work_settled: None,
+        bash_notice_wake: None,
         queued_goal_context_purge: None,
         queued_steering_probe: None,
         should_stop_after_turn: None,

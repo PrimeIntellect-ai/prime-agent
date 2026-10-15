@@ -87,8 +87,8 @@ pub struct BuildSystemPromptOptions<'a> {
     /// Human-readable parent name or id for child communication doctrine.
     pub rlm_parent_agent: Option<&'a str>,
     /// Whether the session runs without a daemon (no scheduler, no
-    /// bash-completion wake-ups). The wake-up facts the daemonless line
-    /// states must match the embedding's wiring.
+    /// heartbeat firing). The wake-up facts the daemonless line states
+    /// must match the embedding's wiring.
     pub daemonless: bool,
     /// Whether `rlm.spawn` can create children in this session (the
     /// daemonless print host or a daemon worker); a daemonless session
@@ -298,10 +298,10 @@ fn session_role_section(options: &BuildSystemPromptOptions, has_ipython: bool) -
     )];
     if options.daemonless {
         lines.push(if options.can_spawn {
-            "This session has no daemon: heartbeats never fire, and background `bash()` completions do not wake you, so await them before ending your turn. Subagent replies and exit notices still wake you, and the run waits for your subagents before it exits."
+            "This session has no daemon: heartbeats never fire, and background `bash()` completions wake you with a queued `[bash-done]` turn; the run waits for live background commands and your subagents before it exits. Subagent replies and exit notices still wake you."
                 .to_string()
         } else {
-            "This session has no daemon: `rlm.spawn` is unavailable, heartbeats never fire, and background `bash()` completions do not wake you, so await them before ending your turn."
+            "This session has no daemon: `rlm.spawn` is unavailable, heartbeats never fire, and background `bash()` completions wake you with a queued `[bash-done]` turn."
                 .to_string()
         });
     }
@@ -511,6 +511,20 @@ mod tests {
         assert!(breakdown
             .assembled
             .contains("Enabled generic MCP servers: `t`."));
+    }
+
+    #[test]
+    fn daemonless_line_drops_the_stale_no_wake_claim() {
+        // The line's one durable contract: it no longer tells daemonless
+        // agents that background completions never wake them.
+        let mut spawning = base_options();
+        spawning.daemonless = true;
+        spawning.can_spawn = true;
+        assert!(!build_system_prompt(&spawning).contains("completions do not wake you"));
+
+        let mut bare = base_options();
+        bare.daemonless = true;
+        assert!(!build_system_prompt(&bare).contains("completions do not wake you"));
     }
 
     #[test]

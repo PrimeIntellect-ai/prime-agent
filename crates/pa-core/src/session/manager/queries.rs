@@ -425,6 +425,18 @@ impl SessionManager {
         &self.file_entries
     }
 
+    /// The persisted late `agent_message.send` receipts on the active
+    /// branch, oldest first: an engine build patches them onto the rebuilt
+    /// `python_repl` tool results (TS `_restoreLateIpythonSentAgentMessages`).
+    #[must_use]
+    pub fn late_sent_agent_messages(
+        &self,
+    ) -> Vec<crate::session_engine::late_sent_messages::PersistedSentAgentMessage> {
+        crate::session_engine::late_sent_messages::scan_sent_agent_message_entries(
+            self.active_branch_entries(),
+        )
+    }
+
     #[must_use]
     pub fn get_leaf_id(&self) -> Option<&str> {
         self.leaf_id.as_deref()
