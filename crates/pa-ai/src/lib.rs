@@ -39,11 +39,14 @@ pub use stream::{complete, complete_simple, stream, stream_simple};
 // Cross-crate surface consumed by the agent layer (pa-ai owned).
 pub mod utils {
     //! Overflow detection, stream-failure classification, JSON repair
-    //! parsing, structured diagnostics, and the caller-facing TLS client
-    //! builder. SSE decoding, request plumbing, hashing, and logging are
+    //! parsing, structured diagnostics, the structured logger (the auth
+    //! manager surfaces refresh failures through it; consumers install
+    //! the sink at their entry), and the caller-facing TLS client
+    //! builder. SSE decoding, request plumbing, and hashing are
     //! crate-internal.
     pub use crate::utils_inner::diagnostics;
     pub use crate::utils_inner::json_parse;
+    pub use crate::utils_inner::log;
     pub use crate::utils_inner::overflow;
     pub use crate::utils_inner::stream_failure;
     pub use crate::utils_inner::tls;

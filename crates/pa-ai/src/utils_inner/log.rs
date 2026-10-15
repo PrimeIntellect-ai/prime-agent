@@ -21,6 +21,7 @@ impl Serialize for LogLevel {
 }
 
 impl LogLevel {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             LogLevel::Debug => "debug",
@@ -46,6 +47,10 @@ pub type LogSink = std::sync::Arc<dyn Fn(&LogEntry) + Send + Sync>;
 static SINK: RwLock<Option<LogSink>> = RwLock::new(None);
 
 /// Install the process-wide log sink. Pass None to restore the default.
+///
+/// # Panics
+///
+/// Panics when the sink's lock is poisoned.
 #[allow(dead_code)] // logging surface for consumers once exposed
 pub fn set_log_sink(next: Option<LogSink>) {
     *SINK.write().unwrap() = next;
@@ -122,6 +127,7 @@ impl Logger {
     }
 }
 
+#[must_use]
 pub fn get_logger(component: &str) -> Logger {
     Logger {
         component: component.to_string(),

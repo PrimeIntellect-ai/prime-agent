@@ -10,6 +10,7 @@ use super::{
     QUOTA_WAKE_MAX_RETRIES, QUOTA_WAKE_RETRY_DELAY_MS,
 };
 
+mod auth_recovery;
 mod boundary;
 mod model;
 mod quota;

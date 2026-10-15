@@ -313,28 +313,27 @@ async fn json_token_request(
         ));
     }
     let json: serde_json::Value = serde_json::from_str(&response.body).map_err(|error| {
-        format!(
-            "{label} returned invalid JSON. url={url}; body={}; details=Error: {error}",
-            response.body
-        )
+        format!("{label} returned invalid JSON. url={url}; details=Error: {error}")
     })?;
+    // A malformed SUCCESS body can echo credentials back: the errors name
+    // the missing field, never the response body.
     let access = json
         .get("access_token")
         .and_then(serde_json::Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| format!("{label} response missing fields: {json}"))?
+        .ok_or_else(|| format!("{label} response missing field: access_token"))?
         .to_string();
     let refresh = json
         .get("refresh_token")
         .and_then(serde_json::Value::as_str)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| format!("{label} response missing fields: {json}"))?
+        .ok_or_else(|| format!("{label} response missing field: refresh_token"))?
         .to_string();
     let expires_in = json
         .get("expires_in")
         .and_then(serde_json::Value::as_f64)
         .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-        .ok_or_else(|| format!("{label} response missing fields: {json}"))?;
+        .ok_or_else(|| format!("{label} response missing field: expires_in"))?;
     // The wire's expires_in is an integer second count read through JSON f64; the i64 truncation is the port's convention.
     #[allow(clippy::cast_possible_truncation)]
     let expires_in_seconds = expires_in as i64;
@@ -635,7 +634,7 @@ mod tests {
         let ui = ScriptedUi::new(Some(ScriptedAnswer::value("the-code")), None);
         let error = login_on_a_free_port(&http, &ui).await.unwrap_err();
         assert!(
-            error.starts_with("Token exchange response missing fields"),
+            error.starts_with("Token exchange response missing field: refresh_token"),
             "{error}"
         );
     }

@@ -8,10 +8,11 @@ use std::future::Future;
 use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 
+use super::provider_auth::{AuthRecoveryCallback, AuthRecoveryOutcome};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind, is_provider_auth_failure,
     is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
     provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
@@ -69,6 +70,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut emit: E,
     mut wait: W,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -79,6 +81,11 @@ where
     WF: Future<Output = bool>,
 {
     let mut retries_performed = 0u32;
+    let mut auth_retries = 0u32;
+    // The auth seam's one quick retry, granted past the generic ladder:
+    // set when a rejection just refreshed and rebound, consumed by the
+    // retry it bought.
+    let mut auth_quick_retry = false;
     loop {
         let message = attempt().await?;
         if message.stop_reason != StopReason::Error {
@@ -106,10 +113,31 @@ where
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
-                retries_performed,
+                auth_retries,
                 provider_stream_failure_status(&message),
             );
         if !policy.enabled || non_retryable {
+            // A rejected OAuth grant still surfaces its re-login guidance
+            // with retries disabled: the seam's verdict is error
+            // messaging, not a retry, and the refresh it performed heals
+            // the store for the turns after this one.
+            if is_provider_auth_failure(&message) && !non_retryable {
+                if let Some(recovery) = auth_recovery.as_deref_mut() {
+                    if let AuthRecoveryOutcome::ReLoginRequired(sentence) = recovery(&message).await
+                    {
+                        let mut message = message;
+                        message.error_message = Some(sentence);
+                        emit(AutoRetryEvent::End {
+                            success: false,
+                            attempt: retries_performed,
+                            final_error: Some(final_error_of(&message)),
+                            restored_model: None,
+                        })
+                        .await?;
+                        return Ok(message);
+                    }
+                }
+            }
             // SANCTIONED DIVERGENCE (the 402 diagnosis, operator ruling): the
             // outcome row is FAILURE-scoped, not episode-scoped. TS emits retry
             // events only once a retry was attempted; here a provider failure
@@ -128,6 +156,42 @@ where
             }
             return Ok(message);
         }
+        // A credential rejection owns its one quick retry: the engine
+        // force-refreshes the stored OAuth credential and rebinds the
+        // request target before the retry re-issues (SANCTIONED
+        // DIVERGENCE, operator ruling 2026-10-07, the revoked-session
+        // outage: TS fails the turn on the provider's 401). A rejected
+        // grant ends the turn with the re-login sentence.
+        if is_provider_auth_failure(&message) {
+            let outcome = match auth_recovery.as_deref_mut() {
+                Some(recovery) => recovery(&message).await,
+                None => AuthRecoveryOutcome::Continue,
+            };
+            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = &outcome {
+                let mut message = message;
+                message.error_message = Some(sentence.clone());
+                emit(AutoRetryEvent::End {
+                    success: false,
+                    attempt: retries_performed,
+                    final_error: Some(final_error_of(&message)),
+                    restored_model: None,
+                })
+                .await?;
+                return Ok(message);
+            }
+            // A superseded selection's failure never consumes the
+            // episode's one auth budget: the newer target's own rejection
+            // still gets its recovery round.
+            if outcome != AuthRecoveryOutcome::Superseded {
+                // This auth failure is being retried: the classification
+                // counts it, so the next rejection settles the turn. Only
+                // a credential the failed attempt never served earns the
+                // beyond-budget one-shot; an unchanged key retries inside
+                // the ordinary ladder.
+                auth_retries += 1;
+                auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            }
+        }
         // The attempt counter bumps before deciding, so the exhaustion
         // check compares past `max_retries`.
         retries_performed += 1;
@@ -143,7 +207,10 @@ where
             ProviderRetryDelay::Wait { delay_ms } => {
                 // The server-requested-wait arm runs BEFORE the quick-retry
                 // exhaustion check: a quota-blocked final retry still parks.
-                if retries_performed > policy.max_retries {
+                // The auth seam's own retry still issues past the ladder
+                // (a rejection at the exhaustion boundary never wastes the
+                // refreshed credential's one shot).
+                if retries_performed > policy.max_retries && !auth_quick_retry {
                     emit(AutoRetryEvent::End {
                         success: false,
                         attempt: retries_performed - 1,
@@ -153,43 +220,52 @@ where
                     .await?;
                     return Ok(message);
                 }
+                auth_quick_retry = false;
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
-                // The give-up sentence of this arm is the park's abort
-                // message (the TS wait loop's `reset-too-far` analogue).
-                let abort = format!(
+                // The refreshed credential's one retry never waits out an
+                // over-cap server request: the auth seam's grant re-issues
+                // immediately instead of wasting the exchange.
+                if auth_quick_retry {
+                    auth_quick_retry = false;
+                    0
+                } else {
+                    // The give-up sentence of this arm is the park's abort
+                    // message (the TS wait loop's `reset-too-far` analogue).
+                    let abort = format!(
                     "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
                     retry_after_ms.div_ceil(1000),
                     policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam: other
-                // server-requested waits keep the give-up.
-                let parked = if is_quota_block_failure(&message) {
-                    match park.as_deref_mut() {
-                        Some(park) => park(message.clone(), &abort).await,
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let final_error = match parked {
-                    // The turn settles as the park's pause, not its
-                    // death: the parked status replaces the give-up.
-                    Some(outcome) => outcome.status_message,
-                    None => format!(
-                        "{abort}: {}",
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    ),
-                };
-                emit(AutoRetryEvent::End {
-                    success: false,
-                    attempt: retries_performed - 1,
-                    restored_model: None,
-                    final_error: Some(final_error),
-                })
-                .await?;
-                return Ok(message);
+                    // The park seam is a quota-failure seam: other
+                    // server-requested waits keep the give-up.
+                    let parked = if is_quota_block_failure(&message) {
+                        match park.as_deref_mut() {
+                            Some(park) => park(message.clone(), &abort).await,
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let final_error = match parked {
+                        // The turn settles as the park's pause, not its
+                        // death: the parked status replaces the give-up.
+                        Some(outcome) => outcome.status_message,
+                        None => format!(
+                            "{abort}: {}",
+                            message.error_message.as_deref().unwrap_or("unknown error"),
+                        ),
+                    };
+                    emit(AutoRetryEvent::End {
+                        success: false,
+                        attempt: retries_performed - 1,
+                        restored_model: None,
+                        final_error: Some(final_error),
+                    })
+                    .await?;
+                    return Ok(message);
+                }
             }
         };
         emit(AutoRetryEvent::Start {

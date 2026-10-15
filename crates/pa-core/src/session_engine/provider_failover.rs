@@ -10,10 +10,11 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
+use super::provider_auth::{AuthRecoveryCallback, AuthRecoveryOutcome};
 use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     has_provider_stream_failure, is_agent_lifecycle_failure, is_context_overflow_failure,
-    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind,
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind, is_provider_auth_failure,
     is_unsupported_tool_failure, jittered_delay_ms, provider_retry_delay,
     provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
     provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
@@ -100,6 +101,7 @@ pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     mut switch: S,
     mut restore: R,
     mut park: Option<ParkDecisionCallback<'_>>,
+    mut auth_recovery: Option<AuthRecoveryCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -114,8 +116,8 @@ where
     RF: Future<Output = anyhow::Result<Option<String>>>,
 {
     if !failover.enabled || candidates.is_empty() {
-        // The pass-through moves the park seam: the loop below cannot
-        // reach (and must not reborrow) it.
+        // The pass-through moves the park and auth-recovery seams: the
+        // loop below cannot reach (and must not reborrow) them.
         return run_turn_with_auto_retry(
             quick_policy,
             context_window,
@@ -124,11 +126,20 @@ where
             emit,
             wait,
             park,
+            auth_recovery,
         )
         .await;
     }
     let mut total_retries = 0u32;
     let mut retries_on_provider = 0u32;
+    // Auth-classified retries on the CURRENT provider: an unrelated
+    // earlier retry never suppresses the auth recovery, and a switch
+    // resets the budget with the new provider's credential.
+    let mut auth_retries = 0u32;
+    // The auth seam's one quick retry on the CURRENT provider, granted
+    // past the per-provider ceiling: a rejection that just refreshed and
+    // rebound re-issues once before any switch.
+    let mut auth_quick_retry = false;
     let mut candidate_index = 0usize;
     let mut switched = false;
     loop {
@@ -170,7 +181,7 @@ where
             || is_unsupported_tool_failure(&message)
             || is_permanent_provider_failure_kind(
                 provider_stream_failure_kind(&message).as_deref(),
-                total_retries,
+                auth_retries,
                 provider_stream_failure_status(&message),
             );
         if non_retryable {
@@ -195,11 +206,60 @@ where
             }
             return Ok(message);
         }
+        // A credential rejection owns its one retry: the engine
+        // force-refreshes the stored OAuth credential and rebinds the
+        // request target before the retry re-issues (SANCTIONED
+        // DIVERGENCE, operator ruling 2026-10-07, the revoked-session
+        // outage: TS fails the turn on the provider's 401). A rejected
+        // grant ends the episode with the re-login sentence.
+        let mut superseded_auth_failure = false;
+        if is_provider_auth_failure(&message) {
+            let outcome = match auth_recovery.as_deref_mut() {
+                Some(recovery) => recovery(&message).await,
+                None => AuthRecoveryOutcome::Continue,
+            };
+            superseded_auth_failure = outcome == AuthRecoveryOutcome::Superseded;
+            if let AuthRecoveryOutcome::ReLoginRequired(sentence) = &outcome {
+                if switched {
+                    let _ = restore().await?;
+                }
+                let mut message = message;
+                message.error_message = Some(sentence.clone());
+                emit(AutoRetryEvent::End {
+                    success: false,
+                    attempt: total_retries,
+                    final_error: Some(final_error_of(&message)),
+                    restored_model: None,
+                })
+                .await?;
+                return Ok(message);
+            }
+            // A superseded selection's failure never consumes the
+            // episode's one auth budget: the newer target's own rejection
+            // still gets its recovery round.
+            if outcome != AuthRecoveryOutcome::Superseded {
+                // This auth failure is being retried: the classification
+                // counts it, so the next rejection settles the turn. Only
+                // a credential the failed attempt never served earns the
+                // beyond-budget one-shot; an unchanged key retries inside
+                // the ordinary budget.
+                auth_retries += 1;
+                auth_quick_retry = matches!(outcome, AuthRecoveryOutcome::NewCredential);
+            }
+        }
         total_retries += 1;
-        retries_on_provider += 1;
+        // A superseded selection's failure never charges the current
+        // provider's budget: only the current selection's own failures
+        // can switch it away. The episode total still counts the real
+        // attempt (the whole-episode ceiling stays the bound).
+        if !superseded_auth_failure {
+            retries_on_provider += 1;
+        }
         // The whole-episode ceiling binds first: a long candidate chain
-        // gives up here instead of stacking per-provider budgets.
-        if total_retries > MAX_TOTAL_PROVIDER_RETRIES {
+        // gives up here instead of stacking per-provider budgets. The
+        // refreshed credential's one-shot re-issues past it once — a
+        // spent episode must not waste a grant it already refreshed.
+        if total_retries > MAX_TOTAL_PROVIDER_RETRIES && !auth_quick_retry {
             if switched {
                 let _ = restore().await?;
             }
@@ -212,7 +272,7 @@ where
             .await?;
             return Ok(message);
         }
-        if retries_on_provider > failover.max_retries {
+        if retries_on_provider > failover.max_retries && !auth_quick_retry {
             let Some(next) = candidates.get(candidate_index) else {
                 if switched {
                     let _ = restore().await?;
@@ -228,6 +288,7 @@ where
             };
             candidate_index += 1;
             retries_on_provider = 0;
+            auth_retries = 0;
             let backup_model = format!("{}/{}", next.provider, next.id);
             switch(next).await?;
             switched = true;
@@ -242,6 +303,10 @@ where
             .await?;
             continue;
         }
+        // The grant stays visible through the delay match: the refreshed
+        // credential's retry re-issues past a per-provider ceiling, a
+        // spent episode, and an over-cap server wait alike — consumed by
+        // the arm that issues it.
         let delay = failover_retry_delay(
             retries_on_provider,
             provider_stream_failure_retry_after_ms(&message),
@@ -253,46 +318,58 @@ where
             // 2026-09-23): the jittered value is both waited and
             // reported.
             ProviderRetryDelay::Wait { delay_ms } => {
+                // The ordinary wait issues the auth retry too: consume its
+                // one-shot grant here (a later failure falls to the
+                // ceiling check and switches).
+                auth_quick_retry = false;
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
-                if switched {
-                    let _ = restore().await?;
-                }
-                // The give-up sentence here is the park's abort message
-                // (TS `reset-too-far`).
-                let abort = format!(
+                // The refreshed credential's one retry never waits out an
+                // over-cap server request: the auth seam's grant re-issues
+                // immediately instead of wasting the exchange.
+                if auth_quick_retry {
+                    auth_quick_retry = false;
+                    0
+                } else {
+                    if switched {
+                        let _ = restore().await?;
+                    }
+                    // The give-up sentence here is the park's abort message
+                    // (TS `reset-too-far`).
+                    let abort = format!(
                     "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
                     retry_after_ms.div_ceil(1000),
                     quick_policy.max_retry_delay_ms,
                 );
-                // The park seam is a quota-failure seam: other
-                // server-requested waits keep the give-up.
-                let parked = if is_quota_block_failure(&message) {
-                    match park.as_deref_mut() {
-                        Some(park) => park(message.clone(), &abort).await,
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let final_error = match parked {
-                    // The parked status replaces the give-up (TS
-                    // `_finishQuotaParkedTurn`'s `finalError`).
-                    Some(outcome) => outcome.status_message,
-                    None => format!(
-                        "{abort}: {}",
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    ),
-                };
-                emit(AutoRetryEvent::End {
-                    success: false,
-                    attempt: total_retries - 1,
-                    final_error: Some(final_error),
-                    restored_model: None,
-                })
-                .await?;
-                return Ok(message);
+                    // The park seam is a quota-failure seam: other
+                    // server-requested waits keep the give-up.
+                    let parked = if is_quota_block_failure(&message) {
+                        match park.as_deref_mut() {
+                            Some(park) => park(message.clone(), &abort).await,
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                    let final_error = match parked {
+                        // The parked status replaces the give-up (TS
+                        // `_finishQuotaParkedTurn`'s `finalError`).
+                        Some(outcome) => outcome.status_message,
+                        None => format!(
+                            "{abort}: {}",
+                            message.error_message.as_deref().unwrap_or("unknown error"),
+                        ),
+                    };
+                    emit(AutoRetryEvent::End {
+                        success: false,
+                        attempt: total_retries - 1,
+                        final_error: Some(final_error),
+                        restored_model: None,
+                    })
+                    .await?;
+                    return Ok(message);
+                }
             }
         };
         emit(AutoRetryEvent::Start {
@@ -353,6 +430,39 @@ mod tests {
 
     fn error_message(kind: Option<&str>, status: Option<u16>, error: &str) -> AssistantMessage {
         let details = serde_json::json!({ "kind": kind, "status": status });
+        AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            })],
+            api: String::new(),
+            provider: "primary".to_string(),
+            model: "glm-5.3".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(details),
+            }]),
+            usage: Usage::zero(),
+            stop_reason: StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(error.to_string()),
+            timestamp: 0,
+        }
+    }
+
+    /// One auth failure carrying a server-requested wait (the
+    /// `retryAfterMs` the delay ladder reads).
+    fn auth_message_with_wait(
+        status: Option<u16>,
+        error: &str,
+        retry_after_ms: u64,
+    ) -> AssistantMessage {
+        let details =
+            serde_json::json!({ "kind": "auth", "status": status, "retryAfterMs": retry_after_ms });
         AssistantMessage {
             content: vec![AssistantContent::Text(TextContent {
                 text: String::new(),
@@ -505,6 +615,7 @@ mod tests {
                     }
                 }
             },
+            None,
             None,
         )
         .await
@@ -840,5 +951,621 @@ mod tests {
         assert!(harness.events.is_empty());
         assert!(harness.switches.is_empty());
         assert!(harness.restores.is_empty());
+    }
+
+    /// A rejected recovery grant ends the episode inside the chain: the
+    /// primary is restored when a backup had taken over, the sentence is
+    /// the final error, and no provider switch happens for the auth class.
+    #[tokio::test]
+    async fn a_rejected_recovery_ends_the_chain_with_the_re_login_sentence() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(Mutex::new(0usize));
+        let restores: Arc<Mutex<Vec<Option<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut seam = move |_message: &AssistantMessage| {
+            Box::pin(async move {
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::ReLoginRequired(
+                    "re-login sentence".to_string(),
+                )
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let restores_for_restore = Arc::clone(&restores);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let mut index = attempts.lock().unwrap();
+                        *index += 1;
+                        Ok(error_message(Some("auth"), Some(401), "token expired"))
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            {
+                let switches = Arc::clone(&switches);
+                move |next: &Model| {
+                    let switches = Arc::clone(&switches);
+                    let next = next.clone();
+                    async move {
+                        switches
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}/{}", next.provider, next.id));
+                        Ok(())
+                    }
+                }
+            },
+            {
+                let restores = Arc::clone(&restores_for_restore);
+                move || {
+                    let restores = Arc::clone(&restores);
+                    async move {
+                        restores
+                            .lock()
+                            .unwrap()
+                            .push(Some("primary/glm-5.3".to_string()));
+                        Ok(Some("primary/glm-5.3".to_string()))
+                    }
+                }
+            },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            1,
+            "a rejected grant spends no chain retries"
+        );
+        assert_eq!(
+            message.error_message.as_deref(),
+            Some("re-login sentence"),
+            "the final message carries the re-login sentence"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "an auth rejection never walks the provider chain"
+        );
+        assert!(
+            restores.lock().unwrap().is_empty(),
+            "no restore runs: the primary never switched"
+        );
+    }
+
+    /// An auth rejection after unrelated retries on the same provider still
+    /// consults the recovery seam: the auth classification tracks auth
+    /// retries per provider, so an earlier rate-limit retry never
+    /// suppresses the forced refresh.
+    #[tokio::test]
+    async fn an_auth_failure_after_unrelated_retries_still_recovers() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            1 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            {
+                let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+                move |next: &Model| {
+                    let switches = Arc::clone(&switches);
+                    let next = next.clone();
+                    async move {
+                        switches
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}/{}", next.provider, next.id));
+                        Ok(())
+                    }
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs despite the earlier rate-limit retry"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the rate-limit retry, the auth failure, and the recovered retry"
+        );
+    }
+
+    /// An auth failure at the per-provider ceiling still spends its one
+    /// quick retry on the same provider: the refreshed credential
+    /// re-issues once before any switch, instead of refreshing the
+    /// primary and immediately abandoning it for the backup.
+    #[tokio::test]
+    async fn an_auth_failure_at_the_provider_ceiling_still_uses_the_refreshed_credential() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            2 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs once despite the spent per-provider budget"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "two rate-limit retries, the ceiling auth failure, and the refreshed retry"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the refreshed primary keeps its retry before any switch"
+        );
+    }
+
+    /// An auth failure at the whole-episode ceiling still spends its one
+    /// retry on the refreshed credential: a long walk that exhausts the
+    /// total budget re-issues once past it instead of refreshing and
+    /// surfacing the raw rejection.
+    #[tokio::test]
+    async fn an_auth_failure_at_the_episode_ceiling_still_uses_the_refreshed_credential() {
+        let candidates = vec![model("backup-a"), model("backup-b")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0..=7 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            8 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs once despite the spent episode"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            10,
+            "eight rate-limit retries across the walk, the ceiling auth failure, and the refreshed retry"
+        );
+        assert_eq!(
+            switches.lock().unwrap().len(),
+            2,
+            "the walk reached the last candidate before the auth rejection"
+        );
+    }
+
+    /// An unchanged credential never buys the ceiling exemption: an
+    /// env-key rejection at the per-provider budget switches to the
+    /// backup immediately instead of re-issuing past it.
+    #[tokio::test]
+    async fn an_unrefreshed_rejection_at_the_provider_ceiling_switches_immediately() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Continue
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            2 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered on backup"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the seam was consulted once before the switch decision"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "two rate-limit retries, the unrefreshed rejection, and the backup re-issue"
+        );
+        assert_eq!(
+            switches.lock().unwrap().as_slice(),
+            ["backup-a/glm-5.3"],
+            "the unchanged credential switches instead of re-issuing past the ceiling"
+        );
+    }
+
+    /// A just-refreshed credential never waits out an over-cap server
+    /// request in the chain either: the auth seam's grant re-issues
+    /// immediately on the current provider instead of refreshing and
+    /// then ending the turn unused.
+    #[tokio::test]
+    async fn a_refreshed_grant_re_issues_past_an_over_cap_wait() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 => auth_message_with_wait(Some(401), "token rejected", 120_000),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the recovery seam runs once despite the over-cap wait"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the refreshed grant re-issues past the over-cap request"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the refreshed primary keeps its re-issue before any switch"
+        );
+    }
+
+    /// A superseded selection's rejection never consumes the chain's one
+    /// auth budget either: the newer target's own rejection still gets
+    /// its recovery round instead of switching or ending as a "second"
+    /// auth failure.
+    #[tokio::test]
+    async fn a_superseded_rejection_keeps_the_recovery_budget() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                let call = recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    crate::session_engine::provider_auth::AuthRecoveryOutcome::Superseded
+                } else {
+                    crate::session_engine::provider_auth::AuthRecoveryOutcome::NewCredential
+                }
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            recovery_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "both rejections get their recovery round"
+        );
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "two auth rejections and the recovered retry"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the auth class never walks the provider chain"
+        );
+    }
+
+    /// A superseded selection's failure never charges the current
+    /// provider's budget: at the per-provider ceiling the chain stays on
+    /// the current selection instead of switching away from a provider
+    /// that never failed.
+    #[tokio::test]
+    async fn a_superseded_failure_never_charges_the_current_provider() {
+        let candidates = vec![model("backup-a")];
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovery_calls_for_seam = Arc::clone(&recovery_calls);
+        let mut seam = move |_message: &AssistantMessage| {
+            let recovery_calls = Arc::clone(&recovery_calls_for_seam);
+            Box::pin(async move {
+                recovery_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                crate::session_engine::provider_auth::AuthRecoveryOutcome::Superseded
+            }) as crate::session_engine::provider_auth::AuthRecoveryFuture
+        };
+        let switches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let switches_for_switch = Arc::clone(&switches);
+        let attempts_for_attempt = Arc::clone(&attempts);
+        let message = run_turn_with_provider_failover(
+            &quick_policy(),
+            &fast_failover(),
+            &candidates,
+            0,
+            None,
+            {
+                let attempts = Arc::clone(&attempts_for_attempt);
+                move || {
+                    let attempts = Arc::clone(&attempts);
+                    async move {
+                        let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(match index {
+                            0 | 1 => error_message(Some("rate_limit"), Some(429), "slow down"),
+                            2 => error_message(Some("auth"), Some(401), "token rejected"),
+                            _ => ok_message("recovered on primary"),
+                        })
+                    }
+                }
+            },
+            |_| async { Ok(()) },
+            |_| async { true },
+            move |next: &Model| {
+                let switches = Arc::clone(&switches_for_switch);
+                let next = next.clone();
+                async move {
+                    switches
+                        .lock()
+                        .unwrap()
+                        .push(format!("{}/{}", next.provider, next.id));
+                    Ok(())
+                }
+            },
+            move || async { Ok(Some("primary/glm-5.3".to_string())) },
+            None,
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            4,
+            "two rate-limit retries, the superseded rejection, and the re-issue"
+        );
+        assert!(
+            switches.lock().unwrap().is_empty(),
+            "the never-failed current provider keeps its turn"
+        );
     }
 }

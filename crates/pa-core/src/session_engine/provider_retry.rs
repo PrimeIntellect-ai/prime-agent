@@ -127,6 +127,15 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
         .and_then(|status| u16::try_from(status).ok())
 }
 
+/// Whether a failed assistant message is auth-classified: the
+/// `provider_stream_failure` diagnostic's `auth` kind — the server
+/// rejected the presented credential (a 401 and its token-expired
+/// subclasses).
+#[must_use]
+pub fn is_provider_auth_failure(message: &AssistantMessage) -> bool {
+    provider_stream_failure_kind(message).as_deref() == Some("auth")
+}
+
 /// The failure-scoped disclosure's gate. Lifecycle and faux queue
 /// failures and abort conversions stay silent (the 402 diagnosis: only
 /// a real provider failure must never settle silently).
@@ -137,11 +146,14 @@ pub fn has_provider_stream_failure(message: &AssistantMessage) -> bool {
 
 /// Deterministic rejections never retry; auth gets one retry before it
 /// can be marked stale. A 404 is transient (routing blips). Safety
-/// filters never retry (TS #2472).
+/// filters never retry (TS #2472). The retry count is auth-classified
+/// retries on the failing provider, not the episode total: an unrelated
+/// earlier retry (a rate limit, a dropped stream) never suppresses the
+/// auth recovery.
 #[must_use]
 pub fn is_permanent_provider_failure_kind(
     kind: Option<&str>,
-    retries_performed: u32,
+    auth_retries: u32,
     status: Option<u16>,
 ) -> bool {
     match kind {
@@ -149,7 +161,7 @@ pub fn is_permanent_provider_failure_kind(
         // A payment failure never refills mid-ladder, so it settles on
         // the first attempt (the disclosure row still fires).
         Some("invalid_request" | "refusal" | "permission" | "safety" | "payment_required") => true,
-        Some("auth") => retries_performed > 0,
+        Some("auth") => auth_retries > 0,
         _ => false,
     }
 }
@@ -233,6 +245,7 @@ where
         0
     };
     let mut retries_performed = 0u32;
+    let mut auth_retries = 0u32;
     loop {
         let message = attempt().await?;
         if message.stop_reason != StopReason::Error {
@@ -250,7 +263,7 @@ where
         }
         let kind = provider_stream_failure_kind(&message);
         let status = provider_stream_failure_status(&message);
-        if is_permanent_provider_failure_kind(kind.as_deref(), retries_performed, status) {
+        if is_permanent_provider_failure_kind(kind.as_deref(), auth_retries, status) {
             return Ok(message);
         }
         let delay = provider_retry_delay(
@@ -266,6 +279,9 @@ where
             return Ok(with_stop_reason_aborted(message));
         }
         retries_performed += 1;
+        if kind.as_deref() == Some("auth") {
+            auth_retries += 1;
+        }
     }
 }
 
@@ -917,5 +933,48 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(message.stop_reason, StopReason::Error);
+    }
+
+    /// An auth rejection after an unrelated retry still gets its own retry:
+    /// the auth classification counts auth retries, not the episode total.
+    #[tokio::test]
+    async fn an_auth_failure_after_unrelated_retries_still_retries() {
+        let policy = ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_provider_retry(
+            &policy,
+            None,
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    let index = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(match index {
+                        0 => error_message(Some("rate_limit"), Some(429), None),
+                        1 => error_message(Some("auth"), Some(401), None),
+                        _ => {
+                            let mut ok = error_message(None, None, None);
+                            ok.stop_reason = StopReason::Stop;
+                            ok
+                        }
+                    })
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Stop);
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the rate-limit retry, the auth failure, and the auth retry"
+        );
     }
 }
