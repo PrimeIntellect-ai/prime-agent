@@ -216,12 +216,12 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
         ..options.profile.defaults()
     };
     println!("=== generating the cold corpus");
-    corpus::generate(&CorpusOptions {
+    corpus::regenerate_for_suite(&CorpusOptions {
         out: options.out.join("corpus-cold"),
         ..knobs()
     })?;
     println!("=== generating the warm corpus");
-    corpus::generate(&CorpusOptions {
+    corpus::regenerate_for_suite(&CorpusOptions {
         out: options.out.join("corpus-warm"),
         cache: CacheMode::Warm,
         ..knobs()
@@ -699,9 +699,11 @@ fn restore(ctx: &RunCtx) -> anyhow::Result<()> {
     let mut dirs = Vec::new();
     let mut stack = vec![ctx.agent_dir.clone()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)?.flatten() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
             let path = entry.path();
-            if path.is_dir() {
+            // Never follow product-created links outside the owned corpus.
+            if entry.file_type()?.is_dir() {
                 dirs.push(path.clone());
                 stack.push(path);
             } else if !baseline.contains(path.to_string_lossy().as_ref()) {
@@ -910,6 +912,32 @@ mod tests {
             .expect("failure dump")
             .windows(b"diagnostic before missing paint".len())
             .any(|bytes| bytes == b"diagnostic before missing paint"));
+    }
+
+    #[test]
+    fn restore_removes_links_without_traversing_external_targets() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().expect("corpus directory");
+        let ctx = tiny_context(directory.path());
+        let external = tempfile::tempdir().expect("external directory");
+        let sentinel = external.path().join("sentinel");
+        std::fs::write(&sentinel, b"external data").expect("external sentinel");
+        let directory_link = ctx.agent_dir.join("outside-dir");
+        let file_link = ctx.agent_dir.join("outside-file");
+        symlink(external.path(), &directory_link).expect("directory link");
+        symlink(&sentinel, &file_link).expect("file link");
+        restore(&ctx).expect("restore without following links");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("external file retained"),
+            b"external data"
+        );
+        assert!(external.path().is_dir());
+        assert!(std::fs::symlink_metadata(directory_link).is_err());
+        assert!(std::fs::symlink_metadata(file_link).is_err());
+        for file in &ctx.manifest.files {
+            assert!(Path::new(file).exists(), "baseline file missing: {file}");
+        }
     }
 
     #[test]

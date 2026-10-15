@@ -340,23 +340,6 @@ pub(crate) fn write_session_file(
                 })?,
                 rng,
             )?;
-            rows.push(
-                "message",
-                serde_json::json!({
-                    "message": pa_types::session::AgentMessage::CompactionSummary(
-                        pa_types::session::CompactionSummaryMessage {
-                            summary,
-                            tokens_before: rng.below(30_000) + 40_000,
-                            retained_message_count: Some(20),
-                            custom_instructions: None,
-                            harness_digest: None,
-                            harness_state_fingerprint: None,
-                            timestamp: rows.millis,
-                        },
-                    )
-                }),
-                rng,
-            )?;
             continue;
         }
 
@@ -555,6 +538,22 @@ mod tests {
                     .count(),
                 1,
                 "seed={seed}"
+            );
+            let entries = pa_core::session::parse_session_entries(
+                &std::fs::read_to_string(&path).expect("read generated session"),
+            );
+            let context = pa_core::session::build_session_context(&entries, None);
+            assert_eq!(
+                context
+                    .messages
+                    .iter()
+                    .filter(|message| matches!(
+                        message,
+                        pa_types::session::AgentMessage::CompactionSummary(_)
+                    ))
+                    .count(),
+                1,
+                "the real context builder must not duplicate the summary; seed={seed}"
             );
         }
     }

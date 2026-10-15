@@ -34,6 +34,8 @@ pub(crate) struct PtyChild {
     /// child's stdin, so it never shows up in the read stream — a
     /// stream-search for it would re-send forever).
     kitty_answered: bool,
+    /// Set only after the exited child's final PTY bytes have drained.
+    exited: Option<std::process::ExitStatus>,
 }
 
 impl PtyChild {
@@ -81,6 +83,7 @@ impl PtyChild {
             output: Vec::new(),
             screen: vt100::Parser::new(rows, cols, 0),
             kitty_answered: false,
+            exited: None,
         })
     }
 
@@ -131,6 +134,12 @@ impl PtyChild {
                 return Ok(Instant::now());
             }
             scanned = self.output.len();
+            if let Some(status) = self.exited {
+                anyhow::bail!(
+                    "child exited with {status} before {what}; pty tail:\n{}",
+                    String::from_utf8_lossy(&self.output[self.output.len().saturating_sub(4000)..])
+                );
+            }
             if Instant::now() >= deadline {
                 let tail =
                     &self.output_from(mark)[self.output_from(mark).len().saturating_sub(4000)..];
@@ -157,13 +166,24 @@ impl PtyChild {
         let millis = timeout.as_millis().min(u16::MAX as u128) as u16;
         let mut poller = [PollFd::new(self.master.as_fd(), PollFlags::POLLIN)];
         let ready = poll(&mut poller, millis)?;
-        if ready == 0 {
+        // After exit, keep reading any buffered final paints before reporting
+        // the status. A poll timeout alone must not hide an already dead UI.
+        let status = self.child.try_wait()?;
+        if ready == 0 && status.is_none() {
             return Ok(());
         }
         let mut buffer = [0u8; 8192];
         let read = self.master.read(&mut buffer);
         match read {
-            Ok(0) | Err(_) => {}
+            Ok(0) => self.exited = status,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.raw_os_error() == Some(nix::errno::Errno::EIO as i32) =>
+            {
+                self.exited = status;
+            }
+            Err(error) => return Err(error.into()),
             Ok(n) => {
                 let chunk = &buffer[..n];
                 self.receive(chunk)?;
@@ -200,6 +220,12 @@ impl PtyChild {
         loop {
             if self.screen_text().contains(needle) {
                 return Ok(Instant::now());
+            }
+            if let Some(status) = self.exited {
+                anyhow::bail!(
+                    "child exited with {status} before {what}; pty tail:\n{}",
+                    String::from_utf8_lossy(&self.output[self.output.len().saturating_sub(4000)..])
+                );
             }
             if Instant::now() >= deadline {
                 anyhow::bail!(
@@ -291,6 +317,71 @@ mod tests {
             child.master = closed;
             child.receive(KITTY_QUERY).expect("already answered");
         }
+    }
+
+    #[test]
+    fn exited_children_fail_missing_needles_without_waiting_for_liveness_timeout() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &["-c".into(), "printf 'fatal mock diagnostic'; exit 7".into()],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn exiting mock");
+        let started = Instant::now();
+        let error = child
+            .wait_from(
+                0,
+                b"missing",
+                "first paint",
+                started + Duration::from_secs(10),
+            )
+            .expect_err("exited child has no paint");
+        let message = error.to_string();
+        assert!(message.contains("exit status: 7"), "{message}");
+        assert!(message.contains("fatal mock diagnostic"), "{message}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(child
+            .wait_screen_contains("missing", "ready", started + Duration::from_secs(10))
+            .expect_err("screen wait also sees exit")
+            .to_string()
+            .contains("exit status: 7"));
+    }
+
+    #[test]
+    fn final_output_is_drained_before_reporting_child_exit() {
+        let directory = tempfile::tempdir().expect("mock directory");
+        let mut child = PtyChild::spawn(
+            std::path::Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "printf '%20000s' x; printf 'last paint'; exit 0".into(),
+            ],
+            &[],
+            directory.path(),
+            120,
+            36,
+        )
+        .expect("spawn final paint mock");
+        child
+            .wait_from(
+                0,
+                b"last paint",
+                "final paint",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("final bytes survive child exit");
+        assert!(child.output.len() > 8192, "exercise more than one PTY read");
+        child
+            .wait_screen_contains(
+                "last paint",
+                "final screen",
+                Instant::now() + Duration::from_secs(5),
+            )
+            .expect("final screen survives child exit");
     }
 
     #[test]

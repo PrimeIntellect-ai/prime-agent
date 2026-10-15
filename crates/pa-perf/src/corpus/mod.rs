@@ -439,6 +439,38 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
     Ok(manifest)
 }
 
+/// Replace only a prior corpus owned by this suite; arbitrary populated output
+/// remains an error. remove_dir_all does not follow nested directory symlinks.
+pub(crate) fn regenerate_for_suite(options: &CorpusOptions) -> anyhow::Result<Manifest> {
+    anyhow::ensure!(
+        options.sessions >= 3,
+        "the corpus needs at least 3 sessions"
+    );
+    let root = &options.out;
+    if let Ok(metadata) = std::fs::symlink_metadata(root) {
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "suite corpus root must not be a symlink: {}",
+            root.display()
+        );
+    }
+    if root.exists() && std::fs::read_dir(root)?.next().transpose()?.is_some() {
+        let canonical = root.canonicalize()?;
+        let manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(canonical.join("corpus.json"))?)
+                .context("refuse to replace output without a corpus manifest")?;
+        anyhow::ensure!(
+            manifest.schema == 1
+                && manifest.paths.manifest_file == canonical.join("corpus.json")
+                && manifest.paths.agent_dir == canonical.join("agent")
+                && manifest.paths.project_dir == canonical.join("project"),
+            "refuse to replace a corpus whose manifest belongs to another root"
+        );
+        std::fs::remove_dir_all(root)?;
+    }
+    generate(options)
+}
+
 /// A one-child spawn through the product's ledger, then the recursion's row
 /// accounting.
 #[allow(clippy::too_many_arguments)] // the spawn inputs are the tree site's own facts
@@ -594,5 +626,57 @@ mod tests {
         assert_eq!(manifest.counts.child_sessions, 0);
         assert_eq!(manifest.counts.subagent_edges, 0);
         assert!(!manifest.files.iter().any(|file| file.contains("sub-")));
+    }
+    #[test]
+    fn suite_regeneration_replaces_owned_corpora_without_admitting_stale_files() {
+        let directory = tempfile::tempdir().expect("suite output");
+        let options = tiny_options(&directory.path().join("corpus-cold"));
+        super::generate(&options).expect("initial corpus");
+        let stale = options.out.join("agent/sessions/stale.jsonl");
+        std::fs::write(&stale, "stale transcript").expect("stale file");
+        let manifest = super::regenerate_for_suite(&options).expect("repeat suite generation");
+        assert!(!stale.exists());
+        assert!(!manifest
+            .files
+            .iter()
+            .any(|file| file.ends_with("stale.jsonl")));
+        assert_eq!(manifest.counts.sessions, options.sessions);
+    }
+
+    #[test]
+    fn suite_regeneration_refuses_unowned_populated_output() {
+        let directory = tempfile::tempdir().expect("suite output");
+        let sentinel = directory.path().join("unrelated.txt");
+        std::fs::write(&sentinel, "preserve me").expect("unrelated file");
+        assert!(super::regenerate_for_suite(&tiny_options(directory.path())).is_err());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "preserve me");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn suite_regeneration_does_not_follow_external_directory_symlinks() {
+        let directory = tempfile::tempdir().expect("suite output");
+        let outside = tempfile::tempdir().expect("outside tree");
+        let sentinel = outside.path().join("sentinel");
+        std::fs::write(&sentinel, "outside survives").expect("sentinel");
+        let options = tiny_options(&directory.path().join("corpus-cold"));
+        super::generate(&options).expect("initial corpus");
+        std::os::unix::fs::symlink(outside.path(), options.out.join("external-link"))
+            .expect("external symlink");
+        super::regenerate_for_suite(&options).expect("replace owned corpus");
+        assert_eq!(
+            std::fs::read_to_string(sentinel).unwrap(),
+            "outside survives"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn suite_regeneration_rejects_even_an_empty_external_root_symlink() {
+        let directory = tempfile::tempdir().expect("suite output");
+        let outside = tempfile::tempdir().expect("empty outside directory");
+        let link = directory.path().join("corpus-cold");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("root symlink");
+        assert!(super::regenerate_for_suite(&tiny_options(&link)).is_err());
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 }

@@ -25,7 +25,9 @@ pa-perf corpus --profile medium --out DIR [--seed N] [knob overrides]
 
 `DIR` must be absent or empty. A populated output is rejected before any writes,
 so stale sessions cannot enter the new corpus or its restore baseline. Choose a
-fresh directory for another generation.
+fresh directory for another standalone generation. The suite command can be run
+again in the same output: it replaces only its own corpus directories after
+verifying their manifests, and refuses unrelated populated directories.
 
 Writes the product's real layout under `DIR/`:
 
