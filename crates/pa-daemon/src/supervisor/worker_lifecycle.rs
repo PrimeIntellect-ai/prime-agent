@@ -109,6 +109,7 @@ impl Supervisor {
             telemetry_disabled,
             runtime_metadata,
             env,
+            launch_env,
             ..
         } = create
         else {
@@ -124,6 +125,13 @@ impl Supervisor {
         let client_env = env
             .as_ref()
             .map(crate::herdr::filter_client_env)
+            .filter(|env| !env.is_empty());
+        // The client's launch env (TS `launchEnv`) re-filtered on receipt
+        // (the socket peer is untrusted). In-memory only; the lifetime is
+        // documented on the `ResidentWorker::launch_env` field.
+        let client_launch_env = launch_env
+            .clone()
+            .map(pa_types::daemon::launch_env::collect_launch_env)
             .filter(|env| !env.is_empty());
         // The shutdown gate: a create dispatched while the supervisor is
         // stopping must never launch a worker the stop pass would miss (a
@@ -341,6 +349,8 @@ impl Supervisor {
         };
         let descriptor_path = self.descriptor_dir.join(format!("{worker_id}.json"));
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, descriptor_path.clone());
+        // TS stores `worker.launchEnv` before the spawn.
+        resident.set_launch_env(client_launch_env);
         // Register the resident before spawning: the worker's boot self-registration must
         // find its identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
@@ -462,6 +472,11 @@ impl Supervisor {
         {
             let mut descriptor = resident.descriptor.lock().await;
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+            // TS clears `launchEnv` at ready; an owned worker keeps it
+            // for its recovery relaunch until ownership clears.
+            if descriptor.owner_client_id.is_none() {
+                resident.clear_launch_env();
+            }
             descriptor.root_session_id = create_summary
                 .get("sessionId")
                 .and_then(Value::as_str)

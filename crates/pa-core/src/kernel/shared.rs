@@ -232,10 +232,8 @@ pub struct KernelBusyAfterInterruptError;
 /// A typed request from Python code running in the kernel to the host.
 #[derive(Debug, Clone)]
 pub struct HostRequestPayload {
-    /// The request payload with `cellSourceCode` merged in when known.
+    /// The request payload.
     pub data: Value,
-    /// Source of the cell that triggered the request, when attributable.
-    pub cell_source_code: Option<String>,
 }
 
 pub type HostHandlerFuture = Pin<Box<dyn Future<Output = anyhow::Result<Value>> + Send>>;

@@ -140,3 +140,30 @@ If you use this codebase in your research, please cite Prime Agent:
 ```
 
 Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+
+### Automatic compaction settings
+
+`/settings` exposes the global automatic compaction percentage in five-point steps,
+with a 95% default. A saved off-grid percentage stays selectable. The effective
+trigger also reserves room for retained history and summaries; the model's input
+and requested-output ceiling always takes priority. Manual compaction budgets are
+unchanged. The underlying `compaction.thresholdPercent` setting accepts 1–100,
+including fractional values; project settings can override the global setting.
+
+For per-model early compaction, use the existing provider-scoped
+`modelOverrides.<id>.contextWindow` option in `models.json`, for example:
+
+```json
+{
+  "providers": {
+    "prime-inference": {
+      "modelOverrides": {
+        "your-model-id": { "contextWindow": 524288 }
+      }
+    }
+  }
+}
+```
+
+Use the actual model ID for your provider. This sets that model's effective context
+window; it does not change every model's global compaction percentage.

@@ -260,9 +260,9 @@ impl AgentSessionEngine {
                 return Ok(());
             }
         }
-        let built = self.build_session(model).await?;
+        let built = Arc::new(self.build_session(model).await?);
         self.adopt_built_session(&built).await?;
-        self.session.lock().await.replace(Arc::new(built));
+        self.session.lock().await.replace(built);
         Ok(())
     }
 
@@ -337,7 +337,7 @@ impl AgentSessionEngine {
         }
     }
 
-    async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
+    async fn adopt_built_session(&self, built: &Arc<CoreSessionEngine>) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built).await;
         *self
             .progress_notes
@@ -361,7 +361,7 @@ impl AgentSessionEngine {
             Some(crate::autonomous_continuation::AutonomousBoundaryMirror {
                 turn_boundary: std::sync::Arc::clone(&built.turn_boundary),
                 agent: std::sync::Arc::clone(built.session.agent()),
-                compaction: built.session.compaction_settings(),
+                session: Arc::downgrade(built),
             });
         // The background-bash liveness probe: a deadlock-free read over the
         // build's provisioner.

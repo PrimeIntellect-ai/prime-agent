@@ -5,8 +5,8 @@
 use anyhow::Context as _;
 
 use super::{
-    bail, canonical_session_path, fs, json, HashMap, Path, PathBuf, Result, RlmLedgerDeleteReason,
-    RlmLedgerEdge, Value,
+    bail, canonical_session_path, fs, json, Arc, HashMap, Path, PathBuf, Result,
+    RlmLedgerDeleteReason, RlmLedgerEdge, Value,
 };
 
 /// One replayed ledger record (`meta` records carry no edge and are skipped).
@@ -152,7 +152,7 @@ pub(super) fn parse_ledger_line(line: &str, index: usize) -> Result<Option<Ledge
 }
 
 /// The replayed edge set: replay order plus a key index for record joins.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub(super) struct ReplayState {
     pub(super) edges: Vec<RlmLedgerEdge>,
     pub(super) index: HashMap<String, usize>,
@@ -249,7 +249,7 @@ fn artifact_session_index(agent_dir: &Path) -> HashMap<String, PathBuf> {
 #[derive(Debug)]
 pub(super) struct ReplaySnapshot {
     pub(super) identity: FileIdentity,
-    pub(super) state: ReplayState,
+    pub(super) state: Arc<ReplayState>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
