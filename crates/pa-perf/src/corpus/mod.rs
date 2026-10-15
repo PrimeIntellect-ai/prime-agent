@@ -441,6 +441,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
 
 /// Replace only a prior corpus owned by this suite; arbitrary populated output
 /// remains an error. remove_dir_all does not follow nested directory symlinks.
+#[cfg(any(unix, test))]
 pub(crate) fn regenerate_for_suite(options: &CorpusOptions) -> anyhow::Result<Manifest> {
     anyhow::ensure!(
         options.sessions >= 3,
