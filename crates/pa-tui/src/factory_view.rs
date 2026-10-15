@@ -494,10 +494,9 @@ impl FactoryView {
     /// reaches this page exactly like its siblings.
     #[must_use]
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> FactoryViewAction {
-        if key == "ctrl+c" || key == "left" || kb.matches(key, "tui.select.cancel") {
-            // Esc (and Left, its horizontal twin — nothing else wants the
-            // horizontal arrows here) backs out of the open action rows
-            // before it closes the page — the drill-in's back.
+        if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
+            // Esc backs out of the open action rows before it closes
+            // the page — the drill-in's back.
             if self.mode != Mode::Feed {
                 self.mode = Mode::Feed;
                 return FactoryViewAction::None;
@@ -513,7 +512,20 @@ impl FactoryView {
             self.move_selection(delta);
             return FactoryViewAction::None;
         }
-        if key == "right" || kb.matches(key, "tui.select.confirm") {
+        if kb.matches(key, "tui.select.confirm") {
+            return self.confirm_selection();
+        }
+        // The horizontal arrows mirror back/confirm — as fallbacks only,
+        // after the configured bindings, so a rebound Left/Right keeps
+        // its configured action.
+        if key == "left" {
+            if self.mode != Mode::Feed {
+                self.mode = Mode::Feed;
+                return FactoryViewAction::None;
+            }
+            return FactoryViewAction::Close;
+        }
+        if key == "right" {
             return self.confirm_selection();
         }
         FactoryViewAction::None
