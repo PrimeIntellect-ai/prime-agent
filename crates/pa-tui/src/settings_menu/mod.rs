@@ -134,7 +134,26 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             idle_values[1..].sort_by_key(|value| value.parse::<u32>().unwrap_or(0));
         }
     }
+    let percent =
+        if pa_types::compaction::is_valid_threshold_percent(current.compaction_threshold_percent) {
+            current.compaction_threshold_percent
+        } else {
+            95.0
+        };
+    let mut thresholds: Vec<f64> = (5..=100).step_by(5).map(f64::from).collect();
+    if !thresholds.contains(&percent) {
+        thresholds.push(percent);
+        thresholds.sort_by(f64::total_cmp);
+    }
     vec![
+        SettingsMenuRow {
+            id: "autocompact-threshold",
+            label: "Auto-compact threshold (%)",
+            description: "Context percentage (1–100); retained history and model output budgets bound the trigger",
+            current: percent.to_string(),
+            values: Some(thresholds.into_iter().map(|value| value.to_string()).collect()),
+            submenu: None,
+        },
         SettingsMenuRow {
             id: "autocompact",
             label: "Auto-compact",
@@ -172,6 +191,14 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
             label: "Skill commands",
             description: "Register skills as /skill:name commands",
             current: current.skill_commands.to_string(),
+            values: Some(bool_value()),
+            submenu: None,
+        },
+        SettingsMenuRow {
+            id: "harness-refinements",
+            label: "Harness refinements",
+            description: "Create and load harness refinements; prior replies and summaries retain their influence",
+            current: current.harness_refinements.to_string(),
             values: Some(bool_value()),
             submenu: None,
         },
@@ -323,11 +350,13 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
 #[derive(Debug, Clone, Default)]
 pub struct SettingsCurrentValues {
     pub autocompact: bool,
+    pub compaction_threshold_percent: f64,
     pub show_images: bool,
     pub auto_resize_images: bool,
     pub block_images: bool,
     pub skill_commands: bool,
     pub builtin_skills: bool,
+    pub harness_refinements: bool,
     pub hardware_cursor: bool,
     pub editor_padding: u64,
     pub autocomplete_max_visible: u64,

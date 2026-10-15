@@ -58,9 +58,6 @@ pub struct UnifiedRecord {
     /// Every key this record is reachable by (selection survival).
     pub aliases: Vec<String>,
     pub section: Section,
-    /// The picker's match targets: the SESSION column's title, the
-    /// durable session id, and the cwd (see `agents_view_search`).
-    pub search: SessionSearchText,
     /// The query-relevance score behind the ranked list (lower is better);
     /// `None` for retained ancestors and unqueried rosters.
     pub search_score: Option<f64>,
@@ -154,7 +151,7 @@ fn session_search_name(summary: &Value) -> String {
 
 /// The picker targets of one unified record: the SESSION column's own title as the name target,
 /// plus the durable session id and the cwd. Daemon data wins; a saved row fills the gaps.
-fn record_search_text(record: &UnifiedRecord) -> SessionSearchText {
+pub(crate) fn record_search_text(record: &UnifiedRecord) -> SessionSearchText {
     let summary = summary_for_record(record);
     let pick = |daemon: Option<&str>, saved: Option<&str>| {
         daemon
@@ -208,18 +205,15 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
         for alias in &aliases {
             by_alias.insert(alias.clone(), index);
         }
-        let mut record = UnifiedRecord {
+        let record = UnifiedRecord {
             daemon: Some(summary),
             saved: None,
             status,
             identity,
             aliases,
             section,
-            search: SessionSearchText::default(),
             search_score: None,
         };
-        let search = record_search_text(&record);
-        record.search = search;
         records.push(record);
     }
 
@@ -242,26 +236,21 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
                 }
                 by_alias.insert(alias.clone(), index);
             }
-            let search = record_search_text(record);
-            record.search = search;
             continue;
         }
         let index = records.len();
         for alias in &aliases {
             by_alias.insert(alias.clone(), index);
         }
-        let mut record = UnifiedRecord {
+        let record = UnifiedRecord {
             daemon: None,
             saved: Some(row.clone()),
             status: None,
             identity,
             aliases,
             section: Section::Inactive,
-            search: SessionSearchText::default(),
             search_score: None,
         };
-        let search = record_search_text(&record);
-        record.search = search;
         records.push(record);
     }
     records
@@ -484,7 +473,7 @@ pub fn filter_unified_sessions(
     for index in 0..records.len() {
         // Every directly matching record carries its score, even one
         // already retained as an ancestor of an earlier hit.
-        let Some(score) = score_search(&records[index].search, query) else {
+        let Some(score) = score_search(&record_search_text(&records[index]), query) else {
             continue;
         };
         scores[index] = Some(score);
@@ -706,8 +695,8 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].section, Section::Idle);
         assert_eq!(records[0].identity, "file:/x/s1.jsonl");
-        assert_eq!(records[0].search.name, "Bug fix");
-        assert_eq!(records[0].search.id, "s1");
+        assert_eq!(record_search_text(&records[0]).name, "Bug fix");
+        assert_eq!(record_search_text(&records[0]).id, "s1");
         let summary = summary_for_record(&records[0]);
         assert_eq!(summary["firstMessage"], "fix the bug");
         assert_eq!(summary["sessionName"], "Bug fix");
@@ -874,17 +863,17 @@ mod tests {
             "parentSessionPath": "/x/parent.jsonl",
         })];
         let records = reconcile_unified_sessions(&[], &saved);
-        let targets = &records[0].search;
+        let targets = record_search_text(&records[0]);
         for query in ["alpha", "roster", "ROSTER", "api-server", "sess-al"] {
             let parsed = parse_search_query(query);
             assert!(
-                score_search(targets, &parsed).is_some(),
+                score_search(&targets, &parsed).is_some(),
                 "query {query:?} should match the restricted corpus"
             );
         }
         // Partial words need the fuzzy path on the name (ordered
         // subsequence).
-        assert!(score_search(targets, &parse_search_query("rtwr")).is_some());
+        assert!(score_search(&targets, &parse_search_query("rtwr")).is_some());
         // Content fields are gone from the picker: first messages, the capped transcript, and
         // file paths never match.
         for query in [
@@ -898,7 +887,7 @@ mod tests {
         ] {
             let parsed = parse_search_query(query);
             assert!(
-                score_search(targets, &parsed).is_none(),
+                score_search(&targets, &parsed).is_none(),
                 "query {query:?} must not match content or path fields"
             );
         }
@@ -928,11 +917,12 @@ mod tests {
         assert_eq!(records.len(), 1);
         // Daemon data wins for the merged targets; the saved transcript
         // stays out of the corpus.
-        assert_eq!(records[0].search.name, "tuned retry policy");
-        assert_eq!(records[0].search.id, "s1");
-        assert_eq!(records[0].search.cwd, "/work/retry");
-        assert!(score_search(&records[0].search, &parse_search_query("retry")).is_some());
-        assert!(score_search(&records[0].search, &parse_search_query("backoff")).is_none());
+        let targets = record_search_text(&records[0]);
+        assert_eq!(targets.name, "tuned retry policy");
+        assert_eq!(targets.id, "s1");
+        assert_eq!(targets.cwd, "/work/retry");
+        assert!(score_search(&targets, &parse_search_query("retry")).is_some());
+        assert!(score_search(&targets, &parse_search_query("backoff")).is_none());
     }
 
     #[test]
@@ -1120,7 +1110,7 @@ mod tests {
             }),
         )];
         let records = reconcile_unified_sessions(&roster, &[]);
-        assert_eq!(records[0].search.name, "hey");
+        assert_eq!(record_search_text(&records[0]).name, "hey");
         for query in ["hey", "HEY", "Hey"] {
             let filtered = filter_unified_sessions(&records, &parse_search_query(query));
             assert_eq!(
@@ -1156,18 +1146,15 @@ mod tests {
         let records = reconcile_unified_sessions(&roster, &[]);
         let title = session_title(&summary_for_record(&records[0]));
         let visible = truncate_text(&title, SESSION_TITLE_MAX_CELLS);
-        assert_eq!(records[0].search.name, visible);
+        let targets = record_search_text(&records[0]);
+        assert_eq!(targets.name, visible);
         assert!(
-            score_search(
-                &records[0].search,
-                &parse_search_query("agents view search")
-            )
-            .is_some(),
+            score_search(&targets, &parse_search_query("agents view search")).is_some(),
             "the visible title head matches"
         );
         for query in ["backoff ceiling", "queue lane", "CI is red"] {
             assert!(
-                score_search(&records[0].search, &parse_search_query(query)).is_none(),
+                score_search(&targets, &parse_search_query(query)).is_none(),
                 "{query:?} lives past the column clip and must not match"
             );
         }
@@ -1209,14 +1196,19 @@ mod tests {
             "firstMessage": "orchestrate the fleet", "messageCount": 2,
         })];
         let records = reconcile_unified_sessions(&roster, &saved);
-        assert_eq!(records[0].search.name, "gateway worker");
-        assert_eq!(records[1].search.name, "deploy the gateway now");
-        assert_eq!(records[2].search.name, "gateway");
-        assert_eq!(records[3].search.name, "orchestrate the fleet");
+        let names: Vec<String> = records
+            .iter()
+            .map(record_search_text)
+            .map(|targets| targets.name)
+            .collect();
+        assert_eq!(names[0], "gateway worker");
+        assert_eq!(names[1], "deploy the gateway now");
+        assert_eq!(names[2], "gateway");
+        assert_eq!(names[3], "orchestrate the fleet");
         for record in &records {
             let title = session_title(&summary_for_record(record));
             assert_eq!(
-                record.search.name,
+                record_search_text(record).name,
                 truncate_text(&title, SESSION_TITLE_MAX_CELLS),
                 "the corpus equals the SESSION column's title"
             );
@@ -1237,14 +1229,15 @@ mod tests {
             }),
         )];
         let records = reconcile_unified_sessions(&roster, &[]);
-        assert_eq!(records[0].search.name, "gateway worker");
+        let targets = record_search_text(&records[0]);
+        assert_eq!(targets.name, "gateway worker");
         assert!(
-            score_search(&records[0].search, &parse_search_query("gateway")).is_some(),
+            score_search(&targets, &parse_search_query("gateway")).is_some(),
             "the name still matches"
         );
         for query in ["deploy", "backoff", "flaky"] {
             assert!(
-                score_search(&records[0].search, &parse_search_query(query)).is_none(),
+                score_search(&targets, &parse_search_query(query)).is_none(),
                 "{query:?} lives in the first prompt, not the displayed title"
             );
         }

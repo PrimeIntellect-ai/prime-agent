@@ -81,6 +81,15 @@ pub enum TransportSetting {
     WebSocketCached,
 }
 
+fn deserialize_threshold_percent<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<f64>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value
+        .as_f64()
+        .filter(|percent| pa_types::compaction::is_valid_threshold_percent(*percent)))
+}
+
 /// `number | "unlimited"` autonomous limit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -93,6 +102,9 @@ pub enum AutonomousLimitSetting {
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSettings {
     pub enabled: Option<bool>,
+    /// Percentage ceiling for automatic compaction; invalid values behave as unset.
+    #[serde(default, deserialize_with = "deserialize_threshold_percent")]
+    pub threshold_percent: Option<f64>,
     pub reserve_tokens: Option<u64>,
     pub keep_recent_tokens: Option<u64>,
     pub agent_callable: Option<bool>,
@@ -316,6 +328,8 @@ pub struct Settings {
     pub theme: Option<String>,
     pub compaction: Option<CompactionSettings>,
     pub auto_refine: Option<AutoRefineSettings>,
+    /// Master switch for harness creation and context loading; unset preserves enabled behavior.
+    pub harness_refinements: Option<bool>,
     pub agent_traces: Option<AgentTracesSettings>,
     pub factory: Option<FactorySettings>,
     pub telemetry: Option<TelemetrySettings>,

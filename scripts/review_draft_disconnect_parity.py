@@ -404,6 +404,10 @@ class Supervisor:
                                 "serviceTier": None, "model": None}}
                     elif name == "get_mcp_connections": response["data"] = {"connections": []}
                     elif name == "detach": response["data"] = {}
+                    elif name == "set_auto_compaction":
+                        if not isinstance(command.get("enabled"), bool):
+                            raise RuntimeError("set_auto_compaction requires a boolean")
+                        response.pop("data", None)
                     else:
                         self.errors.append(f"unexpected command: {name}")
                         response.update(success=False, error=f"Unsupported fixture command: {name}")

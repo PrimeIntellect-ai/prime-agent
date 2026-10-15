@@ -178,7 +178,7 @@ fn user_block_keeps_the_link_affordance() {
                 ),
                 body.add_modifier(ratatui::style::Modifier::UNDERLINED)
             ),
-            (" [https://x.dev/a]".to_string(), link_url),
+            (" (https://x.dev/a)".to_string(), link_url),
             (" ".repeat(60 - 28), bg),
         ]
     );

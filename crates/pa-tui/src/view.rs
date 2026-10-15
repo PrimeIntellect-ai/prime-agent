@@ -161,7 +161,7 @@ pub struct AgentView {
     /// The width the cached rows were laid out for.
     pub(crate) layout_width: usize,
     /// Rendering options that affect cached entry rows.
-    layout_options: Option<(Theme, String, bool, bool)>,
+    layout_options: Option<layout::LayoutOptions>,
     /// Row texts of the inline frame at the last main-screen flush: the
     /// next flush diffs against this, so exits never duplicate scrollback.
     flushed_frame: Vec<String>,

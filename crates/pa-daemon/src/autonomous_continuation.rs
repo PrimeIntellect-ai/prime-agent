@@ -20,7 +20,7 @@ pub(crate) struct AutonomousBoundaryMirror {
     pub(crate) turn_boundary:
         std::sync::Arc<pa_core::session_engine::turn_boundary::TurnBoundaryRequests>,
     pub(crate) agent: std::sync::Arc<pa_agent::agent::Agent>,
-    pub(crate) compaction: pa_core::session_engine::compaction::CompactionSettings,
+    pub(crate) session: std::sync::Weak<pa_core::session_engine::engine::SessionEngine>,
 }
 
 impl AgentSessionEngine {
@@ -193,6 +193,9 @@ impl AgentSessionEngine {
             .iter()
             .filter_map(json_round_trip::<_, pa_types::session::AgentMessage>)
             .collect();
+        let Some(session) = mirror.session.upgrade() else {
+            return false;
+        };
         pa_core::session_engine::compaction::threshold_compaction_due(
             &messages,
             model.context_window,
@@ -202,7 +205,7 @@ impl AgentSessionEngine {
                     state.thinking_level,
                 ),
             ),
-            &mirror.compaction,
+            &session.session.compaction_settings(),
         )
     }
 

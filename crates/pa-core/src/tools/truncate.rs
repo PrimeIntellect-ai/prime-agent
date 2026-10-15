@@ -2,22 +2,10 @@
 //! line limit (default 2000) and byte limit (default 50KB). Never returns partial lines (except
 //! the bash tail truncation edge case).
 
-/// Max chars per grep match line.
-pub const GREP_MAX_LINE_LENGTH: usize = 500;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TruncationOptions {
     pub max_lines: usize,
     pub max_bytes: usize,
-}
-
-impl Default for TruncationOptions {
-    fn default() -> Self {
-        Self {
-            max_lines: DEFAULT_MAX_LINES,
-            max_bytes: DEFAULT_MAX_BYTES,
-        }
-    }
 }
 
 impl TruncationOptions {
@@ -63,89 +51,6 @@ pub fn format_size(bytes: usize) -> String {
         format!("{:.1}KB", bytes as f64 / 1024.0)
     } else {
         format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
-    }
-}
-
-/// Truncate content from the head (keep first N lines/bytes); suitable for file
-/// reads. Never returns partial lines; a first line over the byte limit returns
-/// empty content with `first_line_exceeds_limit = true`.
-pub fn truncate_head(content: &str, options: TruncationOptions) -> TruncationResult {
-    let TruncationOptions {
-        max_lines,
-        max_bytes,
-    } = options;
-
-    let total_bytes = content.len();
-    let lines: Vec<&str> = content.split('\n').collect();
-    let total_lines = lines.len();
-
-    if total_lines <= max_lines && total_bytes <= max_bytes {
-        return TruncationResult {
-            content: content.to_string(),
-            truncated: false,
-            truncated_by: None,
-            total_lines,
-            total_bytes,
-            output_lines: total_lines,
-            output_bytes: total_bytes,
-            last_line_partial: false,
-            first_line_exceeds_limit: false,
-            max_lines,
-            max_bytes,
-        };
-    }
-
-    let first_line_bytes = lines[0].len();
-    if first_line_bytes > max_bytes {
-        return TruncationResult {
-            content: String::new(),
-            truncated: true,
-            truncated_by: Some(TruncatedBy::Bytes),
-            total_lines,
-            total_bytes,
-            output_lines: 0,
-            output_bytes: 0,
-            last_line_partial: false,
-            first_line_exceeds_limit: true,
-            max_lines,
-            max_bytes,
-        };
-    }
-
-    let mut output_lines: Vec<&str> = Vec::new();
-    let mut output_bytes_count = 0usize;
-    let mut truncated_by = TruncatedBy::Lines;
-
-    for (i, line) in lines.iter().enumerate().take(max_lines) {
-        // +1 for the newline before every line after the first.
-        let line_bytes = line.len() + usize::from(i > 0);
-        if output_bytes_count + line_bytes > max_bytes {
-            truncated_by = TruncatedBy::Bytes;
-            break;
-        }
-        output_lines.push(line);
-        output_bytes_count += line_bytes;
-    }
-
-    if output_lines.len() >= max_lines && output_bytes_count <= max_bytes {
-        truncated_by = TruncatedBy::Lines;
-    }
-
-    let output_content = output_lines.join("\n");
-    let final_output_bytes = output_content.len();
-
-    TruncationResult {
-        content: output_content,
-        truncated: true,
-        truncated_by: Some(truncated_by),
-        total_lines,
-        total_bytes,
-        output_lines: output_lines.len(),
-        output_bytes: final_output_bytes,
-        last_line_partial: false,
-        first_line_exceeds_limit: false,
-        max_lines,
-        max_bytes,
     }
 }
 
@@ -246,43 +151,6 @@ fn truncate_string_to_bytes_from_end(s: &str, max_bytes: usize) -> String {
     String::from_utf8_lossy(&bytes[start..]).into_owned()
 }
 
-/// Truncate a single line to max UTF-16 code units, adding a `[truncated]` suffix.
-/// Used for grep match lines.
-pub fn truncate_line(line: &str, max_chars: usize) -> TruncatedLine {
-    if line.chars().map(char::len_utf16).sum::<usize>() <= max_chars {
-        return TruncatedLine {
-            text: line.to_string(),
-            was_truncated: false,
-        };
-    }
-    let cut = utf16_truncate_end(line, max_chars);
-    TruncatedLine {
-        text: format!("{cut}... [truncated]"),
-        was_truncated: true,
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TruncatedLine {
-    pub text: String,
-    pub was_truncated: bool,
-}
-
-/// Slice `s` to its first `max_units` UTF-16 code units.
-fn utf16_truncate_end(s: &str, max_units: usize) -> String {
-    let mut units = 0usize;
-    let mut end = 0usize;
-    for ch in s.chars() {
-        let w = ch.len_utf16();
-        if units + w > max_units {
-            break;
-        }
-        units += w;
-        end += ch.len_utf8();
-    }
-    s[..end].to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,34 +163,6 @@ mod tests {
         assert_eq!(format_size(50 * 1024), "50.0KB");
         assert_eq!(format_size(1024 * 1024), "1.0MB");
         assert_eq!(format_size(2 * 1024 * 1024 + 512 * 1024), "2.5MB");
-    }
-
-    #[test]
-    fn head_within_limits_is_passthrough() {
-        let r = truncate_head("a\nb\nc", TruncationOptions::default());
-        assert!(!r.truncated);
-        assert_eq!(r.content, "a\nb\nc");
-        assert_eq!(r.total_lines, 3);
-        assert_eq!(r.output_bytes, 5);
-    }
-
-    #[test]
-    fn head_line_limit() {
-        let r = truncate_head("a\nb\nc\nd", TruncationOptions::with_limits(2, 100));
-        assert!(r.truncated);
-        assert_eq!(r.truncated_by, Some(TruncatedBy::Lines));
-        assert_eq!(r.content, "a\nb");
-        assert_eq!(r.output_lines, 2);
-    }
-
-    #[test]
-    fn head_first_line_exceeds_byte_limit() {
-        let r = truncate_head("xxxxxxxxxx\ny", TruncationOptions::with_limits(10, 4));
-        assert!(r.truncated);
-        assert!(r.first_line_exceeds_limit);
-        assert_eq!(r.content, "");
-        assert_eq!(r.output_bytes, 0);
-        assert_eq!(r.truncated_by, Some(TruncatedBy::Bytes));
     }
 
     #[test]
@@ -363,14 +203,5 @@ mod tests {
         let s = "héllo";
         let cut = truncate_string_to_bytes_from_end(s, 4);
         assert_eq!(cut, "llo");
-    }
-
-    #[test]
-    fn truncate_line_utf16() {
-        let r = truncate_line("short", 10);
-        assert!(!r.was_truncated);
-        let r = truncate_line("a".repeat(600).as_str(), 500);
-        assert!(r.was_truncated);
-        assert_eq!(r.text.len(), 500 + "... [truncated]".len());
     }
 }

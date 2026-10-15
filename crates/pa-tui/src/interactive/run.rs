@@ -1930,8 +1930,6 @@ async fn run_interactive_surface(
             }
         }
 
-        session.sync_goal_tray(&mut view);
-
         // Spinner animation: the wall clock drives the phase, not the render rate — the frame gate
         // below caps renders, and only a phase change dirties the frame.
         let animating = session.turn_active
