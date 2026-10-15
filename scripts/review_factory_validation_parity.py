@@ -19,7 +19,7 @@ from review_draft_disconnect_parity import digest, env_for, TS_ARCHIVE_SHA256
 from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
 from review_restore_notice_parity import texts
 
-MARKER = 'FACTORY_RECOVERY_RESULT='
+MARKER = 'FACTORY_VALIDATION_RESULT='
 CELL = '''import json
 fixture_harness = rlm.get_harness_state()
 fixture_results = []
@@ -32,7 +32,7 @@ for label, retries in [('positive', 1), ('zero', 0), ('malformed', 'bad')]:
     except ValueError as error:
         fixture_results.append({'case': label, 'error': str(error),
             'stored': fixture_harness.get('factory', 'fixture-' + label) is not None})
-print('FACTORY_RECOVERY_RESULT=' + json.dumps(fixture_results))'''
+print('FACTORY_VALIDATION_RESULT=' + json.dumps(fixture_results))'''
 
 
 class Provider(http.server.ThreadingHTTPServer):
@@ -42,7 +42,7 @@ class Provider(http.server.ThreadingHTTPServer):
         super().__init__(('127.0.0.1', 0), Handler)
         self.requests = []
         self.parent_requests = []
-        self.child_requests = []
+        self.errors = []
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -55,25 +55,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.requests.append(body)
-        parent = any('FACTORY_PARENT_PROBE' in ''.join(texts(m.get('content')))
+        parent = any('FACTORY_VALIDATION_PARENT' in ''.join(texts(m.get('content')))
                      for m in body.get('messages', []) if m.get('role') == 'user')
-        child = not parent and any('FACTORY_RECOVERY_CHILD' in ''.join(texts(m.get('content')))
-                    for m in body.get('messages', []) if m.get('role') == 'user')
-        if child:
-            self.server.child_requests.append(body)
-            delta = {'content': 'first attempt has no JSON' if len(self.server.child_requests) == 1
-                     else '```json\n{"data": {"ok": true}}\n```'}
-            reason = 'stop'
+        if not parent:
+            self.server.errors.append('unexpected child or unrelated provider request')
+            self.send_error(422)
+            return
+        self.server.parent_requests.append(body)
+        if len(self.server.parent_requests) == 1:
+            offered = [t['function']['name'] for t in body.get('tools', [])]
+            repl = next((name for name in ('python_repl', 'ipython') if name in offered), None)
+            assert repl is not None, offered
+            delta = {'tool_calls': [{'index': 0, 'id': 'factory_probe', 'type': 'function',
+                'function': {'name': repl, 'arguments': json.dumps({'code': CELL})}}]}
+            reason = 'tool_calls'
         else:
-            self.server.parent_requests.append(body)
-            if len(self.server.parent_requests) == 1:
-                offered = [t['function']['name'] for t in body.get('tools', [])]
-                assert 'python_repl' in offered, offered
-                delta = {'tool_calls': [{'index': 0, 'id': 'factory_probe', 'type': 'function',
-                    'function': {'name': 'python_repl', 'arguments': json.dumps({'code': CELL})}}]}
-                reason = 'tool_calls'
-            else:
-                delta, reason = {'content': 'Factory probe complete.'}, 'stop'
+            delta, reason = {'content': 'Factory validation probe complete.'}, 'stop'
         def chunk(delta, reason=None):
             return {'id': 'factory-fixture', 'object': 'chat.completion.chunk', 'created': 1,
                 'model': 'factory-fixture', 'choices': [{'index': 0, 'delta': delta, 'finish_reason': reason}]}
@@ -140,14 +137,15 @@ def observe(binary, kind, root, observed):
             active = created.get('activeSessionId') or created.get('id')
             assert active, created
             control.call('attach', activeSessionId=active)
-            control.call('prompt', activeSessionId=active, message='Run FACTORY_PARENT_PROBE')
+            control.call('prompt', activeSessionId=active, message='Run FACTORY_VALIDATION_PARENT')
             control.call('wait_for_idle', timeout_seconds=120, activeSessionId=active)
             observed['probe'] = extract(server.parent_requests)
             validate(observed['probe'])
-            assert not server.child_requests, 'validation must not spawn children'
+            assert not server.errors, server.errors
         observed['behavior_verified'] = True
     finally:
         observed['provider_requests'] = server.requests
+        observed['provider_errors'] = server.errors
         observed['wire'] = list(control.wire) if control else []
         finish(scope, control, daemon, observed)
         log.close()
