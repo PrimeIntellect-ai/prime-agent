@@ -125,8 +125,7 @@ fn sample_runs(
         let sample = outcome.context("a sampled run failed")?;
         samples.push(sample);
         println!(
-            "run {index}/{}: {sample:.1}ms (wall {:.1}s)",
-            runs,
+            "run {index}/{runs}: {sample:.1}ms (wall {:.1}s)",
             started.elapsed().as_secs_f32()
         );
     }
