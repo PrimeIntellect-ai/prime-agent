@@ -9,10 +9,12 @@ use hmac::{Hmac, Mac};
 use pa_types::ai::Model;
 use sha2::Sha256;
 
+use serde_json::Value;
+
 use super::prime_inference::is_private_prime_inference_model_id;
-use super::prime_inference_catalog::{
-    build_prime_inference_models_with_minimum, fetch_prime_inference_model_catalog,
-    parse_prime_inference_model_catalog, PrimeInferenceCatalogEntry,
+use super::prime_inference_catalog::fetch_prime_inference_model_catalog;
+use pa_models::prime_inference::{
+    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceEntry,
 };
 
 const PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE: &str = "prime-inference-private-models.json";
@@ -46,79 +48,121 @@ pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> 
     })
 }
 
+/// The account's authorized private Prime Inference routes from a successful
+/// entitlement fetch: the models the registry serves, plus the raw `/models`
+/// wire items they were built from — the durable form the authorization cache
+/// stores, so a read rebuilds with the reasoning declarations intact.
+#[derive(Debug, Clone, Default)]
+pub struct AuthorizedPrivatePrimeInferenceModels {
+    pub models: Vec<Model>,
+    pub items: Vec<Value>,
+}
+
 /// Fetch the team's authorized private models; 401/403 settle to empty.
 /// `base_url` is the Prime Inference API base (the shared catalog's, so
 /// hermetic tests aim the whole flow at a local server).
+///
+/// # Errors
+///
+/// Propagates the fetch's error, or the catalog parse's (an invalid payload).
 pub async fn fetch_authorized_private_prime_inference_models(
     base_url: &str,
     api_key: &str,
     team_headers: &HashMap<String, String>,
     public_model_ids: &HashSet<String>,
     timeout_ms: u64,
-) -> Result<Vec<Model>, String> {
+) -> Result<AuthorizedPrivatePrimeInferenceModels, String> {
     if team_headers.get("X-Prime-Team-ID").is_none() {
-        return Ok(Vec::new());
+        return Ok(AuthorizedPrivatePrimeInferenceModels::default());
     }
     let mut headers = team_headers.clone();
     headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
-    let fetch =
-        fetch_prime_inference_model_catalog(base_url, Some(&headers), timeout_ms, true).await;
-    let (payload, entries) = match fetch {
-        Ok(result) => result,
+    let fetch = fetch_prime_inference_model_catalog(base_url, Some(&headers), timeout_ms).await;
+    let payload = match fetch {
+        Ok(payload) => payload,
         Err(error) => {
             // 401/403 mean "no entitlements", not a failure.
             if error.contains("with status 401") || error.contains("with status 403") {
-                return Ok(Vec::new());
+                return Ok(AuthorizedPrivatePrimeInferenceModels::default());
             }
             return Err(error);
         }
+    };
+    let Some(data) = payload.get("data").and_then(|data| data.as_array()) else {
+        return Ok(AuthorizedPrivatePrimeInferenceModels::default());
     };
     let public_ids: HashSet<String> = public_model_ids
         .iter()
         .map(|id| id.to_lowercase())
         .collect();
+    let items = data
+        .iter()
+        .filter(|item| {
+            let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
+                return false;
+            };
+            let lower = id.to_lowercase();
+            !public_ids.contains(&lower) && is_private_prime_inference_model_id(&lower)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let models = build_authorized_private_models(&items)?;
+    Ok(AuthorizedPrivatePrimeInferenceModels { models, items })
+}
+
+/// Build the registry's private models from the raw `/models` wire items: the
+/// parse and build are the catalog crate's, shared with the public routes, so
+/// a route's declared reasoning parameters rebuild into the model's compat and
+/// thinking-level map. An item the parser drops survives on a bundled
+/// template's entry.
+///
+/// # Errors
+///
+/// Propagates the catalog parse's error (an invalid item payload).
+fn build_authorized_private_models(items: &[Value]) -> Result<Vec<Model>, String> {
     let bundled = super::prime_inference::private_prime_inference_models();
     let bundled_by_id: HashMap<String, &Model> = bundled
         .iter()
         .map(|model| (model.id.to_lowercase(), model))
         .collect();
-    let entries_by_id: HashMap<String, &PrimeInferenceCatalogEntry> = entries
+    let parsed = parse_prime_inference_model_catalog(&serde_json::json!({ "data": items }), true)?;
+    let parsed_by_id: HashMap<String, &PrimeInferenceEntry> = parsed
         .iter()
         .map(|entry| (entry.id.to_lowercase(), entry))
         .collect();
-    let Some(data) = payload.get("data").and_then(|data| data.as_array()) else {
-        return Ok(Vec::new());
-    };
-    let mut private_entries = Vec::new();
-    for item in data {
-        let Some(id) = item.get("id").and_then(|id| id.as_str()) else {
-            continue;
-        };
-        let lower = id.to_lowercase();
-        if public_ids.contains(&lower) || !is_private_prime_inference_model_id(&lower) {
-            continue;
-        }
-        if let Some(parsed) = entries_by_id.get(&lower) {
-            private_entries.push((*parsed).clone());
-        } else if let Some(template) = bundled_by_id.get(&lower) {
-            private_entries.push(PrimeInferenceCatalogEntry {
-                id: id.to_string(),
-                input: template.cost.input.0,
-                output: template.cost.output.0,
-                ..Default::default()
-            });
-        }
-    }
-    Ok(
-        build_prime_inference_models_with_minimum(&bundled, &private_entries, true, Some(0))
-            .unwrap_or_default(),
-    )
+    let entries = items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(|id| id.as_str())?;
+            let lower = id.to_lowercase();
+            if !is_private_prime_inference_model_id(&lower) {
+                return None;
+            }
+            if let Some(parsed) = parsed_by_id.get(&lower) {
+                return Some((*parsed).clone());
+            }
+            bundled_by_id
+                .get(&lower)
+                .map(|template| PrimeInferenceEntry {
+                    id: id.to_string(),
+                    input: template.cost.input.0,
+                    output: template.cost.output.0,
+                    ..PrimeInferenceEntry::default()
+                })
+        })
+        .collect::<Vec<_>>();
+    Ok(build_prime_inference_models(&bundled, &entries, true, Some(0)).unwrap_or_default())
 }
 
 /// A cached authorization: fingerprint-scoped models with a refresh timestamp.
 #[derive(Debug, Clone)]
 pub struct PrivatePrimeAuthorizationCache {
     pub fingerprint: String,
+    /// The raw `/models` wire items for the account's private routes — the
+    /// durable form this cache stores; a read rebuilds the models from them,
+    /// so the live reasoning declarations survive the round-trip.
+    pub items: Vec<Value>,
+    /// The models built from `items`: the registry's usable form.
     pub models: Vec<Model>,
     pub refreshed_at: u64,
 }
@@ -247,21 +291,11 @@ fn parse_private_prime_authorization_cache(path: &Path) -> Option<PrivatePrimeAu
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let fingerprint = parsed.get("fingerprint")?.as_str()?.to_string();
     let refreshed_at = parsed.get("refreshedAt")?.as_u64()?;
-    let data = parsed.get("data")?.as_array()?;
-    let entries = parse_prime_inference_model_catalog(&serde_json::json!({ "data": data }), true)
-        .ok()?
-        .into_iter()
-        .filter(|entry| is_private_prime_inference_model_id(&entry.id))
-        .collect::<Vec<_>>();
-    let models = build_prime_inference_models_with_minimum(
-        &super::prime_inference::private_prime_inference_models(),
-        &entries,
-        true,
-        Some(0),
-    )
-    .unwrap_or_default();
+    let items = parsed.get("data")?.as_array()?.clone();
+    let models = build_authorized_private_models(&items).ok()?;
     Some(PrivatePrimeAuthorizationCache {
         fingerprint,
+        items,
         models,
         refreshed_at,
     })
@@ -274,31 +308,9 @@ pub fn write_private_prime_authorization_cache(
     models_json_path: &Path,
     cache: &PrivatePrimeAuthorizationCache,
 ) {
-    let data: Vec<serde_json::Value> = cache
-        .models
-        .iter()
-        .map(|model| {
-            serde_json::json!({
-                "id": model.id,
-                "display_name": model.name,
-                "pricing": {
-                    "input_usd_per_mtok": model.cost.input.0,
-                    "output_usd_per_mtok": model.cost.output.0,
-                    "cache_read_usd_per_mtok": model.cost.cache_read.0,
-                    "cache_write_usd_per_mtok": model.cost.cache_write.0,
-                },
-                "specs": {
-                    "context_window": model.context_window,
-                    "max_output_tokens": model.max_tokens,
-                    "modalities": { "input": model.input.iter().map(|i| match i { pa_types::ai::ModelInput::Text => "text", pa_types::ai::ModelInput::Image => "image" }).collect::<Vec<_>>(), "output": ["text"] },
-                    "supports_reasoning": model.reasoning,
-                }
-            })
-        })
-        .collect();
     let document = serde_json::json!({
         "fingerprint": cache.fingerprint,
-        "data": data,
+        "data": cache.items,
         "refreshedAt": cache.refreshed_at,
     });
     let path = private_prime_authorization_cache_path(models_json_path);
@@ -322,10 +334,33 @@ pub fn is_offline_mode_enabled() -> bool {
 mod tests {
     use super::*;
 
+    /// One bundled private route's wire item (the durable cache form).
+    fn wire_item(model: &Model) -> serde_json::Value {
+        serde_json::json!({
+            "id": model.id,
+            "display_name": model.name,
+            "pricing": {
+                "input_usd_per_mtok": model.cost.input.0,
+                "output_usd_per_mtok": model.cost.output.0,
+                "cache_read_usd_per_mtok": model.cost.cache_read.0,
+                "cache_write_usd_per_mtok": model.cost.cache_write.0,
+            },
+            "specs": {
+                "context_window": model.context_window,
+                "max_output_tokens": model.max_tokens,
+                "supports_reasoning": model.reasoning,
+                "modalities": { "input": ["text"], "output": ["text"] },
+            },
+        })
+    }
+
     fn cache(fingerprint: &str) -> PrivatePrimeAuthorizationCache {
+        let models = get_private_prime_inference_models();
+        let items = models.iter().map(wire_item).collect::<Vec<_>>();
         PrivatePrimeAuthorizationCache {
             fingerprint: fingerprint.to_string(),
-            models: get_private_prime_inference_models(),
+            models,
+            items,
             refreshed_at: 1,
         }
     }
@@ -477,6 +512,83 @@ mod tests {
                 .expect("cache readable")
                 .fingerprint,
             "fingerprint-a"
+        );
+    }
+
+    /// The private-reasoning regression: the cache round-trips the raw wire
+    /// items, so a route declaring its reasoning parameters (the live
+    /// `internal/deepseek-v4.1-flash` shape) rebuilds with the declared
+    /// controls — a cache that stored only the built models' pricing and
+    /// specs would drop them, and the model would stop addressing reasoning.
+    #[test]
+    fn the_cache_rebuilds_declared_reasoning_controls_from_the_wire_items() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let models_json = dir.path().join("models.json");
+        write_private_prime_authorization_cache(
+            &models_json,
+            &PrivatePrimeAuthorizationCache {
+                fingerprint: "fingerprint-a".into(),
+                items: vec![serde_json::json!({
+                    "id": "internal/deepseek-flash",
+                    "display_name": "DeepSeek Flash (internal)",
+                    "pricing": {
+                        "input_usd_per_mtok": 0.0,
+                        "output_usd_per_mtok": 0.0,
+                    },
+                    "specs": {
+                        "context_window": 1_048_576,
+                        "max_output_tokens": 131_072,
+                        "supports_reasoning": true,
+                        "modalities": { "input": ["text"], "output": ["text"] },
+                    },
+                    "supported_parameters": [
+                        "max_tokens", "temperature", "tools", "tool_choice",
+                        "reasoning", "reasoning_effort",
+                    ],
+                    "reasoning": {
+                        "supported_efforts": ["none", "low", "high", "max"],
+                        "default_effort": "high",
+                    },
+                })],
+                models: Vec::new(),
+                refreshed_at: 1,
+            },
+        );
+        let cache = read_private_prime_authorization_cache(&models_json).expect("cache readable");
+        let model = cache
+            .models
+            .iter()
+            .find(|model| model.id == "internal/deepseek-flash")
+            .expect("the declared route rebuilds");
+        let compat = model
+            .compat
+            .as_ref()
+            .expect("the built route carries compat");
+        assert_eq!(
+            compat.raw.get("supportsReasoningEffort"),
+            Some(&serde_json::json!(true)),
+            "the declared reasoning_effort parameter must be addressable"
+        );
+        assert_eq!(compat.raw.get("thinkingFormat"), None);
+        let map = model
+            .thinking_level_map
+            .as_ref()
+            .expect("addressable levels");
+        assert_eq!(
+            map.get(&pa_types::ai::ModelThinkingLevel::High),
+            Some(&Some("high".into()))
+        );
+        assert_eq!(
+            map.get(&pa_types::ai::ModelThinkingLevel::Low),
+            Some(&Some("low".into()))
+        );
+        assert_eq!(
+            map.get(&pa_types::ai::ModelThinkingLevel::Max),
+            Some(&Some("max".into()))
+        );
+        assert_eq!(
+            map.get(&pa_types::ai::ModelThinkingLevel::Off),
+            Some(&Some("none".into()))
         );
     }
 }

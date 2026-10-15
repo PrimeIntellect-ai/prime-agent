@@ -348,6 +348,35 @@ mod tests {
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
+    /// A private entitlement payload whose route declares the live reasoning
+    /// parameters (`supported_parameters` with `reasoning`/`reasoning_effort`
+    /// plus the supported efforts) — the shape the internal `DeepSeek` routes
+    /// serve: reasoning arrives only when a request addresses it.
+    fn reasoning_private_payload(id: &str) -> String {
+        serde_json::to_string(&json!({
+            "data": [{
+                "id": id,
+                "display_name": id,
+                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+                "specs": {
+                    "context_window": 200_000,
+                    "max_output_tokens": 32_768,
+                    "supports_reasoning": true,
+                    "modalities": {"input": ["text"], "output": ["text"]},
+                },
+                "supported_parameters": [
+                    "max_tokens", "temperature", "tools", "tool_choice",
+                    "reasoning", "reasoning_effort",
+                ],
+                "reasoning": {
+                    "supported_efforts": ["none", "low", "high", "max"],
+                    "default_effort": "high",
+                },
+            }]
+        }))
+        .unwrap()
+    }
+
     fn write_auth_json(agent_dir: &Path, api_key: &str, team_id: &str) {
         std::fs::write(
             agent_dir.join("auth.json"),
@@ -732,6 +761,42 @@ mod tests {
             !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
             "a gated refresh must not broadcast model_catalog_changed"
         );
+    }
+
+    /// The private-route reasoning regression: a route that declares its
+    /// reasoning parameters (the live `internal/deepseek-v4.1-flash` shape)
+    /// must serve a model whose compat addresses them — the served catalog
+    /// reads the authorization cache back, so this pins the fetch build AND
+    /// the cache round-trip. Without the declared controls rebuilt into the
+    /// model, a thinking session sends no `reasoning_effort`, and a route
+    /// that only thinks when asked emits no thinking at all.
+    #[tokio::test]
+    async fn a_private_route_with_declared_reasoning_serves_addressable_levels() {
+        let answers = vec![
+            Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
+            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
+            Answer::Raw(ok_json(&reasoning_private_payload(
+                "internal/team-a-private",
+            ))),
+        ];
+        let fixture = fixture(answers).await;
+
+        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
+        assert_canonical_models_order(&served);
+        let model = served["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "internal/team-a-private")
+            .expect("the authorized private route");
+        assert_eq!(
+            model["compat"]["supportsReasoningEffort"], true,
+            "the declared reasoning_effort parameter must be addressable"
+        );
+        assert_eq!(model["thinkingLevelMap"]["high"], "high");
+        assert_eq!(model["thinkingLevelMap"]["low"], "low");
+        assert_eq!(model["thinkingLevelMap"]["max"], "max");
+        assert_eq!(model["thinkingLevelMap"]["off"], "none");
     }
 
     #[tokio::test]
