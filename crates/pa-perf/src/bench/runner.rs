@@ -96,11 +96,28 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
         &options.corpus,
         Duration::from_secs(options.liveness_secs),
     )?;
-    let mut samples = Vec::with_capacity(options.runs + 1);
-    let total = options.runs + 1;
+    let samples = sample_runs(&ctx, options.runs, |index| {
+        scenario_once(&ctx, options.scenario, index)
+    })?;
+    let result = build_result(&ctx, options.scenario, samples);
+    write_result(&result, &options.json)?;
+    Ok(result)
+}
+
+/// Restore the manifest baseline before every standalone launch, including
+/// its discarded warm-up. The scenario callback keeps this loop testable
+/// with filesystem mutations instead of running the product.
+fn sample_runs(
+    ctx: &RunCtx,
+    runs: usize,
+    mut scenario: impl FnMut(usize) -> anyhow::Result<f64>,
+) -> anyhow::Result<Vec<f64>> {
+    let mut samples = Vec::with_capacity(runs + 1);
+    let total = runs + 1;
     for index in 0..total {
+        restore(ctx)?;
         let started = Instant::now();
-        let outcome = scenario_once(&ctx, options.scenario, index);
+        let outcome = scenario(index);
         if index == 0 {
             outcome?;
             continue;
@@ -109,13 +126,11 @@ pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
         samples.push(sample);
         println!(
             "run {index}/{}: {sample:.1}ms (wall {:.1}s)",
-            options.runs,
+            runs,
             started.elapsed().as_secs_f32()
         );
     }
-    let result = build_result(&ctx, options.scenario, samples);
-    write_result(&result, &options.json)?;
-    Ok(result)
+    Ok(samples)
 }
 
 /// One scenario pass; returns the sample in ms.
@@ -131,7 +146,7 @@ fn scenario_once(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result
 fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, Launch)> {
     let socket = run_socket(ctx, run);
     std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
-    if matches!(
+    let mut daemon = if matches!(
         scenario,
         Scenario::WarmStart | Scenario::WarmReady | Scenario::AgentsViewWarm
     ) {
@@ -139,16 +154,42 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
         // populate warms; the single-scenario path cannot express that (its
         // second launch would spawn a second daemon), so it runs the first
         // populate only and the sample is the suite's warm number.
-        start_daemon(ctx, &socket)?;
-    }
+        Some(start_daemon(ctx, &socket)?)
+    } else {
+        None
+    };
     let outcome: anyhow::Result<(f64, Launch)> = (|| {
         let mut launched = spawn_for_scenario(ctx, &socket, scenario, run)?;
         let sample = launch_scenario(ctx, &mut launched, scenario)?;
         Ok((sample, launched))
     })();
     let stopped = stop_daemon(&socket);
+    // Socket closure alone does not reap a daemon we directly spawned.
+    // Keep ownership through shutdown, and fail before the guard's forced
+    // cleanup if it does not exit normally.
+    let exited = if let Some(daemon) = &mut daemon {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = daemon.child.try_wait()? {
+                break if status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("the owned daemon exited with {status}"))
+                };
+            }
+            if Instant::now() >= deadline {
+                break Err(anyhow::anyhow!(
+                    "the owned daemon did not exit after shutdown"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    } else {
+        Ok(())
+    };
     let result = outcome?;
     stopped?;
+    exited?;
     Ok(result)
 }
 
@@ -491,7 +532,7 @@ fn run_socket(ctx: &RunCtx, run: usize) -> PathBuf {
 
 /// Start the daemon (own session, detached) and wait for the socket to
 /// accept — the observable readiness.
-fn start_daemon(ctx: &RunCtx, socket: &Path) -> anyhow::Result<()> {
+fn start_daemon(ctx: &RunCtx, socket: &Path) -> anyhow::Result<DaemonChild> {
     std::fs::create_dir_all(socket.parent().expect("a socket dir"))?;
     let args: [std::ffi::OsString; 4] = [
         "--mode".into(),
@@ -516,15 +557,43 @@ fn start_daemon(ctx: &RunCtx, socket: &Path) -> anyhow::Result<()> {
             Ok(())
         });
     }
-    command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if socket_accepts(socket) {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(5));
+    DaemonChild {
+        child: command.spawn()?,
     }
-    anyhow::bail!("the daemon socket never accepted: {}", socket.display())
+    .wait_until_ready(socket, Instant::now() + Duration::from_secs(30))
+}
+
+/// Direct child ownership survives startup and normal protocol shutdown.
+/// Drop is an error-path fallback, restricted to this exact child handle.
+struct DaemonChild {
+    child: std::process::Child,
+}
+
+impl DaemonChild {
+    fn wait_until_ready(mut self, socket: &Path, deadline: Instant) -> anyhow::Result<Self> {
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                anyhow::bail!("the daemon exited before socket readiness: {status}");
+            }
+            if socket_accepts(socket) {
+                return Ok(self);
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("the daemon socket never accepted: {}", socket.display());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        if self.child.try_wait().is_ok_and(|status| status.is_some()) {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 fn socket_accepts(socket: &Path) -> bool {
@@ -691,11 +760,9 @@ fn write_result(result: &BenchResult, path: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_binary_path_is_anchored_before_entering_the_corpus_project() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    fn tiny_context(root: &Path) -> RunCtx {
         corpus::generate(&CorpusOptions {
-            out: dir.path().to_path_buf(),
+            out: root.to_path_buf(),
             sessions: 3,
             rows: 100,
             huge_rows: 100,
@@ -706,11 +773,57 @@ mod tests {
         })
         .expect("generate the tiny corpus");
         // A relative file is sufficient: loading does not execute it.
+        RunCtx::load(Path::new("Cargo.toml"), root, Duration::ZERO).expect("load corpus")
+    }
+
+    #[test]
+    fn the_binary_path_is_anchored_before_entering_the_corpus_project() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = tiny_context(dir.path());
         let binary = Path::new("Cargo.toml");
-        let ctx = RunCtx::load(binary, dir.path(), Duration::ZERO).expect("load corpus");
         assert_eq!(
             ctx.binary,
             binary.canonicalize().expect("anchor the binary")
+        );
+    }
+
+    #[test]
+    fn every_standalone_sample_restores_the_manifest_baseline() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = tiny_context(dir.path());
+        let sidecar = ctx.agent_dir.join("sessions/mock.window-cache.json");
+        // Even the discarded warm-up starts from the original baseline.
+        std::fs::write(&sidecar, "previous invocation").expect("old sidecar");
+        let mut launches = Vec::new();
+        let samples = sample_runs(&ctx, 2, |index| {
+            assert!(
+                !sidecar.exists(),
+                "sample {index} inherited a prior sidecar"
+            );
+            for file in &ctx.manifest.files {
+                assert!(Path::new(file).exists(), "baseline file missing: {file}");
+            }
+            std::fs::write(&sidecar, "written by the mock scenario")?;
+            launches.push(index);
+            Ok(index as f64)
+        })
+        .expect("sample the mock scenario");
+        assert_eq!((launches, samples), (vec![0, 1, 2], vec![1.0, 2.0]));
+    }
+
+    #[test]
+    fn a_daemon_startup_timeout_kills_and_reaps_its_owned_child() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn the mock daemon, never the product");
+        let pid = nix::unistd::Pid::from_raw(child.id() as i32);
+        let result = DaemonChild { child }.wait_until_ready(&dir.path().join("s"), Instant::now());
+        assert!(result.is_err());
+        assert_eq!(
+            nix::sys::signal::kill(pid, None),
+            Err(nix::errno::Errno::ESRCH)
         );
     }
 

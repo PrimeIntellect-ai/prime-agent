@@ -14,8 +14,8 @@ only).
   the interactive surfaces (start, agents view, open/switch session,
   @ completion) through the real binary.
 - Non-goals: benchmarks of provider/LLM paths (the harness stays offline),
-  and any product-code changes. `make deny` stays clean: no new
-  third-party dependencies (clap and nix were already in the tree).
+  and any product-code changes. The new `vt100` screen-model dependency
+  is described below; clap and nix were already in the tree.
 
 ## The corpus generator
 
@@ -61,7 +61,6 @@ collide around ~22K rows and silently break branch reconstruction.
 | `--cwd-files` | files in the project tree | 200 | 2,000 | 4,000 | 2,000 |
 | `--artifacts` | per-session artifact partitions (on/off) | on | on | on | on |
 | `--cache` | cold/warm (see below) | cold | cold | cold | cold |
-| `--seed` | the deterministic seed | 7 | 7 | 7 | 7 |
 | `--seed` | the deterministic seed | 7 | 7 | 7 | 7 |
 
 Total rows: small ~3.5K, medium ~250K, large ~10.1M, xl ~1.2M (medium is
