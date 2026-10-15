@@ -8,7 +8,7 @@ class QueueBrowseGuardTest(unittest.TestCase):
             'index': 0, 'expectedText': USER_A, 'mutation': {'type': 'move', 'direction': direction}}
 
     def test_compares_actual_mutation_target_with_explicit_ts_delta(self):
-        check_mutation('ts', self.command(1))
+        check_mutation('ts', {**self.command(1), 'id': 'actual-transport-request'})
         check_mutation('rust', self.command(2))
         with self.assertRaises(AssertionError):
             check_mutation('rust', self.command(1))

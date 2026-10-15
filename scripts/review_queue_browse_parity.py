@@ -32,7 +32,11 @@ def check_mutation(kind, command):
     expected = {'type': 'mutate_queued_message', 'activeSessionId': 's1',
         'lane': 'steering', 'index': 0, 'expectedText': USER_A,
         'mutation': {'type': 'move', 'direction': 1 if kind == 'ts' else 2}}
-    assert command == expected, command
+    # TS places its request ID inside the command as well as its envelope.
+    # Retain that raw transport ID, compare only the addressed mutation here.
+    if 'id' in command:
+        assert isinstance(command['id'], str) and command['id'], command
+    assert {key: value for key, value in command.items() if key != 'id'} == expected, command
 
 
 class QueueSupervisor(Supervisor):
@@ -47,6 +51,10 @@ class QueueSupervisor(Supervisor):
     def send(self, sock, data):
         data = copy.deepcopy(data)
         name = data.get('command')
+        if data.get('type') == 'daemon_hello':
+            # Advertise the actual queue-mutation protocol this subclass owns.
+            # The shared draft-only server deliberately omits this capability.
+            data['serverCapabilities'] = ['session_input_admission', 'queue_message_mutation']
         if data.get('type') == 'response':
             if name == 'attach':
                 data['data']['snapshot']['state']['sessionActions'] = self.actions()
@@ -87,6 +95,7 @@ def discover_hello(binary, root, env, observed):
             client = Client(path, daemon)
             hello = client.hello
             assert hello.get('schemaId'), hello
+            assert 'queue_message_mutation' in hello.get('serverCapabilities', []), hello
             observed['hello'] = hello
         finally:
             finish(scope, client, daemon, observed)
