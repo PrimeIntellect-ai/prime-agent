@@ -403,6 +403,37 @@ fn browse_walks_only_the_user_typed_items() {
     assert!(!selection.is_browsing());
 }
 
+/// A reorder exchanges the user item with the adjacent user item of its lane; the internal item
+/// between them keeps its position.
+#[test]
+fn reorder_targets_the_adjacent_user_item() {
+    let mut queue = QueuedMessages {
+        steering: vec![
+            "user A".to_string(),
+            "Agent message received: from child".to_string(),
+            "user B".to_string(),
+        ],
+        follow_ups: Vec::new(),
+        starting: None,
+        rlm_child_status: QueueLaneIndices::default(),
+        injected_prompts: QueueLaneIndices::default(),
+    };
+    let mut selection = QueueSelection::default();
+    selection.browse(&queue, "draft", QueueBrowseDirection::Older);
+    assert_eq!(selection.reorder_target(-1), Some(0));
+    selection.browse(&queue, "", QueueBrowseDirection::Older);
+    assert_eq!(
+        selection.reorder_target(-1),
+        None,
+        "no user item sits earlier in the lane"
+    );
+    mirror_lane_move(&mut queue, QueueLane::Steering, 2, 0);
+    assert_eq!(
+        queue.steering,
+        vec!["user B", "Agent message received: from child", "user A"]
+    );
+}
+
 #[test]
 fn browse_walks_newest_first_and_ends_on_the_draft() {
     let mut selection = QueueSelection::default();
@@ -519,12 +550,6 @@ fn mirror_lane_move_swaps_within_the_lane_only() {
         queue.follow_ups,
         vec!["later"],
         "the other lane is untouched"
-    );
-    mirror_lane_move(&mut queue, QueueLane::FollowUp, 0, -1);
-    assert_eq!(
-        queue.follow_ups,
-        vec!["later"],
-        "a negative target is a noop"
     );
     mirror_lane_move(&mut queue, QueueLane::FollowUp, 0, 7);
     assert_eq!(

@@ -421,6 +421,23 @@ impl QueueSelection {
         }
     }
 
+    /// The real lane index of the user item next to the selection in its lane, one step earlier
+    /// (`direction < 0`) or later; `None` when the selection has no user neighbor there.
+    #[must_use]
+    pub fn reorder_target(&self, direction: i64) -> Option<usize> {
+        let cursor = self.cursor?;
+        let lane = self.items[cursor].lane;
+        let neighbor = if direction < 0 {
+            cursor.checked_sub(1)?
+        } else {
+            cursor + 1
+        };
+        self.items
+            .get(neighbor)
+            .filter(|item| item.lane == lane)
+            .map(|item| item.index)
+    }
+
     /// Re-point the selection after a mutation or queue update: the selection
     /// survives only when the addressed user-typed item is unchanged (TS `refreshAt`).
     pub fn refresh_at(
@@ -453,11 +470,7 @@ impl QueueSelection {
 
 /// Mirror one applied lane move locally: swap the item with its neighbor so the strip and the
 /// selection update without waiting for the `session_action_update` event.
-pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usize, target: i64) {
-    if target < 0 {
-        return;
-    }
-    let target = target as usize;
+pub fn mirror_lane_move(queue: &mut QueuedMessages, lane: QueueLane, index: usize, target: usize) {
     let lane_items = match lane {
         QueueLane::Steering => &mut queue.steering,
         QueueLane::FollowUp => &mut queue.follow_ups,

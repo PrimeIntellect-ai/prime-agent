@@ -72,8 +72,9 @@ impl SessionUi {
             .map(str::to_string))
     }
 
-    /// Reorder the selected message one slot earlier/later in its lane; the move is mirrored
-    /// locally — the `session_action_update` event may land after the response.
+    /// Swap the selected message with the adjacent user message in its lane (a silent no-op at the
+    /// lane's first/last user message); the move is mirrored locally — the `session_action_update`
+    /// event may land after the response.
     pub(crate) async fn move_queue_selection(
         &mut self,
         direction: i64,
@@ -82,32 +83,34 @@ impl SessionUi {
         let Some(selected) = self.queue_selection.selected().cloned() else {
             return Ok(());
         };
+        // Internal items keep their positions: the swap partner is the adjacent user item, so
+        // the daemon's move direction spans any internal items between the two.
+        let Some(target) = self.queue_selection.reorder_target(direction) else {
+            return Ok(());
+        };
         let status = self
             .queue_mutation(
                 selected.lane,
                 selected.index,
                 &selected.text,
-                serde_json::json!({ "type": "move", "direction": direction }),
+                serde_json::json!({ "type": "move", "direction": target as i64 - selected.index as i64 }),
             )
             .await;
         match status {
             Ok(Some(status)) if status == "applied" => {
                 self.emit_queue_edit("reorder");
-                let target = selected.index as i64 + direction;
                 crate::queued::mirror_lane_move(
                     &mut view.queued,
                     selected.lane,
                     selected.index,
                     target,
                 );
-                if target >= 0 {
-                    self.queue_selection.refresh_at(
-                        &view.queued,
-                        selected.lane,
-                        target as usize,
-                        &selected.text,
-                    );
-                }
+                self.queue_selection.refresh_at(
+                    &view.queued,
+                    selected.lane,
+                    target,
+                    &selected.text,
+                );
                 self.sync_queue_selection(view);
                 self.dirty = true;
             }
