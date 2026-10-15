@@ -334,6 +334,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
                 fanout: options.fanout,
                 max_depth: options.depth,
                 child_rows: options.child_rows,
+                artifacts: options.artifacts,
             };
             child_sessions += spawn_and_count(
                 &ledger,
@@ -350,6 +351,7 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
                     fanout: options.wide_children,
                     max_depth: 1,
                     child_rows: options.child_rows,
+                    artifacts: options.artifacts,
                 };
                 child_sessions += spawn_and_count(
                     &ledger,
@@ -628,6 +630,49 @@ mod tests {
         assert_eq!(manifest.counts.subagent_edges, 0);
         assert!(!manifest.files.iter().any(|file| file.contains("sub-")));
     }
+
+    #[test]
+    fn artifact_option_preserves_deep_and_wide_children_without_optional_payloads() {
+        for artifacts in [false, true] {
+            let directory = tempfile::tempdir().expect("output directory");
+            let mut options = tiny_options(directory.path());
+            options.artifacts = artifacts;
+            options.fanout = 2;
+            options.depth = 2;
+            options.wide_children = 3;
+            let manifest = super::generate(&options).expect("generate child trees");
+            // Two direct children, four grandchildren, and three wide children.
+            assert_eq!(manifest.counts.child_sessions, 9);
+            let ledger = pa_daemon::rlm_ledger::RlmSpawnLedger::new(
+                &manifest.paths.agent_dir,
+                &manifest.paths.sessions_dir,
+                |_| {},
+            );
+            let edges = ledger.live_edges().expect("replay actual spawn ledger");
+            assert_eq!(edges.len(), 9);
+            assert!(edges.iter().any(|edge| edge.depth == 2));
+            for edge in edges {
+                assert!(std::path::Path::new(&edge.child).is_file());
+                assert!(manifest.files.contains(&edge.child));
+            }
+            let payloads = manifest
+                .files
+                .iter()
+                .filter(|file| {
+                    file.ends_with("kernel-state.json") || file.ends_with("kernel-state.dill")
+                })
+                .count();
+            if artifacts {
+                assert_eq!(payloads, 2 * (options.sessions + 9));
+            } else {
+                assert_eq!(payloads, 0);
+                assert!(!manifest.files.iter().any(|file| {
+                    file.contains("/harness/") || file.ends_with("scheduled-jobs.json")
+                }));
+            }
+        }
+    }
+
     #[test]
     fn suite_regeneration_replaces_owned_corpora_without_admitting_stale_files() {
         let directory = tempfile::tempdir().expect("suite output");

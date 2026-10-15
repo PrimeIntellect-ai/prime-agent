@@ -818,8 +818,14 @@ mod tests {
     #[test]
     fn relative_corpus_paths_anchor_the_socket_before_changing_project() {
         let dir = tempfile::tempdir_in(".").expect("relative corpus directory");
-        assert!(dir.path().is_relative(), "exercise a relative caller path");
-        let ctx = tiny_context(dir.path());
+        // TempDir may return an absolute path even for a relative parent.
+        // The directory lives in cwd, so its name is the caller's relative path.
+        let relative_root = Path::new(dir.path().file_name().expect("temporary directory name"));
+        assert!(
+            relative_root.is_relative(),
+            "exercise a relative caller path"
+        );
+        let ctx = tiny_context(relative_root);
         assert!(run_socket(&ctx, 0).is_absolute());
         assert_eq!(
             ctx.corpus_root,

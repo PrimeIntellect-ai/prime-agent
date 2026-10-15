@@ -15,11 +15,12 @@ use crate::corpus::rows::SessionSpec;
 use crate::rng::{iso_from_millis, Rng};
 
 /// The subagent tree shape: fanout per level, total depth, and the row count
-/// of each child session file.
+/// of each child session file, plus whether to populate artifact partitions.
 pub(crate) struct SubagentTree {
     pub fanout: usize,
     pub max_depth: u32,
     pub child_rows: usize,
+    pub artifacts: bool,
 }
 
 /// The worker-name bank for subagent ledger edges.
@@ -198,15 +199,17 @@ pub(crate) fn spawn_child(
         )?;
         crate::corpus::set_mtime(&child_file, child_start + 10_000)?;
         // The child's OWN artifact partition sits under the parent's tree.
-        write_artifact_dir(
-            &artifacts_root
-                .join(parent_session_id)
-                .join("session-artifacts")
-                .join(&child_session_id),
-            &child_session_id,
-            &child_session_id,
-            rng,
-        )?;
+        if tree.artifacts {
+            write_artifact_dir(
+                &artifacts_root
+                    .join(parent_session_id)
+                    .join("session-artifacts")
+                    .join(&child_session_id),
+                &child_session_id,
+                &child_session_id,
+                rng,
+            )?;
+        }
         ledger.append_spawn(&RlmSpawnInput {
             child_id: child_tag.clone(),
             parent: parent_file.display().to_string(),
