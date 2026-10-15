@@ -319,10 +319,11 @@ pub(crate) fn write_session_file(
     // The conversation: fill to `rows`, keeping a compaction boundary near
     // 60% for long sessions and the marker on the final user message.
     let target = spec.rows as u64;
-    let compaction_at = (target >= 1500).then(|| target * 6 / 10);
+    let mut compaction_at = (target >= 1500).then(|| target * 6 / 10);
     let mut last_user_text = String::new();
     while rows.rows_written() < target {
-        if compaction_at == Some(rows.rows_written()) {
+        if compaction_at.is_some_and(|threshold| rows.rows_written() >= threshold) {
+            compaction_at = None;
             let summary = format!("Compacted earlier entries: {}.", sentence(rng, 6));
             rows.push(
                 "compaction",
@@ -360,7 +361,7 @@ pub(crate) fn write_session_file(
         }
 
         let text = match &spec.marker {
-            Some(marker) if target - rows.rows_written() <= 3 => marker.clone(),
+            Some(marker) if target - rows.rows_written() <= 4 => marker.clone(),
             _ => user_text(rng),
         };
         let content = if rng.chance(30) {
@@ -500,4 +501,61 @@ pub(crate) fn write_session_file(
         rows: rows.counter as usize,
         last_user_text,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    fn spec(rows: usize) -> super::SessionSpec {
+        super::SessionSpec {
+            id: "corpus-regression".to_string(),
+            start_ms: 1_700_000_000_000,
+            cwd: "/tmp".to_string(),
+            rows,
+            name: Some("regression".to_string()),
+            marker: Some("final user marker".to_string()),
+            parent_session: None,
+            rlm_depth: Some(0),
+        }
+    }
+
+    #[test]
+    fn final_user_marker_survives_all_small_turn_shapes() {
+        let directory = tempfile::tempdir().expect("session directory");
+        for seed in 0..16 {
+            for target in 9..32 {
+                let written = super::write_session_file(
+                    &directory.path().join("session.jsonl"),
+                    &spec(target),
+                    &mut crate::rng::Rng::new(seed),
+                )
+                .expect("write session");
+                assert_eq!(
+                    written.last_user_text, "final user marker",
+                    "seed={seed}, target={target}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn long_sessions_crossing_compaction_threshold_have_exactly_one_boundary() {
+        let directory = tempfile::tempdir().expect("session directory");
+        let path = directory.path().join("session.jsonl");
+        for seed in 0..8 {
+            super::write_session_file(&path, &spec(1500), &mut crate::rng::Rng::new(seed))
+                .expect("write long session");
+            let rows: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+                .expect("read session")
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("valid row"))
+                .collect();
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row["type"] == "compaction")
+                    .count(),
+                1,
+                "seed={seed}"
+            );
+        }
+    }
 }

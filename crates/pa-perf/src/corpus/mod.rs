@@ -218,6 +218,11 @@ pub fn generate(options: &CorpusOptions) -> anyhow::Result<Manifest> {
         "the corpus needs at least 3 sessions (the huge, switch-a, and switch-b markers)"
     );
     let out = canonical_root(&options.out)?;
+    anyhow::ensure!(
+        std::fs::read_dir(&out)?.next().transpose()?.is_none(),
+        "corpus output directory must be empty: {}",
+        out.display()
+    );
     let agent_dir = out.join("agent");
     let sessions_dir = agent_dir.join("sessions");
     let archive_dir = agent_dir.join("sessions-archive");
@@ -540,4 +545,54 @@ fn canonical_root(out: &Path) -> anyhow::Result<PathBuf> {
     // paths, and every ledger record key on canonical paths.
     out.canonicalize()
         .with_context(|| format!("canonicalize {}", out.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    fn tiny_options(out: &std::path::Path) -> super::CorpusOptions {
+        let mut options = super::Profile::Small.defaults();
+        options.out = out.to_path_buf();
+        options.sessions = 4;
+        options.rows = 8;
+        options.huge_rows = 8;
+        options.child_rows = 8;
+        options.archive = 0;
+        options.cwd_files = 0;
+        options.tree_parents = 1;
+        options.wide_children = 0;
+        options.artifacts = false;
+        options
+    }
+
+    #[test]
+    fn generation_rejects_stale_output_without_changing_existing_files() {
+        let directory = tempfile::tempdir().expect("output directory");
+        let options = tiny_options(directory.path());
+        super::generate(&options).expect("generate initial corpus");
+        let sentinel = directory.path().join("unrelated.txt");
+        std::fs::write(&sentinel, b"keep this file").expect("write unrelated file");
+        let manifest = std::fs::read(directory.path().join("corpus.json")).expect("manifest");
+        let error = super::generate(&options).expect_err("reject previously populated output");
+        assert!(error.to_string().contains("must be empty"), "{error:#}");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel retained"),
+            b"keep this file"
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("corpus.json")).expect("old manifest"),
+            manifest
+        );
+    }
+
+    #[test]
+    fn depth_zero_generates_no_recursive_children_or_spawn_edges() {
+        let directory = tempfile::tempdir().expect("output directory");
+        let mut options = tiny_options(directory.path());
+        options.depth = 0;
+        options.fanout = 3;
+        let manifest = super::generate(&options).expect("generate depth-zero corpus");
+        assert_eq!(manifest.counts.child_sessions, 0);
+        assert_eq!(manifest.counts.subagent_edges, 0);
+        assert!(!manifest.files.iter().any(|file| file.contains("sub-")));
+    }
 }

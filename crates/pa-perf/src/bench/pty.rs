@@ -5,7 +5,6 @@
 
 use std::io::Read;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
-use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -71,14 +70,7 @@ impl PtyChild {
             .stdin(slave_as_stdio(&pty.slave))
             .stdout(slave_as_stdio(&pty.slave))
             .stderr(slave_as_stdio(&pty.slave));
-        // SAFETY: the pre-exec hook runs post-fork, pre-exec, in the child
-        // only; it cannot disturb this process.
-        unsafe {
-            command.pre_exec(|| {
-                nix::unistd::setsid()?;
-                Ok(())
-            });
-        }
+        pa_core::platform::process::set_new_session(&mut command);
         let fd = pty.master.as_raw_fd();
         fcntl(fd, F_SETFL(OFlag::O_NONBLOCK))?;
         let child = command.spawn()?;
@@ -174,13 +166,20 @@ impl PtyChild {
             Ok(0) | Err(_) => {}
             Ok(n) => {
                 let chunk = &buffer[..n];
-                self.output.extend_from_slice(chunk);
-                self.screen.process(chunk);
-                if !self.kitty_answered && find(chunk, KITTY_QUERY).is_some() {
-                    self.write(KITTY_ANSWER)?;
-                    self.kitty_answered = true;
-                }
+                self.receive(chunk)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Include the previous read's overlap when a terminal query is split.
+    fn receive(&mut self, chunk: &[u8]) -> anyhow::Result<()> {
+        let from = self.output.len().saturating_sub(KITTY_QUERY.len() - 1);
+        self.output.extend_from_slice(chunk);
+        self.screen.process(chunk);
+        if !self.kitty_answered && find(&self.output[from..], KITTY_QUERY).is_some() {
+            self.write(KITTY_ANSWER)?;
+            self.kitty_answered = true;
         }
         Ok(())
     }
@@ -229,9 +228,9 @@ impl PtyChild {
         if self.child.try_wait().is_ok_and(|status| status.is_some()) {
             return;
         }
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.pid()),
-            nix::sys::signal::Signal::SIGTERM,
+        let _ = pa_core::platform::process::kill_pid(
+            self.pid(),
+            pa_core::platform::process::Signal::Term,
         );
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
@@ -240,7 +239,10 @@ impl PtyChild {
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let _ = self.child.kill();
+        let _ = pa_core::platform::process::kill_pid(
+            self.pid(),
+            pa_core::platform::process::Signal::Kill,
+        );
         let _ = self.child.wait();
     }
 }
@@ -265,6 +267,31 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kitty_queries_are_answered_at_every_read_boundary_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for split in 1..KITTY_QUERY.len() {
+            let mut child = PtyChild::spawn(
+                std::path::Path::new("/bin/cat"),
+                &[],
+                &[],
+                dir.path(),
+                120,
+                36,
+            )
+            .expect("spawn mock terminal peer");
+            child.receive(&KITTY_QUERY[..split]).expect("first chunk");
+            assert!(!child.kitty_answered);
+            child.receive(&KITTY_QUERY[split..]).expect("second chunk");
+            assert!(child.kitty_answered, "unanswered query split at {split}");
+            // A repeated probe must not write another answer, even if the
+            // master is now closed: answer write failures propagate.
+            let closed = std::fs::File::open("/dev/null").expect("read-only master");
+            child.master = closed;
+            child.receive(KITTY_QUERY).expect("already answered");
+        }
+    }
 
     #[test]
     fn an_initial_paint_timeout_reaps_the_owned_child() {

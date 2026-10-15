@@ -40,7 +40,7 @@ const WORKER_NAMES: [&str; 12] = [
 
 /// A valid empty-dict pickle payload (protocol 4): the kernel-state sidecar
 /// stub unpickles cleanly to zero restored names.
-const EMPTY_PICKLE: &[u8] = b"\x80\x04}\x00.";
+const EMPTY_PICKLE: &[u8] = b"\x80\x04}\x94.";
 
 /// Write one session's artifact partition: the kernel-state manifest and
 /// payload, plus (per `rng`) a local harness store and a retired heartbeat.
@@ -160,7 +160,7 @@ pub(crate) fn write_artifact_dir(
 /// # Errors
 ///
 /// Propagates ledger and filesystem failures.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one node carries the ledger, parent identity and tree-generation context
 pub(crate) fn spawn_child(
     ledger: &RlmSpawnLedger,
     artifacts_root: &Path,
@@ -172,6 +172,9 @@ pub(crate) fn spawn_child(
     rng: &mut Rng,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let mut written = Vec::new();
+    if depth > tree.max_depth {
+        return Ok(written);
+    }
     for _ in 0..tree.fanout {
         let child_tag = format!("sub-{:07x}", rng.below(1 << 28));
         let child_dir = artifacts_root.join(parent_session_id).join(&child_tag);
@@ -226,4 +229,30 @@ pub(crate) fn spawn_child(
         }
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generated_kernel_snapshot_unpickles_to_an_empty_dictionary() {
+        let directory = tempfile::tempdir().expect("artifact directory");
+        super::write_artifact_dir(
+            directory.path(),
+            "session",
+            "seed",
+            &mut crate::rng::Rng::new(7),
+        )
+        .expect("write real artifact partition");
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import pickle,sys; value=pickle.load(open(sys.argv[1],'rb')); assert type(value) is dict and not value")
+            .arg(directory.path().join("kernel-state.dill"))
+            .output()
+            .expect("run hosted Python pickle reader");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

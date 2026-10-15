@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -52,7 +51,9 @@ impl RunCtx {
                 .with_context(|| format!("resolve benchmark binary {}", binary.display()))?,
             project_dir: manifest.paths.project_dir.clone(),
             agent_dir: manifest.paths.agent_dir.clone(),
-            corpus_root: corpus_root.to_path_buf(),
+            corpus_root: corpus_root
+                .canonicalize()
+                .with_context(|| format!("resolve corpus root {}", corpus_root.display()))?,
             manifest,
             liveness,
         })
@@ -91,6 +92,7 @@ fn child_env(ctx: &RunCtx) -> Vec<(String, String)> {
 ///
 /// Propagates spawn, needle-timeout, daemon, and IO failures.
 pub(super) fn run(options: &BenchOptions) -> anyhow::Result<BenchResult> {
+    anyhow::ensure!(options.runs > 0, "sampled runs must be positive");
     let ctx = RunCtx::load(
         &options.binary,
         &options.corpus,
@@ -207,6 +209,7 @@ fn launch(ctx: &RunCtx, scenario: Scenario, run: usize) -> anyhow::Result<(f64, 
 /// Propagates corpus-generation, spawn, needle-timeout, daemon, and IO
 /// failures.
 pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>> {
+    anyhow::ensure!(options.runs > 0, "sampled runs must be positive");
     let liveness = Duration::from_secs(options.liveness_secs);
     let knobs = || CorpusOptions {
         seed: options.seed,
@@ -278,7 +281,8 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
                 options.runs
             );
         }
-        let result = build_result(&cold_ctx, scenario, samples);
+        let ctx = corpus_for(scenario, &cold_ctx, &warm_ctx);
+        let result = build_result(ctx, scenario, samples);
         let name = crate::report::key_of(scenario);
         // Per-profile unique names: the CI legs merge their artifacts into
         // one results dir, and same-named files would overwrite each other.
@@ -293,6 +297,20 @@ pub(super) fn run_suite(options: &RunOptions) -> anyhow::Result<Vec<BenchResult>
         results.push(result);
     }
     Ok(results)
+}
+
+/// Keep result provenance paired with the corpus used by the schedule.
+fn corpus_for<'a>(scenario: Scenario, cold: &'a RunCtx, warm: &'a RunCtx) -> &'a RunCtx {
+    match scenario {
+        Scenario::WarmStart | Scenario::WarmReady => warm,
+        Scenario::ColdStart
+        | Scenario::ColdReady
+        | Scenario::AgentsView
+        | Scenario::AgentsViewWarm
+        | Scenario::OpenSession
+        | Scenario::SessionSwitch
+        | Scenario::AtCompletion => cold,
+    }
 }
 
 /// Push a sample unless this is the discarded warm-up run.
@@ -320,12 +338,11 @@ fn spawn_for_scenario(
         ),
         _ => (None, FIRST_PAINT_NEEDLE.to_vec()),
     };
-    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle)?;
-    launch.stream_dump = Some(
-        ctx.corpus_root
-            .join("failed-streams")
-            .join(format!("{}-run{run}.bin", crate::report::key_of(scenario))),
-    );
+    let dump = ctx
+        .corpus_root
+        .join("failed-streams")
+        .join(format!("{}-run{run}.bin", crate::report::key_of(scenario)));
+    let mut launch = Launch::spawn(ctx, socket, resume.as_deref(), &first_needle, dump)?;
     if matches!(
         scenario,
         Scenario::ColdStart | Scenario::WarmStart | Scenario::ColdReady | Scenario::WarmReady
@@ -353,13 +370,14 @@ fn post_launch(ctx: &RunCtx, launch: &mut Launch, scenario: Scenario) -> anyhow:
             // the second TUI measures the warm path on the same daemon.
             agents_view_populate(ctx, &mut launch.child)?;
             let socket = launch.socket.clone();
-            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE)?;
-            second.stream_dump = Some(
-                ctx.corpus_root
-                    .join("failed-streams")
-                    .join("agents-view-warm-second.bin"),
-            );
-            agents_view_populate(ctx, &mut second.child)
+            let dump = ctx
+                .corpus_root
+                .join("failed-streams")
+                .join("agents-view-warm-second.bin");
+            let mut second = Launch::spawn(ctx, &socket, None, FIRST_PAINT_NEEDLE, dump)?;
+            let sample = agents_view_populate(ctx, &mut second.child)?;
+            second.completed = true;
+            Ok(sample)
         }
         Scenario::SessionSwitch => switch_to_target_b(ctx, &mut launch.child),
         Scenario::AtCompletion => at_completion(ctx, &mut launch.child),
@@ -391,6 +409,7 @@ impl Launch {
         socket: &Path,
         resume: Option<&Path>,
         first_needle: &[u8],
+        stream_dump: PathBuf,
     ) -> anyhow::Result<Self> {
         let mut args = vec![
             "--daemon-socket".into(),
@@ -401,7 +420,7 @@ impl Launch {
             args.push(file.display().to_string().into());
         }
         let started = Instant::now();
-        let mut child = PtyChild::spawn(
+        let child = PtyChild::spawn(
             &ctx.binary,
             &args,
             &child_env(ctx),
@@ -414,17 +433,24 @@ impl Launch {
         } else {
             "the first paint"
         };
-        child.wait_from(child.mark(), first_needle, what, started + ctx.liveness)?;
-        Ok(Self {
-            first_ms: started.elapsed().as_secs_f64() * 1000.0,
+        let mut launch = Self {
+            first_ms: 0.0,
             child,
             socket: socket.to_path_buf(),
             ready_ms: None,
             spawned: started,
             liveness: ctx.liveness,
-            stream_dump: None,
+            stream_dump: Some(stream_dump),
             completed: false,
-        })
+        };
+        launch.child.wait_from(
+            launch.child.mark(),
+            first_needle,
+            what,
+            started + ctx.liveness,
+        )?;
+        launch.first_ms = started.elapsed().as_secs_f64() * 1000.0;
+        Ok(launch)
     }
 
     /// The ready metric: exec -> the tray's session-usage pill, the first
@@ -553,13 +579,7 @@ fn start_daemon(ctx: &RunCtx, socket: &Path) -> anyhow::Result<DaemonChild> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    // SAFETY: the pre-exec hook runs in the child only.
-    unsafe {
-        command.pre_exec(|| {
-            nix::unistd::setsid()?;
-            Ok(())
-        });
-    }
+    pa_core::platform::process::set_new_session(&mut command);
     DaemonChild {
         child: command.spawn()?,
     }
@@ -594,7 +614,10 @@ impl Drop for DaemonChild {
         if self.child.try_wait().is_ok_and(|status| status.is_some()) {
             return;
         }
-        let _ = self.child.kill();
+        let _ = pa_core::platform::process::kill_pid(
+            self.child.id() as i32,
+            pa_core::platform::process::Signal::Kill,
+        );
         let _ = self.child.wait();
     }
 }
@@ -788,6 +811,105 @@ mod tests {
             ctx.binary,
             binary.canonicalize().expect("anchor the binary")
         );
+    }
+
+    #[test]
+    fn relative_corpus_paths_anchor_the_socket_before_changing_project() {
+        let dir = tempfile::tempdir_in(".").expect("relative corpus directory");
+        assert!(dir.path().is_relative(), "exercise a relative caller path");
+        let ctx = tiny_context(dir.path());
+        assert!(run_socket(&ctx, 0).is_absolute());
+        assert_eq!(
+            ctx.corpus_root,
+            dir.path().canonicalize().expect("absolute root")
+        );
+        assert_ne!(ctx.project_dir, ctx.corpus_root);
+    }
+
+    #[test]
+    fn warm_results_record_the_corpus_that_was_measured() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cold = tiny_context(&dir.path().join("cold"));
+        let warm = tiny_context(&dir.path().join("warm"));
+        for scenario in [
+            Scenario::WarmStart,
+            Scenario::WarmReady,
+            Scenario::ColdStart,
+        ] {
+            let measured = corpus_for(scenario, &cold, &warm);
+            let result = build_result(measured, scenario, vec![1.0, 2.0]);
+            let expected = if scenario == Scenario::ColdStart {
+                &cold
+            } else {
+                &warm
+            };
+            assert_eq!(result.corpus.root, expected.corpus_root);
+        }
+    }
+
+    #[test]
+    fn zero_samples_fail_before_loading_or_generating_corpora() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let absent = dir.path().join("must-not-be-created");
+        let standalone = run(&BenchOptions {
+            binary: absent.clone(),
+            corpus: absent.clone(),
+            scenario: Scenario::ColdStart,
+            runs: 0,
+            json: absent.clone(),
+            liveness_secs: 1,
+        });
+        assert_eq!(
+            standalone.expect_err("zero runs rejected").to_string(),
+            "sampled runs must be positive"
+        );
+        let suite = run_suite(&RunOptions {
+            binary: absent.clone(),
+            profile: crate::corpus::Profile::Small,
+            out: absent.clone(),
+            seed: 1,
+            runs: 0,
+            liveness_secs: 1,
+        });
+        assert_eq!(
+            suite.expect_err("zero suite runs rejected").to_string(),
+            "sampled runs must be positive"
+        );
+        assert!(!absent.exists(), "validation must precede output mutation");
+    }
+
+    #[test]
+    fn a_first_paint_failure_retains_the_raw_stream() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut ctx = tiny_context(dir.path());
+        let mock = dir.path().join("mock-ui");
+        std::fs::write(
+            &mock,
+            "#!/bin/sh\nprintf 'diagnostic before missing paint\\n'\nexec /bin/cat\n",
+        )
+        .expect("write mock UI");
+        std::fs::set_permissions(&mock, std::fs::Permissions::from_mode(0o700))
+            .expect("executable mock");
+        ctx.binary = mock;
+        ctx.liveness = Duration::from_secs(1);
+        let dump = dir.path().join("failed-streams/first.bin");
+        let launched = Launch::spawn(
+            &ctx,
+            &dir.path().join("s"),
+            None,
+            b"absent paint",
+            dump.clone(),
+        );
+        assert!(
+            launched.is_err(),
+            "the mock never paints the requested needle"
+        );
+        assert!(std::fs::read(&dump)
+            .expect("failure dump")
+            .windows(b"diagnostic before missing paint".len())
+            .any(|bytes| bytes == b"diagnostic before missing paint"));
     }
 
     #[test]
