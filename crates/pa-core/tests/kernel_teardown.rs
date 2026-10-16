@@ -159,7 +159,10 @@ fn test_options() -> Option<pa_core::kernel::shared::KernelManagerOptions> {
         python_skills: Vec::new(),
         on_background_work_settled: None,
         snapshot: None,
-        bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(&[])),
+        bootstrap_code: Some(pa_core::kernel::bootstrap::build_rlm_bootstrap_code(
+            &[],
+            false,
+        )),
         stderr_log_path: None,
     })
 }

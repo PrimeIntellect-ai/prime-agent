@@ -447,6 +447,29 @@ jobs:
           python3 scripts/test_ci_test_shard_summary.py
           python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
+  # The vendored runtime suite (prime-agent-runtime): the kernel-side Python
+  # (`bash()`, the repl protocol, the bounded-await contract) has no Rust test,
+  # so this is its only CI gate — CPython 3.11, the minimum the runtime
+  # supports and the version the kernel venv pins.
+  runtime:
+    name: runtime suite (python 3.11)
+    needs: trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    if: needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run the runtime suite (CPython 3.11)
+        run: |
+          cd prime-agent-runtime
+          uv run --python 3.11 python -m unittest discover -s test
+
   # The Windows job set + the supply-chain deny gate:
   #
   #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
@@ -517,7 +540,18 @@ jobs:
   # enforces.
   trust-audit:
     name: trust gate audit
-    needs: [trust, changes, fmt, clippy-test, test-shard, test-summary, windows-cross, deny]
+    needs:
+      [
+        trust,
+        changes,
+        fmt,
+        clippy-test,
+        test-shard,
+        test-summary,
+        runtime,
+        windows-cross,
+        deny,
+      ]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

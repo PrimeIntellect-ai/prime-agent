@@ -33,12 +33,23 @@ pub fn parse_unavailable_python_skills(stdout: &str) -> Option<UnavailablePython
 const RLM_BOOTSTRAP_HEADER_CODE: &str =
     "import asyncio\nimport os as _prime_agent_os\n\n_prime_agent_os.environ[\"NO_COLOR\"] = \"1\"";
 
-const RLM_BOOTSTRAP_RUNTIME_CODE: &str = r#"
+const RLM_BOOTSTRAP_RUNTIME_HEAD_CODE: &str = "
 try:
     import rlm as _prime_agent_rlm_module
     rlm = _prime_agent_rlm_module.rlm
     bash = _prime_agent_rlm_module.bash
     import rlm.mcp as mcp
+";
+
+/// One line inside the bootstrap's try block, emitted only when the host
+/// registered the [`crate::kernel::shared::BASH_COMPLETED_REQUEST_TYPE`]
+/// handler: turns the runtime's bounded `await bash()` default on. Without
+/// the notice nothing wakes a cell that ended its turn on a degraded command,
+/// so daemonless sessions keep the unbounded await.
+const RLM_BOOTSTRAP_BASH_NOTICES_LINE_CODE: &str =
+    "    _prime_agent_rlm_module._set_completion_notices_wired(True)\n";
+
+const RLM_BOOTSTRAP_RUNTIME_TAIL_CODE: &str = r#"
 except Exception as _prime_agent_rlm_error:
     _PRIME_AGENT_RLM_IMPORT_ERROR = str(_prime_agent_rlm_error)
 
@@ -68,15 +79,24 @@ except Exception as _prime_agent_rlm_error:
 
     rlm = _PrimeAgentMissingRlm()
 
-    def bash(command):
+    def bash(command, yield_after=None):
         rlm._raise_missing()
 "#;
 
 /// The code the session injects right after kernel start/restore: binds the `rlm`, `bash`, and MCP
-/// surfaces, imports every Python skill.
+/// surfaces, imports every Python skill. `bash_notices_wired` emits the bounded-await toggle only
+/// when the host registers the bash completion notice.
 #[must_use]
-pub fn build_rlm_bootstrap_code(python_skills: &[KernelPythonSkill]) -> String {
-    let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{RLM_BOOTSTRAP_RUNTIME_CODE}");
+pub fn build_rlm_bootstrap_code(
+    python_skills: &[KernelPythonSkill],
+    bash_notices_wired: bool,
+) -> String {
+    let mut runtime_code = String::from(RLM_BOOTSTRAP_RUNTIME_HEAD_CODE);
+    if bash_notices_wired {
+        runtime_code.push_str(RLM_BOOTSTRAP_BASH_NOTICES_LINE_CODE);
+    }
+    runtime_code.push_str(RLM_BOOTSTRAP_RUNTIME_TAIL_CODE);
+    let base_code = format!("{RLM_BOOTSTRAP_HEADER_CODE}\n\n{runtime_code}");
     // TS: `[...new Set(pythonSkills.map(...))]` — first-seen order, so the pre-import loop follows
     // the session's skill discovery order.
     let mut import_names: Vec<&str> = Vec::new();
@@ -180,9 +200,23 @@ mod tests {
 
     #[test]
     fn bootstrap_code_without_skills_binds_rlm() {
-        let code = build_rlm_bootstrap_code(&[]);
+        let code = build_rlm_bootstrap_code(&[], false);
         assert!(code.contains("import rlm as _prime_agent_rlm_module"));
         assert!(!code.contains("_PrimeAgentUnavailableSkill"));
+    }
+
+    #[test]
+    fn bootstrap_turns_the_bounded_bash_default_on_only_with_notices() {
+        let daemonless = build_rlm_bootstrap_code(&[], false);
+        let noticed = build_rlm_bootstrap_code(&[], true);
+        assert!(
+            noticed.contains("_set_completion_notices_wired(True)"),
+            "the wired bootstrap must enable the bounded bash default: {noticed}"
+        );
+        assert!(
+            !daemonless.contains("_set_completion_notices_wired"),
+            "the daemonless bootstrap must not emit the toggle: {daemonless}"
+        );
     }
 
     #[test]
@@ -193,7 +227,7 @@ mod tests {
             package_path: PathBuf::from("/pkg/edit"),
             pyproject_path: PathBuf::from("/pkg/edit/pyproject.toml"),
         }];
-        let code = build_rlm_bootstrap_code(&skills);
+        let code = build_rlm_bootstrap_code(&skills, false);
         assert!(code.contains(r#"for _prime_agent_skill_name in ["edit"]"#));
         assert!(code.contains("_PrimeAgentUnavailableSkill"));
     }

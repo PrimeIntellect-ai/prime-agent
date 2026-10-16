@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 
-SKILL = Path(__file__).parents[2] / "packages/coding-agent/skills/agent-message/src/agent_message/__init__.py"
+SKILL = Path(__file__).parents[2] / "skills/agent-message/src/agent_message/__init__.py"
 
 
 class AgentMessageSkillTest(unittest.TestCase):

@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use pa_core::kernel::shared::{host_handler, HostRequestHandlers};
+use pa_core::kernel::shared::{host_handler, HostRequestHandlers, BASH_COMPLETED_REQUEST_TYPE};
 
 use crate::agent_engine::AgentSessionEngine;
 use crate::engine::{BashCompletionNotice, BashConsumedNotice};
@@ -56,7 +56,7 @@ impl AgentSessionEngine {
             return;
         };
         handlers.register(
-            "bash.completed",
+            BASH_COMPLETED_REQUEST_TYPE,
             host_handler(move |payload| {
                 let completion = completion.clone();
                 Box::pin(async move {

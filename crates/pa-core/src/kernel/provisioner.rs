@@ -18,7 +18,7 @@ use crate::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use crate::kernel::shared::ExecuteStatus;
 use crate::kernel::shared::{
     ExecuteOptions, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
-    KernelSnapshotConfig, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
+    KernelSnapshotConfig, BASH_COMPLETED_REQUEST_TYPE, BOOTSTRAP_EXECUTION_TIMEOUT_MS,
 };
 use crate::kernel::state_snapshot::RestoreResult;
 use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
@@ -1035,7 +1035,15 @@ async fn start_kernel_impl(
         gate().await;
     }
     let snapshot_dir = options.snapshot_dir.clone();
-    let bootstrap_code = build_rlm_bootstrap_code(&options.python_skills);
+    // The bounded-await default keys on the bash.completed host handler:
+    // one source of truth (the registry the daemon registers the notice in).
+    let bootstrap_code = build_rlm_bootstrap_code(
+        &options.python_skills,
+        options
+            .host_handlers
+            .get(BASH_COMPLETED_REQUEST_TYPE)
+            .is_some(),
+    );
     let mut env = options.env.clone();
     if let Some(shell_path) = &options.shell_path {
         env.insert(

@@ -73,7 +73,7 @@ fn test_options(snapshot_dir: Option<&std::path::Path>) -> Option<KernelManagerO
             debounce_ms: None,
         }),
         // The TS provisioner always runs the RLM bootstrap after start; tests match that contract.
-        bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
+        bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         stderr_log_path: None,
     })
 }
@@ -199,7 +199,7 @@ async fn rlm_bootstrap_injects_the_kernel_surface() {
         return;
     };
     let options = KernelManagerOptions {
-        bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
+        bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         ..base
     };
     let manager = started_manager(options).await;
@@ -246,7 +246,7 @@ async fn host_requests_round_trip_to_registered_handlers() {
     };
     let options = KernelManagerOptions {
         host_handlers: handlers,
-        bootstrap_code: Some(build_rlm_bootstrap_code(&[])),
+        bootstrap_code: Some(build_rlm_bootstrap_code(&[], false)),
         ..base
     };
     let manager = started_manager(options).await;
