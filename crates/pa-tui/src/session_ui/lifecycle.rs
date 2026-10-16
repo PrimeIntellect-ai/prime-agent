@@ -169,6 +169,7 @@ impl SessionUi {
             input_submission_generation: 0,
             prompt_in_flight: 0,
             transcript_stale: false,
+            rebuild_row_floor: None,
             transcript_epoch: 0,
             backfill_compaction_count: None,
             backfill_leaf_id: None,
@@ -596,6 +597,9 @@ impl SessionUi {
         self.pressed_click = None;
         self.pending_tools.clear();
         self.aborted_tools.clear();
+        // The attach snapshot reconciles on its own cursor, so the last
+        // rebuild's fetch floor no longer applies.
+        self.rebuild_row_floor = None;
         if let Some(items) = self.pending_snapshot.take() {
             for entry in items {
                 view.push_entry(entry);

@@ -145,6 +145,14 @@ impl SessionUi {
             }
             return;
         };
+        // The fetch's coverage point: rows whose live frames sit at or below
+        // it are already in the rebuilt transcript, so they must not render
+        // twice.
+        self.rebuild_row_floor = data
+            .as_ref()
+            .ok()
+            .and_then(|data| data.get("lastEventSequence"))
+            .and_then(Value::as_u64);
         let entries = crate::snapshot::transcript_to_entries(messages);
         view.clear_chat();
         for entry in entries {
@@ -382,7 +390,20 @@ impl SessionUi {
                     self.last_event_sequence = meta_sequence;
                 }
                 if let Some(update) = event_to_update(&event) {
-                    self.apply_update(update, view);
+                    // A row-bearing frame at or below the rebuild floor is
+                    // already in the rebuilt transcript: every row persists
+                    // before its frames are sequenced, so a covered frame's
+                    // row is in the fetched transcript.
+                    let covered_by_rebuild = self
+                        .rebuild_row_floor
+                        .is_some_and(|floor| floor >= meta_sequence)
+                        && matches!(
+                            update,
+                            TurnUpdate::UserMessage(_) | TurnUpdate::CustomRow(_)
+                        );
+                    if !covered_by_rebuild {
+                        self.apply_update(update, view);
+                    }
                 }
             }
             DaemonClientEvent::SideQuestionEvent {

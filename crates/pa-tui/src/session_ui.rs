@@ -353,6 +353,11 @@ pub(crate) struct SessionUi {
     /// idle and exit gates treat an in-flight submit as busy.
     prompt_in_flight: usize,
     pub(crate) transcript_stale: bool,
+    /// The last transcript rebuild fetch's coverage point (the worker's
+    /// `lastEventSequence`): row-bearing live frames at or below it are
+    /// already in the rebuilt transcript. Cleared on attach, whose snapshot
+    /// reconciles on its own cursor.
+    pub(crate) rebuild_row_floor: Option<u64>,
     transcript_epoch: u64,
     backfill_compaction_count: Option<u64>,
     backfill_leaf_id: Option<String>,

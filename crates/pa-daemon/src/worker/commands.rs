@@ -497,10 +497,16 @@ impl Worker {
             (Some(store), None) => store.messages(),
             (None, _) => Vec::new(),
         };
+        // The read's coverage point, taken under the same lock as the
+        // transcript walk: rows whose live frames sit at or below it are
+        // already in the served transcript, so a client rebuilding its view
+        // can drop them without a second render.
+        let last_event_sequence = core.last_event_sequence;
         if crate::snapshot_stream::wants_image_elision(&capabilities) {
             crate::snapshot_stream::elide_snapshot_image_payloads(&mut messages);
         }
         let mut data = json!({ "messages": messages });
+        data["lastEventSequence"] = json!(last_event_sequence);
         if let Some(anchor) = history_leaf {
             data["historyLeafId"] = anchor.clone();
         }

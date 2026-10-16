@@ -606,3 +606,66 @@ async fn anchored_backfill_accepts_descendant_appends_and_restored_branch() {
         );
     }
 }
+
+/// The transcript read's coverage stamp: `get_messages` answers with the
+/// worker's `lastEventSequence` at the store read, so a client rebuilding its
+/// view from the response can drop the row-bearing live frames the fetch
+/// already covered (a queued prompt delivered across a compaction's rebuild
+/// window is the reported instance — the row must not render twice).
+#[tokio::test]
+async fn get_messages_stamps_the_store_reads_event_sequence() {
+    let dir = session_dir();
+    let path = dir.join("sessions").join("stamp.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut fixture = Fixture {
+        content: header_line("stamp-session"),
+        prev: None,
+        id: 0,
+    };
+    fixture.row(|prev, id| {
+        message_row(
+            prev,
+            id,
+            &json!({
+                "role": "user", "content": "seed row", "timestamp": 10u64,
+            }),
+        )
+    });
+    std::fs::write(&path, &fixture.content).unwrap();
+    let worker = worker_over(&dir, &path).await;
+
+    // A settled turn advanced the worker's event counter past the seeded
+    // rows; the fetch serves the transcript AND the read's coverage point.
+    let prompt = worker
+        .dispatch(
+            "prompt_and_wait",
+            &json!({
+                "activeSessionId": "windowed-session",
+                "message": "run once",
+            }),
+        )
+        .await;
+    assert!(prompt.success, "prompt failed: {prompt:?}");
+    let live_sequence = worker.core.lock().unwrap().last_event_sequence;
+    assert!(live_sequence >= 1, "the turn emitted frames");
+
+    let response = worker.dispatch("get_messages", &json!({})).await;
+    assert!(response.success, "get_messages failed: {response:?}");
+    let data = response.data.expect("get_messages data");
+    let stamp = data
+        .get("lastEventSequence")
+        .and_then(Value::as_u64)
+        .expect("the response stamps the read's event sequence");
+    assert_eq!(
+        stamp, live_sequence,
+        "the stamp is the store read's coverage point"
+    );
+    assert!(
+        data["messages"]
+            .as_array()
+            .expect("messages array")
+            .iter()
+            .any(|message| message["content"] == json!("run once")),
+        "the fetched transcript carries the turn's user row"
+    );
+}
