@@ -238,7 +238,13 @@ async fn ensure_kernel_venv(
         return Ok(python);
     }
 
-    let release_lock = acquire_bootstrap_lock(&venv).await?;
+    let release_lock = match acquire_bootstrap_lock(&venv).await {
+        Ok(release_lock) => release_lock,
+        Err(error) if dir_lock::lock_creation_denied(&error) => {
+            return unwritable_venv(options, &python, &venv, &runtime_identity, &error);
+        }
+        Err(error) => return Err(error),
+    };
     let result = async {
         if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
             return Ok(python);
@@ -278,6 +284,38 @@ async fn ensure_kernel_venv(
     drop(release_lock);
     options.report("✓ ready");
     result.map_err(|error| format_bootstrap_failure(&error))
+}
+
+/// The venv's directory denies writes to this user, so the bootstrap lock cannot be
+/// created: a base-ready venv degrades the way a `PRIME_AGENT_KERNEL_PYTHON` override
+/// does (uncovered skills disabled with a warning, nothing installed), and anything
+/// less is a setup error naming the venv and both env overrides.
+fn unwritable_venv(
+    options: &EnsureKernelPythonOptions,
+    python: &std::path::Path,
+    venv: &std::path::Path,
+    runtime_identity: &str,
+    lock_error: &anyhow::Error,
+) -> anyhow::Result<PathBuf> {
+    let python_str = python.to_string_lossy().to_string();
+    if !kernel_base_ready(&python_str, venv, runtime_identity) {
+        return Err(anyhow!(
+            "cannot set up the Python kernel runtime: the kernel venv at {} is not writable by \
+             this user and does not hold a current runtime. Set PRIME_AGENT_KERNEL_VENV to a \
+             writable directory, or set PRIME_AGENT_KERNEL_PYTHON to a Python with a current \
+             prime-agent-runtime and the default Python packages installed. ({lock_error:#})",
+            venv.display()
+        ));
+    }
+    let missing = missing_python_skill_import_labels(&python_str, &options.python_skills);
+    if !missing.is_empty() {
+        options.report(&format!(
+            "Warning: Python skills unavailable in {} and will be disabled: {}",
+            venv.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok(python.to_path_buf())
 }
 
 #[cfg(test)]

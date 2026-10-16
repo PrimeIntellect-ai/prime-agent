@@ -113,6 +113,20 @@ fn lock_missing_pid_is_stale(lock_path: &Path) -> bool {
         .is_ok_and(|age| age.as_millis() as u64 > BOOTSTRAP_LOCK_STALE_WITHOUT_PID_MS)
 }
 
+/// Whether the bootstrap lock could not be created because the venv's directory
+/// denies writes to this user (`EACCES`/`EROFS` on the lock candidate).
+pub(crate) fn lock_creation_denied(error: &anyhow::Error) -> bool {
+    error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io_error| {
+            matches!(
+                io_error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+            )
+        })
+}
+
 /// Serialize concurrent bootstraps across processes on the same venv.
 pub(crate) async fn acquire_bootstrap_lock(venv: &Path) -> anyhow::Result<impl Drop> {
     let lock_dir = venv.with_file_name(format!(
