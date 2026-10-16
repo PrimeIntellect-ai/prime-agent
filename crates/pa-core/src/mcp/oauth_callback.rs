@@ -66,6 +66,9 @@ impl CallbackShared {
 pub struct CallbackServer {
     shared: Arc<CallbackShared>,
     port: u16,
+    // The task only borrows the socket while polling accept. The owner can close it
+    // synchronously even when the runtime has not polled an aborted task yet.
+    listener: Arc<Mutex<Option<TcpListener>>>,
     listener_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -92,9 +95,19 @@ impl CallbackServer {
             };
             let shared = Arc::new(CallbackShared::default());
             let task_shared = Arc::clone(&shared);
+            let listener = Arc::new(Mutex::new(Some(listener)));
+            let task_listener = Arc::clone(&listener);
             let listener_task = tokio::spawn(async move {
                 loop {
-                    let Ok((stream, _)) = listener.accept().await else {
+                    let accepted = futures::future::poll_fn(|cx| {
+                        let slot = task_listener.lock().unwrap();
+                        match slot.as_ref() {
+                            Some(listener) => listener.poll_accept(cx).map(Some),
+                            None => std::task::Poll::Ready(None),
+                        }
+                    })
+                    .await;
+                    let Some(Ok((stream, _))) = accepted else {
                         break;
                     };
                     let shared = Arc::clone(&task_shared);
@@ -106,6 +119,7 @@ impl CallbackServer {
             return Ok(CallbackServer {
                 shared,
                 port,
+                listener,
                 listener_task: Mutex::new(Some(listener_task)),
             });
         }
@@ -142,11 +156,12 @@ impl CallbackServer {
     /// Cancel: settle the waiter with `None` so an in-flight redirect loses
     /// only because the caller chose to stop waiting.
     pub async fn cancel(&self) {
+        self.listener.lock().unwrap().take();
         self.shared.settle(None).await;
         let task = self.listener_task.lock().unwrap().take();
         if let Some(task) = task {
             task.abort();
-            // Join cancellation so the registered port is free before another login starts.
+            // Join cancellation so the listener task cannot outlive explicit cleanup.
             let _ = task.await;
         }
     }
@@ -154,6 +169,7 @@ impl CallbackServer {
 
 impl Drop for CallbackServer {
     fn drop(&mut self) {
+        self.listener.lock().unwrap().take();
         if let Some(task) = self.listener_task.get_mut().unwrap().take() {
             task.abort();
         }
@@ -343,6 +359,18 @@ fn oauth_error_page(label: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_registered_callback_releases_the_port_without_yielding() {
+        let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+        let server = CallbackServer::start("Slack", Some(port)).await.unwrap();
+        drop(server);
+        let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("dropping the callback must release its registered port immediately");
+        drop(rebound);
+    }
 
     #[tokio::test]
     async fn registered_port_is_exact_and_released_after_cancel() {
