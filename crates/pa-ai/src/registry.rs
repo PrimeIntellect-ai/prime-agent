@@ -4,6 +4,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
+mod checked;
+pub(crate) use checked::CheckedProvider;
+
 use crate::event_stream::AssistantMessageEventStream;
 use crate::types::{Context, Model, SimpleStreamOptions, StreamOptions};
 
@@ -28,7 +31,7 @@ pub trait Provider: Send + Sync {
 }
 
 struct RegisteredProvider {
-    provider: Arc<dyn Provider>,
+    provider: Arc<CheckedProvider>,
     source_id: Option<String>,
 }
 
@@ -47,7 +50,7 @@ pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str
     registry.insert(
         provider.api().to_string(),
         RegisteredProvider {
-            provider,
+            provider: Arc::new(CheckedProvider::new(provider)),
             source_id: source_id.map(std::string::ToString::to_string),
         },
     );
@@ -60,6 +63,10 @@ pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str
 /// Panics if the registry `RwLock` is poisoned (a thread panicked while holding it).
 #[must_use]
 pub fn get_api_provider(api: &str) -> Option<Arc<dyn Provider>> {
+    get_checked_api_provider(api).map(|provider| provider as Arc<dyn Provider>)
+}
+
+pub(crate) fn get_checked_api_provider(api: &str) -> Option<Arc<CheckedProvider>> {
     registry()
         .read()
         .unwrap()
@@ -78,7 +85,7 @@ pub fn get_api_providers() -> Vec<Arc<dyn Provider>> {
         .read()
         .unwrap()
         .values()
-        .map(|entry| entry.provider.clone())
+        .map(|entry| entry.provider.clone() as Arc<dyn Provider>)
         .collect()
 }
 
@@ -124,7 +131,7 @@ pub fn register_builtin_api_providers() {
         registry.insert(
             provider.api().to_string(),
             RegisteredProvider {
-                provider,
+                provider: Arc::new(CheckedProvider::new(provider)),
                 source_id: None,
             },
         );

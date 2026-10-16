@@ -13,9 +13,17 @@ use crate::utils_inner::sanitize_unicode::sanitize_surrogates;
 
 /// Convert a conversation into Chat Completions `messages` params, including tool-result bridging
 /// and image replay.
+///
+/// # Errors
+///
+/// Returns a replay limitation when reasoning cannot retain its channel or signature.
 // Long by design: mirrors the provider's stream shape.
 #[allow(clippy::too_many_lines)]
-pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompat) -> Vec<Value> {
+pub fn convert_messages(
+    model: &Model,
+    context: &Context,
+    compat: &ResolvedCompat,
+) -> Result<Vec<Value>, String> {
     use crate::types::Message;
     let mut params: Vec<Value> = Vec::new();
 
@@ -128,14 +136,13 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                         .insert("reasoning_details".into(), json!(replay_reasoning_details));
                 }
 
-                let non_empty_thinking_blocks: Vec<&ThinkingContent> = assistant
+                let plaintext_thinking_blocks: Vec<&ThinkingContent> = assistant
                     .content
                     .iter()
                     .filter_map(|block| match block {
                         AssistantContent::Thinking(thinking)
                             if decode_reasoning_details(thinking.thinking_signature.as_deref())
-                                .is_none()
-                                && !thinking.thinking.trim().is_empty() =>
+                                .is_none() =>
                         {
                             Some(thinking)
                         }
@@ -143,62 +150,23 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                     })
                     .collect();
 
-                if !non_empty_thinking_blocks.is_empty() {
-                    if compat.requires_thinking_as_text {
-                        let thinking_text = non_empty_thinking_blocks
-                            .iter()
-                            .map(|block| sanitize_surrogates(&block.thinking))
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        assistant_msg.insert(
-                            "content".into(),
-                            json!([{
-                                "type": "text",
-                                "text": thinking_text,
-                            }]),
-                        );
-                        for block in &text_blocks {
-                            assistant_msg["content"]
-                                .as_array_mut()
-                                .expect("content is an array")
-                                .push(json!({
-                                    "type": "text",
-                                    "text": sanitize_surrogates(&block.text),
-                                }));
-                        }
-                    } else {
-                        // Always send assistant text as a plain string.
-                        if !assistant_text.is_empty() {
-                            assistant_msg.insert("content".into(), json!(assistant_text));
-                        }
-
-                        let reasoning_text = non_empty_thinking_blocks
-                            .iter()
-                            .map(|block| sanitize_surrogates(&block.thinking))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let reasoning_field =
-                            if compat.requires_reasoning_content_on_assistant_messages {
-                                Some("reasoning_content")
-                            } else {
-                                non_empty_thinking_blocks[0].thinking_signature.as_deref()
-                            };
-                        match reasoning_field {
-                            Some(field) => {
-                                assistant_msg.insert(field.to_string(), json!(reasoning_text));
-                            }
-                            None => {
-                                assistant_msg.insert(
-                                    "content".into(),
-                                    if assistant_text.is_empty() {
-                                        json!(reasoning_text)
-                                    } else {
-                                        json!(format!("{reasoning_text}\n\n{assistant_text}"))
-                                    },
-                                );
-                            }
-                        }
-                    }
+                if !plaintext_thinking_blocks.is_empty() {
+                    assistant_msg.insert("content".into(), json!(assistant_text));
+                    let reasoning_text = plaintext_thinking_blocks
+                        .iter()
+                        .map(|block| sanitize_surrogates(&block.thinking))
+                        .collect::<String>();
+                    let field = compat
+                        .reasoning_replay_field
+                        .as_deref()
+                        .or(plaintext_thinking_blocks[0].thinking_signature.as_deref())
+                        .filter(|field| {
+                            crate::providers::openai_completions::REASONING_FIELDS.contains(field)
+                        })
+                        .ok_or_else(|| {
+                            "The destination does not accept a reasoning replay channel".to_string()
+                        })?;
+                    assistant_msg.insert(field.to_string(), json!(reasoning_text));
                 } else if !assistant_text.is_empty() {
                     assistant_msg.insert("content".into(), json!(assistant_text));
                 }
@@ -262,6 +230,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 if !has_content
                     && !assistant_msg.contains_key("tool_calls")
                     && replay_reasoning_details.is_empty()
+                    && plaintext_thinking_blocks.is_empty()
                 {
                     index += 1;
                     continue;
@@ -356,7 +325,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
         index += 1;
     }
 
-    params
+    Ok(params)
 }
 
 /// Normalize a tool call ID for providers that reject long/pipe-separated IDs.
@@ -554,6 +523,217 @@ mod tests {
             headers: None,
             compat: None,
         }
+    }
+
+    #[test]
+    fn switched_model_replays_reasoning_separately_and_preserves_tool_results() {
+        let mut target = model("deepseek", 0.0, 0.0);
+        target.reasoning = true;
+        let messages = serde_json::from_value(json!([
+            {
+                "role": "assistant", "api": "openai-completions", "provider": "prime-inference",
+                "model": "previous-model", "timestamp": 0, "stopReason": "toolUse",
+                "usage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 } },
+                "content": [
+                    { "type": "thinking", "thinking": "SYNTHETIC_PRIVATE_MARKER", "thinkingSignature": "reasoning_content" },
+                    { "type": "text", "text": "Synthetic answer." },
+                    { "type": "toolCall", "id": "call-1", "name": "python_repl", "arguments": {} }
+                ]
+            },
+            { "role": "toolResult", "toolCallId": "call-1", "toolName": "python_repl", "content": [], "isError": false, "timestamp": 1 }
+        ])).unwrap();
+        let context = Context {
+            system_prompt: None,
+            messages,
+            tools: None,
+        };
+        let wire = convert_messages(
+            &target,
+            &context,
+            &crate::providers::openai_completions::get_compat(&target),
+        )
+        .unwrap();
+        assert_eq!(
+            wire,
+            vec![
+                json!({ "role": "assistant", "content": "Synthetic answer.", "reasoning_content": "SYNTHETIC_PRIVATE_MARKER", "tool_calls": [
+                { "id": "call-1", "type": "function", "function": { "name": "python_repl", "arguments": "{}" } }
+            ] }),
+                json!({ "role": "tool", "tool_call_id": "call-1", "content": "" }),
+            ]
+        );
+    }
+
+    fn thinking_only_context(signature: Option<&str>) -> Context {
+        Context {
+            system_prompt: None,
+            messages: vec![serde_json::from_value(json!({
+                "role": "assistant", "api": "openai-completions", "provider": "prime-inference",
+                "model": "previous-model", "timestamp": 0, "stopReason": "stop",
+                "usage": Usage::default(),
+                "content": [{ "type": "thinking", "thinking": "SYNTHETIC_PLAN", "thinkingSignature": signature }]
+            })).unwrap()],
+            tools: None,
+        }
+    }
+
+    #[test]
+    fn thinking_only_turn_retains_its_reasoning_channel_and_original_history() {
+        let target = model("deepseek", 0.0, 0.0);
+        let context = thinking_only_context(None);
+        let original = context.messages.clone();
+        assert_eq!(
+            convert_messages(
+                &target,
+                &context,
+                &crate::providers::openai_completions::get_compat(&target)
+            )
+            .unwrap(),
+            vec![
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN" })
+            ]
+        );
+        assert_eq!(context.messages, original);
+    }
+
+    #[test]
+    fn same_gateway_model_switch_keeps_the_known_channel_without_new_route_metadata() {
+        let mut target = model("prime-inference", 0.0, 0.0);
+        target.id = "internal/deepseek-v4.1-flash".into();
+        target.reasoning = true;
+        let context = thinking_only_context(Some("reasoning_content"));
+        let original = context.messages.clone();
+        assert_eq!(
+            convert_messages(
+                &target,
+                &context,
+                &crate::providers::openai_completions::get_compat(&target)
+            )
+            .unwrap(),
+            vec![
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN" })
+            ]
+        );
+        assert_eq!(context.messages, original);
+    }
+
+    #[test]
+    fn reasoning_fragments_replay_in_order_without_added_or_removed_whitespace() {
+        let target = model("deepseek", 0.0, 0.0);
+        let mut context = thinking_only_context(None);
+        let crate::types::Message::Assistant(assistant) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        for fragment in [" ", "TAIL"] {
+            assistant
+                .content
+                .push(AssistantContent::Thinking(ThinkingContent {
+                    thinking: fragment.into(),
+                    thinking_signature: None,
+                    redacted: None,
+                    rest: Map::default(),
+                }));
+        }
+        let original = context.messages.clone();
+        assert_eq!(
+            convert_messages(
+                &target,
+                &context,
+                &crate::providers::openai_completions::get_compat(&target)
+            )
+            .unwrap(),
+            vec![
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN TAIL" })
+            ]
+        );
+        assert_eq!(context.messages, original);
+    }
+
+    #[test]
+    fn reasoning_only_tool_turn_replays_the_call_and_its_result() {
+        let mut target = model("prime-inference", 0.0, 0.0);
+        target.reasoning = true;
+        let mut context = thinking_only_context(Some("reasoning_content"));
+        let crate::types::Message::Assistant(assistant) = &mut context.messages[0] else {
+            unreachable!()
+        };
+        assistant.stop_reason = StopReason::ToolUse;
+        assistant.content.push(
+            serde_json::from_value(json!({
+                "type": "toolCall", "id": "call-1", "name": "python_repl", "arguments": {}
+            }))
+            .unwrap(),
+        );
+        context.messages.push(serde_json::from_value(json!({
+            "role": "toolResult", "toolCallId": "call-1", "toolName": "python_repl",
+            "content": [{ "type": "text", "text": "SYNTHETIC_RESULT" }], "isError": false, "timestamp": 1
+        })).unwrap());
+        let original = context.messages.clone();
+        assert_eq!(
+            convert_messages(
+                &target,
+                &context,
+                &crate::providers::openai_completions::get_compat(&target)
+            )
+            .unwrap(),
+            vec![
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN", "tool_calls": [
+                    { "id": "call-1", "type": "function", "function": { "name": "python_repl", "arguments": "{}" } }
+                ] }),
+                json!({ "role": "tool", "tool_call_id": "call-1", "content": "SYNTHETIC_RESULT" }),
+            ]
+        );
+        assert_eq!(context.messages, original);
+        context.messages.pop();
+        let wire = convert_messages(
+            &target,
+            &context,
+            &crate::providers::openai_completions::get_compat(&target),
+        )
+        .unwrap();
+        assert_eq!(
+            wire,
+            vec![
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN", "tool_calls": [
+                { "id": "call-1", "type": "function", "function": { "name": "python_repl", "arguments": "{}" } }
+            ] }),
+                json!({ "role": "tool", "tool_call_id": "call-1", "content": "No result provided" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn reasoning_only_between_users_remains_an_assistant_turn() {
+        let mut target = model("prime-inference", 0.0, 0.0);
+        target.reasoning = true;
+        let mut context = thinking_only_context(Some("reasoning_content"));
+        context.messages.insert(
+            0,
+            serde_json::from_value(json!({
+                "role": "user", "content": "First request", "timestamp": 0
+            }))
+            .unwrap(),
+        );
+        context.messages.push(
+            serde_json::from_value(json!({
+                "role": "user", "content": "Next request", "timestamp": 1
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            convert_messages(
+                &target,
+                &context,
+                &crate::providers::openai_completions::get_compat(&target)
+            )
+            .unwrap(),
+            vec![
+                json!({ "role": "user", "content": "First request" }),
+                json!({ "role": "assistant", "content": "", "reasoning_content": "SYNTHETIC_PLAN" }),
+                json!({ "role": "user", "content": "Next request" }),
+            ]
+        );
     }
 
     enum ByokBilling {

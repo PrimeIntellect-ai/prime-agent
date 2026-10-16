@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine as _;
 use serde_json::{Map, Value};
 
 use crate::event_stream::{AssistantMessageEvent, AssistantMessageEventWriter};
@@ -25,6 +26,7 @@ enum BlockSlot {
     },
     Thinking {
         index: usize,
+        redacted_bytes: Option<Vec<u8>>,
     },
     ToolUse {
         index: usize,
@@ -39,22 +41,33 @@ impl BedrockStreamState {
         }
     }
 
-    /// Port of the TS catch settle: finalize tool-call blocks whose parsed preview may lag the
-    /// accumulated text under the growth throttle.
-    pub(crate) fn settle_partial_tool_calls(&mut self, output: &mut AssistantMessage) {
+    /// Settle unfinished tool arguments and opaque reasoning on EOF or a stream error.
+    pub(crate) fn settle_partial_blocks(&mut self, output: &mut AssistantMessage) {
         for slot in self.slots.values_mut() {
-            let BlockSlot::ToolUse {
-                index,
-                partial_json,
-            } = slot
-            else {
-                continue;
-            };
-            let Some(Value::Object(map)) = partial_json.flush() else {
-                continue;
-            };
-            if let Some(AssistantContent::ToolCall(block)) = output.content.get_mut(*index) {
-                block.arguments = map;
+            match slot {
+                BlockSlot::ToolUse {
+                    index,
+                    partial_json,
+                } => {
+                    if let Some(Value::Object(map)) = partial_json.flush() {
+                        if let Some(AssistantContent::ToolCall(block)) =
+                            output.content.get_mut(*index)
+                        {
+                            block.arguments = map;
+                        }
+                    }
+                }
+                BlockSlot::Thinking {
+                    index,
+                    redacted_bytes: Some(bytes),
+                } => {
+                    encode_redacted_reasoning(output, *index, bytes);
+                }
+                BlockSlot::Thinking {
+                    redacted_bytes: None,
+                    ..
+                }
+                | BlockSlot::Text { .. } => {}
             }
         }
     }
@@ -117,7 +130,7 @@ pub(crate) fn handle_event(
     }
 
     if let Some(content_block_delta) = parsed.get("contentBlockDelta") {
-        handle_content_block_delta(content_block_delta, model, output, writer, state);
+        handle_content_block_delta(content_block_delta, model, output, writer, state)?;
         return Ok(());
     }
 
@@ -127,6 +140,18 @@ pub(crate) fn handle_event(
     }
 
     if let Some(message_stop) = parsed.get("messageStop") {
+        if let Some(transformations) = message_stop
+            .get("additionalModelResponseFields")
+            .and_then(|fields| fields.get("input_transformations"))
+        {
+            output
+                .rest
+                .insert("inputTransformations".into(), transformations.clone());
+            crate::providers::reasoning_replay::validate_input_transformations(Some(
+                transformations,
+            ))
+            .map_err(ProviderError::Message)?;
+        }
         let stop_reason = message_stop.get("stopReason").and_then(Value::as_str);
         output.stop_reason = map_stop_reason(stop_reason);
         if output.stop_reason == StopReason::Error {
@@ -194,7 +219,7 @@ fn handle_content_block_delta(
     output: &mut AssistantMessage,
     writer: &AssistantMessageEventWriter,
     state: &mut BedrockStreamState,
-) {
+) -> Result<(), ProviderError> {
     let content_block_index = event
         .get("contentBlockIndex")
         .and_then(Value::as_u64)
@@ -235,7 +260,7 @@ fn handle_content_block_delta(
         };
         let index = match slot {
             BlockSlot::Text { index } => *index,
-            _ => return,
+            _ => return Ok(()),
         };
         if let AssistantContent::Text(block) = &mut output.content[index] {
             block.text.push_str(text);
@@ -245,7 +270,7 @@ fn handle_content_block_delta(
             delta: text.to_string(),
             partial: output.clone(),
         });
-        return;
+        return Ok(());
     }
 
     if let Some(tool_input) = tool_input {
@@ -268,7 +293,7 @@ fn handle_content_block_delta(
                 partial,
             });
         }
-        return;
+        return Ok(());
     }
 
     if let Some(reasoning) = reasoning {
@@ -284,9 +309,13 @@ fn handle_content_block_delta(
                     rest: Map::default(),
                 }));
             let index = output.content.len() - 1;
-            state
-                .slots
-                .insert(content_block_index, BlockSlot::Thinking { index });
+            state.slots.insert(
+                content_block_index,
+                BlockSlot::Thinking {
+                    index,
+                    redacted_bytes: None,
+                },
+            );
             writer.push(AssistantMessageEvent::ThinkingStart {
                 content_index: index as u64,
                 partial: output.clone(),
@@ -297,9 +326,46 @@ fn handle_content_block_delta(
                 .expect("just inserted")
         };
         let index = match slot {
-            BlockSlot::Thinking { index } => *index,
-            _ => return,
+            BlockSlot::Thinking { index, .. } => *index,
+            _ => return Ok(()),
         };
+        if let Some(payload) = reasoning.get("redactedContent") {
+            let payload = payload.as_str().ok_or_else(|| {
+                ProviderError::Message("Bedrock redacted reasoning was not a base64 blob".into())
+            })?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .map_err(|_| {
+                    ProviderError::Message(
+                        "Bedrock redacted reasoning contained invalid base64".into(),
+                    )
+                })?;
+            if let Some(BlockSlot::Thinking { redacted_bytes, .. }) =
+                state.slots.get_mut(&content_block_index)
+            {
+                redacted_bytes.get_or_insert_with(Vec::new).extend(bytes);
+            }
+            let first_redacted =
+                if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
+                    let first = !block.redacted.unwrap_or(false);
+                    block.redacted = Some(true);
+                    block.thinking_signature = Some(String::new());
+                    if first {
+                        block.thinking.push_str("[Reasoning redacted]");
+                    }
+                    first
+                } else {
+                    false
+                };
+            if first_redacted {
+                writer.push(AssistantMessageEvent::ThinkingDelta {
+                    content_index: index as u64,
+                    delta: "[Reasoning redacted]".into(),
+                    partial: output.clone(),
+                });
+            }
+            return Ok(());
+        }
         let mut signature_delta = None;
         if let AssistantContent::Thinking(block) = &mut output.content[index] {
             if let Some(text) = reasoning.get("text").and_then(Value::as_str) {
@@ -320,6 +386,7 @@ fn handle_content_block_delta(
         }
         let _ = signature_delta;
     }
+    Ok(())
 }
 
 fn handle_content_block_stop(
@@ -347,7 +414,13 @@ fn handle_content_block_stop(
                 partial: output.clone(),
             });
         }
-        BlockSlot::Thinking { index } => {
+        BlockSlot::Thinking {
+            index,
+            redacted_bytes,
+        } => {
+            if let Some(bytes) = redacted_bytes {
+                encode_redacted_reasoning(output, index, &bytes);
+            }
             let content = match &output.content[index] {
                 AssistantContent::Thinking(thinking) => thinking.thinking.clone(),
                 _ => String::new(),
@@ -377,6 +450,12 @@ fn handle_content_block_stop(
                 partial: output.clone(),
             });
         }
+    }
+}
+
+fn encode_redacted_reasoning(output: &mut AssistantMessage, index: usize, bytes: &[u8]) {
+    if let Some(AssistantContent::Thinking(block)) = output.content.get_mut(index) {
+        block.thinking_signature = Some(base64::engine::general_purpose::STANDARD.encode(bytes));
     }
 }
 
@@ -421,6 +500,86 @@ mod tests {
     use super::*;
     use crate::types::{zero_model_cost, ModelInput, Usage};
     use serde_json::json;
+
+    #[test]
+    fn opaque_reasoning_chunks_keep_bytes_at_stop_and_at_eof() {
+        for include_stop in [true, false] {
+            let model: Model = serde_json::from_value(json!({
+                "id": "anthropic.claude-sonnet-4-6-v1", "name": "Claude Sonnet", "api": "bedrock-converse-stream", "provider": "amazon-bedrock",
+                "baseUrl": "http://localhost", "reasoning": true, "input": ["text"],
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+                "contextWindow": 128_000, "maxTokens": 8192
+            })).unwrap();
+            let mut output = crate::event_stream::initial_assistant_message(
+                "bedrock-converse-stream",
+                "amazon-bedrock",
+                &model.id,
+            );
+            let (writer, _reader) = crate::event_stream::create_assistant_message_event_stream();
+            let mut state = BedrockStreamState::new();
+            for chunk in [b"SYNTHETIC_".as_slice(), b"OPAQUE_BYTES".as_slice()] {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                handle_content_block_delta(&json!({ "contentBlockIndex": 0, "delta": { "reasoningContent": { "redactedContent": encoded } } }),
+                    &model, &mut output, &writer, &mut state).unwrap();
+            }
+            if include_stop {
+                handle_content_block_stop(
+                    &json!({ "contentBlockIndex": 0 }),
+                    &mut output,
+                    &writer,
+                    &mut state,
+                );
+            }
+            state.settle_partial_blocks(&mut output);
+            assert_eq!(
+                output.content,
+                vec![AssistantContent::Thinking(ThinkingContent {
+                    thinking: "[Reasoning redacted]".into(),
+                    thinking_signature: Some(
+                        base64::engine::general_purpose::STANDARD.encode(b"SYNTHETIC_OPAQUE_BYTES")
+                    ),
+                    redacted: Some(true),
+                    rest: Map::default(),
+                })]
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_opaque_reasoning_and_native_binding_drops_surface_errors() {
+        let model: Model = serde_json::from_value(json!({
+            "id": "anthropic.claude-fixture", "name": "Claude", "api": "bedrock-converse-stream", "provider": "amazon-bedrock",
+            "baseUrl": "http://localhost", "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128_000, "maxTokens": 8192
+        })).unwrap();
+        let mut output =
+            crate::event_stream::initial_assistant_message(&model.api, &model.provider, &model.id);
+        let (writer, _reader) = crate::event_stream::create_assistant_message_event_stream();
+        let mut state = BedrockStreamState::new();
+        assert!(handle_content_block_delta(
+            &json!({ "delta": { "reasoningContent": { "redactedContent": "invalid!" } } }),
+            &model,
+            &mut output,
+            &writer,
+            &mut state,
+        )
+        .is_err());
+        let transformations =
+            json!([{ "type": "thinking_dropped", "reason": "model_binding_mismatch" }]);
+        let event = crate::providers::bedrock::eventstream::EventStreamMessage {
+            message_type: Some("event".into()), event_type: Some("messageStop".into()), exception_type: None,
+            payload: serde_json::to_vec(&json!({ "messageStop": { "stopReason": "end_turn", "additionalModelResponseFields": { "input_transformations": transformations } } })).unwrap(),
+        };
+        assert!(handle_event(&event, &model, &mut output, &writer, &mut state, None).is_err());
+        assert_eq!(
+            output.rest,
+            json!({ "inputTransformations": transformations })
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+    }
 
     /// TS `handleMetadata` assigns `usage.totalTokens = event.usage.totalTokens || input + output`:
     /// an explicitly reported zero total is falsy and falls back to the input/output sum.

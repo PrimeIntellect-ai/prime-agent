@@ -2,6 +2,11 @@
 //! OpenAI-responses and Anthropic compat blocks, and the `ModelCompat`/`CompatKind` descriptor.
 use super::{Deserialize, JsonMap, OpenRouterRouting, Serialize, Value, VercelGatewayRouting};
 
+/// Assistant input fields that carry plaintext reasoning separately from answer content.
+/// Opaque signatures and encrypted reasoning use their native provider representations.
+pub const PLAINTEXT_REASONING_FIELDS: [&str; 3] =
+    ["reasoning_content", "reasoning", "reasoning_text"];
+
 /// Compatibility settings for OpenAI-compatible completions APIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +29,9 @@ pub struct OpenAiCompletionsCompat {
     pub requires_thinking_as_text: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_reasoning_content_on_assistant_messages: Option<bool>,
+    /// Destination assistant-message field accepted for plaintext reasoning replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_replay_field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_format: Option<ThinkingFormat>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

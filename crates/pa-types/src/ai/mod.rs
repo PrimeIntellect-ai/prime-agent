@@ -672,7 +672,7 @@ pub enum ModelInput {
 mod compat;
 pub use compat::{
     AnthropicMessagesCompat, CacheControlFormat, CompatKind, MaxTokensField, ModelCompat,
-    OpenAiCompletionsCompat, OpenAiResponsesCompat, ThinkingFormat,
+    OpenAiCompletionsCompat, OpenAiResponsesCompat, ThinkingFormat, PLAINTEXT_REASONING_FIELDS,
 };
 
 mod routing;

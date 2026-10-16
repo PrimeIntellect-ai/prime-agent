@@ -281,3 +281,64 @@ async fn wire_caller_content_type_override_wins() {
         "the wire head: {head}"
     );
 }
+
+#[tokio::test]
+async fn native_binding_drop_reports_error_and_requests_diagnostics() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let transformations =
+        json!([{ "type": "thinking_dropped", "reason": "organization_binding_mismatch" }]);
+    let event = json!({ "type": "message_start", "message": { "id": "synthetic", "input_transformations": transformations } });
+    let sse = format!("event: message_start\ndata: {event}\n\nevent: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n");
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0; 8192];
+        loop {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&chunk[..count]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.contains(super::super::reasoning_replay::CLAUDE_BINDING_DIAGNOSTICS_BETA));
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{sse}", sse.len()).as_bytes()).await.unwrap();
+    });
+    let model: Model = serde_json::from_value(json!({
+        "id": "claude-fixture", "name": "Claude Fixture", "api": "anthropic-messages", "provider": "anthropic",
+        "baseUrl": format!("http://{addr}"), "reasoning": true, "input": ["text"],
+        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        "contextWindow": 128_000, "maxTokens": 8192
+    })).unwrap();
+    let context = Context {
+        system_prompt: None, tools: None,
+        messages: vec![serde_json::from_value(json!({
+            "role": "assistant", "api": model.api, "provider": model.provider, "model": model.id,
+            "timestamp": 0, "stopReason": "stop", "usage": crate::types::Usage::default(),
+            "content": [{ "type": "thinking", "thinking": "", "thinkingSignature": "SYNTHETIC_SIGNATURE" }]
+        })).unwrap()],
+    };
+    let options = AnthropicOptions::from_base(StreamOptions {
+        api_key: Some("sk-ant-api-test".into()),
+        ..Default::default()
+    });
+    let mut reader = stream_anthropic(&model, &context, Some(&options));
+    while let Some(_event) = reader.next_event().await {}
+    let output = reader.result().await;
+    assert_eq!(output.stop_reason, StopReason::Error);
+    assert!(output
+        .error_message
+        .unwrap()
+        .contains("provider dropped replayed reasoning"));
+    assert_eq!(
+        output.rest,
+        json!({ "inputTransformations": transformations })
+            .as_object()
+            .unwrap()
+            .clone()
+    );
+    server.await.unwrap();
+}

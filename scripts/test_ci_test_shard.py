@@ -230,10 +230,20 @@ class SelectionReportingTestCase(unittest.TestCase):
         env = dict(os.environ)
         output = Path(tempfile.mkdtemp()) / "github-output"
         env["GITHUB_OUTPUT"] = str(output)
-        # pa-ai's two units both hash to shard 8: every other leg selects zero.
+        # Derive an empty leg from the real workspace so adding a test target
+        # cannot invalidate a hard-coded crate/shard pairing.
+        units = SHARD.enumerate_units()
+        empty_leg = next(
+            (package, shard)
+            for package in sorted({unit["package"] for unit in units})
+            for shard in range(1, TOTAL + 1)
+            if not any(unit["package"] == package
+                       and SHARD.shard_of(unit["id"], TOTAL) == shard - 1
+                       for unit in units))
+        package, shard = empty_leg
         result = subprocess.run(
             [sys.executable, str(SCRIPTS_DIR / "ci_test_shard.py"),
-             "--shard", "3", "--total", str(TOTAL), "--crates", "pa-ai",
+             "--shard", str(shard), "--total", str(TOTAL), "--crates", package,
              "--print-selection"],
             capture_output=True, text=True, env=env, cwd=REPO, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)

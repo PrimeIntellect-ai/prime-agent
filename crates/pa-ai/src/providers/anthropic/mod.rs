@@ -19,6 +19,8 @@ use crate::types::{
 use crate::utils_inner::diagnostics::now_ms;
 
 mod convert;
+#[cfg(test)]
+pub(super) use convert::convert_messages;
 mod params;
 mod stream;
 

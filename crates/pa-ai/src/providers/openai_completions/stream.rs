@@ -574,7 +574,8 @@ async fn run_stream(
         &compat,
         cache_retention,
         cache_control.as_ref(),
-    );
+    )
+    .map_err(ProviderError::Message)?;
     if let Some(on_payload) = &base_options.on_payload {
         if let Some(next) = on_payload(params.clone(), model) {
             params = next;

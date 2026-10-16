@@ -204,7 +204,7 @@ async fn run_stream(
         .and_then(|options| options.interleaved_thinking)
         .unwrap_or(true);
     let use_fine_grained = should_use_fine_grained_tool_streaming_beta(model, context);
-    let (headers, is_oauth) = build_request_headers(
+    let (mut headers, is_oauth) = build_request_headers(
         model,
         &api_key,
         interleaved_thinking,
@@ -212,6 +212,21 @@ async fn run_stream(
         base_options.headers.as_ref(),
         base_options.session_id.as_deref(),
     );
+
+    if crate::providers::reasoning_replay::has_claude_reasoning_replay(model, context) {
+        let beta = crate::providers::reasoning_replay::CLAUDE_BINDING_DIAGNOSTICS_BETA;
+        if let Some((_, value)) = headers
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+        {
+            if !value.split(',').any(|part| part.trim() == beta) {
+                value.push(',');
+                value.push_str(beta);
+            }
+        } else {
+            headers.push(("anthropic-beta".into(), beta.into()));
+        }
+    }
 
     let (_retention, cache_control) = get_cache_control(model, base_options.cache_retention);
     let uses_anthropic_cache_pricing = has_standard_anthropic_cache_pricing(model);
@@ -291,6 +306,15 @@ async fn run_stream(
                     "message_start" => {
                         saw_message_start = true;
                         if let Some(message) = event.get("message") {
+                            if let Some(transformations) = message.get("input_transformations") {
+                                output
+                                    .rest
+                                    .insert("inputTransformations".into(), transformations.clone());
+                                crate::providers::reasoning_replay::validate_input_transformations(
+                                    Some(transformations),
+                                )
+                                .map_err(StopReasonError)?;
+                            }
                             if let Some(id) = message.get("id").and_then(|value| value.as_str()) {
                                 output.response_id = Some(id.to_string());
                             }
@@ -572,6 +596,15 @@ async fn run_stream(
                         }
                     }
                     "message_delta" => {
+                        if let Some(transformations) = event.get("input_transformations") {
+                            output
+                                .rest
+                                .insert("inputTransformations".into(), transformations.clone());
+                            crate::providers::reasoning_replay::validate_input_transformations(
+                                Some(transformations),
+                            )
+                            .map_err(StopReasonError)?;
+                        }
                         if let Some(delta) = event.get("delta") {
                             if let Some(stop_reason) =
                                 delta.get("stop_reason").and_then(|value| value.as_str())
