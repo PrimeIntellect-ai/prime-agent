@@ -144,7 +144,7 @@ def run_case(binary, label, scenario, base_dir, observation):
            if key in os.environ}
     env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(home / "config"),
                 "XDG_CACHE_HOME": str(home / "cache"), "XDG_DATA_HOME": str(home / "data"),
-                "TMPDIR": str(home / "tmp"), "DO_NOT_TRACK": "1", "PI_OFFLINE": "1",
+                "TMPDIR": str(home / "tmp"), "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY_ORIGIN": "test", "PI_OFFLINE": "1",
                 "PI_CODING_AGENT_DIR": str(agent), "PI_SESSION_DIR": str(sessions),
                 "PRIME_AGENT_CODING_AGENT_DIR": str(agent),
                 "PRIME_AGENT_SESSION_DIR": str(sessions)})

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Decision-only regression tests; these never launch either product binary."""
 import copy
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
-from review_draft_disconnect_parity import classify_validation
+from review_draft_disconnect_parity import classify_validation, env_for
 
 
 def completed_observations():
@@ -120,6 +125,22 @@ class ValidationDecisionTests(unittest.TestCase):
             receipt = completed_observations()
             receipt["results"][kind]["error"] = "could not launch binary"
             self.assertFalse(classify_validation(receipt))
+
+
+class HarnessTelemetryTests(unittest.TestCase):
+    def test_known_test_launcher_marks_its_subprocess_without_operator_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = env_for(Path(directory), "rust")
+            # The launcher supplies these even when its caller supplied none.
+            output = subprocess.check_output([
+                sys.executable, "-c",
+                "import json, os; print(json.dumps({key: os.environ.get(key) for key in "
+                "['DO_NOT_TRACK', 'PI_OFFLINE', 'PRIME_AGENT_TELEMETRY_ORIGIN']}))",
+            ], env=env, text=True)
+            self.assertEqual(json.loads(output), {
+                "DO_NOT_TRACK": "1", "PI_OFFLINE": "1",
+                "PRIME_AGENT_TELEMETRY_ORIGIN": "test",
+            })
 
 
 if __name__ == "__main__":

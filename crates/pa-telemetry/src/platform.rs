@@ -16,7 +16,7 @@ const UNKNOWN: &str = "unknown";
 const MAX_VERSION_LENGTH: usize = 64;
 
 /// The catalog's property-rule revision (additive rule changes bump it).
-pub const SCHEMA_REVISION: u64 = 3;
+pub const SCHEMA_REVISION: u64 = 4;
 
 /// The `cpu_baseline` values.
 const CPU_AVX2: &str = "avx2";
@@ -97,10 +97,13 @@ fn build_channel() -> &'static str {
     "release"
 }
 
-/// `PRIME_AGENT_TELEMETRY_ORIGIN=internal|test` wins; otherwise interactive
-/// is `interactive` and headless is `automated` (the mode alone never
-/// identifies internal populations).
+/// Faux invocations are tests; otherwise an explicit workload origin wins,
+/// then interactive/headless classification. Autonomous/headless mode alone
+/// never identifies an eval.
 fn workload_origin(execution_mode: &str) -> &'static str {
+    if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
+        return "test";
+    }
     match std::env::var("PRIME_AGENT_TELEMETRY_ORIGIN")
         .ok()
         .as_deref()
@@ -108,6 +111,7 @@ fn workload_origin(execution_mode: &str) -> &'static str {
     {
         Some("internal") => return "internal",
         Some("test") => return "test",
+        Some("eval") => return "eval",
         _ => {}
     }
     if execution_mode == "interactive" {

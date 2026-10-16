@@ -119,7 +119,7 @@ def run_case(binary, label, root, observation):
     library = Path(os.environ['PI_PACKAGE_DIR'])
     if label == 'ts':
         env['PI_PACKAGE_DIR'] = str(library)
-    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1',
+    env.update(HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), DO_NOT_TRACK='1', PRIME_AGENT_TELEMETRY_ORIGIN='test',
                PI_OFFLINE='1', PI_CODING_AGENT_DIR=str(agent), PRIME_AGENT_CODING_AGENT_DIR=str(agent),
                PI_SESSION_DIR=str(sessions), PRIME_AGENT_SESSION_DIR=str(sessions),
                XDG_CONFIG_HOME=str(root / 'config'), XDG_CACHE_HOME=str(root / 'cache'),

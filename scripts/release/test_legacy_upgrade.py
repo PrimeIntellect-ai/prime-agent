@@ -102,7 +102,7 @@ def isolated_environment(root: Path, base_url: str, layout: str = "custom") -> d
     env["npm_config_prefix"] = str(root / "npm")
     env["npm_config_userconfig"] = str(root / "npmrc")
     env.update({
-        "SHELL": "/bin/sh", "DO_NOT_TRACK": "1", "TERM": "dumb",
+        "SHELL": "/bin/sh", "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY_ORIGIN": "test", "TERM": "dumb",
         "PRIME_AGENT_DOWNLOAD_BASE_URL": base_url,
         "PRIME_AGENT_ALLOW_INSECURE_HTTP_FOR_TESTS": "1",
         "PRIME_AGENT_INSTALL_METHOD": "binary", "PRIME_AGENT_INSTALLER_NONINTERACTIVE": "1",

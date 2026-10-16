@@ -15,7 +15,9 @@ pseudonymous installation identity for Prime Agent product analytics.
 - `TelemetrySink` trait + shipped sinks: `AnalyticsSink` (the one product
   destination: the TS endpoint `ANALYTICS_ENDPOINT` and wire format
   `{installation_id, events: [{id, name, timestamp, properties}]}`, no
-  credentials, 1.5s timeout; the platform backend forwards to PostHog),
+  credentials, 1.5s timeout; the platform backend forwards to PostHog;
+  explicit `PRIME_AGENT_TELEMETRY_ORIGIN=test|eval` or a faux-script
+  invocation suppresses HTTP delivery, as do events marked `test|eval`),
   `FileSink` (local JSONL transparency mirror at `<agentDir>/telemetry.jsonl`),
   `NoopSink` (opt-out fast path), `MockSink` (tests, also re-exported for
   downstream crate tests).
@@ -66,3 +68,16 @@ pseudonymous installation identity for Prime Agent product analytics.
 
 Depends on no workspace crate (sits beside pa-types at the bottom of the
 dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
+
+## Synthetic workloads
+
+Harnesses running real providers or mock HTTP servers must set
+`PRIME_AGENT_TELEMETRY_ORIGIN=test` or `eval` on the invocation. The
+analytics sink suppresses these workloads even with `PRIME_AGENT_TELEMETRY=1`;
+local mirrors remain available for instrumentation checks. Known repository
+test launchers stamp the test origin automatically, and faux invocations
+are classified as tests without an origin setting. `DO_NOT_TRACK=1`
+or `PI_OFFLINE=1` still disables all product telemetry, including mirrors.
+Automated mode, custom models, CI, short runs, and low token counts do not
+identify a test. See [workload isolation](../../docs/telemetry-workload-isolation.md)
+for the boundary audit and proposed reporting exclusions.

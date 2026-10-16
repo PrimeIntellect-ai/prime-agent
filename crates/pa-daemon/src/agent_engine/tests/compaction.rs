@@ -433,7 +433,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (probe, _probe_dir) = faux_engine_with_settings(
+    let (probe, _probe_dir) = faux_engine_with_local_telemetry(
         &serde_json::json!({ "responses": [{"text": "seed reply"}] }),
         1,
     );
@@ -451,7 +451,7 @@ fn threshold_compaction_counts_into_the_run_telemetry() {
     let big_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
     let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
     let headroom = baseline + big_tokens / 2;
-    let (engine, dir) = faux_engine_with_settings(
+    let (engine, dir) = faux_engine_with_local_telemetry(
         &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
@@ -497,7 +497,7 @@ fn requested_compaction_counts_into_the_run_telemetry() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // A tiny reserve keeps the threshold arm silent (TS reserve 1 means
     // the context must nearly fill the window).
-    let (engine, dir) = faux_engine_with_settings(
+    let (engine, dir) = faux_engine_with_local_telemetry(
         &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
@@ -557,7 +557,7 @@ fn manual_wire_compaction_counts_into_the_run_telemetry() {
     let _faux = FAUX_TEST_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (engine, dir) = faux_engine_with_settings(
+    let (engine, dir) = faux_engine_with_local_telemetry(
         &serde_json::json!({
             "responses": [
                 {"text": "seed reply"},
@@ -1307,4 +1307,19 @@ fn low_custom_percentage_compacts_real_history_once_and_then_makes_progress() {
             ..Default::default()
         }
     );
+}
+
+// These instrumentation tests deliberately install the local mirror after
+// the production faux guard; release builds cannot use this test seam.
+fn faux_engine_with_local_telemetry(
+    script: &serde_json::Value,
+    reserve_tokens: u64,
+) -> (AgentSessionEngine, tempfile::TempDir) {
+    assert!(
+        pa_core::session_engine::telemetry::telemetry_endpoint().is_none(),
+        "local telemetry injection requires no production endpoint"
+    );
+    let (mut engine, dir) = faux_engine_with_settings(script, reserve_tokens);
+    engine.config.telemetry_disabled = None;
+    (engine, dir)
 }
