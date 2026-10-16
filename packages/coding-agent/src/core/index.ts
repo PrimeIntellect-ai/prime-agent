@@ -31,6 +31,7 @@ export {
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export type { CompactionResult } from "./compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
+export { startDelegatedProviderBroker, type DelegatedProviderBrokerOptions } from "./delegated-provider-broker.js";
 // Extensions system
 export {
 	type AgentEndEvent,
