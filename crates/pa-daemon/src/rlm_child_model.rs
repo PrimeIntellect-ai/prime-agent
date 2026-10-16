@@ -441,31 +441,32 @@ mod tests {
             .get_provider_headers("prime-inference")
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
             .expect("stored team selection");
-        let fingerprint =
-            pa_core::models::private_prime_authorization_fingerprint(&api_key, &team_id);
-        pa_core::models::write_private_prime_authorization_cache(
-            &dir.path().join("models.json"),
-            &pa_core::models::PrivatePrimeAuthorizationCache {
-                fingerprint,
-                // The durable wire items (an `/models` payload shape): the
-                // read path parses and builds the model from them.
-                items: vec![json!({
+        let scope = pa_models::prime_inference::scope_key(&api_key, &team_id);
+        let cache_path = dir.path().join("models/prime-inference-models-cache.json");
+        std::fs::create_dir_all(cache_path.parent().expect("models dir")).unwrap();
+        std::fs::write(
+            cache_path,
+            json!({
+                "url": "https://api.pinference.ai/api/v1/models",
+                "scope": scope,
+                "fetchedAt": 1,
+                "payload": {"data": [{
                     "id": "internal/glm-5.3-fast",
                     "display_name": "GLM 5.3 Fast",
                     "pricing": {
                         "input_usd_per_mtok": 0.42, "output_usd_per_mtok": 2.1,
-                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0,
+                        "cache_read_usd_per_mtok": 0.0, "cache_write_usd_per_mtok": 0.0
                     },
                     "specs": {
                         "context_window": 400_000, "max_output_tokens": 131_072,
                         "supports_reasoning": true,
-                        "modalities": { "input": ["text"], "output": ["text"] },
-                    },
-                })],
-                models: Vec::new(),
-                refreshed_at: 1,
-            },
-        );
+                        "modalities": { "input": ["text"], "output": ["text"] }
+                    }
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
 
         assert!(catalog_models(dir.path())
             .iter()

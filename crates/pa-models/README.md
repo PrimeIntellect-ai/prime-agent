@@ -9,8 +9,9 @@ Port of the TS catalog client (branch `feat/catalog-client`:
 
 ## Scope
 
-- Fetch layer: unauthenticated GET on the two catalog URLs; 5 s timeout,
-  8 MiB cap (content-length AND streaming), redirects refused, ETag
+- Fetch layer: unauthenticated provider-catalog GET (8 MiB cap) and
+  authenticated Prime Inference GET (2 MiB cap); 5 s timeout,
+  redirects refused, ETag
   `If-None-Match` with 304 snapshot reuse; `PI_OFFLINE` disables the network.
 - No-cold-start chain: validated last-good disk cache -> build-time bundled
   snapshot -> compiled fallback (42 transport tuples + 110 offline Prime
@@ -22,11 +23,16 @@ Port of the TS catalog client (branch `feat/catalog-client`:
 - Transport pinning: every remote model must match a compiled
   `(provider, api, baseUrl)` tuple; catalog data never carries request
   headers.
-- Prime Inference: live credentialed fetch, scope-keyed disk cache
-  (HMAC-SHA256 of key over team), 401/403 clears only that scope.
-- Refresh: hourly + startup + picker open + auth change; fire-and-forget;
-  coalesced per source; a mid-session refresh never retargets the active
-  model.
+- Prime Inference: authenticated `/models` is the sole authority for private
+  `internal/`, `dev/`, and colon IDs, including key-only accounts. Its validated
+  snapshot is scope-keyed (HMAC-SHA256 of key over team); valid empty results
+  revoke all Prime Inference models, malformed/failed requests keep last-good,
+  and 401/403 clears the active scope. Neither public aggregates nor bundled
+  templates grant private IDs.
+- Refresh: startup and hourly in the background; each explicit `/model` open
+  forces both sources in parallel without delaying the current snapshot.
+  Concurrent opens coalesce, and a mid-session refresh never retargets the
+  active model.
 
 ## Non-goals
 

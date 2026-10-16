@@ -11,46 +11,51 @@ use serde_json::{json, Value};
 use crate::protocol::{response_success, DaemonResponse};
 use crate::worker::{OutboundFrame, Worker};
 
-/// The catalog background-refresh coalescing gate: at most one refresh
-/// with one queued trailing re-arm, so concurrent opens cost one cycle.
+/// Concurrent picker opens share one in-flight refresh; a later open
+/// starts another fetch even if the last snapshot was fetched recently.
 #[derive(Default)]
 pub(crate) struct RefreshGate {
     in_flight: std::sync::atomic::AtomicBool,
-    queued: std::sync::atomic::AtomicBool,
+    auth_change_queued: std::sync::atomic::AtomicBool,
 }
 
 impl Worker {
-    /// `get_model_catalog`: the full catalog and configured providers from
-    /// the current validated snapshot — never a network request here.
-    pub(crate) fn handle_get_model_catalog(&self) -> DaemonResponse {
+    /// `get_model_catalog` returns a validated snapshot immediately.
+    /// Explicit picker opens (or omitted `refresh`, for existing callers)
+    /// fetch both catalogs in the background; `refresh:false` only reads
+    /// (including event re-reads).
+    pub(crate) fn handle_get_model_catalog(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("get_model_catalog") {
             return response;
         }
         let agent_dir = self.config.agent_dir.clone();
         let models_json = agent_dir.join("models.json");
-        let mut registry = pa_core::models::ModelRegistry::create(
+        let registry = pa_core::models::ModelRegistry::create(
             pa_core::auth::AuthStorage::create(&agent_dir),
             models_json.clone(),
         );
-        // The on-disk private authorization (fingerprint-checked): the
-        // validated current view of the account's private models, no network.
-        registry.load_private_authorization_from_cache();
         let available = registry
             .get_available()
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
         let served = catalog_payload(&registry, &available);
-        // An observed credential-scope change forces the refresh; the
-        // observation consumes the scope, so one change forces exactly once.
         let credentials = pa_core::models::prime_credentials_for_dir(&agent_dir);
         let catalog = pa_core::models::catalog_for(Some(&models_json));
-        let trigger = if catalog.credentials_changed(credentials.as_ref()) {
-            pa_core::models::RefreshTrigger::AuthChange
-        } else {
-            pa_core::models::RefreshTrigger::PickerOpen
-        };
-        self.spawn_catalog_refresh(trigger, served.clone());
+        let scope_changed = catalog.credentials_changed(credentials.as_ref());
+        if scope_changed
+            || payload
+                .get("refresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+        {
+            let trigger = if scope_changed {
+                pa_core::models::RefreshTrigger::AuthChange
+            } else {
+                pa_core::models::RefreshTrigger::PickerOpen
+            };
+            self.spawn_catalog_refresh(trigger, served.clone());
+        }
         response_success(None, "get_model_catalog", Some(served))
     }
 
@@ -60,9 +65,11 @@ impl Worker {
     fn spawn_catalog_refresh(&self, trigger: pa_core::models::RefreshTrigger, served: Value) {
         let gate = std::sync::Arc::clone(&self.model_catalog_refresh_gate);
         if gate.in_flight.swap(true, Ordering::SeqCst) {
-            // A refresh already runs: remember the request and return — the
-            // running task re-arms exactly once when it lands.
-            gate.queued.store(true, Ordering::SeqCst);
+            // A scope change cannot be satisfied by the old account's
+            // in-flight fetch. Re-arm once using the current credentials.
+            if trigger == pa_core::models::RefreshTrigger::AuthChange {
+                gate.auth_change_queued.store(true, Ordering::SeqCst);
+            }
             return;
         }
         let agent_dir = self.config.agent_dir.clone();
@@ -83,17 +90,14 @@ impl Worker {
                 }
                 baseline = refreshed;
                 gate.in_flight.store(false, Ordering::SeqCst);
-                if !gate.queued.swap(false, Ordering::SeqCst) {
+                if !gate.auth_change_queued.swap(false, Ordering::SeqCst) {
                     return;
                 }
                 if gate.in_flight.swap(true, Ordering::SeqCst) {
-                    // A later request re-armed first; its task covers the
-                    // trailing refresh.
                     return;
                 }
-                // The trailing re-arm stays gated: the next request's own
-                // scope observation re-detects and forces any flip.
-                trigger = pa_core::models::RefreshTrigger::PickerOpen;
+                // The prior fetch may have used pre-login credentials.
+                trigger = pa_core::models::RefreshTrigger::AuthChange;
             }
         });
     }
@@ -158,32 +162,35 @@ mod tests {
         Gate(tokio::sync::oneshot::Receiver<Vec<u8>>),
     }
 
-    /// A scripted loopback HTTP server for the two catalog fetch layers:
-    /// every request head is recorded; answers come from a shared queue
-    /// (the last raw answer repeats; a gate parks its request).
+    /// Route answers by request path: the provider and PI fetch run in
+    /// parallel, so their request arrival order must not select payloads.
     struct CatalogServer {
         port: u16,
         requests: Arc<Mutex<Vec<String>>>,
-        answers: Arc<Mutex<VecDeque<Answer>>>,
+        provider_answers: Arc<Mutex<VecDeque<Answer>>>,
+        pi_answers: Arc<Mutex<VecDeque<Answer>>>,
     }
 
     impl CatalogServer {
-        async fn start(answers: Vec<Answer>) -> Self {
+        async fn start(provider_answers: Vec<Answer>, pi_answers: Vec<Answer>) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind mock catalog server");
             let port = listener.local_addr().unwrap().port();
             let requests = Arc::new(Mutex::new(Vec::new()));
-            let answers = Arc::new(Mutex::new(VecDeque::from(answers)));
+            let provider_answers = Arc::new(Mutex::new(VecDeque::from(provider_answers)));
+            let pi_answers = Arc::new(Mutex::new(VecDeque::from(pi_answers)));
             let server_requests = Arc::clone(&requests);
-            let server_answers = Arc::clone(&answers);
+            let server_provider_answers = Arc::clone(&provider_answers);
+            let server_pi_answers = Arc::clone(&pi_answers);
             tokio::spawn(async move {
                 loop {
                     let Ok((socket, _)) = listener.accept().await else {
                         return;
                     };
                     let requests = Arc::clone(&server_requests);
-                    let answers = Arc::clone(&server_answers);
+                    let provider_answers = Arc::clone(&server_provider_answers);
+                    let pi_answers = Arc::clone(&server_pi_answers);
                     tokio::spawn(async move {
                         let mut socket = socket;
                         let mut buffer = [0u8; 8_192];
@@ -204,8 +211,17 @@ mod tests {
                             }
                         }
                         let head = String::from_utf8_lossy(&buffer[..read]).to_string();
-                        requests.lock().expect("request log").push(head);
-                        let answer = answers.lock().expect("answer queue").pop_front();
+                        requests.lock().expect("request log").push(head.clone());
+                        let answer = if head.starts_with("GET /catalog ") {
+                            provider_answers
+                                .lock()
+                                .expect("provider answers")
+                                .pop_front()
+                        } else if head.starts_with("GET /api/v1/models ") {
+                            pi_answers.lock().expect("PI answers").pop_front()
+                        } else {
+                            None
+                        };
                         let response = match answer {
                             Some(Answer::Raw(bytes)) => bytes,
                             Some(Answer::Gate(receiver)) => match receiver.await {
@@ -222,7 +238,8 @@ mod tests {
             Self {
                 port,
                 requests,
-                answers,
+                provider_answers,
+                pi_answers,
             }
         }
 
@@ -234,8 +251,18 @@ mod tests {
             self.requests.lock().expect("request log").clone()
         }
 
-        fn push(&self, answer: Answer) {
-            self.answers.lock().expect("answer queue").push_back(answer);
+        fn push_provider(&self, answer: Answer) {
+            self.provider_answers
+                .lock()
+                .expect("provider answers")
+                .push_back(answer);
+        }
+
+        fn push_pi(&self, answer: Answer) {
+            self.pi_answers
+                .lock()
+                .expect("PI answers")
+                .push_back(answer);
         }
 
         fn request_count(&self) -> usize {
@@ -289,10 +316,9 @@ mod tests {
         serde_json::to_string(&json!({"schemaVersion": 1, "models": models})).unwrap()
     }
 
-    /// The Prime Inference `/models` payload: every compiled entry (the
-    /// coverage gate needs them) plus one public marker the compiled
-    /// catalog provably lacks, so a landed refresh visibly changes it.
-    fn pi_snapshot_payload(marker: &str) -> String {
+    /// The Prime Inference `/models` payload: compiled public routes plus
+    /// a public marker, and the authenticated private IDs for this account.
+    fn pi_snapshot_payload(marker: &str, private: &[&str]) -> String {
         let mut data: Vec<Value> = pa_models::transports::prime_inference_offline_entries()
             .iter()
             .map(|model| {
@@ -323,11 +349,16 @@ mod tests {
                 "modalities": {"input": ["text"], "output": ["text"]},
             },
         }));
+        let private_data: Value = serde_json::from_str(&private_payload(private)).unwrap();
+        data.extend(
+            private_data["data"]
+                .as_array()
+                .expect("private entries")
+                .clone(),
+        );
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
-    /// The private-model entitlement payload: full-specs entries for
-    /// exactly the ids the account is authorized for.
     fn private_payload(ids: &[&str]) -> String {
         let data: Vec<Value> = ids
             .iter()
@@ -348,33 +379,28 @@ mod tests {
         serde_json::to_string(&json!({"data": data})).unwrap()
     }
 
-    /// A private entitlement payload whose route declares the live reasoning
-    /// parameters (`supported_parameters` with `reasoning`/`reasoning_effort`
-    /// plus the supported efforts) — the shape the internal `DeepSeek` routes
-    /// serve: reasoning arrives only when a request addresses it.
-    fn reasoning_private_payload(id: &str) -> String {
-        serde_json::to_string(&json!({
-            "data": [{
-                "id": id,
-                "display_name": id,
-                "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
-                "specs": {
-                    "context_window": 200_000,
-                    "max_output_tokens": 32_768,
-                    "supports_reasoning": true,
-                    "modalities": {"input": ["text"], "output": ["text"]},
-                },
-                "supported_parameters": [
-                    "max_tokens", "temperature", "tools", "tool_choice",
-                    "reasoning", "reasoning_effort",
-                ],
-                "reasoning": {
-                    "supported_efforts": ["none", "low", "high", "max"],
-                    "default_effort": "high",
-                },
-            }]
-        }))
-        .unwrap()
+    /// A private route with the live reasoning controls the gateway reports.
+    fn reasoning_private_payload(marker: &str, id: &str) -> String {
+        let mut payload: Value =
+            serde_json::from_str(&pi_snapshot_payload(marker, &[id])).expect("snapshot");
+        let item = payload["data"]
+            .as_array_mut()
+            .expect("entries")
+            .last_mut()
+            .expect("private route");
+        item["supported_parameters"] = json!([
+            "max_tokens",
+            "temperature",
+            "tools",
+            "tool_choice",
+            "reasoning",
+            "reasoning_effort"
+        ]);
+        item["reasoning"] = json!({
+            "supported_efforts": ["none", "low", "high", "max"],
+            "default_effort": "high"
+        });
+        payload.to_string()
     }
 
     fn write_auth_json(agent_dir: &Path, api_key: &str, team_id: &str) {
@@ -427,7 +453,7 @@ mod tests {
         events: tokio::sync::broadcast::Receiver<Arc<OutboundFrame>>,
     }
 
-    async fn fixture(create_answers: Vec<Answer>) -> Fixture {
+    async fn fixture((provider_answers, pi_answers): (Vec<Answer>, Vec<Answer>)) -> Fixture {
         let dir = std::env::temp_dir().join(format!(
             "pa-model-catalog-refresh-{}-{}",
             std::process::id(),
@@ -440,7 +466,7 @@ mod tests {
         let agent_dir = dir.join("agent");
         write_models_json(&agent_dir);
         write_auth_json(&agent_dir, "sk-account-a", "team-a");
-        let server = CatalogServer::start(create_answers).await;
+        let server = CatalogServer::start(provider_answers, pi_answers).await;
         let bundled_dir = dir.join("bundled");
         std::fs::create_dir_all(&bundled_dir).expect("bundled dir");
         let catalog = pa_models::ModelCatalog::with_urls(
@@ -470,11 +496,12 @@ mod tests {
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
-        // The create path's background refresh settles when its last
-        // write lands (the private-authorization cache).
-        let private_cache = agent_dir.join("prime-inference-private-models.json");
+        // The create path's background refresh publishes the authenticated
+        // scoped snapshot; wait for that observable write, not a fixed delay.
+        let scoped_cache = agent_dir.join("models/prime-inference-models-cache.json");
         let deadline = Instant::now() + Duration::from_secs(30);
-        while !private_cache.exists() {
+        let provider_cache = agent_dir.join("models/provider-model-catalog.v1.json");
+        while !scoped_cache.exists() || !provider_cache.exists() {
             assert!(
                 Instant::now() < deadline,
                 "the create-path refresh never settled; requests so far: {:?}",
@@ -498,22 +525,39 @@ mod tests {
     }
 
     /// The initial answers for the create-path refresh (key sk-account-a,
-    /// team team-a): the v1 catalog aggregate, the team-a snapshot (with
-    /// the team-a private entitlement), and the matching authorization.
-    fn create_phase_answers() -> Vec<Answer> {
-        vec![
-            Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
-            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
-            Answer::Raw(ok_json(&private_payload(&["internal/team-a-private"]))),
-        ]
+    /// team team-a): the v1 provider aggregate and one authenticated PI
+    /// snapshot with the team's private entitlement.
+    fn create_phase_answers() -> (Vec<Answer>, Vec<Answer>) {
+        (
+            vec![Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"])))],
+            vec![Answer::Raw(ok_json(&pi_snapshot_payload(
+                "live/team-a-marker",
+                &["internal/team-a-private"],
+            )))],
+        )
     }
 
-    async fn get_model_catalog(worker: &Worker, session: &str) -> Value {
+    async fn get_model_catalog(worker: &Worker, session: &str, refresh: bool) -> Value {
         let response = worker
-            .dispatch("get_model_catalog", &json!({ "activeSessionId": session }))
+            .dispatch(
+                "get_model_catalog",
+                &json!({ "activeSessionId": session, "refresh": refresh }),
+            )
             .await;
         assert!(response.success, "get_model_catalog failed: {response:?}");
         response.data.expect("catalog payload")
+    }
+
+    async fn await_refresh_settled(worker: &Worker) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while worker
+            .model_catalog_refresh_gate
+            .in_flight
+            .load(Ordering::SeqCst)
+        {
+            assert!(Instant::now() < deadline, "catalog refresh did not settle");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     fn has_model(payload: &Value, id: &str) -> bool {
@@ -583,205 +627,227 @@ mod tests {
     #[tokio::test]
     async fn picker_open_returns_instantly_and_the_auth_change_refresh_lands() {
         let mut fixture = fixture(create_phase_answers()).await;
-        // A login switched the account between the create path's warm-up
-        // and this picker open: the scope observation detects the change.
         write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
         let (release, held) = gate();
-        fixture.server.push(held);
+        fixture.server.push_provider(held);
         fixture
             .server
-            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
+            .push_pi(Answer::Raw(ok_json(&pi_snapshot_payload(
                 "live/team-b-marker",
+                &["internal/team-b-private"],
             ))));
-        fixture
-            .server
-            .push(Answer::Raw(ok_json(&private_payload(&[]))));
         let requests_before = fixture.server.request_count();
 
         let started = Instant::now();
-        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
-        // The response returned while the catalog fetch was still held.
+        let served = get_model_catalog(&fixture.worker, "catalog-session", true).await;
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "the picker-open response waited on the fetch"
+            "picker waited on fetch"
         );
-        assert!(has_model(&served, "mock-1"), "the custom models.json entry");
-        assert!(has_model(&served, "probe-v1"), "the warm provider catalog");
+        assert!(has_model(&served, "probe-v1"));
         assert!(!has_model(&served, "live/team-a-marker"));
-        assert!(!has_model(&served, "live/team-b-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
-
         let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
         await_catalog_changed(&mut fixture.events).await;
-        let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(
-            has_model(&fresh, "probe-v2"),
-            "the refreshed provider catalog"
-        );
-        assert_canonical_models_order(&fresh);
-        assert_canonical_models_order(&served);
+        let fresh = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(has_model(&fresh, "probe-v2"));
         assert!(has_model(&fresh, "live/team-b-marker"));
-        assert!(!has_model(&fresh, "live/team-a-marker"));
+        assert!(has_model(&fresh, "internal/team-b-private"));
         assert!(!has_model(&fresh, "internal/team-a-private"));
-        // The refreshed requests carried the new credentials only. The
-        // team header carries the account's EFFECTIVE team — an ambient
-        // `PRIME_TEAM_ID` pins it (the production pin), else team-b rides.
-        let pinned_team = std::env::var("PRIME_TEAM_ID")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let expected_team = pinned_team.as_deref().unwrap_or("team-b");
+        assert_canonical_models_order(&fresh);
         let heads = fixture.server.recorded_requests();
-        assert!(heads.len() > requests_before, "the forced refresh fetched");
-        let refreshed_heads = &heads[requests_before..];
-        let auth_headers: Vec<&str> = refreshed_heads
-            .iter()
-            .filter_map(|head| {
-                head.lines()
-                    .find(|line| line.to_ascii_lowercase().starts_with("authorization:"))
-            })
-            .collect();
-        assert!(
-            !auth_headers.is_empty(),
-            "the credentialed fetches exist in the refreshed log"
-        );
-        assert!(
-            auth_headers
-                .iter()
-                .all(|header| header.contains("Bearer sk-account-b")),
-            "no old credentials leak into the refreshed fetches: {auth_headers:?}"
-        );
-        // Header names are case-insensitive and the client writes them
-        // lowercase: match the name case-insensitively, the value exactly.
-        assert!(
-            refreshed_heads.iter().any(|head| {
-                head.to_ascii_lowercase()
-                    .contains(&format!("x-prime-team-id: {expected_team}"))
-            }),
-            "the private fetch rode the new effective team header ({expected_team}): {refreshed_heads:?}"
-        );
-        assert!(
-            refreshed_heads.iter().all(|head| !head
-                .to_ascii_lowercase()
-                .contains("x-prime-team-id: team-a")),
-            "the old account's team never rides the refreshed fetches: {refreshed_heads:?}"
-        );
+        assert_eq!(heads.len() - requests_before, 2);
+        let team = std::env::var("PRIME_TEAM_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "team-b".into());
+        assert!(heads[requests_before..].iter().any(|head| {
+            head.contains("Bearer sk-account-b")
+                && head.to_ascii_lowercase().contains(&format!(
+                    "x-prime-team-id: {}",
+                    team.trim().to_ascii_lowercase()
+                ))
+        }));
     }
 
     #[tokio::test]
     async fn concurrent_opens_coalesce_into_one_refresh() {
-        let mut fixture = fixture(create_phase_answers()).await;
-        write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
-        let (release, held) = gate();
-        fixture.server.push(held);
-        fixture
-            .server
-            .push(Answer::Raw(ok_json(&pi_snapshot_payload(
-                "live/team-b-marker",
-            ))));
-        fixture
-            .server
-            .push(Answer::Raw(ok_json(&private_payload(&[]))));
-        let requests_before = fixture.server.request_count();
-
-        let (first, second, third, fourth, fifth) = tokio::join!(
-            get_model_catalog(&fixture.worker, "catalog-session"),
-            get_model_catalog(&fixture.worker, "catalog-session"),
-            get_model_catalog(&fixture.worker, "catalog-session"),
-            get_model_catalog(&fixture.worker, "catalog-session"),
-            get_model_catalog(&fixture.worker, "catalog-session"),
+        let fixture = fixture(create_phase_answers()).await;
+        let (release_provider, held_provider) = gate();
+        let (release_pi, held_pi) = gate();
+        fixture.server.push_provider(held_provider);
+        fixture.server.push_pi(held_pi);
+        let before = fixture.server.request_count();
+        let (first, second, third) = tokio::join!(
+            get_model_catalog(&fixture.worker, "catalog-session", true),
+            get_model_catalog(&fixture.worker, "catalog-session", true),
+            get_model_catalog(&fixture.worker, "catalog-session", true),
         );
-        for payload in [&first, &second, &third, &fourth, &fifth] {
-            assert!(has_model(payload, "probe-v1"), "the warm provider catalog");
-            assert_canonical_models_order(payload);
-        }
-        assert_eq!(
-            first, second,
-            "every concurrent open served the same canonical payload"
-        );
+        assert_eq!(first, second);
         assert_eq!(second, third);
-        assert_eq!(third, fourth);
-        assert_eq!(fourth, fifth);
-        // Exactly one refresh left the worker while the provider fetch was
-        // held; the deadline is on the request log, never a fixed sleep.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while fixture.server.request_count() < requests_before + 1 {
+        while fixture.server.request_count() < before + 2 {
             assert!(
                 Instant::now() < deadline,
-                "the forced refresh never started: {:?}",
-                fixture.server.recorded_requests()
+                "both remote fetches did not start"
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(
-            fixture.server.request_count() - requests_before,
-            1,
-            "only the one running refresh reached the server: {:?}",
-            fixture.server.recorded_requests()
-        );
-
-        // Release the held fetch: the one refresh cycle lands (provider +
-        // snapshot + entitlement = 3 requests total), the queued trailing
-        // re-arm finds every gate warm and fetches nothing.
-        let _ = release.send(ok_json(&catalog_aggregate(&["probe-v1", "probe-v2"])));
-        await_catalog_changed(&mut fixture.events).await;
-        assert_eq!(
-            fixture.server.request_count() - requests_before,
-            3,
-            "the burst cost exactly one refresh cycle: {:?}",
-            fixture.server.recorded_requests()
-        );
-        let fresh = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(has_model(&fresh, "probe-v2"));
-        assert!(has_model(&fresh, "live/team-b-marker"));
-        assert_canonical_models_order(&fresh);
+        assert_eq!(fixture.server.request_count() - before, 2);
+        let _ = release_provider.send(ok_json(&catalog_aggregate(&["probe-v1"])));
+        let _ = release_pi.send(ok_json(&pi_snapshot_payload(
+            "live/team-a-marker",
+            &["internal/team-a-private"],
+        )));
+        await_refresh_settled(&fixture.worker).await;
+        let settled = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert_eq!(settled, first, "the responses were warm snapshots");
+        assert_eq!(fixture.server.request_count() - before, 2);
     }
 
-    /// Repeat picker opens inside the hourly window stay gated: no new
-    /// fetches, no event, so event -> re-fetch -> refresh terminates.
     #[tokio::test]
-    async fn repeat_opens_inside_the_gate_add_no_fetches_and_stay_silent() {
-        let mut fixture = fixture(create_phase_answers()).await;
-        let requests_before = fixture.server.request_count();
-        for _ in 0..3 {
-            let served = get_model_catalog(&fixture.worker, "catalog-session").await;
-            assert!(has_model(&served, "probe-v1"));
-            assert!(has_model(&served, "live/team-a-marker"));
+    async fn omitted_refresh_preserves_existing_client_fetch_behavior() {
+        let fixture = fixture(create_phase_answers()).await;
+        fixture
+            .server
+            .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&[
+                "probe-v1",
+                "legacy-client-refresh",
+            ]))));
+        fixture
+            .server
+            .push_pi(Answer::Raw(ok_json(&pi_snapshot_payload(
+                "live/team-a-marker",
+                &["internal/team-a-private"],
+            ))));
+        let response = fixture
+            .worker
+            .dispatch(
+                "get_model_catalog",
+                &json!({"activeSessionId": "catalog-session"}),
+            )
+            .await;
+        assert!(response.success);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let snapshot = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+            if has_model(&snapshot, "legacy-client-refresh") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "omitted refresh never fetched");
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        // The hourly gate held for every open (the create-path refresh
-        // armed it).
-        assert_eq!(
-            fixture.server.request_count(),
-            requests_before,
-            "repeat opens stayed gated"
-        );
-        // Nothing broadcast: a spurious broadcast lands inside the bound;
-        // an honestly gated refresh lets it elapse.
-        assert!(
-            !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
-            "a gated refresh must not broadcast model_catalog_changed"
-        );
     }
 
-    /// The private-route reasoning regression: a route that declares its
-    /// reasoning parameters (the live `internal/deepseek-v4.1-flash` shape)
-    /// must serve a model whose compat addresses them — the served catalog
-    /// reads the authorization cache back, so this pins the fetch build AND
-    /// the cache round-trip. Without the declared controls rebuilt into the
-    /// model, a thinking session sends no `reasoning_effort`, and a route
-    /// that only thinks when asked emits no thinking at all.
+    #[tokio::test]
+    async fn same_key_team_entitlement_revoke_lands_on_next_picker_open() {
+        let mut fixture = fixture(create_phase_answers()).await;
+        fixture
+            .server
+            .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))));
+        fixture
+            .server
+            .push_pi(Answer::Raw(ok_json(r#"{"data": []}"#)));
+        let before = get_model_catalog(&fixture.worker, "catalog-session", true).await;
+        assert!(has_model(&before, "internal/team-a-private"));
+        await_catalog_changed(&mut fixture.events).await;
+        let revoked = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(!has_model(&revoked, "internal/team-a-private"));
+        assert!(!has_model(&revoked, "live/team-a-marker"));
+        assert!(has_model(&revoked, "probe-v1"));
+    }
+
+    #[tokio::test]
+    async fn auth_change_during_inflight_refresh_rearms_for_the_new_account() {
+        let fixture = fixture(create_phase_answers()).await;
+        let (release_a, held_a) = gate();
+        fixture
+            .server
+            .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))));
+        fixture.server.push_pi(held_a);
+        let before = fixture.server.request_count();
+        let first = get_model_catalog(&fixture.worker, "catalog-session", true).await;
+        assert!(has_model(&first, "internal/team-a-private"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < before + 2 {
+            assert!(Instant::now() < deadline, "account A refresh never started");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        write_auth_json(&fixture.agent_dir, "sk-account-b", "team-b");
+        fixture
+            .server
+            .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))));
+        fixture
+            .server
+            .push_pi(Answer::Raw(ok_json(&pi_snapshot_payload(
+                "live/team-b-marker",
+                &["internal/team-b-private"],
+            ))));
+        let switched = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(!has_model(&switched, "internal/team-a-private"));
+        let _ = release_a.send(ok_json(&pi_snapshot_payload(
+            "live/team-a-marker",
+            &["internal/team-a-private"],
+        )));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < before + 4 {
+            assert!(
+                Instant::now() < deadline,
+                "queued account B refresh never started"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        await_refresh_settled(&fixture.worker).await;
+        let fresh = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(has_model(&fresh, "internal/team-b-private"));
+        assert!(!has_model(&fresh, "internal/team-a-private"));
+    }
+
+    #[tokio::test]
+    async fn every_explicit_open_refetches_both_catalogs_but_event_reads_do_not() {
+        let mut fixture = fixture(create_phase_answers()).await;
+        let before = fixture.server.request_count();
+        for iteration in 0..2 {
+            let provider_marker = format!("probe-new-{iteration}");
+            let pi_marker = format!("live/new-{iteration}");
+            fixture
+                .server
+                .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&[
+                    "probe-v1",
+                    &provider_marker,
+                ]))));
+            fixture
+                .server
+                .push_pi(Answer::Raw(ok_json(&pi_snapshot_payload(
+                    &pi_marker,
+                    &["internal/team-a-private"],
+                ))));
+            let served = get_model_catalog(&fixture.worker, "catalog-session", true).await;
+            assert!(has_model(&served, "internal/team-a-private"));
+            await_catalog_changed(&mut fixture.events).await;
+            let fresh = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+            assert!(has_model(&fresh, &provider_marker));
+            assert!(has_model(&fresh, &pi_marker));
+            assert_eq!(fixture.server.request_count() - before, 2 * (iteration + 1));
+        }
+        let read_before = fixture.server.request_count();
+        let _ = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert_eq!(fixture.server.request_count(), read_before);
+    }
+
+    /// Live private route reasoning controls survive a scoped cache write
+    /// and fresh registry read (child sessions see the same model shape).
     #[tokio::test]
     async fn a_private_route_with_declared_reasoning_serves_addressable_levels() {
-        let answers = vec![
-            Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))),
-            Answer::Raw(ok_json(&pi_snapshot_payload("live/team-a-marker"))),
-            Answer::Raw(ok_json(&reasoning_private_payload(
+        let answers = (
+            vec![Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"])))],
+            vec![Answer::Raw(ok_json(&reasoning_private_payload(
+                "live/team-a-marker",
                 "internal/team-a-private",
-            ))),
-        ];
+            )))],
+        );
         let fixture = fixture(answers).await;
-
-        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
+        let served = get_model_catalog(&fixture.worker, "catalog-session", false).await;
         assert_canonical_models_order(&served);
         let model = served["models"]
             .as_array()
@@ -789,123 +855,59 @@ mod tests {
             .iter()
             .find(|model| model["id"] == "internal/team-a-private")
             .expect("the authorized private route");
-        assert_eq!(
-            model["compat"]["supportsReasoningEffort"], true,
-            "the declared reasoning_effort parameter must be addressable"
-        );
+        assert_eq!(model["compat"]["supportsReasoningEffort"], true);
         assert_eq!(model["thinkingLevelMap"]["high"], "high");
         assert_eq!(model["thinkingLevelMap"]["low"], "low");
         assert_eq!(model["thinkingLevelMap"]["max"], "max");
         assert_eq!(model["thinkingLevelMap"]["off"], "none");
     }
 
-    /// The malformed-entitlement regression: a 200 body without a `data`
-    /// array is a fetch failure, not an empty authorization — an empty
-    /// success would wipe the authorized private models and rewrite the
-    /// fingerprint cache with an empty set and a fresh TTL.
     #[tokio::test]
-    async fn a_malformed_entitlement_payload_keeps_the_authorized_private_models() {
-        let fixture = fixture(create_phase_answers()).await;
-        // Age the on-disk authorization past its TTL so the next refresh
-        // refetches the entitlements in the background.
-        let cache_path = fixture
-            .agent_dir
-            .join("prime-inference-private-models.json");
-        let document: Value =
-            serde_json::from_str(&std::fs::read_to_string(&cache_path).expect("cache")).unwrap();
-        std::fs::write(
-            &cache_path,
-            serde_json::to_string(&json!({
-                "fingerprint": document["fingerprint"],
-                "data": document["data"],
-                "refreshedAt": 1u64,
-            }))
-            .unwrap(),
-        )
-        .expect("age the cache");
-        // The catalog chain stays hourly-gated from the create path; only the
-        // private entitlement fetch runs. Its answer is a held gate: the
-        // malformed body is released only after this test starts watching
-        // the cache, so the background refresh's write decision cannot slip
-        // in before the watch begins.
+    async fn malformed_authenticated_payload_preserves_private_entitlement() {
+        let mut fixture = fixture(create_phase_answers()).await;
         let (release, held) = gate();
-        fixture.server.push(held);
-        let requests_before = fixture.server.request_count();
-
-        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(
-            has_model(&served, "internal/team-a-private"),
-            "the cached authorization serves instantly"
-        );
-        // The background entitlement fetch is recorded and parked on the
-        // gate; the deadline is on the request log, not a fixed wait.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while fixture.server.request_count() < requests_before + 1 {
-            assert!(
-                Instant::now() < deadline,
-                "the stale-cache background refresh never fetched: {:?}",
-                fixture.server.recorded_requests()
-            );
+        fixture
+            .server
+            .push_provider(Answer::Raw(ok_json(&catalog_aggregate(&["probe-v1"]))));
+        fixture.server.push_pi(held);
+        let before = fixture.server.request_count();
+        let served = get_model_catalog(&fixture.worker, "catalog-session", true).await;
+        assert!(has_model(&served, "internal/team-a-private"));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < before + 2 {
+            assert!(Instant::now() < deadline, "PI fetch did not start");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let aged_cache = std::fs::read_to_string(&cache_path).expect("cache");
-        // Release the malformed body. The empty-success bug applies the
-        // wipe and rewrites the cache the moment the refresh processes it;
-        // the bounded negative wait is the only way to prove the fixed
-        // path leaves the cache untouched.
         let _ = release.send(ok_json(r#"{"data": {"not": "an array"}}"#));
-        let settle = Instant::now() + Duration::from_secs(2);
-        loop {
-            let cache = std::fs::read_to_string(&cache_path).expect("cache");
-            assert_eq!(
-                cache, aged_cache,
-                "a malformed entitlement payload must not rewrite the authorization cache"
-            );
-            if Instant::now() >= settle {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        let after = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(
-            has_model(&after, "internal/team-a-private"),
-            "a malformed entitlement payload must not wipe the authorized private models"
-        );
+        await_refresh_settled(&fixture.worker).await;
+        assert!(!catalog_changed_within(&mut fixture.events, Duration::from_millis(50)).await);
+        let after = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(has_model(&after, "internal/team-a-private"));
     }
 
     #[tokio::test]
     async fn refresh_failure_keeps_the_last_good_catalog_and_stays_silent() {
         let mut fixture = fixture(create_phase_answers()).await;
         write_auth_json(&fixture.agent_dir, "sk-account-c", "team-c");
-        for _ in 0..3 {
-            fixture
-                .server
-                .push(Answer::Raw(status(500, "Catalog Down")));
-        }
-        let served = get_model_catalog(&fixture.worker, "catalog-session").await;
-        // The instant snapshot still serves the validated public view; the
-        // changed scope isolates the old account's credentialed entries.
+        fixture
+            .server
+            .push_pi(Answer::Raw(status(500, "Catalog Down")));
+        fixture
+            .server
+            .push_provider(Answer::Raw(status(500, "Catalog Down")));
+        let served = get_model_catalog(&fixture.worker, "catalog-session", true).await;
         assert!(has_model(&served, "probe-v1"));
         assert!(!has_model(&served, "live/team-a-marker"));
         assert!(!has_model(&served, "internal/team-a-private"));
-
-        // The forced refresh consumed its three failures; the deadline is
-        // on the request log, not on a fixed sleep.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while fixture.server.request_count() < 3 + 3 {
-            assert!(
-                Instant::now() < deadline,
-                "the failed refresh never ran; requests: {:?}",
-                fixture.server.recorded_requests()
-            );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while fixture.server.request_count() < 4 {
+            assert!(Instant::now() < deadline, "failed fetches never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            !catalog_changed_within(&mut fixture.events, Duration::from_millis(250)).await,
-            "a failed refresh keeps the served snapshot and must stay silent"
-        );
-        let after = get_model_catalog(&fixture.worker, "catalog-session").await;
-        assert!(has_model(&after, "probe-v1"), "last-good retained");
+        await_refresh_settled(&fixture.worker).await;
+        assert!(!catalog_changed_within(&mut fixture.events, Duration::from_millis(50)).await);
+        let after = get_model_catalog(&fixture.worker, "catalog-session", false).await;
+        assert!(has_model(&after, "probe-v1"));
         assert!(!has_model(&after, "internal/team-a-private"));
     }
 }

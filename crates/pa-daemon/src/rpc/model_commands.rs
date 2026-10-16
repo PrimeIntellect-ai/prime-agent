@@ -14,10 +14,7 @@ use super::protocol::ResponseData;
 /// The available-models registry over the mode's agent dir (the same resolution `set_model` uses).
 fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
     let auth = pa_core::auth::AuthStorage::create(&state.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, state.agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
-    registry
+    pa_core::models::ModelRegistry::create(auth, state.agent_dir.join("models.json"))
 }
 
 /// `set_model`: resolve through the available catalog, swap the live

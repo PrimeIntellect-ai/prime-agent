@@ -25,11 +25,8 @@ impl StartupModelProbe {
     fn resolve(&self) -> (Option<pa_types::ai::Model>, bool) {
         let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
-        let mut registry =
+        let registry =
             pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
-        // Sync resolution on a fresh registry must adopt the on-disk private
-        // authorization cache before `get_available`.
-        registry.load_private_authorization_from_cache();
         let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
         let available: Vec<pa_types::ai::Model> =
             registry.get_available().into_iter().cloned().collect();

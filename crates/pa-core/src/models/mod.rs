@@ -1,11 +1,6 @@
 //! Model subsystem: resolver and Prime Inference private models.
 
 pub use allowlist::{model_allowed, ModelAllowlistRefusal};
-pub use private_auth::{
-    get_private_prime_inference_models, private_prime_authorization_fingerprint,
-    read_private_prime_authorization_cache, write_private_prime_authorization_cache,
-    PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
-};
 pub use registry::{
     ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth, SetModelSelectionError,
 };
@@ -23,8 +18,6 @@ pub(crate) mod catalog_chain;
 pub(crate) mod custom;
 pub mod image_model_routing;
 pub(crate) mod prime_inference;
-pub(crate) mod prime_inference_catalog;
-pub(crate) mod private_auth;
 pub(crate) mod registry;
 pub(crate) mod resolver;
 pub(crate) mod session_restore;
@@ -38,8 +31,7 @@ pub use image_model_routing::{
     resolve_image_model_override, ImageModelRoutingInputs, ResolvedImageModel,
 };
 pub use prime_inference::{
-    is_private_prime_inference_model, is_private_prime_inference_model_id,
-    private_prime_inference_models, PRIME_INFERENCE_BASE_URL,
+    is_private_prime_inference_model, is_private_prime_inference_model_id, PRIME_INFERENCE_BASE_URL,
 };
 pub use resolver::{
     build_fallback_model, failover_candidates, find_exact_model_reference_match,

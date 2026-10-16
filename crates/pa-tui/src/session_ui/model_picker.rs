@@ -1,4 +1,4 @@
-//! The `/model` catalog's TTL-gated refresh and landed-catalog fold,
+//! The `/model` catalog's background refresh and landed-catalog fold,
 //! the picker's open/key handling, and the model/thinking-level application
 //! paths.
 use super::{
@@ -7,10 +7,6 @@ use super::{
     Result, SessionUi, SetModelOutcome, StatusKind, UI_REQUEST_TIMEOUT_MS,
 };
 use serde_json::Value;
-
-/// How long a fetched model catalog stays fresh; a `/model` open past it
-/// refreshes again in the background.
-const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
 /// with configured auth.
@@ -32,7 +28,7 @@ impl SessionUi {
     }
 
     /// Open the `/model` picker over the cached catalog, its search prefilled with `search`. A
-    /// refresh fires in the background when the snapshot is stale and lands into the open picker.
+    /// refresh fires in the background on every open and lands into the open picker.
     pub(super) async fn open_model_picker(
         &mut self,
         view: &mut AgentView,
@@ -75,10 +71,9 @@ impl SessionUi {
         let crate::model_picker::ModelCommandOutcome::Open(picker) =
             ModelPicker::open(options, search);
         view.model_picker = Some(*picker);
-        let force = !search.trim().is_empty();
-        if self.model_refresh_due(force) {
-            self.spawn_model_catalog_refresh();
-        }
+        // Every explicit picker open asks the daemon to fetch both catalogs
+        // in the background; its response serves the warm snapshot immediately.
+        self.request_model_catalog(true);
         Ok(())
     }
 
@@ -177,9 +172,12 @@ impl SessionUi {
         })
     }
 
-    /// Fire a background `get_model_catalog` refresh: the response lands through the run loop's
-    /// channel, and failures leave the current snapshot alone.
+    /// The initial/event/auth snapshot read: never triggers a remote fetch.
     pub(crate) fn spawn_model_catalog_refresh(&self) {
+        self.request_model_catalog(false);
+    }
+
+    fn request_model_catalog(&self, refresh: bool) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let updates = self.catalog_updates.clone();
@@ -188,7 +186,7 @@ impl SessionUi {
                 .request_ok(DaemonCommand::GetModelCatalog {
                     id: None,
                     active_session_id,
-                    rest: Map::default(),
+                    rest: Map::from_iter([("refresh".to_string(), Value::Bool(refresh))]),
                 })
                 .await
             else {
@@ -218,21 +216,10 @@ impl SessionUi {
         });
     }
 
-    /// Whether the catalog refresh is due: forced, never fetched, or older
-    /// than the TTL.
-    pub(crate) fn model_refresh_due(&self, force: bool) -> bool {
-        force
-            || match self.models_fetched_at {
-                None => true,
-                Some(fetched) => fetched.elapsed() > MODEL_CATALOG_REFRESH_TTL,
-            }
-    }
-
     /// Fold a landed catalog refresh into the session and any open picker.
     pub(crate) fn apply_model_catalog(&mut self, update: ModelCatalogUpdate, view: &mut AgentView) {
         self.model_catalog = update.models;
         self.model_configured_providers = update.configured_providers;
-        self.models_fetched_at = Some(std::time::Instant::now());
         let current = self.current_model(view);
         if let Some(picker) = view.model_picker.as_mut() {
             picker.update_state(

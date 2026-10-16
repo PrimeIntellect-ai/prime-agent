@@ -238,8 +238,7 @@ fn resolve_available_model(
     model_id: &str,
 ) -> Result<pa_types::ai::Model, pa_core::models::SetModelSelectionError> {
     let auth = pa_core::auth::AuthStorage::create(agent_dir);
-    let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-    registry.load_private_authorization_from_cache();
+    let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
     registry
         .resolve_set_model_selection(provider, model_id)
         .cloned()
@@ -500,9 +499,7 @@ mod tests {
             auth.mark_auth_stale("anthropic"),
             "the stored credential marks stale"
         );
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
+        let registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
         let (provider, model_id) = first_built_in_anthropic_model();
         let model = registry
             .resolve_set_model_selection(&provider, &model_id)

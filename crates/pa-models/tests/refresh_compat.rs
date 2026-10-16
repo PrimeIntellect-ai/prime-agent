@@ -393,12 +393,14 @@ async fn prime_inference_cache_is_scope_keyed_and_isolated() {
         .refresh(&team_a, true)
         .await
         .expect("team-a live models");
-    assert_eq!(a.len(), 60, "public live entries only");
-    // The public models cache never includes private ids (the private
-    // entitlement flow is the registry's, over its own authorization).
+    assert_eq!(
+        a.len(),
+        ids.len() + 1,
+        "authenticated snapshot includes the private entry"
+    );
     assert!(
-        !a.iter().any(|m| m.id == "internal/team-a-secret"),
-        "private ids are filtered from the public models cache"
+        a.iter().any(|m| m.id == "internal/team-a-secret"),
+        "the authenticated scope grants the private route"
     );
     let request = &server.recorded_requests()[0];
     assert!(request.contains("authorization: Bearer key-a"), "{request}");
@@ -478,6 +480,52 @@ async fn unauthorized_prime_inference_clears_only_that_scope() {
         "cache file removed"
     );
     assert!(catalog.get(&other).is_none());
+}
+
+#[tokio::test]
+async fn malformed_authenticated_catalog_preserves_last_good_until_explicit_revocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = json!({"data": [{
+        "id": "internal/entitled",
+        "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0},
+        "specs": {
+            "context_window": 200_000, "max_output_tokens": 32_768,
+            "supports_reasoning": true,
+            "modalities": {"input": ["text"], "output": ["text"]},
+        },
+    }]});
+    let server = common::MockServer::start(vec![
+        common::ok_json(good.to_string(), None),
+        common::ok_json(
+            json!({"data": [{"id": "missing-pricing"}]}).to_string(),
+            None,
+        ),
+        common::ok_json(json!({"data": []}).to_string(), None),
+    ])
+    .await;
+    let base = server.url("/api/v1");
+    let catalog = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
+    let creds = PrimeInferenceCredentials {
+        api_key: "key-a".into(),
+        team_id: Some("team-a".into()),
+    };
+    assert_eq!(
+        catalog.refresh(&creds, true).await.unwrap()[0].id,
+        "internal/entitled"
+    );
+    let preserved = catalog
+        .refresh(&creds, true)
+        .await
+        .expect("last-good snapshot");
+    assert_eq!(preserved[0].id, "internal/entitled");
+    assert_eq!(catalog.get(&creds).unwrap()[0].id, "internal/entitled");
+    let fresh = PrimeInferenceCatalog::with_base_url(Some(PathBuf::from(dir.path())), &base);
+    assert_eq!(fresh.get(&creds).unwrap()[0].id, "internal/entitled");
+    assert!(
+        catalog.refresh(&creds, true).await.unwrap().is_empty(),
+        "valid revocation"
+    );
+    assert!(catalog.get(&creds).unwrap().is_empty());
 }
 
 #[test]
