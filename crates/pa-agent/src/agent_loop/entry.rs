@@ -20,16 +20,17 @@ pub async fn run_agent_loop(
     signal: Option<&AbortSignal>,
     stream_fn: Option<&StreamFn>,
 ) -> anyhow::Result<Vec<AgentMessage>> {
-    let mut new_messages: Vec<AgentMessage> = prompts.clone();
+    let mut new_messages: Vec<AgentMessage> = Vec::new();
     let mut current_context = AgentContext {
         system_prompt: context.system_prompt.clone(),
         tools: context.tools.clone(),
         messages: context.messages.clone(),
     };
-    current_context.messages.extend(prompts.iter().cloned());
-
     emit(AgentEvent::AgentStart).await?;
     emit(AgentEvent::TurnStart).await?;
+    super::run::before_input_batch(&prompts, config, signal).await?;
+    current_context.messages.extend(prompts.iter().cloned());
+    new_messages.extend(prompts.iter().cloned());
     for prompt in &prompts {
         emit(AgentEvent::MessageStart {
             message: prompt.clone(),

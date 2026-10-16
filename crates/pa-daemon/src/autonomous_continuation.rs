@@ -3,6 +3,7 @@
 //! (`_getContinuationMessages`), churning INSIDE the one prompt wait - no
 //! run boundary between continuation turns, one `agent_end` per prompt wait.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pa_core::session_engine::provider_adapter::json_round_trip;
@@ -49,7 +50,33 @@ impl AgentSessionEngine {
         let Some(weak) = weak else {
             return;
         };
+        let stop_eligible = Arc::new(AtomicBool::new(false));
+        let eligibility = Arc::clone(&stop_eligible);
+        let eligibility_engine = weak.clone();
+        agent.set_stop_hook_eligibility(Some(Arc::new(move || {
+            let eligibility = Arc::clone(&eligibility);
+            let weak = eligibility_engine.clone();
+            Box::pin(async move {
+                let Some(engine) = weak.upgrade() else {
+                    return false;
+                };
+                // Recheck ownership after an external Stop command: new work
+                // may have arrived since the continuation consult settled.
+                eligibility.load(Ordering::Acquire)
+                    && !engine.session_is_closed()
+                    && !engine.session_input_queued()
+                    && !engine.goal_owns_continuation_wakeup().await
+                    && !engine.requested_compaction_scheduled().await
+                    && !engine.has_unsettled_rlm_work().await
+                    && !engine.has_live_background_bash_handles()
+                    && !engine.autonomous_threshold_due().await
+            }) as pa_agent::BoxFut<'static, bool>
+        })));
         agent.set_continuation_hook(Some(Arc::new(move |context, signal| {
+            // Empty continuation rows can also mean a held boundary, so each
+            // consult must explicitly establish a genuine natural stop.
+            stop_eligible.store(false, Ordering::Release);
+            let stop_eligible = Arc::clone(&stop_eligible);
             let weak = weak.clone();
             Box::pin(async move {
                 let Some(engine) = weak.upgrade() else {
@@ -60,7 +87,13 @@ impl AgentSessionEngine {
                 if signal.is_aborted() || engine.session_is_closed() {
                     return Ok(Vec::new());
                 }
-                Ok(engine.autonomous_continuation_rows(&context.message).await)
+                let rows = engine
+                    .autonomous_continuation_rows(&context.message, &stop_eligible)
+                    .await;
+                if signal.is_aborted() || engine.session_is_closed() {
+                    stop_eligible.store(false, Ordering::Release);
+                }
+                Ok(rows)
             })
                 as pa_agent::BoxFut<'static, anyhow::Result<Vec<pa_agent::types::AgentMessage>>>
         })));
@@ -82,7 +115,9 @@ impl AgentSessionEngine {
     pub(crate) async fn autonomous_continuation_rows(
         self: &Arc<Self>,
         message: &pa_agent::types::AssistantMessage,
+        stop_eligible: &AtomicBool,
     ) -> Vec<pa_agent::types::AgentMessage> {
+        stop_eligible.store(false, Ordering::Release);
         // A closed session (killed/stopped) mints no continuation.
         if self.session_is_closed() {
             return Vec::new();
@@ -122,12 +157,14 @@ impl AgentSessionEngine {
             }
             return Vec::new();
         }
-        match self.autonomous_follow_up_text(message).await {
-            Some(text) => vec![pa_core::autonomous::autonomous_continuation_loop_row(
+        if let Some(text) = self.autonomous_follow_up_text(message).await {
+            vec![pa_core::autonomous::autonomous_continuation_loop_row(
                 &text,
                 pa_core::autonomous::now_millis(),
-            )],
-            None => Vec::new(),
+            )]
+        } else {
+            stop_eligible.store(true, Ordering::Release);
+            Vec::new()
         }
     }
 

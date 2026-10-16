@@ -19,6 +19,7 @@
 //! Public API: the tool-definition contract; subsystem internals are `pub(crate)`.
 //! `SessionEngine` (message in -> events out) is the future facade.
 
+mod hooks;
 pub(crate) mod tools;
 
 // Tool-definition contract.

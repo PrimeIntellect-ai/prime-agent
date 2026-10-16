@@ -10,7 +10,7 @@ use serde_json::Value;
 use pa_agent::types::AgentEvent;
 use pa_agent::types::AgentMessage;
 use pa_core::session_engine::session_commands::{
-    execute_session_command, session_command_echo_row, SessionCommandParams,
+    execute_session_command_with_compaction_permit, session_command_echo_row, SessionCommandParams,
 };
 use pa_core::session_engine::session_events::agent_event_json;
 use pa_core::session_engine::{PromptOptions, PromptOutcome};
@@ -32,7 +32,10 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         .ok_or_else(|| "prompt requires a message".to_string())?;
     let images = protocol::command_images(payload);
     let behavior = protocol::command_streaming_behavior(payload);
-    let handle = state.session.handle().await;
+    // Classification expands session-owned templates, so reserve cancellation
+    // before waiting for the handle and discard it for ordinary model prompts.
+    let compact_operation = state.manual_compaction_cancel.register();
+    let mut handle = state.session.handle().await;
     let engine = handle.engine.clone();
     let admission = engine
         .session
@@ -54,11 +57,34 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         kick_queue_pump(state, &engine);
         return Ok(ResponseData::Absent);
     };
-    // The handle guard stays held through the command's execution: a
-    // replacement can never dispose the kernel mid-command. The model
-    // and key pass THROUGH: a re-acquisition behind a waiting writer
-    // would deadlock.
     let model = handle.model.clone();
+    let compact_permit = if command.name == "compact" {
+        let signal = compact_operation.signal();
+        // The external preflight must not retain the handle, session_ops or
+        // autonomous locks. Revalidate the snapshot before guarded mutation.
+        drop(handle);
+        let permit = tokio::select! {
+            biased;
+            () = state.session.shutdown_cancelled() => {
+                return Err("A signal exit is in progress".to_string());
+            }
+            result = engine.session.preflight_compaction_hook(
+                pa_core::session_engine::compact_session::CompactionTrigger::Manual,
+                (!command.args.is_empty()).then_some(command.args.as_str()), &model, Some(&signal),
+            ) => result.map_err(|error| format!("{error:#}"))?,
+        };
+        handle = state.session.handle().await;
+        if !Arc::ptr_eq(&engine, &handle.engine) || handle.model != model {
+            return Err(
+                "Session or model changed during compaction hook; retry compact".to_string(),
+            );
+        }
+        Some(permit)
+    } else {
+        None
+    };
+    // The handle now stays held through execution. A consumed preflight permit
+    // cannot execute another hook inside the command's serialization guards.
     let api_key = handle.api_key.clone();
     let command_result = run_session_command(
         state.as_ref(),
@@ -67,6 +93,7 @@ pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseDa
         model,
         api_key,
         &images,
+        compact_permit,
     )
     .await;
     drop(handle);
@@ -110,6 +137,7 @@ async fn run_session_command(
     model: pa_types::ai::Model,
     api_key: Option<String>,
     images: &[pa_agent::types::ImageContent],
+    compact_permit: Option<pa_core::session_engine::compact_session::CompactionHookPermit>,
 ) -> Result<(), String> {
     let is_compact = command.name == "compact";
     // The compact frames carry the command's arguments as the
@@ -154,7 +182,14 @@ async fn run_session_command(
         };
         // The executor never errors out of the call: failures ride
         // `execution.error` and the session events.
-        execute_session_command(&engine, &mut params, command, images).await
+        execute_session_command_with_compaction_permit(
+            &engine,
+            &mut params,
+            command,
+            images,
+            compact_permit,
+        )
+        .await
     };
     if is_compact {
         // The post-compaction kernel notice rides between the start and

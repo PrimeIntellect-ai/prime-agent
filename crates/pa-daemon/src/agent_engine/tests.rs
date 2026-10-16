@@ -12,6 +12,8 @@ mod autonomous;
 mod compaction;
 mod failover_facts;
 mod goal;
+#[cfg(unix)]
+mod hook_admission;
 mod model_resolution;
 mod quota_park;
 mod reload;

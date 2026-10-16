@@ -21,7 +21,7 @@ use pa_core::session_engine::provider_adapter::{
     json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
 };
 use pa_core::session_engine::session_commands::{
-    execute_session_command, SessionCommandExecution, SessionCommandParams,
+    execute_session_command_with_compaction_permit, SessionCommandExecution, SessionCommandParams,
 };
 use pa_types::ai::Model;
 
@@ -63,7 +63,7 @@ mod config;
 
 mod artifacts;
 
-pub(crate) use artifacts::{artifact_reference, now_millis};
+pub(crate) use artifacts::artifact_reference;
 
 pub use config::AgentEngineConfig;
 pub(crate) use config::AutonomousAdmission;
@@ -303,6 +303,9 @@ pub struct AgentSessionEngine {
     /// serving the newest store).
     pub(crate) reload_lock: std::sync::Mutex<()>,
 
+    /// Manual slash compaction registers before external hook preflight;
+    /// worker abort/shutdown cancels it through `abort_in_flight_turn`.
+    manual_compaction_cancel: crate::compaction_cancel::CompactionCancellation,
     /// Turn-boundary runs register their controller here;
     /// [`SessionEngine::abort_auto_compaction`] aborts whatever holds it.
     pub(crate) auto_compaction_abort: std::sync::Mutex<Option<std::sync::Arc<AbortController>>>,
