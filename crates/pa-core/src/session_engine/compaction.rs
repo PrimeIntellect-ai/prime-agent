@@ -462,6 +462,15 @@ pub const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "This is the PREFIX of a turn
 
 const UPDATE_SUMMARIZATION_PROMPT: &str = "The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.\n\nUpdate the existing structured summary with new information. RULES:\n- PRESERVE all existing information from the previous summary\n- ADD new progress, decisions, and context from the new messages\n- UPDATE the Progress section: move items from \"In Progress\" to \"Done\" when completed\n- UPDATE \"Next Steps\" based on what was accomplished\n- PRESERVE exact file paths, function names, and error messages\n- If something is no longer relevant, you may remove it\n\nUse this EXACT format:\n\n## Goal\n[Preserve existing goals, add new ones if the task expanded]\n\n## Constraints & Preferences\n- [Preserve existing, add new ones discovered]\n\n## Progress\n### Done\n- [x] [Include previously done items AND newly completed items]\n\n### In Progress\n- [ ] [Current work - update based on progress]\n\n### Blocked\n- [Current blockers - remove if resolved]\n\n## Key Decisions\n- **[Decision]**: [Brief rationale] (preserve all previous, add new)\n\n## Next Steps\n1. [Update based on current state]\n\n## Critical Context\n- [Preserve important context, add new if needed]\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.";
 
+/// The retry instruction for a summary the output cap cut off: the retry
+/// wire call appends it as one more text block on the summarization request.
+pub(crate) const SHORTER_SUMMARY_INSTRUCTION: &str = "Your previous summary was cut off at the output limit. Write a shorter summary that fits: keep every required section and compress the detail.";
+
+/// The line a twice-capped summary commits behind: the retry's text still
+/// replaces the transcript, so it rides in front of this disclosure.
+pub(crate) const SUMMARY_TRUNCATED_MARKER: &str =
+    "[summary truncated: earlier detail may be missing]";
+
 /// The instruction part of the summarization prompt (initial or update
 /// template, user instructions, kernel persistence note).
 #[must_use]

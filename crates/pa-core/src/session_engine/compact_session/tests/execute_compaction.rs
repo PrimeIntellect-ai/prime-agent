@@ -537,6 +537,155 @@ async fn execute_compaction_fails_on_an_error_summarizer_response() {
     registration.unregister();
 }
 
+/// A whitespace-only summarizer reply (a blank-but-billed HTTP success)
+/// fails the compaction instead of committing an empty summary that would
+/// replace the transcript.
+#[tokio::test]
+async fn execute_compaction_fails_on_an_empty_summarizer_response() {
+    let registration = faux_registration();
+    let model = registration.get_model();
+    registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+        pa_ai::faux::faux_assistant_text_message(
+            "  \n",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        ),
+    )]);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut session = session_with_turns(tmp.path(), 3);
+    let before = session.get_entries();
+    let error = execute_compaction(
+        &mut session,
+        CompactOptions {
+            model,
+            api_key: None,
+            custom_instructions: None,
+            settings: super::super::compaction::CompactionSettings {
+                keep_recent_tokens: 20,
+                ..Default::default()
+            },
+            abort: None,
+            harness_digest: None,
+            auxiliary: None,
+            semantic_edges: None,
+            summary_delta: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Summarization failed: the summary was empty"
+    );
+    assert_eq!(session.get_entries(), before);
+    registration.unregister();
+}
+
+/// A length-capped summarizer reply retries once with the shorter-summary
+/// instruction: the committed row is the retry's text, with no marker.
+#[tokio::test]
+async fn execute_compaction_retries_a_length_capped_summarizer_response() {
+    let registration = faux_registration();
+    let model = registration.get_model();
+    registration.set_responses(vec![
+        pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+            "cut-off summary",
+            pa_ai::faux::FauxAssistantMessageOptions {
+                stop_reason: Some(pa_types::ai::StopReason::Length),
+                ..Default::default()
+            },
+        )),
+        pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+            "shorter summary",
+            pa_ai::faux::FauxAssistantMessageOptions::default(),
+        )),
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut session = session_with_turns(tmp.path(), 3);
+    let outcome = execute_compaction(
+        &mut session,
+        CompactOptions {
+            model,
+            api_key: None,
+            custom_instructions: None,
+            settings: super::super::compaction::CompactionSettings {
+                keep_recent_tokens: 20,
+                ..Default::default()
+            },
+            abort: None,
+            harness_digest: None,
+            auxiliary: None,
+            semantic_edges: None,
+            summary_delta: None,
+        },
+    )
+    .await
+    .unwrap();
+    let CompactOutcome::Ran(run) = outcome else {
+        panic!("expected the compaction to run");
+    };
+    assert_eq!(run.entry.summary, "shorter summary");
+    // Exactly one retry: the capped reply plus its shorter-summary retry.
+    assert_eq!(registration.call_count(), 2);
+    registration.unregister();
+}
+
+/// A twice-capped summarizer pair still commits: the retry's text rides
+/// behind the truncation marker, and the queue's two responses prove the
+/// retry never loops (a third call would hit the empty queue and fail).
+#[tokio::test]
+async fn execute_compaction_accepts_a_twice_capped_summary_behind_the_marker() {
+    let registration = faux_registration();
+    let model = registration.get_model();
+    let capped = |text: &str| {
+        pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+            text,
+            pa_ai::faux::FauxAssistantMessageOptions {
+                stop_reason: Some(pa_types::ai::StopReason::Length),
+                ..Default::default()
+            },
+        ))
+    };
+    registration.set_responses(vec![capped("partial one"), capped("partial two")]);
+    let tmp = tempfile::tempdir().unwrap();
+    let mut session = session_with_turns(tmp.path(), 3);
+    let outcome = execute_compaction(
+        &mut session,
+        CompactOptions {
+            model,
+            api_key: None,
+            custom_instructions: None,
+            settings: super::super::compaction::CompactionSettings {
+                keep_recent_tokens: 20,
+                ..Default::default()
+            },
+            abort: None,
+            harness_digest: None,
+            auxiliary: None,
+            semantic_edges: None,
+            summary_delta: None,
+        },
+    )
+    .await
+    .unwrap();
+    let CompactOutcome::Ran(run) = outcome else {
+        panic!("expected the compaction to run");
+    };
+    assert_eq!(
+        run.entry.summary,
+        format!(
+            "{}\n\npartial two",
+            super::super::compaction::SUMMARY_TRUNCATED_MARKER
+        )
+    );
+    assert_eq!(registration.call_count(), 2);
+    // The session continues: the twice-capped retry still commits the row.
+    assert!(session
+        .get_entries()
+        .iter()
+        .any(|entry| matches!(entry, FileEntry::Compaction { .. })));
+    registration.unregister();
+}
+
 /// The durable row carries the full record — `fromHook: false`, the usage,
 /// and the file-operation details — not just the summary boundary.
 #[tokio::test]

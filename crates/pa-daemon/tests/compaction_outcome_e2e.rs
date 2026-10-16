@@ -26,7 +26,6 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,36 +47,47 @@ impl Drop for Supervisor {
     }
 }
 
-/// An OpenAI-compatible SSE mock with a switchable failure mode: while `fail_summarizer`
-/// is set, any request carrying the summarization prompt gets a 500; every other request
-/// the fixed reply. The usage list makes the second turn cross (f14-auto shape).
+/// What the mock answers a summarizer request with: the fixed turn reply,
+/// a 500, or a blank-but-billed HTTP 200 stream (the glm-ht failure shape:
+/// a successful reply whose only content delta is empty, with usage billed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SummarizerMode {
+    TurnReply,
+    Unavailable,
+    Blank,
+}
+
+/// An OpenAI-compatible SSE mock with a switchable summarizer mode: any
+/// request carrying the summarization prompt is answered per
+/// [`SummarizerMode`]; every other request gets the fixed reply. The usage
+/// list makes the second turn cross (f14-auto shape).
 struct CompactionMock {
     requests: Arc<Mutex<Vec<Value>>>,
-    fail_summarizer: Arc<AtomicBool>,
+    summarizer_mode: Arc<Mutex<SummarizerMode>>,
     port: u16,
 }
 
 impl CompactionMock {
     fn start() -> CompactionMock {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let fail_summarizer = Arc::new(AtomicBool::new(false));
+        let summarizer_mode = Arc::new(Mutex::new(SummarizerMode::TurnReply));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
-        let fail_for_thread = Arc::clone(&fail_summarizer);
+        let mode_for_thread = Arc::clone(&summarizer_mode);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
-                let fail = Arc::clone(&fail_for_thread);
+                let mode = Arc::clone(&mode_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, &requests, &fail);
+                    let _ = serve(stream, &requests, &mode);
                 });
             }
         });
         CompactionMock {
             requests,
-            fail_summarizer,
+            summarizer_mode,
             port,
         }
     }
@@ -88,6 +98,10 @@ impl CompactionMock {
 
     fn request_count(&self) -> usize {
         self.requests.lock().expect("mock lock").len()
+    }
+
+    fn set_summarizer_mode(&self, mode: SummarizerMode) {
+        *self.summarizer_mode.lock().expect("mode lock") = mode;
     }
 }
 
@@ -142,10 +156,37 @@ fn is_summarizer_request(body: &Value) -> bool {
     })
 }
 
+/// The OpenAI-compatible SSE stream for one assistant reply: a content
+/// delta, the finish chunk, and the terminal usage frame.
+fn sse_stream(content: &str, usage: &Value) -> String {
+    let mut payload = String::new();
+    for data in [
+        chunk(
+            &json!({"role": "assistant", "content": content}),
+            None,
+            &small_usage(),
+        ),
+        chunk(&json!({}), Some("stop"), usage),
+        json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 1_750_000_000,
+            "model": "mock-1",
+            "choices": [],
+            "usage": usage,
+        })
+        .to_string(),
+    ] {
+        write!(payload, "data: {data}\n\n").expect("write to String");
+    }
+    payload.push_str("data: [DONE]\n\n");
+    payload
+}
+
 fn serve(
     mut stream: TcpStream,
     requests: &Arc<Mutex<Vec<Value>>>,
-    fail_summarizer: &Arc<AtomicBool>,
+    summarizer_mode: &Arc<Mutex<SummarizerMode>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -173,17 +214,6 @@ fn serve(
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body.clone());
-    if fail_summarizer.load(Ordering::SeqCst) && is_summarizer_request(&body) {
-        let error = json!({"error": {"message": "summarizer unavailable"}}).to_string();
-        return stream.write_all(
-            format!(
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
-                error.len(),
-                error
-            )
-            .as_bytes(),
-        );
-    }
     // Turn 2 reports the over-threshold usage; every other request reports the small
     // usage so the session does not re-cross.
     let usage = if index == 1 {
@@ -191,30 +221,37 @@ fn serve(
     } else {
         small_usage()
     };
-    let mut payload = String::new();
-    for data in [
-        chunk(
-            &json!({"role": "assistant", "content": "parity reply"}),
-            None,
-            &small_usage(),
-        ),
-        chunk(&json!({}), Some("stop"), &usage),
-        json!({
-            "id": "chatcmpl-test",
-            "object": "chat.completion.chunk",
-            "created": 1_750_000_000,
-            "model": "mock-1",
-            "choices": [],
-            "usage": usage,
-        })
-        .to_string(),
-    ] {
-        write!(payload, "data: {data}\n\n").expect("write to String");
+    if is_summarizer_request(&body) {
+        match *summarizer_mode.lock().expect("mode lock") {
+            SummarizerMode::TurnReply => {}
+            SummarizerMode::Unavailable => {
+                let error = json!({"error": {"message": "summarizer unavailable"}}).to_string();
+                return stream.write_all(
+                    format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        error.len(),
+                        error
+                    )
+                    .as_bytes(),
+                );
+            }
+            // The blank-but-billed success: an empty content delta, a "stop"
+            // finish, and usage the provider still bills.
+            SummarizerMode::Blank => {
+                return stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                        sse_stream("", &usage)
+                    )
+                    .as_bytes(),
+                );
+            }
+        }
     }
-    payload.push_str("data: [DONE]\n\n");
     stream.write_all(
         format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+            sse_stream("parity reply", &usage)
         )
         .as_bytes(),
     )
@@ -352,8 +389,24 @@ impl Client {
     }
 }
 
-#[test]
-fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
+/// The live session right after a failed threshold auto-compaction: the
+/// broadcast events ride the client, and the harness (client, mock,
+/// supervisor, dir) stays alive for follow-up turns.
+struct FailedCompactionRun {
+    client: Client,
+    mock: CompactionMock,
+    session_id: String,
+    session_dir: PathBuf,
+    #[allow(dead_code)]
+    _supervisor: Supervisor,
+    #[allow(dead_code)]
+    _dir: tempfile::TempDir,
+}
+
+/// Drive the f14-auto shape once: seed a turn over the mock, flip its
+/// summarizer mode to `mode`, and send the crossing turn that fires the
+/// threshold auto-compaction against that mode.
+fn drive_failed_auto_compaction(mode: SummarizerMode) -> FailedCompactionRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -391,7 +444,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     )
     .expect("write settings.json");
     let socket = dir.path().join("daemon.sock");
-    let _supervisor = spawn_supervisor(&socket, &agent_dir);
+    let supervisor = spawn_supervisor(&socket, &agent_dir);
     let mut client = Client::connect(&socket);
 
     client.send_command(
@@ -430,8 +483,9 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
 
     // The crossing turn reports 126010 tokens (over the 500-token headroom): the
-    // threshold check fires a compaction, and the mock fails its summarizer request.
-    mock.fail_summarizer.store(true, Ordering::SeqCst);
+    // threshold check fires a compaction, and the mock answers its summarizer
+    // request per `mode`.
+    mock.set_summarizer_mode(mode);
     client.send_command(
         "p2",
         &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
@@ -451,7 +505,23 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         "the compaction summarizer request never arrived"
     );
     client.drain_events(500);
+    FailedCompactionRun {
+        client,
+        mock,
+        session_id,
+        session_dir,
+        _supervisor: supervisor,
+        _dir: dir,
+    }
+}
 
+/// The failure-path observables shared by every failure mode: the durable
+/// `compaction_outcome` row broadcasts before the settled unsuccessful
+/// `compaction_end`, and the session file carries exactly one durable row
+/// with the same failure message. Returns the failure message and the
+/// persisted session file content for mode-specific follow-ups.
+fn assert_unsuccessful_compaction_observed(run: &FailedCompactionRun) -> (String, String) {
+    let client = &run.client;
     // The broadcast: the durable row's message pair, then the settled end carrying
     // the same failure message (TS `_endCompactionUnsuccessfully` order).
     let row_start = client
@@ -465,7 +535,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
             panic!(
                 "the outcome row's message_start broadcast; events: {:#?}; requests: {:#?}",
                 client.events,
-                mock.requests.lock().expect("mock lock").len()
+                run.mock.requests.lock().expect("mock lock").len()
             )
         });
     let row_end = client
@@ -478,7 +548,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     assert!(row_end > row_start, "the row's pair stays in order");
     let row = client.events[row_start]["message"].clone();
     assert_eq!(row["role"], "custom");
-    let failure_message = row["content"].as_str().expect("row content");
+    let failure_message = row["content"].as_str().expect("row content").to_string();
     assert!(
         failure_message.starts_with("Auto-compaction failed:"),
         "the row carries the failure message: {failure_message}"
@@ -511,7 +581,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
 
     // The session file carries the row (TS `appendCustomMessageEntryWithRollback` shape)
     // and a session UUID, not the worker's active id.
-    let session_file = std::fs::read_dir(&session_dir)
+    let session_file = std::fs::read_dir(&run.session_dir)
         .expect("list session dir")
         .flatten()
         .map(|entry| entry.path())
@@ -537,19 +607,26 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         durable["details"],
         json!({"reason": "threshold", "outcome": "failed"})
     );
+    (failure_message, persisted)
+}
+
+#[test]
+fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
+    let mut run = drive_failed_auto_compaction(SummarizerMode::Unavailable);
+    let (failure_message, _) = assert_unsuccessful_compaction_observed(&run);
 
     // The next turn: recovery compaction succeeds and the provider request NEVER contains
     // the disclosure — the exclusion that keeps the KV-cacheable prefix unaffected.
-    mock.fail_summarizer.store(false, Ordering::SeqCst);
-    let before_next = mock.request_count();
-    client.send_command(
+    run.mock.set_summarizer_mode(SummarizerMode::TurnReply);
+    let before_next = run.mock.request_count();
+    run.client.send_command(
         "p3",
-        &json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "next turn"}),
+        &json!({"type": "prompt_and_wait", "activeSessionId": run.session_id, "message": "next turn"}),
     );
-    let next = client.read_response("p3");
+    let next = run.client.read_response("p3");
     assert_eq!(next["success"], true, "next prompt failed: {next}");
-    client.drain_events(500);
-    let requests = mock.requests.lock().expect("mock lock").clone();
+    run.client.drain_events(500);
+    let requests = run.mock.requests.lock().expect("mock lock").clone();
     let next_turn_request = requests[before_next..]
         .iter()
         .find(|body| !is_summarizer_request(body))
@@ -557,7 +634,36 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         .clone();
     let serialized = serde_json::to_string(&next_turn_request).expect("serialize request");
     assert!(
-        !serialized.contains("compaction_outcome") && !serialized.contains(failure_message),
+        !serialized.contains("compaction_outcome") && !serialized.contains(&failure_message),
         "the disclosure never reaches the provider request"
     );
+}
+
+/// The live failure shape behind the empty-summary bug: an HTTP-success
+/// summarizer reply that is blank-but-billed lands on the SAME failure path
+/// as a 500 — a durable failed outcome row, no compaction row, and the
+/// transcript intact.
+#[test]
+fn blank_summarizer_reply_fails_the_compaction_and_keeps_the_transcript() {
+    let run = drive_failed_auto_compaction(SummarizerMode::Blank);
+    let (_, session_file) = assert_unsuccessful_compaction_observed(&run);
+
+    // The blank summary is never committed: no compaction row lands, and the
+    // message rows from both turns stay in the transcript.
+    let rows: Vec<Value> = session_file
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert!(
+        rows.iter().all(|row| row["type"] != "compaction"),
+        "a blank summary must never become the compaction row: {session_file}"
+    );
+    let transcript: Vec<&Value> = rows.iter().filter(|row| row["type"] == "message").collect();
+    let serialized = serde_json::to_string(&transcript).expect("serialize transcript");
+    for text in ["seed turn", "crossing turn", "parity reply"] {
+        assert!(
+            serialized.contains(text),
+            "the transcript rows stay intact after the failed compaction"
+        );
+    }
 }
