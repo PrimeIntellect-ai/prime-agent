@@ -1528,3 +1528,96 @@ fn artifact_misses_stay_cached_until_a_directory_changes() {
     assert_eq!(ledger.live_edges().unwrap(), expected);
     assert_eq!(replay::ARTIFACT_SCANS.with(std::cell::Cell::get), scans + 2);
 }
+
+#[test]
+fn family_topology_tracks_restore_and_relocation_without_a_ledger_append() {
+    let dir = temp_dir("topology-disk-change");
+    let sessions = dir.join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let parent = sessions.join("parent.jsonl");
+    let child = sessions.join("child.jsonl");
+    fs::write(&parent, "{}").unwrap();
+    let parent = canonical_session_path(&parent);
+    fs::write(&child, "{}").unwrap();
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: child.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    let archive = crate::session_archive::archive_dir(&dir);
+    fs::create_dir_all(&archive).unwrap();
+    fs::rename(
+        &child,
+        archive.join(crate::session_store::session_file_name("child")),
+    )
+    .unwrap();
+    assert!(ledger
+        .family_topology()
+        .unwrap()
+        .descendants(&parent)
+        .is_empty());
+    crate::session_archive::restore_session(&archive, &sessions, "child").unwrap();
+    let restored = ledger.family_topology().unwrap();
+    assert_eq!(restored.descendants(&parent), vec![0]);
+    assert_eq!(
+        restored.canonical_children,
+        vec![canonical_session_path(&child)]
+    );
+    assert!(
+        Arc::ptr_eq(&restored, &ledger.family_topology().unwrap()),
+        "unchanged endpoints reuse the topology"
+    );
+    let relocated = dir.join("session-artifacts/parent/sub/child.jsonl");
+    fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    fs::rename(&child, &relocated).unwrap();
+    let moved = ledger.family_topology().unwrap();
+    assert_eq!(moved.descendants(&parent), vec![0]);
+    assert_eq!(
+        moved.canonical_children,
+        vec![canonical_session_path(&relocated)]
+    );
+    fs::remove_file(&relocated).unwrap();
+    assert!(ledger
+        .family_topology()
+        .unwrap()
+        .descendants(&parent)
+        .is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn family_topology_rechecks_symlink_targets_without_a_ledger_append() {
+    use std::os::unix::fs::symlink;
+    let dir = temp_dir("topology-symlink");
+    let parent = dir.join("parent.jsonl");
+    let first = dir.join("first.jsonl");
+    let second = dir.join("second.jsonl");
+    for file in [&parent, &first, &second] {
+        fs::write(file, "{}").unwrap();
+    }
+    let ledger = ledger_for(&dir);
+    ledger
+        .append_spawn(&RlmSpawnInput {
+            child_id: "sub".into(),
+            parent: parent.to_string_lossy().into(),
+            child: first.to_string_lossy().into(),
+            depth: 1,
+            name: "child".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().canonical_children,
+        vec![canonical_session_path(&first)]
+    );
+    fs::remove_file(&first).unwrap();
+    symlink(&second, &first).unwrap();
+    assert_eq!(
+        ledger.family_topology().unwrap().canonical_children,
+        vec![canonical_session_path(&second)]
+    );
+}

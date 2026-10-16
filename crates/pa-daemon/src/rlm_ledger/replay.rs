@@ -158,6 +158,7 @@ pub(super) struct ReplayState {
     pub(super) index: HashMap<String, usize>,
     pub(super) artifact_index: OnceLock<Mutex<ArtifactIndex>>,
     pub(super) deleted_bucket: Mutex<Option<DeletedBucket>>,
+    pub(super) family_topology: Mutex<Option<Arc<super::FamilyTopology>>>,
 }
 
 /// Ledger rows are immutable within a replay, but restore/archive and transcript

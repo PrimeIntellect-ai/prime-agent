@@ -57,6 +57,7 @@ pub(crate) use routing::{
 };
 
 // Called only by the supervision sibling module and in-file tests; lib-target unused.
+pub(crate) use worker_lifecycle::RosterFamilySeedOwner;
 #[allow(unused_imports)]
 use worker_lifecycle::{probe_worker_socket, worker_connect_deadline};
 

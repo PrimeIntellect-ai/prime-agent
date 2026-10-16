@@ -1,0 +1,1 @@
+- Reopening a saved session now publishes its passive subagents before the first Agents view snapshot, even when worker registration is delayed or the opening client disconnects.

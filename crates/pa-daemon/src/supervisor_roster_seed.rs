@@ -1,7 +1,7 @@
 //! The roster's seeding and hydration arms: the boot ledger seed that
-//! keeps passivated RLM children in the live roster, the create path's
-//! edge-only family seed, and the bounded background hydration that
-//! fills their durable display rows.
+//! keeps passivated RLM children in the live roster, the registration
+//! seed's edge-only family walk, and the bounded background hydration
+//! that fills their durable display rows.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,8 +24,13 @@ impl Supervisor {
         if roots.is_empty() {
             return;
         }
-        let (edges, parent_by_child) = match self.live_edges_and_parents().await {
-            Ok(view) => view,
+        // The same ledger instance the topology snapshot read, so its
+        // replay cache carries deletions that land during this seed.
+        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
+            return;
+        };
+        let topology = match ledger.family_topology() {
+            Ok(topology) => topology,
             Err(error) => {
                 self.log_line(&format!(
                     "Could not seed the agent roster from the spawn ledger: {error:#}"
@@ -36,47 +41,47 @@ impl Supervisor {
         // Roots re-snapshot after the ledger awaits: a root that
         // stopped mid-read must not receive seeded rows.
         let roots = self.roster_seed_roots().await;
-        // The same ledger instance the edge snapshot read, so its
-        // replay cache carries deletions that land during this seed.
-        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
-            return;
-        };
         let mut changed = Vec::new();
         let mut retry = Vec::new();
-        for edge in &edges {
-            let parent = canonical_session_path(Path::new(&edge.parent));
-            if !family_descends_from(&parent_by_child, &parent, &roots) {
+        for (parent, indices) in &topology.children_by_parent {
+            if !family_descends_from(&topology.parent_by_child, parent, &roots) {
                 continue;
             }
-            let candidate = SeededRosterEntry::edge_only(edge);
-            // The collision guards run BEFORE the hydration read: a
-            // rostered row never re-reads its transcript, except an
-            // unhydrated seeded row.
-            if let Some(existing) = self.roster_row_for_candidate(&candidate) {
-                if existing.seeded_cwd == Some(true) {
-                    retry.push(existing);
+            for edge in indices.iter().map(|at| &topology.edges[*at]) {
+                let candidate = SeededRosterEntry::edge_only(edge);
+                // The collision guards run BEFORE the hydration read: a
+                // rostered row never re-reads its transcript, except an
+                // unhydrated seeded row.
+                if let Some(existing) = self.roster_row_for_candidate(&candidate) {
+                    if existing.seeded_cwd == Some(true) {
+                        retry.push(existing);
+                    }
+                    continue;
                 }
-                continue;
+                // Hydration reads one child at a time, outside the roster
+                // lock (a large ledger must not fan out).
+                let candidate = candidate.hydrate().await;
+                // The hydrate awaited, so both sides of the edge are
+                // revalidated: a stopped root or a tombstoned edge must
+                // not receive rows.
+                if !ledger.edge_is_live(&edge.child_id, &edge.child)
+                    || !family_descends_from(
+                        &topology.parent_by_child,
+                        parent,
+                        &self.roster_seed_roots().await,
+                    )
+                {
+                    continue;
+                }
+                let mut roster = self.roster.lock().unwrap();
+                // Re-check under the lock: never clobber a row that landed during the read.
+                if roster.get(&candidate.agent_id).is_some()
+                    || roster.has_session_file(&candidate.child_file)
+                {
+                    continue;
+                }
+                changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
             }
-            // Hydration reads one child at a time, outside the roster
-            // lock (a large ledger must not fan out).
-            let candidate = candidate.hydrate().await;
-            // The hydrate awaited, so both sides of the edge are
-            // revalidated: a stopped root or a tombstoned edge must
-            // not receive rows.
-            if !ledger.edge_is_live(&edge.child_id, &edge.child)
-                || !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await)
-            {
-                continue;
-            }
-            let mut roster = self.roster.lock().unwrap();
-            // Re-check under the lock: never clobber a row that landed during the read.
-            if roster.get(&candidate.agent_id).is_some()
-                || roster.has_session_file(&candidate.child_file)
-            {
-                continue;
-            }
-            changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
         }
         self.push_seeded_rows(changed);
         // Unhydrated seeded rows the guards found already rostered retry here.
@@ -138,25 +143,6 @@ impl Supervisor {
             });
             pending.push(handle);
         }
-    }
-
-    /// The default ledger's live edges and their canonical child->parent
-    /// map, shared by every seed and passivation walk.
-    pub(crate) async fn live_edges_and_parents(
-        self: &Arc<Self>,
-    ) -> anyhow::Result<(Vec<RlmLedgerEdge>, HashMap<PathBuf, PathBuf>)> {
-        let ledger = self.rlm_spawn_ledger_for(None).await?;
-        let edges = ledger.live_edges()?;
-        let parent_by_child = edges
-            .iter()
-            .map(|edge| {
-                (
-                    canonical_session_path(Path::new(&edge.child)),
-                    canonical_session_path(Path::new(&edge.parent)),
-                )
-            })
-            .collect();
-        Ok((edges, parent_by_child))
     }
 
     /// The deleted-descendant bucket (the spawn ledger's fold keyed by
@@ -226,16 +212,20 @@ impl Supervisor {
             .cloned()
     }
 
-    /// The create path's family seed: a newly resident root renders its
-    /// passive descendants from the ledger edges alone, while the root is
-    /// still resident. Edge-only rows carry the dirname cwd and the `seededCwd` marker.
+    /// The registration seed's family walk: a newly resident root renders
+    /// its passive descendants from the ledger edges alone, while the root
+    /// is still resident. Edge-only rows carry the dirname cwd and the
+    /// `seededCwd` marker.
     pub(crate) async fn seed_roster_family_edges(
         self: &Arc<Self>,
         root: &Path,
     ) -> Vec<AgentRosterEntry> {
-        let roots: HashSet<PathBuf> = HashSet::from([canonical_session_path(root)]);
-        let (edges, parent_by_child) = match self.live_edges_and_parents().await {
-            Ok(view) => view,
+        let root = canonical_session_path(root);
+        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
+            return Vec::new();
+        };
+        let topology = match ledger.family_topology() {
+            Ok(topology) => topology,
             Err(error) => {
                 self.log_line(&format!(
                     "Could not seed the agent roster from the spawn ledger: {error:#}"
@@ -243,30 +233,21 @@ impl Supervisor {
                 return Vec::new();
             }
         };
-        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
-            return Vec::new();
-        };
         // The root's residency is revalidated after the awaits: a dead
         // root must not receive ghost family rows (the walk holds no
         // further await).
-        if !self
-            .roster_seed_roots()
-            .await
-            .contains(&canonical_session_path(root))
-        {
+        if !self.roster_seed_roots().await.contains(&root) {
             return Vec::new();
         }
         // The family walk outside the roster lock: neither the descent
         // check nor the ledger read may block every roster operation.
-        let candidates: Vec<&RlmLedgerEdge> = edges
+        let candidates: Vec<&RlmLedgerEdge> = topology
+            .descendants(&root)
             .iter()
-            .filter(|edge| {
-                let parent = canonical_session_path(Path::new(&edge.parent));
-                family_descends_from(&parent_by_child, &parent, &roots)
-                    // The edge snapshot predates this pass: a child deleted in
-                    // that window never seeds.
-                    && ledger.edge_is_live(&edge.child_id, &edge.child)
-            })
+            .map(|at| &topology.edges[*at])
+            // The edge snapshot predates this pass: a child deleted in
+            // that window never seeds.
+            .filter(|edge| ledger.edge_is_live(&edge.child_id, &edge.child))
             .collect();
         let mut changed = Vec::new();
         let mut retry = Vec::new();
@@ -1092,6 +1073,147 @@ pub(crate) mod tests {
             row.summary["model"],
             json!({ "provider": "p", "modelId": "m" })
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_childless_root_leaves_the_bucket_and_other_rows_unchanged() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-live",
+            &root_file,
+            &child_file,
+        );
+        let gone_child = agent_dir
+            .join("session-artifacts")
+            .join("root-1")
+            .join("sub-gone")
+            .join("sub-gone.jsonl");
+        std::fs::create_dir_all(gone_child.parent().expect("gone child dir")).unwrap();
+        write_display_file(&gone_child, "/the/gone/cwd");
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(&crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-gone".to_string(),
+                parent: root_file.to_string_lossy().to_string(),
+                child: gone_child.to_string_lossy().to_string(),
+                depth: 1,
+                name: "gone".to_string(),
+            })
+            .expect("append spawn");
+        ledger
+            .append_delete_with_usage(
+                "sub-gone",
+                &gone_child.to_string_lossy(),
+                crate::rlm_ledger::RlmLedgerDeleteReason::User,
+                &crate::session_usage::SessionUsageSummary {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    cost: 0.5,
+                },
+            )
+            .expect("append delete");
+        let mut events = supervisor.events.subscribe();
+        let mut root_summary = live_child_summary(&root_file, &child_file);
+        root_summary["runtimeKind"] = json!("top-level");
+        root_summary["sessionId"] = json!("root-persisted");
+        root_summary["id"] = json!("root-persisted");
+        root_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        root_summary.as_object_mut().unwrap().remove("rlmChildId");
+        root_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&root_summary, Some("w-root"));
+        let _ = drain_roster_pushes(&mut events);
+        let childless_file = sessions_dir.join("childless.jsonl");
+        write_display_file(&childless_file, "/the/childless/cwd");
+        register_root_worker(&supervisor, "w-childless", &childless_file).await;
+        let mut childless_summary = live_child_summary(&root_file, &child_file);
+        childless_summary["runtimeKind"] = json!("top-level");
+        childless_summary["sessionId"] = json!("childless-persisted");
+        childless_summary["id"] = json!("childless-persisted");
+        childless_summary["sessionFile"] = json!(childless_file.to_string_lossy());
+        childless_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("rlmChildId");
+        childless_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&childless_summary, Some("w-childless"));
+        let _ = drain_roster_pushes(&mut events);
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
+        let _ = drain_roster_pushes(&mut events);
+        supervisor.refresh_deleted_descendant_usage().await;
+        let _ = drain_roster_pushes(&mut events);
+
+        let before = supervisor
+            .handle_roster_subscribe("s1", "roster_subscribe")
+            .await;
+        let before_rows = before.data.expect("snapshot")["roster"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let family_root = before_rows
+            .iter()
+            .find(|entry| entry["summary"]["sessionId"] == json!("root-persisted"))
+            .expect("family root row");
+        assert_eq!(
+            family_root["summary"]["deletedDescendantUsage"],
+            json!({ "inputTokens": 11, "outputTokens": 7, "cost": 0.5 }),
+            "the bucket attached to the family root before the stop"
+        );
+        let childless_id = roster_agent_id_for_summary(&childless_summary);
+        let before_others: Vec<&Value> = before_rows
+            .iter()
+            .filter(|entry| entry["agentId"] != json!(childless_id))
+            .collect();
+
+        supervisor.registry.remove("w-childless").await;
+        supervisor
+            .passivate_roster_worker("w-childless", false)
+            .await;
+
+        let after = supervisor
+            .handle_roster_subscribe("s2", "roster_subscribe")
+            .await;
+        let after_rows = after.data.expect("snapshot")["roster"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let stopped = after_rows
+            .iter()
+            .find(|entry| entry["agentId"] == json!(childless_id))
+            .expect("the childless root's row settles in place");
+        assert_eq!(stopped["status"], "inactive");
+        assert_eq!(stopped["summary"]["isSessionActive"], false);
+        let after_others: Vec<&Value> = after_rows
+            .iter()
+            .filter(|entry| entry["agentId"] != json!(childless_id))
+            .collect();
+        assert_eq!(
+            before_others.len(),
+            after_others.len(),
+            "no row appeared or disappeared besides the stopped root"
+        );
+        for expected in &before_others {
+            let found = after_others
+                .iter()
+                .find(|entry| entry["agentId"] == expected["agentId"])
+                .unwrap_or_else(|| panic!("row vanished: {}", expected["agentId"]));
+            assert_eq!(
+                found, expected,
+                "the stop of a childless root rewrote another row"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

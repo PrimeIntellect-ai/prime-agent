@@ -271,12 +271,16 @@ impl Supervisor {
         // The stopping worker's family view — live edges and surviving
         // resident roots — decides each subagent row's fate; a ledger
         // failure degrades to an empty view.
-        let ledger_view = self.live_edges_and_parents().await;
-        let empty_view: (
-            Vec<crate::rlm_ledger::RlmLedgerEdge>,
-            HashMap<PathBuf, PathBuf>,
-        ) = (Vec::new(), HashMap::new());
-        let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
+        let ledger_view = self
+            .rlm_spawn_ledger_for(None)
+            .await
+            .ok()
+            .and_then(|ledger| ledger.family_topology().ok());
+        let empty_view: HashMap<PathBuf, PathBuf> = HashMap::new();
+        let parent_by_child = ledger_view
+            .as_ref()
+            .map_or(&empty_view, |topology| &topology.parent_by_child);
+        let ledger_view_ok = ledger_view.is_some();
         let roots = self.roster_seed_roots().await;
         // The stop's own ledger event: an RLM delete tombstoned its child
         // before the stop began, and the shutdown route was the
@@ -364,7 +368,7 @@ impl Supervisor {
             // The seeded unowned rows outlived their departed root and
             // flashed as top-level rows: settle them with the same anchor
             // verdict as the owned rows, scoped to the snapshot.
-            if ledger_view.is_ok() {
+            if ledger_view_ok {
                 for entry in &unowned_at_start {
                     if roster
                         .get(&entry.agent_id)
