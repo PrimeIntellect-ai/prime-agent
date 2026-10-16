@@ -11,6 +11,19 @@ use super::{
 
 use std::sync::{Arc, Mutex};
 
+/// Ignore a captured turn goal update when the driver has since changed.
+/// Elapsed wall-clock time is not a goal transition.
+pub(super) fn goal_update_is_superseded(captured: &Value, current: &Value) -> bool {
+    let (Some(mut captured), Some(mut current)) =
+        (captured.as_object().cloned(), current.as_object().cloned())
+    else {
+        return false;
+    };
+    captured.remove("timeUsedSeconds");
+    current.remove("timeUsedSeconds");
+    captured != current
+}
+
 pub(super) struct TurnRunner {
     pub(crate) core: Arc<Mutex<SessionCore>>,
     pub(super) input_pauses: crate::session_input_pause::InputPauseTable,
@@ -478,6 +491,13 @@ impl TurnRunner {
                         | EngineEvent::DoneAborted
                 );
                 let mut core = core.lock().unwrap();
+                if let EngineEvent::GoalUpdate { goal } = &event {
+                    // Compare under the same store lock used by direct control.
+                    // A captured event must not overwrite a newer control row.
+                    if goal_update_is_superseded(goal, &engine.goal_state_value()) {
+                        return true;
+                    }
+                }
                 // The run's TRUE end — an `agent_end` with no queued work
                 // taking the next turn — keys both the note clear here and
                 // the pane's idle debounce below. An internal boundary that

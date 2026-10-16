@@ -94,6 +94,7 @@ impl Worker {
                 self.handle_wait_for_headless_completion(payload).await
             }
             "get_state" => self.handle_get_state(),
+            "control_goal" => self.handle_control_goal(payload).await,
             "get_messages" => self.handle_get_messages(payload),
             "get_session_header" => self.handle_get_session_header(),
             "get_session_stats" => self.handle_get_session_stats(),
@@ -415,6 +416,135 @@ impl Worker {
             None,
             "get_state",
             Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
+        )
+    }
+
+    async fn handle_control_goal(&self, payload: &Value) -> DaemonResponse {
+        use pa_core::session_engine::goal_driver::GoalControlAction;
+
+        const COMMAND: &str = "control_goal";
+        // Serialize the CAS, durable append, and announcement against a
+        // concurrent direct control or session replacement.
+        let _control_gate = self.replacement_gate.lock().await;
+        if let Err(response) = self.require_created(COMMAND) {
+            return response;
+        }
+        if self
+            .goal_control_dirty
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return response_failure(
+                None,
+                COMMAND,
+                "Goal persistence is uncertain; close and reopen this session before controlling it.",
+                None,
+            );
+        }
+        if self.core.lock().unwrap().compacting {
+            return response_failure(
+                None,
+                COMMAND,
+                "Goal cannot be controlled during compaction.",
+                None,
+            );
+        }
+        if self.core.lock().unwrap().store.is_none() {
+            return response_failure(
+                None,
+                COMMAND,
+                "Goal control requires a durable session file.",
+                None,
+            );
+        }
+        let (Some(goal_id), Some(expected_objective), Some(action)) = (
+            payload.get("goalId").and_then(Value::as_str),
+            payload.get("expectedObjective").and_then(Value::as_str),
+            payload.get("action").and_then(Value::as_str),
+        ) else {
+            return response_failure(
+                None,
+                COMMAND,
+                "Goal identity, expected objective, and action must be strings.",
+                None,
+            );
+        };
+        let action = match action {
+            "pause" => GoalControlAction::Pause,
+            "clear" => GoalControlAction::Clear,
+            _ => return response_failure(None, COMMAND, "Unknown goal control action.", None),
+        };
+        let mut persistence_failed = false;
+        let mut persist = |goal: &pa_core::goals::GoalState| -> anyhow::Result<()> {
+            let mut core = self.core.lock().unwrap();
+            let result = core
+                .store
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("This thread has no durable session file."))
+                .and_then(|store| {
+                    store.persist_entry(
+                        "custom",
+                        json!({
+                            "customType": pa_core::goals::GOAL_STATE_CUSTOM_TYPE,
+                            "data": goal,
+                        }),
+                    )
+                });
+            if result.is_ok() {
+                self.engine.mark_goal_control_published(goal);
+            } else {
+                persistence_failed = true;
+            }
+            result.map(|_| ())
+        };
+        let changed = match self
+            .engine
+            .control_goal(goal_id, expected_objective, action, &mut persist)
+            .await
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                if persistence_failed {
+                    self.goal_control_dirty
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    return response_failure(
+                        None,
+                        COMMAND,
+                        &format!("Goal changed in memory but could not be persisted: {error:#}"),
+                        None,
+                    );
+                }
+                return response_failure(None, COMMAND, &format!("{error:#}"), None);
+            }
+        };
+        let goal = changed.unwrap_or_else(pa_core::goals::empty_goal_state);
+        if let Some(engine) = &self.agent_engine {
+            engine.cancel_goal_backoff_wake();
+            let telemetry_engine = std::sync::Arc::clone(engine);
+            let action_name = match action {
+                GoalControlAction::Pause => "pause",
+                GoalControlAction::Clear => "clear",
+            };
+            // A live turn may hold the core session lock. Delivery belongs to
+            // the telemetry worker and cannot delay the control response.
+            tokio::spawn(async move {
+                let guard = telemetry_engine.session.lock().await;
+                if let Some(telemetry) = guard
+                    .as_deref()
+                    .and_then(|session| session.telemetry.as_ref())
+                {
+                    telemetry.note_goal_control(action_name);
+                }
+            });
+        }
+        self.engine.purge_queued_goal_contexts();
+        self.emit_worker_event(json!({ "type": "goal_update", "goal": goal }));
+        response_success(
+            None,
+            COMMAND,
+            Some(match action {
+                GoalControlAction::Pause => serde_json::to_value(goal).unwrap_or(Value::Null),
+                GoalControlAction::Clear => Value::Null,
+            }),
         )
     }
 

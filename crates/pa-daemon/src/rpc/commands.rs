@@ -192,6 +192,7 @@ pub async fn handle_command(state: &Arc<RpcState>, command: protocol::RpcCommand
         }
         "new_session" => new_session(state, &payload).await,
         "get_state" => get_state(state).await,
+        "control_goal" => control_goal(state, &payload).await,
         "set_model" => model_commands::set_model(state, &payload).await,
         "cycle_model" => model_commands::cycle_model(state).await,
         "get_available_models" => model_commands::get_available_models(state).await,
@@ -248,6 +249,55 @@ async fn new_session(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseD
     }
     resume_pump(state);
     Ok(ResponseData::Present(json!({ "cancelled": false })))
+}
+
+async fn control_goal(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
+    use pa_core::session_engine::goal_driver::GoalControlAction;
+
+    let (Some(goal_id), Some(expected_objective), Some(action)) = (
+        payload.get("goalId").and_then(Value::as_str),
+        payload.get("expectedObjective").and_then(Value::as_str),
+        payload.get("action").and_then(Value::as_str),
+    ) else {
+        return Err("Goal identity, expected objective, and action must be strings.".to_string());
+    };
+    let action = match action {
+        "pause" => GoalControlAction::Pause,
+        "clear" => GoalControlAction::Clear,
+        _ => return Err("Unknown goal control action.".to_string()),
+    };
+    let handle = state.session.handle().await;
+    let _ops = state.session_ops.lock().await;
+    if state.compacting.load(Ordering::SeqCst) != 0 {
+        return Err("Goal cannot be controlled during compaction.".to_string());
+    }
+    let engine = &handle.engine;
+    let changed = {
+        let persistence = engine.session.shared_persistence();
+        let mut driver = engine.goal_driver.lock().await;
+        let mut session = persistence.lock().await;
+        driver
+            .control_goal(&mut session, goal_id, expected_objective, action)
+            .map_err(|error| format!("{error:#}"))?
+    };
+    let goal = changed.unwrap_or_else(pa_core::goals::empty_goal_state);
+    if let Some(telemetry) = &engine.telemetry {
+        let action_name = match action {
+            GoalControlAction::Pause => "pause",
+            GoalControlAction::Clear => "clear",
+        };
+        telemetry.note_goal_control(action_name);
+    }
+    state.publish_goal_update_for(&goal).await;
+    engine.session.agent().remove_queued_messages(|message| {
+        matches!(message, pa_agent::types::AgentMessage::Custom(custom)
+            if custom.payload.get("customType").and_then(Value::as_str)
+                == Some(pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE))
+    });
+    Ok(ResponseData::Present(match action {
+        GoalControlAction::Pause => serde_json::to_value(goal).unwrap_or(Value::Null),
+        GoalControlAction::Clear => Value::Null,
+    }))
 }
 
 async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {

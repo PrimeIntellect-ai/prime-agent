@@ -44,6 +44,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "wait_for_headless_completion"
         | "get_session_header"
         | "get_state"
+        | "control_goal"
         | "get_connection_state"
         | "get_messages"
         | "get_rlm_children"
@@ -184,6 +185,7 @@ mod tests {
             "prompt",
             "prompt_and_wait",
             "get_state",
+            "control_goal",
             "get_last_assistant_text",
             "start_side_question",
         ] {
@@ -232,6 +234,7 @@ mod tests {
             "send_message",
             "compact",
             "set_model",
+            "control_goal",
             "clear_queue",
             "rename",
             "prepare_update_restart",

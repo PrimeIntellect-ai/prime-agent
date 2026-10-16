@@ -340,7 +340,9 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "session_input_admission",
                 "prompt_admission_cancellation",
                 "owned_prompt_cancellation",
+                "goal_error_resume",
                 "queue_message_mutation",
+                "goal_lifecycle_control",
                 "authoritative_child_roster",
                 "owned_session_recovery_context",
                 "rlm_quiescence_barrier",
@@ -696,6 +698,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         | DaemonCommand::GetState {
             active_session_id, ..
         }
+        | DaemonCommand::ControlGoal {
+            active_session_id, ..
+        }
         | DaemonCommand::GetConnectionState {
             active_session_id, ..
         }
@@ -981,6 +986,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::WaitForHeadlessCompletion { .. } => "wait_for_headless_completion",
         DaemonCommand::GetSessionHeader { .. } => "get_session_header",
         DaemonCommand::GetState { .. } => "get_state",
+        DaemonCommand::ControlGoal { .. } => "control_goal",
         DaemonCommand::GetConnectionState { .. } => "get_connection_state",
         DaemonCommand::GetMessages { .. } => "get_messages",
         DaemonCommand::GetRlmChildren { .. } => "get_rlm_children",
@@ -1063,6 +1069,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn goal_error_resume_capability_matches_driver_behavior() {
+        use pa_core::goals::{empty_goal_state, GoalState, GoalStatus};
+        use pa_core::session::manager::SessionManager;
+        use pa_core::session_engine::goal_driver::GoalDriver;
+
+        let root = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(root.path());
+        let mut driver = GoalDriver::restore_persisted(GoalState {
+            status: GoalStatus::Error,
+            goal_id: Some("failed-goal".to_string()),
+            objective: Some("Finish the fixture task".to_string()),
+            tokens_used: 42,
+            token_budget: Some(100),
+            ..empty_goal_state()
+        });
+        assert!(default_server_capabilities().contains(&"goal_error_resume".to_string()));
+        assert!(driver.resume(&mut session).unwrap().is_some());
+        assert_eq!(driver.state().status, GoalStatus::Active);
+        assert_eq!(driver.state().tokens_used, 42);
+    }
+
+    #[test]
     fn kernel_bash_activity_commands_are_session_scoped() {
         for (command, kind) in [
             (
@@ -1085,6 +1113,37 @@ mod tests {
             assert!(pa_types::daemon::is_session_plane_daemon_command(kind));
         }
         assert!(default_server_capabilities().contains(&"kernel_bash_activity".to_string()));
+    }
+
+    #[test]
+    fn goal_control_command_is_session_scoped() {
+        let command_json = serde_json::json!({
+            "type": "control_goal",
+            "activeSessionId": "session",
+            "goalId": "goal",
+            "expectedObjective": "old",
+            "action": "clear",
+        });
+        let line = serde_json::json!({
+            "type": "command",
+            "id": "c1",
+            "protocol": current_protocol_info(),
+            "command": command_json,
+        })
+        .to_string();
+        let parsed = parse_daemon_command_line(&line).unwrap();
+        let serialized = serde_json::to_value(&parsed.command).unwrap();
+        assert_eq!(serialized, command_json);
+        assert_eq!(
+            serde_json::from_value::<DaemonCommand>(serialized).unwrap(),
+            parsed.command
+        );
+        assert_eq!(command_type_name(&parsed.command), "control_goal");
+        assert_eq!(command_active_session_id(&parsed.command), Some("session"));
+        assert!(pa_types::daemon::is_session_plane_daemon_command(
+            "control_goal"
+        ));
+        assert!(default_server_capabilities().contains(&"goal_lifecycle_control".to_string()));
     }
 
     #[test]

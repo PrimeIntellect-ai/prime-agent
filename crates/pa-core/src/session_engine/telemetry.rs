@@ -106,6 +106,13 @@ pub struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    /// Record one successfully persisted direct goal control without goal text.
+    pub fn note_goal_control(&self, action: &str) {
+        let mut properties = Properties::new();
+        properties.set("action", Value::from(action));
+        self.client.track("goal controlled", properties);
+    }
+
     /// A handle with no live subscription, for tests driving the state machine directly.
     #[cfg(test)]
     pub(crate) fn detached(

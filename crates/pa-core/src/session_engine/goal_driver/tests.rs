@@ -31,6 +31,93 @@ fn persisted_session() -> SessionManager {
     session
 }
 
+#[test]
+fn error_resume_preserves_goal_identity_and_all_accounting() {
+    let mut session = persisted_session();
+    let saved = GoalState {
+        active: false,
+        status: GoalStatus::Error,
+        goal_id: Some("failed-goal".to_string()),
+        objective: Some("Finish the fixture task".to_string()),
+        token_budget: Some(100),
+        tokens_used: 42,
+        time_used_seconds: 19,
+        continuations_used: 7,
+        created_at: Some(now_millis().saturating_sub(19_000)),
+        no_progress_streak: Some(2),
+        no_progress_turn_ms: Some(900),
+        last_reason: Some("Provider unavailable".to_string()),
+        last_error: Some("Provider unavailable".to_string()),
+        ..empty_goal_state()
+    };
+    let mut driver = GoalDriver::restore_persisted(saved.clone());
+    assert!(driver.resume(&mut session).unwrap().is_some());
+    let resumed = driver.state();
+    let expected = GoalState {
+        active: true,
+        status: GoalStatus::Active,
+        last_reason: None,
+        last_error: None,
+        updated_at: resumed.updated_at,
+        time_used_seconds: resumed
+            .updated_at
+            .unwrap()
+            .saturating_sub(saved.created_at.unwrap())
+            / 1_000,
+        ..saved
+    };
+    assert_eq!(resumed, &expected);
+    assert_eq!(session.active_goal_state(), Some(expected));
+}
+
+#[test]
+fn error_resume_keeps_exhausted_budget_limited_and_no_progress_streak() {
+    let mut session = persisted_session();
+    let saved = GoalState {
+        active: false,
+        status: GoalStatus::Error,
+        goal_id: Some("budget-goal".to_string()),
+        objective: Some("Finish the fixture task".to_string()),
+        token_budget: Some(100),
+        tokens_used: 100,
+        created_at: Some(now_millis()),
+        no_progress_streak: Some(3),
+        ..empty_goal_state()
+    };
+    let mut driver = GoalDriver::restore_persisted(saved.clone());
+    assert!(driver.resume(&mut session).unwrap().is_none());
+    let expected = GoalState {
+        status: GoalStatus::BudgetLimited,
+        last_reason: Some("Goal token budget already reached".to_string()),
+        updated_at: driver.state().updated_at,
+        time_used_seconds: driver
+            .state()
+            .updated_at
+            .unwrap()
+            .saturating_sub(saved.created_at.unwrap())
+            / 1_000,
+        ..saved
+    };
+    assert_eq!(driver.state(), &expected);
+}
+
+#[test]
+fn error_resume_extension_does_not_resume_completed_or_empty_goals() {
+    for status in [GoalStatus::Complete, GoalStatus::Idle] {
+        let mut session = persisted_session();
+        let saved = GoalState {
+            status,
+            objective: (status == GoalStatus::Complete)
+                .then(|| "Finished fixture task".to_string()),
+            ..empty_goal_state()
+        };
+        let mut driver = GoalDriver::restore_persisted(saved);
+        let before = driver.state().clone();
+        assert!(driver.resume(&mut session).unwrap().is_none());
+        assert_eq!(driver.state(), &before);
+    }
+}
+
 /// A failed provider turn in the pa-agent wire shape, carrying the
 /// `provider_stream_failure` diagnostic.
 fn test_error_turn(
@@ -1400,4 +1487,75 @@ fn pending_continuation_never_re_arms() {
         .is_some());
     driver.clear(&mut session).unwrap();
     assert!(!driver.pending_continuation());
+}
+
+#[test]
+fn direct_goal_control_checks_cas_and_preserves_pause_accounting() {
+    let mut session = persisted_session();
+    let mut driver = GoalDriver::new();
+    let started = driver
+        .start(&mut session, "ship the mission", Some(1000))
+        .unwrap();
+    let goal_id = started.goal_id.as_deref().unwrap();
+    let entries = session.get_entries().len();
+    assert!(driver
+        .control_goal(
+            &mut session,
+            "wrong",
+            "ship the mission",
+            GoalControlAction::Pause
+        )
+        .is_err());
+    assert!(driver
+        .control_goal(&mut session, goal_id, "stale", GoalControlAction::Clear)
+        .is_err());
+    assert_eq!(session.get_entries().len(), entries);
+
+    let paused = driver
+        .control_goal(
+            &mut session,
+            goal_id,
+            "ship the mission",
+            GoalControlAction::Pause,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(paused.status, GoalStatus::Paused);
+    assert_eq!(paused.goal_id, started.goal_id);
+    assert_eq!(paused.objective, started.objective);
+    assert_eq!(paused.token_budget, started.token_budget);
+    assert_eq!(paused.tokens_used, started.tokens_used);
+    assert_eq!(paused.continuations_used, started.continuations_used);
+    assert_eq!(session.get_entries().len(), entries + 1);
+    assert!(driver
+        .control_goal(
+            &mut session,
+            goal_id,
+            "ship the mission",
+            GoalControlAction::Pause,
+        )
+        .is_err());
+    assert!(driver
+        .control_goal(
+            &mut session,
+            goal_id,
+            "ship the mission",
+            GoalControlAction::Clear,
+        )
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        GoalDriver::load_persisted(&session).state().status,
+        GoalStatus::Idle
+    );
+    assert_eq!(GoalDriver::load_persisted(&session).state().objective, None);
+    assert_eq!(session.get_entries().len(), entries + 2);
+    assert!(driver
+        .control_goal(
+            &mut session,
+            goal_id,
+            "ship the mission",
+            GoalControlAction::Clear,
+        )
+        .is_err());
 }

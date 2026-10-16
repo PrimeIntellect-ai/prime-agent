@@ -11,6 +11,43 @@ use super::{
 };
 
 impl SessionEngine for AgentSessionEngine {
+    fn control_goal<'a>(
+        &'a self,
+        goal_id: &str,
+        expected_objective: &str,
+        action: pa_core::session_engine::goal_driver::GoalControlAction,
+        persist: &'a mut (dyn FnMut(&pa_core::goals::GoalState) -> anyhow::Result<()> + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = anyhow::Result<Option<pa_core::goals::GoalState>>>
+                + Send
+                + 'a,
+        >,
+    > {
+        let goal_id = goal_id.to_string();
+        let expected_objective = expected_objective.to_string();
+        Box::pin(async move {
+            let model = self.resolve_model()?;
+            self.ensure_core_session_async(&model).await?;
+            let handles = self.goal_runtime.lock().expect("goal runtime lock").clone();
+            let handles = handles.ok_or_else(|| {
+                anyhow::anyhow!("Cannot control goal because this thread has no goal.")
+            })?;
+            let mut driver = handles.driver.lock().await;
+            let mut session = handles.session.lock().await;
+            let changed =
+                driver.control_goal(&mut session, &goal_id, &expected_objective, action)?;
+            // A clear returns None to the wire, but the durable row needs
+            // the driver's normalized empty state (including its timestamp).
+            persist(&driver.state_with_creation_elapsed())?;
+            Ok(changed)
+        })
+    }
+
+    fn mark_goal_control_published(&self, goal: &pa_core::goals::GoalState) {
+        *self.published_goal.lock().expect("published goal lock") = Some(goal.clone());
+    }
+
     /// Withdraw the queued minted goal-context turns so a state change leaves nothing stale to run.
     fn purge_queued_goal_contexts(&self) {
         let purge = self

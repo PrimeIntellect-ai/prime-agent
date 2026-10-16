@@ -940,6 +940,13 @@ const DAEMON_EVENT: EventRule = EventRule {
     ],
 };
 
+/// A direct goal pause or clear, recorded only after durable confirmation.
+const GOAL_CONTROLLED: EventRule = EventRule {
+    name: "goal controlled",
+    since: 2,
+    properties: &[("action", required(enum_rule(&["pause", "clear"], "pause")))],
+};
+
 /// The settings allowlist guardrail.
 const MODEL_REFUSED: EventRule = EventRule {
     name: "model refused",
@@ -1255,6 +1262,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &AGENT_INSTALLATION_STAGE,
         &STARTUP,
         &DAEMON_EVENT,
+        &GOAL_CONTROLLED,
         &MODEL_REFUSED,
         &SESSION_ARCHIVED,
         &TUI_EXIT,
@@ -1375,6 +1383,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn goal_control_event_keeps_only_the_action() {
+        let mut properties = Properties::new();
+        properties.set("action", Value::from("clear"));
+        properties.set("objective", Value::from("private prompt"));
+        sanitize("goal controlled", &mut properties);
+        assert_eq!(properties.get("action"), Some(&Value::from("clear")));
+        assert!(properties.get("objective").is_none());
+    }
+
+    #[test]
     fn the_catalog_is_the_low_frequency_set() {
         assert_eq!(SCHEMA_VERSION, 2);
         let names: Vec<&str> = catalog().iter().map(|rule| rule.name).collect();
@@ -1390,6 +1408,7 @@ mod tests {
             "session archived",
             "startup",
             "daemon event",
+            "goal controlled",
             "model refused",
             "update completed",
             "tui exit",

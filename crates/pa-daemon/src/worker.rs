@@ -205,6 +205,9 @@ pub struct Worker {
     /// Whole-session replacements are one serialized critical section:
     /// the swap must move the worker onto the replacement as one unit.
     pub(crate) replacement_gate: tokio::sync::Mutex<()>,
+    /// A failed worker-file mirror after a live goal mutation requires reopen
+    /// before another direct control can safely compare identities.
+    pub(crate) goal_control_dirty: std::sync::atomic::AtomicBool,
 }
 
 /// The kernel cron wiring the worker hands its session engine: the shared
@@ -786,6 +789,7 @@ impl Worker {
             herdr_generation: std::sync::Arc::clone(&herdr_generation),
             create_gate: tokio::sync::Mutex::new(()),
             replacement_gate: tokio::sync::Mutex::new(()),
+            goal_control_dirty: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

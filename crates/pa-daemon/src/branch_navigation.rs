@@ -593,6 +593,9 @@ impl Worker {
                 if let Err(error) = self.bind_scheduled_jobs().await {
                     return response_failure(None, "fork", &error.to_string(), None);
                 }
+                // The fork owns a new durable file and rebuilt goal state.
+                self.goal_control_dirty
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.prewarm_replacement_session();
                 // The fork swap is a whole-session replacement too: the fresh summary ships
                 // immediately.

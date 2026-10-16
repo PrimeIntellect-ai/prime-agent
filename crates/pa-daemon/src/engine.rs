@@ -47,6 +47,26 @@ pub trait SessionEngine: Send + Sync {
     /// waiting to run; engines without a queue do nothing.
     fn purge_queued_goal_contexts(&self) {}
 
+    /// Compare and apply direct goal control, mirroring it before the driver
+    /// lock is released. A turn must not mutate the driver between the CAS
+    /// and the durable worker append.
+    fn control_goal<'a>(
+        &'a self,
+        _goal_id: &str,
+        _expected_objective: &str,
+        _action: pa_core::session_engine::goal_driver::GoalControlAction,
+        _persist: &'a mut (dyn FnMut(&pa_core::goals::GoalState) -> Result<()> + Send),
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Option<pa_core::goals::GoalState>>> + Send + 'a,
+        >,
+    > {
+        Box::pin(async { anyhow::bail!("Goal lifecycle control is unavailable") })
+    }
+
+    /// Record the goal state mirrored to the worker store before releasing its lock.
+    fn mark_goal_control_published(&self, _goal: &pa_core::goals::GoalState) {}
+
     /// Release the session's kernel at a parent-owned child's idle settle: a
     /// snapshot-flushing stop; engines that cannot release (scripted harness, no
     /// kernel, failed settled gates) no-op.

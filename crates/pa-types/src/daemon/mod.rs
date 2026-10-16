@@ -157,6 +157,9 @@ mod tests {
         rt::<DaemonCommandWire>(
             r#"{"type":"command","id":"e1","protocol":{"name":"prime-agent.daemon","version":7},"clientId":"cl","command":{"type":"prompt","activeSessionId":"s1","message":"hi","queueIfBusy":true,"extra":"kept"}}"#,
         );
+        rt::<DaemonCommandWire>(
+            r#"{"type":"control_goal","activeSessionId":"s1","goalId":"g1","expectedObjective":"old","action":"pause"}"#,
+        );
     }
 
     #[test]

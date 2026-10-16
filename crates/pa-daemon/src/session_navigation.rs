@@ -350,6 +350,10 @@ impl Worker {
                 if let Err(error) = self.bind_scheduled_jobs().await {
                     return response_failure(None, command, &error.to_string(), None);
                 }
+                // A failed mirror only taints the retired session. The new
+                // store and goal context are now installed and bound.
+                self.goal_control_dirty
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 self.prewarm_replacement_session();
                 // The replacement never pushed a roster delta, so the subscribed
                 // surfaces kept the PREVIOUS session's numbers.
