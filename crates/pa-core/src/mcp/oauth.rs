@@ -242,17 +242,10 @@ pub async fn mcp_login(
         })
     });
 
-    let mut manual_outcome = None;
-    let mut result = if let Some(input) = manual_input.as_mut() {
-        tokio::select! {
-            code = callback.wait_for_code() => code,
-            outcome = input.as_mut() => {
-                manual_outcome = Some(outcome);
-                None
-            }
-        }
+    let (mut result, manual_outcome) = if let Some(input) = manual_input.as_mut() {
+        callback.wait_for_code_or_input(input.as_mut()).await
     } else {
-        callback.wait_for_code().await
+        (callback.wait_for_code().await, None)
     };
     let mut manual_error: Option<anyhow::Error> = None;
     if result.is_none() {
@@ -734,6 +727,95 @@ mod tests {
         let rebound = std::net::TcpListener::bind(("127.0.0.1", port))
             .expect("cancelling login must release its callback port before the next attempt");
         drop(rebound);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settled_browser_code_wins_over_paste_cancel_and_validation_errors() {
+        struct GraceUi {
+            auth_url: Mutex<String>,
+            input: Option<String>,
+        }
+        impl McpLoginUi for GraceUi {
+            fn on_progress(&self, _message: &str) {}
+            fn on_auth(&self, url: &str, _instructions: &str) {
+                *self.auth_url.lock().unwrap() = url.to_string();
+            }
+            fn on_prompt(
+                &self,
+                _message: &str,
+                _placeholder: &str,
+            ) -> Pin<Box<dyn Future<Output = Result<String>> + Send>> {
+                Box::pin(async { Err(anyhow!("unexpected fallback prompt")) })
+            }
+            fn on_manual_code_input(
+                &self,
+            ) -> Option<Pin<Box<dyn Future<Output = Option<String>> + Send>>> {
+                let input = self.input.clone();
+                Some(Box::pin(async move { input }))
+            }
+        }
+        let http = ScriptedHttp::new(vec![
+            (ORIGIN_URL, 404, None, ""),
+            (
+                "https://srv.test/.well-known/oauth-protected-resource/mcp",
+                404,
+                None,
+                "",
+            ),
+            (ORIGIN_META_URL, 200, None, &json_response(&origin_meta())),
+            (
+                ORIGIN_TOKEN,
+                200,
+                None,
+                r#"{"access_token":"browser-access"}"#,
+            ),
+        ]);
+        let client = reqwest::Client::new();
+        for input in [
+            None,
+            Some("http://localhost/callback?code=paste&state=wrong".to_string()),
+        ] {
+            // Every schedule must succeed; repetition exercises select's fair branch ordering,
+            // rather than retrying a failed login until it happens to succeed.
+            for _ in 0..32 {
+                let reservation = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let port = reservation.local_addr().unwrap().port();
+                drop(reservation);
+                let mut config = config("Slack", ORIGIN_URL);
+                config.client_id = Some("registered-client".to_string());
+                config.callback_port = Some(port);
+                let ui = GraceUi {
+                    auth_url: Mutex::default(),
+                    input: input.clone(),
+                };
+                let mut login = Box::pin(mcp_login(&http, &config, &ui));
+                assert!(futures::poll!(login.as_mut()).is_pending());
+                let auth_url = Url::parse(&ui.auth_url.lock().unwrap()).unwrap();
+                let state = auth_url
+                    .query_pairs()
+                    .find(|(key, _)| key == "state")
+                    .map(|(_, value)| value.into_owned())
+                    .unwrap();
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/callback?code=browser-code&state={state}"
+                    ))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+                // Both the browser result and the expired paste grace are now ready before
+                // the login future is polled again; no wall-clock sleeps or timing guesses.
+                tokio::time::advance(Duration::from_secs(1)).await;
+                login
+                    .await
+                    .expect("the settled browser code must survive the paste outcome");
+                let requests = http.seen.lock().unwrap();
+                let (url, body) = requests.last().unwrap();
+                assert_eq!(url, ORIGIN_TOKEN);
+                assert!(body.as_ref().unwrap().contains("code=browser-code"));
+            }
+        }
     }
 
     /// The full Plane-style login through a manual paste: PRM, issuer

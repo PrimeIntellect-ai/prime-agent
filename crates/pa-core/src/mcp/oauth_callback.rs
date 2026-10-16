@@ -2,6 +2,8 @@
 //! redirect ports; the login flow races the browser callback against a manual paste. The served
 //! pages keep the TS product's success/error wording.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -150,6 +152,22 @@ impl CallbackServer {
                 return result;
             }
             self.shared.notify.notified().await;
+        }
+    }
+
+    /// Race a browser callback against manual input. The input future must settle the callback
+    /// (through cancellation) before completing; its outcome remains available to the caller.
+    pub async fn wait_for_code_or_input<F: Future + ?Sized>(
+        &self,
+        input: Pin<&mut F>,
+    ) -> (CallbackResult, Option<F::Output>) {
+        tokio::select! {
+            code = self.wait_for_code() => (code, None),
+            outcome = input => {
+                // Input cancellation may have lost settle() to an earlier browser redirect.
+                // Read that result even when fair select polls the input branch first.
+                (self.wait_for_code().await, Some(outcome))
+            },
         }
     }
 
@@ -359,6 +377,34 @@ fn oauth_error_page(label: &str, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn settled_browser_code_survives_ready_input_after_listener_exit() {
+        // An accept loop can exit while a previously accepted request is still completing.
+        // Complete listener cleanup first so input cancellation will not yield on a join.
+        for _ in 0..64 {
+            let server = CallbackServer::start("Slack", /*callback_port*/ None)
+                .await
+                .unwrap();
+            let task = server.listener_task.lock().unwrap().take().unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let browser_code = CallbackCode {
+                code: "browser-code".to_string(),
+                state: "state".to_string(),
+            };
+            server.shared.settle(Some(browser_code.clone())).await;
+            let mut input = Box::pin(async {
+                server.cancel().await;
+            });
+            let (code, _) = server.wait_for_code_or_input(input.as_mut()).await;
+            assert_eq!(
+                code,
+                Some(browser_code),
+                "the browser settled before input cancellation"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn dropping_a_registered_callback_releases_the_port_without_yielding() {
