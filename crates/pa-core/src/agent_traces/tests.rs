@@ -9,6 +9,8 @@ use std::io::Write as _;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+mod append_upload;
+
 /// One captured request (url, headers, body).
 type CapturedRequest = (String, Vec<(String, String)>, String);
 
