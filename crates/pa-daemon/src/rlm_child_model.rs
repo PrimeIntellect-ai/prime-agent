@@ -434,9 +434,8 @@ mod tests {
         // fingerprint-scoped disk cache carries it.
         let mut auth = pa_core::auth::AuthStorage::create(dir.path());
         let api_key = auth.get_api_key("prime-inference").expect("api key");
-        // The stored team selection survives ambient env credentials (a
-        // dogfood box's ambient `PRIME_API_KEY` changes the pair); the
-        // cache below is written for whatever pair resolves.
+        // The cache is scoped to the key and team actually resolved;
+        // an explicit PRIME_TEAM_ID can still override the stored team.
         let team_id = auth
             .get_provider_headers("prime-inference")
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())

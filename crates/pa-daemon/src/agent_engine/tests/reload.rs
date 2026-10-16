@@ -727,3 +727,35 @@ fn reload_keeps_the_target_when_the_credential_leaves_the_store() {
         "a restored credential rebinds the request auth"
     );
 }
+
+/// A login updates an already-built target, with the key and team header
+/// resolved together; no model request or user `/reload` is needed.
+#[test]
+fn auth_change_rebinds_the_live_prime_target_without_rebuilding() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_prime_inference_provider(&agent_dir);
+    write_prime_inference_credential(&agent_dir, "previous-key", Some("previous-team"));
+    let engine = prime_inference_backed_engine(dir.path());
+    let model = engine.resolve_model().expect("custom prime model");
+    *engine.provider_target.write().unwrap() = Some(ProviderTarget {
+        service_tier: None,
+        api_key: Some("previous-key".to_string()),
+        model,
+        headers: Some(team_headers("previous-team")),
+    });
+    write_prime_inference_credential(&agent_dir, "fresh-key", Some("fresh-team"));
+    engine.apply_auth_changed().expect("auth event applied");
+    let target = engine.provider_target.read().unwrap().clone().unwrap();
+    assert_eq!(target.api_key.as_deref(), Some("fresh-key"));
+    assert_eq!(target.headers, Some(team_headers("fresh-team")));
+    // A logout must not leave the removed key on a cached tool-follow-up
+    // target. A configured models.json (or ambient key) becomes the fallback.
+    std::fs::write(agent_dir.join("auth.json"), "{}").unwrap();
+    engine.apply_auth_changed().expect("logout event applied");
+    let target = engine.provider_target.read().unwrap().clone().unwrap();
+    let (fallback, headers) = engine.resolve_request_key_and_headers(&target.model);
+    assert_eq!(target.api_key, fallback);
+    assert_ne!(target.api_key.as_deref(), Some("fresh-key"));
+    assert_eq!(target.headers, headers);
+}

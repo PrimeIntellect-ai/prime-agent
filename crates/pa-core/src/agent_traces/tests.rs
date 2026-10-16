@@ -154,6 +154,30 @@ impl Drop for TraceEnvCredentials {
 }
 
 #[test]
+fn trace_fallback_uses_live_saved_inference_login_before_ambient_key() {
+    let _env = env_lock();
+    let _credentials = clear_trace_credentials();
+    let fixture = Fixture::new();
+    std::env::set_var("PRIME_API_KEY", "stale-ambient");
+    assert_eq!(
+        trace_credential(&fixture.agent_dir).map(|credential| credential.source),
+        Some(TraceCredentialSource::Environment),
+    );
+    let mut auth = crate::auth::AuthStorage::create(&fixture.agent_dir);
+    auth.set_prime_inference_api_key(
+        "fresh-login",
+        crate::auth::PrimeTeamAssignment::PersonalAccount,
+    );
+    let credential = trace_credential(&fixture.agent_dir).expect("saved login");
+    assert_eq!(credential.source, TraceCredentialSource::PrimeInference);
+    assert_eq!(credential.api_key, "fresh-login");
+    std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "dedicated-trace");
+    let credential = trace_credential(&fixture.agent_dir).expect("dedicated trace key");
+    assert_eq!(credential.source, TraceCredentialSource::Environment);
+    assert_eq!(credential.api_key, "dedicated-trace");
+}
+
+#[test]
 fn the_header_validation_matches_ts() {
     let fixture = Fixture::new();
     let good = fixture.write_session("good.jsonl", "s1");

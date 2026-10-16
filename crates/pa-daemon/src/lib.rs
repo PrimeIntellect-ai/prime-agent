@@ -29,6 +29,7 @@ pub mod agent_message_ingest;
 pub mod agent_messaging;
 pub(crate) mod agent_roster;
 mod async_safe_runtime;
+mod auth_changed;
 mod auto_compaction;
 mod autonomous_continuation;
 pub(crate) mod backpressure;

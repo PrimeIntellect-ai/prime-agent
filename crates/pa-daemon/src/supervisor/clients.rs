@@ -968,6 +968,12 @@ impl Supervisor {
                 Self::clear_detaching_after_reattach(connection, &cleared);
                 outcome
             }
+            DaemonCommand::AuthChanged { provider_id, .. } => {
+                let response = self
+                    .handle_auth_changed_broadcast(&command_id, &type_name, provider_id)
+                    .await;
+                (vec![response_line(&response)], false)
+            }
             DaemonCommand::AgentMessagesStatus {
                 active_session_id, ..
             } if active_session_id.is_none() => {

@@ -165,7 +165,7 @@ fn command_keys_resolve() {
 }
 
 #[test]
-fn env_key_priority_for_prime_inference() {
+fn stored_prime_login_wins_over_ambient_key_until_logout() {
     let mut auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": { "type": "api_key", "key": "stored-key" }
@@ -176,8 +176,27 @@ fn env_key_priority_for_prime_inference() {
         )])),
     );
     assert_eq!(
-        auth.get_api_key("prime-inference").as_deref(),
+        auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+        Some("stored-key")
+    );
+    assert_eq!(
+        auth.get_auth_status(PRIME_INFERENCE_PROVIDER_ID).source,
+        Some(AuthSource::Stored)
+    );
+    auth.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "runtime-key".to_string());
+    assert_eq!(
+        auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
+        Some("runtime-key")
+    );
+    auth.remove_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID);
+    auth.logout(PRIME_INFERENCE_PROVIDER_ID);
+    assert_eq!(
+        auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
         Some("env-key")
+    );
+    assert_eq!(
+        auth.get_auth_status(PRIME_INFERENCE_PROVIDER_ID).source,
+        Some(AuthSource::Environment)
     );
 }
 
@@ -207,8 +226,8 @@ fn provider_headers_team_selection() {
         Some("team-1")
     );
     assert!(auth.get_provider_headers("anthropic").is_none());
-    // The stored team survives an ambient environment key: PRIME_API_KEY
-    // supplies the key, the stored login's team still scopes the header.
+    // The stored login wins over an ambient PRIME_API_KEY, and its team
+    // still scopes the header.
     let mut auth = storage_with_env(
         &serde_json::json!({
             "prime-inference": {
@@ -224,7 +243,7 @@ fn provider_headers_team_selection() {
     );
     assert_eq!(
         auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID).as_deref(),
-        Some("env-key")
+        Some("pi-key")
     );
     let headers = auth
         .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
@@ -408,8 +427,7 @@ fn a_failed_prime_inference_key_write_keeps_the_stale_marking() {
         )))),
         Arc::new(NoOAuth),
     );
-    // The scripted empty env keeps the stored credential the active source
-    // (an ambient PRIME_API_KEY would outrank it).
+    // Keep ambient credentials out of the stale-marking test.
     auth.env_credentials = Arc::new(ScriptedEnv(HashMap::new()));
     assert!(auth.mark_auth_stale(PRIME_INFERENCE_PROVIDER_ID));
     auth.set_prime_inference_api_key("sk-new", PrimeTeamAssignment::PersonalAccount);

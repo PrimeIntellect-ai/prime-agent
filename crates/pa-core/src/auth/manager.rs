@@ -538,21 +538,12 @@ impl AuthStorage {
         let fallback = include_fallback
             .then(|| self.fallback_candidate(provider))
             .flatten();
-        if provider == PRIME_INFERENCE_PROVIDER_ID {
-            vec![
-                self.runtime_candidate(provider),
-                self.environment_candidate(provider),
-                self.stored_candidate(provider),
-                fallback,
-            ]
-        } else {
-            vec![
-                self.runtime_candidate(provider),
-                self.stored_candidate(provider),
-                self.environment_candidate(provider),
-                fallback,
-            ]
-        }
+        [
+            self.runtime_candidate(provider),
+            self.stored_candidate(provider),
+            self.environment_candidate(provider),
+            fallback,
+        ]
         .into_iter()
         .flatten()
         .collect()
@@ -740,7 +731,7 @@ impl AuthStorage {
             })
             .or_else(|| {
                 // The stored primeTeam survives runtime and environment API-key
-                // overrides: an ambient `PRIME_API_KEY` supplies the key, never the team.
+                // overrides; an ambient `PRIME_API_KEY` supplies only the key.
                 match self.data.credential(provider_id) {
                     Some(AuthCredential::ApiKey { prime_team, .. }) => {
                         prime_team.as_ref().map(|team| team.team_id.clone())

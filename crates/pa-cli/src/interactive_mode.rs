@@ -463,7 +463,8 @@ fn build_tui_options(
         .get_default_thinking_level()
         .map(|level| level.model_level().wire_name().to_string());
     let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
-        crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
+        crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone())
+            .with_daemon_socket(socket_path.clone()),
     ));
     let (onboarding, pending_onboarding_stages) =
         onboarding_task(options, Some(provider_auth.clone()));

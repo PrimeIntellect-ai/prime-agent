@@ -118,4 +118,45 @@ impl AgentSessionEngine {
         }
         Ok(())
     }
+
+    /// One Prime auth-change notification (not a user `/reload`): resolve
+    /// the serving pair from the healthy store, including a logout's
+    /// environment/models.json fallback or an explicit runtime override.
+    pub(crate) fn apply_auth_changed(&self) -> Result<(), String> {
+        let _serialized = self
+            .reload_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        if let Some(error) = auth.load_error() {
+            return Err(error.to_string());
+        }
+        let update = |target: &mut ProviderTarget| {
+            if target.model.provider == "prime-inference" {
+                let (key, headers) = self.resolve_request_key_and_headers(&target.model);
+                target.api_key = key;
+                target.headers = headers;
+            }
+        };
+        if let Some(route) = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            update(&mut route.target);
+            if let Some(saved) = route.session_target.as_mut() {
+                update(saved);
+            }
+        }
+        if let Some(target) = self
+            .provider_target
+            .write()
+            .expect("provider target lock")
+            .as_mut()
+        {
+            update(target);
+        }
+        Ok(())
+    }
 }

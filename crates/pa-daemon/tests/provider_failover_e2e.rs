@@ -40,6 +40,7 @@ enum ReplyMode {
 
 struct FailingMock {
     requests: Arc<Mutex<usize>>,
+    auth_headers: Arc<Mutex<Vec<(String, String)>>>,
     port: u16,
     reply: ReplyMode,
 }
@@ -47,22 +48,26 @@ struct FailingMock {
 impl FailingMock {
     fn start(failures: usize, reply: ReplyMode) -> FailingMock {
         let requests = Arc::new(Mutex::new(0usize));
+        let auth_headers = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
+        let auth_for_thread = Arc::clone(&auth_headers);
         let reply_for_thread = reply.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
+                let auth_headers = Arc::clone(&auth_for_thread);
                 let reply = reply_for_thread.clone();
                 std::thread::spawn(move || {
-                    let _ = serve(stream, failures, &reply, &requests);
+                    let _ = serve(stream, failures, &reply, &requests, &auth_headers);
                 });
             }
         });
         FailingMock {
             requests,
+            auth_headers,
             port,
             reply,
         }
@@ -74,6 +79,10 @@ impl FailingMock {
 
     fn count(&self) -> usize {
         *self.requests.lock().expect("mock lock")
+    }
+
+    fn auth_headers(&self) -> Vec<(String, String)> {
+        self.auth_headers.lock().expect("mock lock").clone()
     }
 }
 
@@ -88,11 +97,22 @@ fn chunk(delta: &Value, finish_reason: Option<&str>) -> String {
     .to_string()
 }
 
+fn header_value(head: &str, name: &str) -> String {
+    head.lines()
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
 fn serve(
     mut stream: TcpStream,
     failures: usize,
     reply: &ReplyMode,
     requests: &Arc<Mutex<usize>>,
+    auth_headers: &Arc<Mutex<Vec<(String, String)>>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -113,6 +133,10 @@ fn serve(
             content_length = value.trim().parse().unwrap_or_default();
         }
     }
+    auth_headers.lock().expect("mock lock").push((
+        header_value(&head, "Authorization"),
+        header_value(&head, "X-Prime-Team-ID"),
+    ));
     let mut body_bytes = vec![0u8; content_length];
     if content_length > 0 {
         reader.read_exact(&mut body_bytes)?;
@@ -881,4 +905,111 @@ fn failover_switch_and_restore_rebind_the_kernel_model_facts() {
         (4, 2),
         "the next probe uses the primary without another backup request"
     );
+}
+
+/// A completed `auth_changed` fanout updates both an already-built root and
+/// an already-built child without restarting either worker. The mock captures
+/// the authorization/team pair actually sent to the provider.
+#[test]
+fn saved_login_fans_out_to_running_root_and_child() {
+    let primary = FailingMock::start(0, ReplyMode::Text("served"));
+    let backup = FailingMock::start(0, ReplyMode::Text("backup"));
+    let (dir, _supervisor, mut client, root_id) = setup("auth-change", &primary, &backup);
+    let agent_dir = dir.path().join("agent");
+    let write_auth = |key: &str, team: &str| {
+        std::fs::write(
+            agent_dir.join("auth.json"),
+            json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": key,
+                    "primeTeam": { "teamId": team, "name": "Test Team" }
+                }
+            })
+            .to_string(),
+        )
+        .expect("save test credential");
+    };
+    write_auth("old-login", "old-team");
+    client.send_command(
+        "auth-initial",
+        &json!({"type":"auth_changed", "providerId":"prime-inference"}),
+    );
+    assert_eq!(client.request("auth-initial")["success"], true);
+    client.send_command(
+        "p-root-1",
+        &json!({"type":"prompt_and_wait", "activeSessionId":root_id,"message":"root first"}),
+    );
+    assert_eq!(client.request("p-root-1")["success"], true);
+    let child_dir = agent_dir.join("child-artifacts");
+    std::fs::create_dir_all(&child_dir).expect("child dir");
+    let parent_file = std::fs::read_dir(agent_dir.join("sessions"))
+        .expect("root session directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .expect("root session file");
+    client.send_command(
+        "create-child",
+        &json!({
+            "type": "create",
+            "name": "auth-child",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": child_dir.to_string_lossy(),
+                "parentSessionPath": parent_file.to_string_lossy(),
+                "rlmDepth": 1,
+                "provider": "prime-inference",
+                "model": "mock-1"
+            },
+            "runtimeMetadata": {
+                "kind": "subagent",
+                "rlmChildId": "auth-child-id",
+                "parentActiveSessionId": root_id,
+                "parentSessionFile": parent_file.to_string_lossy(),
+                "parentSessionId": "root-session",
+                "rlmDepth": 1,
+                "createdAt": 0
+            },
+            "lifecycle": "resident"
+        }),
+    );
+    let child = client.request("create-child");
+    assert_eq!(child["success"], true, "child create failed: {child}");
+    let child_id = child["data"]["id"]
+        .as_str()
+        .or_else(|| child["data"]["sessionId"].as_str())
+        .expect("child id")
+        .to_string();
+    client.send_command(
+        "p-child-1",
+        &json!({"type":"prompt_and_wait", "activeSessionId":child_id,"message":"child first"}),
+    );
+    assert_eq!(client.request("p-child-1")["success"], true);
+    assert_eq!(
+        primary.auth_headers(),
+        vec![("Bearer old-login".into(), "old-team".into()); 2]
+    );
+
+    write_auth("new-login", "new-team");
+    client.send_command(
+        "auth-changed",
+        &json!({"type":"auth_changed", "providerId":"prime-inference"}),
+    );
+    let refreshed = client.request("auth-changed");
+    assert_eq!(
+        refreshed["success"], true,
+        "auth fanout failed: {refreshed}"
+    );
+    for (id, session) in [("p-root-2", &root_id), ("p-child-2", &child_id)] {
+        client.send_command(
+            id,
+            &json!({"type":"prompt_and_wait", "activeSessionId":session,"message":"after login"}),
+        );
+        assert_eq!(client.request(id)["success"], true);
+    }
+    let after = primary.auth_headers();
+    assert_eq!(after.len(), 4);
+    assert!(after[2..]
+        .iter()
+        .all(|pair| pair == &("Bearer new-login".to_string(), "new-team".to_string())));
 }

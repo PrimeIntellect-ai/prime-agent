@@ -313,3 +313,91 @@ async fn a_stored_web_search_key_pairs_with_the_logout_row() {
         );
     assert!(auth.logout_options().await.is_empty());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_prime_logout_waits_for_worker_refresh_ack_before_reporting_success() {
+    prime_logout_waits_for_ack(true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_logout_notification_requires_a_full_restart() {
+    prime_logout_waits_for_ack(false).await;
+}
+
+#[cfg(unix)]
+async fn prime_logout_waits_for_ack(ack_success: bool) {
+    use std::io::{BufRead, Write};
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let socket = dir.path().join("daemon.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind fake daemon");
+    let mut stored = pa_core::auth::AuthStorage::create(&agent_dir);
+    stored.set_prime_inference_api_key(
+        "old-login",
+        pa_core::auth::PrimeTeamAssignment::PersonalAccount,
+    );
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept notification");
+        let mut writer = stream.try_clone().expect("clone daemon stream");
+        let mut reader = std::io::BufReader::new(stream);
+        writer.write_all(b"{\"type\":\"daemon_hello\",\"protocol\":{\"name\":\"prime-agent.daemon\",\"version\":7},\"serverCapabilities\":[]}\n").expect("hello");
+        let mut frame = String::new();
+        reader.read_line(&mut frame).expect("read notification");
+        let command: serde_json::Value = serde_json::from_str(&frame).expect("command frame");
+        assert_eq!(command["command"]["type"], "auth_changed");
+        assert_eq!(command["command"]["providerId"], "prime-inference");
+        assert!(command["command"].get("key").is_none());
+        let id = command["id"].as_str().expect("request id").to_string();
+        received_tx.send(()).expect("notification observed");
+        ack_rx.recv().expect("release notification");
+        writeln!(
+            writer,
+            "{}",
+            serde_json::json!({
+                "type": "response", "id": id, "command": "auth_changed", "success": ack_success
+            })
+        )
+        .expect("notification ack");
+    });
+    let auth = ProviderAuth::new(dir.path(), &agent_dir).with_daemon_socket(socket);
+    let row = ProviderRow {
+        id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
+        name: "Prime Inference".to_string(),
+        auth_type: AuthType::ApiKey,
+        status: None,
+        flow: AuthFlow::TerminalFlow,
+        configured: true,
+        available: true,
+    };
+    let login = tokio::spawn(async move { auth.logout(&row).await });
+    received_rx.await.expect("daemon saw change");
+    assert!(
+        !login.is_finished(),
+        "logout must wait for all workers to refresh"
+    );
+    ack_tx.send(()).expect("ack release");
+    let outcome = login.await.expect("logout task");
+    match outcome {
+        ProviderAuthOutcome::Status(message) if ack_success => {
+            assert!(
+                !message.contains("Warning:"),
+                "successful refresh: {message}"
+            );
+        }
+        ProviderAuthOutcome::Status(message) => {
+            assert!(message.contains("Warning: shut down and restart Prime Agent"));
+            assert!(!message.contains("/reload"));
+        }
+        other => panic!("expected logout status, got {other:?}"),
+    }
+    server.join().expect("daemon thread");
+    assert!(pa_core::auth::AuthStorage::create(&agent_dir)
+        .get_all()
+        .credential(PRIME_INFERENCE_PROVIDER_ID)
+        .is_none());
+}
