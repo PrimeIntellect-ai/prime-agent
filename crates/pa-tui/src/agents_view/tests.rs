@@ -22,6 +22,7 @@ mod render_pulse;
 mod reply;
 mod running_lines;
 mod saved_catalog;
+mod saved_pages;
 mod search_selection;
 mod selection_churn;
 

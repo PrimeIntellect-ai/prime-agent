@@ -456,7 +456,12 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     let file = fs::File::open(&path).unwrap();
     let _ = file.set_modified(past);
     drop(file);
-    let second = read_session_info(&path).unwrap();
+    let mut file = fs::File::open(&path).unwrap();
+    let (second, sidecar_behind) = read_session_info_from(&mut file, &path).unwrap();
+    assert!(
+        sidecar_behind,
+        "a rejected prefix must mark the fresh scan for sidecar backfill"
+    );
     assert_eq!(
         second.name.as_deref(),
         Some("after!"),

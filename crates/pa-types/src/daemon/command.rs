@@ -117,6 +117,12 @@ pub enum DaemonCommand {
         session_dir: Option<String>,
         #[serde(default)]
         scope: Value,
+        /// The most session files this request folds; `None` walks to the end of the store.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u64>,
+        /// A previous response's `nextCursor`: the walk resumes after that file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
         #[serde(flatten)]
         rest: JsonMap,
     },

@@ -4,8 +4,10 @@
 //! instead of rescanning the whole file. pa-daemon owns the sidecar:
 //! the scan state is this crate's type, and it certifies differently from
 //! pa-core's window snapshot (an exact generation there, a grown-file
-//! resume with a prefix check here). Only the lease holder writes (the
-//! worker at release); every reader loads.
+//! resume with a prefix check here). Two writers: the lease holder at
+//! release, and the catalog scan for a file it had to fold. Both persist
+//! only certified states and every load re-validates the generation or
+//! prefix, so a lost race leaves an older valid prefix, never a wrong row.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -43,8 +45,8 @@ pub(super) fn load(path: &Path) -> Option<SessionScanState> {
     (sidecar.version == INFO_SIDECAR_VERSION).then_some(sidecar.state)
 }
 
-/// The lease-release write: persist the cached scan state for `path` (the
-/// path form the lease holder opened and read the file by - the scan
+/// The sidecar write (lease release, catalog backfill): persist the cached
+/// scan state for `path` (the path form the writer read the file by - the scan
 /// cache's key, and the form the load derives the sidecar path from) so
 /// the next process that opens the file folds only what was appended
 /// since. A fresh temp file, then the rename - a torn write never
