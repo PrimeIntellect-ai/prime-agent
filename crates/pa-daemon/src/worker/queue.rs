@@ -256,7 +256,7 @@ pub(crate) fn checkpoint_queue_recovery(
     };
     // The lanes are read under the recovery lock (a microsecond core hold —
     // never across the journal's fsyncs): no persist interleaves this read.
-    let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
+    let (active_session_id, session_id, session_file, lanes, turn_in_flight, suspended) = {
         let core = core_lock.lock().unwrap();
         (
             core.active_session_id.clone(),
@@ -269,6 +269,7 @@ pub(crate) fn checkpoint_queue_recovery(
                 .map(|s| s.path.to_string_lossy().to_string()),
             queue_lanes(&core),
             core.busy,
+            core.queued_input_suspended,
         )
     };
     let (busy, operation) = match checkpoint {
@@ -283,7 +284,7 @@ pub(crate) fn checkpoint_queue_recovery(
     };
     // The verdict never publishes over a snapshot that did not
     // persist: the pair rides ONE durable append.
-    let _ = journal.record_queue_checkpoint(
+    if let Err(error) = journal.record_queue_checkpoint(
         &active_session_id,
         &session_id,
         session_file.as_deref(),
@@ -291,7 +292,10 @@ pub(crate) fn checkpoint_queue_recovery(
         operation,
         &lanes.steering,
         &lanes.follow_up,
-    );
+        suspended,
+    ) {
+        eprintln!("pa-daemon: queue recovery checkpoint {operation} failed: {error:#}");
+    }
 }
 
 pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
@@ -305,6 +309,8 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
                 queue_key: item.queue_key.clone(),
                 queue_visible: item.queue_visible,
                 policy: item.policy.journal_value().to_string(),
+                forced_batch: item.forced_batch,
+                images: item.images.clone(),
             })
             .collect()
     }
@@ -325,6 +331,10 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
     let Some(first) = items.front() else {
         return Vec::new();
     };
+    // Only a real pickup starts a new delivery. Empty or parked lanes retain
+    // the prior delivery's cancellation and successful completion facts.
+    core.turn_cancelled = false;
+    core.turn_completed = false;
     // The armed set forces "all" only when the front item is armed; an un-armed
     // front disarms the batch once no armed item remains queued.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
@@ -365,10 +375,8 @@ pub(crate) fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<Q
 pub(crate) fn restore_queue_snapshot(
     journal: &WorkerRecoveryJournal,
     active_session_id: &str,
-) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
+) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>, bool) {
     fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
-        // Images on a queued prompt do not survive the restart; the
-        // delivery rows ride the item record without them.
         lanes
             .into_iter()
             .map(|record| {
@@ -399,11 +407,11 @@ pub(crate) fn restore_queue_snapshot(
                     agent_message,
                     queue_key: record.queue_key,
                     admission_id: None,
-                    images: Vec::new(),
+                    images: record.images,
                     done: None,
                     queue_visible: record.queue_visible,
                     policy,
-                    forced_batch: false,
+                    forced_batch: record.forced_batch,
                 }
             })
             .collect()
@@ -411,13 +419,17 @@ pub(crate) fn restore_queue_snapshot(
 
     let mut steering = VecDeque::new();
     let mut follow_up = VecDeque::new();
-    if let Some((steering_lanes, follow_up_lanes)) =
+    let mut suspended = false;
+    // The snapshot carries the suspension bit with the lanes: a user-aborted
+    // queue revives still parked instead of auto-running its prompts.
+    if let Some((steering_lanes, follow_up_lanes, snapshot_suspended)) =
         journal.latest_queue_snapshot(active_session_id)
     {
         steering = pending(steering_lanes);
         follow_up = pending(follow_up_lanes);
+        suspended = snapshot_suspended;
     }
-    (steering, follow_up)
+    (steering, follow_up, suspended)
 }
 
 /// Admit one held autonomous continuation through the follow-up lane:

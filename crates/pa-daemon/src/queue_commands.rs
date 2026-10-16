@@ -1,5 +1,5 @@
-//! The queue-lane command surface: `mutate_queued_message` and
-//! `resume_queue`. Wire contract: `get_queue` and the
+//! Queue-lane mutation command: `mutate_queued_message`.
+//! Wire contract: `get_queue` and the
 //! `session_action_update` events expose each lane's message previews,
 //! and a mutation addresses one preview by `lane` + `index` + `expectedText`.
 
@@ -146,26 +146,6 @@ impl Worker {
             self.work_notify.notify_one();
         }
         response
-    }
-
-    /// `resume_queue`: the queue's queued work resumes (the turn runner
-    /// drains the lanes when idle); the failure string is TS-verbatim for the empty queue.
-    pub(crate) fn handle_resume_queue(&self) -> DaemonResponse {
-        if let Err(response) = self.require_created("resume_queue") {
-            return response;
-        }
-        // The suspension clears first, so `resume_queue` is a resume
-        // site even when it answers "No queued work to resume".
-        self.resume_queued_input();
-        let has_queued_work = {
-            let core = self.core.lock().unwrap();
-            !core.steering.is_empty() || !core.follow_up.is_empty()
-        };
-        if !has_queued_work {
-            return response_failure(None, "resume_queue", "No queued work to resume", None);
-        }
-        self.work_notify.notify_one();
-        response_success(None, "resume_queue", None)
     }
 }
 

@@ -405,6 +405,26 @@ fn distinct(values: Vec<String>) -> Vec<String> {
     values
 }
 
+/// The session file's latest `session_state` marker ("" before any state
+/// was written): a kill stop's finalize appends `archived`.
+fn session_state(session_file: &Path) -> String {
+    let mut state = String::new();
+    for line in std::fs::read_to_string(session_file)
+        .expect("session file readable")
+        .lines()
+    {
+        let Ok(entry) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) == Some("session_state") {
+            if let Some(status) = entry["state"]["status"].as_str() {
+                state = status.to_string();
+            }
+        }
+    }
+    state
+}
+
 // The restart regression families live in the child modules (same tree
 // position); every child's use-super glob resolves through this root's
 // harness, and the one test binary stays one CI shard unit.
@@ -412,4 +432,5 @@ mod boot_cleanup;
 mod plain_boot;
 mod restart;
 mod revival;
+mod shutdown_continue;
 mod update_boot;

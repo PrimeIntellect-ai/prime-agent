@@ -155,6 +155,7 @@ impl CompactionManager {
                 let mut core = self.core.lock().unwrap();
                 if core.busy {
                     core.abort_requested = true;
+                    core.turn_cancelled = true;
                     // TS `compact()` detaches from agent events before the abort, so the
                     // interrupted turn's aborted row never reaches the wire or the session file.
                     core.suppress_aborted_row = true;

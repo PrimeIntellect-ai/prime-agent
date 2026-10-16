@@ -675,6 +675,25 @@ fn restart_relists_child(delay_ms: u64, display_status: &str) {
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    if delay_ms == 0 {
+        // The completed display precedes the child's terminal-notice
+        // follow-up. Drain that notice and its parent turn before closing
+        // the idle fixture; otherwise restart correctly revives owed work.
+        client.send_command(
+            "completed-child-quiescent",
+            &json!({
+                "type": "wait_for_idle",
+                "activeSessionId": parent_id,
+                "waitForRlmQuiescence": true,
+            }),
+        );
+        let quiescent = client.read_response("completed-child-quiescent");
+        assert_eq!(
+            quiescent["success"], true,
+            "completed child and parent notice did not settle: {quiescent}"
+        );
+    }
+
     client.send_command("bye", &json!({ "type": "shutdown" }));
     let deadline = Instant::now() + Duration::from_secs(30);
     while daemon

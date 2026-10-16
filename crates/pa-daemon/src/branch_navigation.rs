@@ -494,6 +494,7 @@ impl TreeNavigation {
                 let mut core = self.core.lock().unwrap();
                 if core.busy {
                     core.abort_requested = true;
+                    core.turn_cancelled = true;
                     // The interrupted turn's aborted row stays off the wire and out of the
                     // store (TS's navigation path never surfaces one).
                     core.suppress_aborted_row = true;
