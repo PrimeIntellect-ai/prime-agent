@@ -1,0 +1,1 @@
+- Terminal worker stops on macOS (and Linux kernels without pidfd) now send SIGTERM and SIGKILL via kill(2), gated by the start-id identity check before each signal, instead of silently reporting the worker as survived.
