@@ -2,11 +2,10 @@
 //! handlers, the stale-id binding and rebind seam, and the saved-row
 //! builders.
 use super::{
-    anyhow, bail, join_all, json, list_sessions, mpsc, name_unavailable_error, paths,
-    reservation_key, response_failure, response_line, response_success, subscribers, Arc,
-    DaemonCommand, DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf,
-    ResidentWorker, Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
-    SUMMARY_TIMEOUT_MS,
+    anyhow, bail, json, list_sessions, mpsc, name_unavailable_error, paths, reservation_key,
+    response_failure, response_line, response_success, subscribers, Arc, DaemonCommand,
+    DaemonResponse, DaemonSessionLifecycle, NameScope, Outbound, Path, PathBuf, ResidentWorker,
+    Result, RouteAdmission, Supervisor, Value, ROUTE_TIMEOUT_MS,
 };
 
 /// One spawn-name reservation held across a fresh-launch create (TS #2396): the only
@@ -421,7 +420,8 @@ impl Supervisor {
                     ));
                 }
             }
-            let summaries_by_resident = self.worker_summaries(&residents).await;
+            let summaries_by_resident: Vec<Value> =
+                residents.iter().map(Self::resident_summary).collect();
             let ledger = match self.rlm_spawn_ledger_for(session_dir.as_deref()).await {
                 Ok(ledger) => ledger,
                 Err(error) => {
@@ -511,7 +511,7 @@ impl Supervisor {
         } else {
             // Live residents of this supervisor.
             let residents = self.registry.list().await;
-            self.worker_summaries(&residents).await
+            residents.iter().map(Self::resident_summary).collect()
         };
         response_success(
             Some(&command_id),
@@ -520,33 +520,20 @@ impl Supervisor {
         )
     }
 
-    /// One resident's live summary (`get_state`), with the recovering-row
-    /// fallback for an unreachable worker.
-    async fn worker_summary(self: &Arc<Self>, resident: &Arc<ResidentWorker>) -> Value {
-        let response = self
-            .route_command_typed(
-                resident,
-                "get_state",
-                json!({}),
-                SUMMARY_TIMEOUT_MS,
-                RouteAdmission::SupervisorInternal,
-            )
-            .await;
-        match response {
-            Ok(response) if response.success => response
-                .data
-                .unwrap_or_else(|| offline_summary(&resident.worker_id)),
-            _ => offline_summary(&resident.worker_id),
-        }
-    }
-
-    async fn worker_summaries(self: &Arc<Self>, residents: &[Arc<ResidentWorker>]) -> Vec<Value> {
-        join_all(
-            residents
-                .iter()
-                .map(|resident| self.worker_summary(resident)),
-        )
-        .await
+    /// One resident's list row: the cached live summary the roster pipeline
+    /// keeps fresh (the worker's own pushes plus the authoritative
+    /// registration/adoption/create/wake pulls), never a per-list `get_state`
+    /// round-trip — the summary budget a busy worker used to hold the whole
+    /// list against. A resident with no cached summary (its registration pull
+    /// failed and it never pushed) serves the degraded offline row today's
+    /// timeout path produced, without the wait.
+    fn resident_summary(resident: &Arc<ResidentWorker>) -> Value {
+        resident
+            .summary_snapshot
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| offline_summary(&resident.worker_id))
     }
 
     pub(crate) async fn handle_create(
@@ -643,7 +630,8 @@ impl Supervisor {
         if name.trim().is_empty() {
             return Err(anyhow!("Session name cannot be empty"));
         }
-        for summary in self.worker_summaries(&self.registry.list().await).await {
+        let residents = self.registry.list().await;
+        for summary in residents.iter().map(Self::resident_summary) {
             let session_name = summary
                 .get("sessionName")
                 .and_then(Value::as_str)
@@ -838,8 +826,9 @@ pub(super) fn saved_session_row(info: &crate::session_store::SessionInfo) -> Val
 mod tests {
     use super::*;
     use crate::backpressure::WORKER_INFLIGHT_CAPACITY;
-    use crate::registry::{WorkerReply, WorkerRequest};
+    use crate::registry::WorkerRequest;
     use crate::supervisor::SupervisorOptions;
+    use crate::supervisor_roster::WorkerRosterDelta;
     use pa_types::daemon::DaemonWorkerDescriptor;
 
     fn resident(worker_id: &str, session_file: Option<&Path>) -> Arc<ResidentWorker> {
@@ -850,8 +839,8 @@ mod tests {
             "socketPath": "/tmp/none.sock",
             "recoveryJournalPath": "/tmp/none.jsonl",
             "supervisorSocketPath": "/tmp/none.sock",
-            "authenticationToken": "test",
-            "rootActiveSessionId": "none",
+            "authenticationToken": worker_id,
+            "rootActiveSessionId": worker_id,
             "createdAt": "2026-09-26T00:00:00Z",
             "updatedAt": "2026-09-26T00:00:00Z",
             "lifecycle": "ready",
@@ -870,6 +859,8 @@ mod tests {
         )
     }
 
+    /// Install a live command channel nobody drains: a resident that accepts
+    /// frames but never answers (the halves must outlive the routes under test).
     async fn wedged_worker(
         resident: &Arc<ResidentWorker>,
     ) -> tokio::sync::mpsc::Receiver<WorkerRequest> {
@@ -877,25 +868,6 @@ mod tests {
             tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
         *resident.cmd_tx.lock().await = Some(cmd_tx);
         cmd_rx
-    }
-
-    async fn responsive_worker(resident: &Arc<ResidentWorker>, state: Value) {
-        let (cmd_tx, mut cmd_rx) =
-            tokio::sync::mpsc::channel::<WorkerRequest>(WORKER_INFLIGHT_CAPACITY);
-        *resident.cmd_tx.lock().await = Some(cmd_tx);
-        let responder = Arc::clone(resident);
-        tokio::spawn(async move {
-            while let Some(request) = cmd_rx.recv().await {
-                let reply = responder.pending.lock().await.remove(&request.request_id);
-                if let Some(reply) = reply {
-                    let _ = reply.send(WorkerReply::Typed(response_success(
-                        Some(&request.request_id),
-                        &request.command_type,
-                        Some(state.clone()),
-                    )));
-                }
-            }
-        });
     }
 
     fn supervisor(dir: &Path) -> Supervisor {
@@ -906,18 +878,105 @@ mod tests {
         .expect("supervisor")
     }
 
+    /// One full live summary in the worker's push shape (the wire form
+    /// `worker_roster_delta` carries): every field the list rows and the CLI's
+    /// structural summary guard read.
+    fn live_summary(worker_id: &str, session_file: &Path, overrides: &Value) -> Value {
+        let mut summary = json!({
+            "id": worker_id,
+            "activeSessionId": worker_id,
+            "lifecycle": "live",
+            "activity": "idle",
+            "isSessionActive": false,
+            "sessionId": worker_id,
+            "sessionFile": session_file.to_string_lossy(),
+            "sessionName": format!("{worker_id}-name"),
+            "cwd": "/tmp",
+            "isStreaming": false,
+            "isCompacting": false,
+            "attachedClients": 0,
+            "messageCount": 1,
+            "sessionActions": { "queuedCount": 0, "steering": [], "followUps": [] },
+            "model": { "provider": "openai", "id": "test-model" },
+            "workerState": "ready",
+        });
+        if let (Some(summary), Some(overrides)) = (summary.as_object_mut(), overrides.as_object()) {
+            for (key, value) in overrides {
+                summary.insert(key.clone(), value.clone());
+            }
+        }
+        summary
+    }
+
+    /// The worker's own roster push, exactly as the wire frame delivers it: the
+    /// real delta handler (token-authenticated, sequence-gated) is the pipeline
+    /// that keeps the resident's cached live summary fresh.
+    async fn publish_roster_delta(supervisor: &Arc<Supervisor>, worker_id: &str, summary: Value) {
+        let delta = WorkerRosterDelta {
+            worker_token: worker_id.to_string(),
+            summary,
+            removed: Vec::new(),
+            sequence: Some(1),
+            worker_instance_id: Some("test-instance".to_string()),
+        };
+        let response = supervisor
+            .handle_worker_roster_delta("d1", "worker_roster_delta", delta)
+            .await;
+        assert!(response.success, "the roster delta applied: {response:?}");
+    }
+
+    /// Register one wedged resident; the undrained channel's receive half
+    /// must outlive the routes under test, so it is returned for the test to
+    /// hold (a dropped receiver closes the channel and routes fail fast).
+    async fn insert_wedged(
+        dir: &Path,
+        supervisor: &Arc<Supervisor>,
+        worker_id: &str,
+    ) -> tokio::sync::mpsc::Receiver<WorkerRequest> {
+        let wedged = resident(worker_id, Some(&dir.join(format!("{worker_id}.jsonl"))));
+        let wedged_rx = wedged_worker(&wedged).await;
+        supervisor.registry.insert(wedged).await;
+        wedged_rx
+    }
+
+    /// The per-resident summary budget the pre-fix list paid to a wedged
+    /// worker (`SUMMARY_TIMEOUT_MS`, deleted with the live routes): the
+    /// regression bound — a served list must never come near it.
+    const WEDGED_SUMMARY_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+    fn list_rows(response: &DaemonResponse) -> Vec<Value> {
+        assert!(response.success, "the list failed: {response:?}");
+        response
+            .data
+            .as_ref()
+            .expect("sessions data")
+            .get("sessions")
+            .and_then(Value::as_array)
+            .cloned()
+            .expect("session rows")
+    }
+
+    fn row_for<'a>(rows: &'a [Value], id: &str) -> &'a Value {
+        rows.iter()
+            .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+            .unwrap_or_else(|| panic!("no row for {id}"))
+    }
+
+    /// The fabrication guard: a wedged (never-answering) resident that pushed a
+    /// BUSY summary must keep serving that real busy row — the offline
+    /// "recovering" row a summary timeout fabricates is the regression — and
+    /// the list must answer inside the summary budget, not wait it out.
     #[tokio::test(start_paused = true)]
-    async fn a_wedged_resident_does_not_hold_the_all_true_list_past_the_client_deadline() {
+    async fn a_wedged_resident_keeps_its_pushed_busy_row_and_never_holds_the_list() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let supervisor = Arc::new(supervisor(dir.path()));
-        let wedged = resident("w-wedged", Some(&dir.path().join("w-wedged.jsonl")));
-        let _wedged_rx = wedged_worker(&wedged).await;
-        supervisor.registry.insert(Arc::clone(&wedged)).await;
-        let healthy = resident("w-healthy", Some(&dir.path().join("w-healthy.jsonl")));
-        let state =
-            json!({ "id": "w-healthy", "lifecycle": "live", "sessionName": "healthy-name" });
-        responsive_worker(&healthy, state).await;
-        supervisor.registry.insert(Arc::clone(&healthy)).await;
+        let _w_busy_rx = insert_wedged(dir.path(), &supervisor, "w-busy").await;
+        let summary = live_summary(
+            "w-busy",
+            &dir.path().join("w-busy.jsonl"),
+            &json!({ "activity": "working", "isStreaming": true, "isSessionActive": true }),
+        );
+        publish_roster_delta(&supervisor, "w-busy", summary).await;
 
         let start = tokio::time::Instant::now();
         let response = supervisor
@@ -925,53 +984,224 @@ mod tests {
             .await;
         let elapsed = start.elapsed();
 
-        assert!(response.success);
-        let rows = response
-            .data
-            .expect("sessions data")
-            .get("sessions")
-            .and_then(Value::as_array)
-            .cloned()
-            .expect("session rows");
-        let wedged_row = rows
-            .iter()
-            .find(|row| row.get("id").and_then(Value::as_str) == Some("w-wedged"))
-            .expect("wedged row");
+        let rows = list_rows(&response);
+        let busy_row = row_for(&rows, "w-busy");
         assert_eq!(
-            wedged_row.get("lifecycle").and_then(Value::as_str),
-            Some("recovering")
+            busy_row.get("lifecycle").and_then(Value::as_str),
+            Some("live"),
+            "the wedged resident serves its real row, not the offline fallback: {busy_row}"
         );
-        let healthy_row = rows
-            .iter()
-            .find(|row| row.get("id").and_then(Value::as_str) == Some("w-healthy"))
-            .expect("healthy row");
         assert_eq!(
-            healthy_row.get("sessionName").and_then(Value::as_str),
-            Some("healthy-name")
+            busy_row.get("activity").and_then(Value::as_str),
+            Some("working")
+        );
+        assert_eq!(
+            busy_row.get("isStreaming").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            busy_row.get("sessionName").and_then(Value::as_str),
+            Some("w-busy-name")
+        );
+        assert_eq!(
+            busy_row
+                .get("sessionActions")
+                .and_then(|actions| actions.get("queuedCount"))
+                .and_then(Value::as_u64),
+            Some(0),
+            "the full summary keeps its session-action snapshot: {busy_row}"
         );
         assert!(
-            elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
+            elapsed < WEDGED_SUMMARY_BUDGET,
             "one wedged resident held the list for {elapsed:?}"
         );
     }
 
+    /// The non-`all` branch (the CLI's `prime-agent list` and the resume
+    /// lease guard) serves the same cached rows with no worker round trips.
     #[tokio::test(start_paused = true)]
-    async fn a_named_create_name_check_does_not_wait_out_the_client_deadline_behind_a_wedged_resident(
-    ) {
+    async fn the_live_residents_list_serves_cached_rows_without_worker_round_trips() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let supervisor = Arc::new(supervisor(dir.path()));
-        let wedged = resident("w-wedged", None);
-        let _wedged_rx = wedged_worker(&wedged).await;
-        supervisor.registry.insert(Arc::clone(&wedged)).await;
+        let _w_idle_rx = insert_wedged(dir.path(), &supervisor, "w-idle").await;
+        let summary = live_summary(
+            "w-idle",
+            &dir.path().join("w-idle.jsonl"),
+            &json!({ "activity": "idle", "isStreaming": false }),
+        );
+        publish_roster_delta(&supervisor, "w-idle", summary).await;
 
         let start = tokio::time::Instant::now();
-        let verdict = supervisor.assert_session_name_available("fresh-name").await;
+        let response = supervisor
+            .handle_list("l2".to_string(), "list".to_string(), None, None, None)
+            .await;
         let elapsed = start.elapsed();
 
-        assert!(verdict.is_ok(), "an unreachable resident is skipped");
+        let rows = list_rows(&response);
+        let row = row_for(&rows, "w-idle");
+        assert_eq!(
+            row.get("sessionName").and_then(Value::as_str),
+            Some("w-idle-name")
+        );
+        assert_eq!(row.get("activity").and_then(Value::as_str), Some("idle"));
         assert!(
-            elapsed < std::time::Duration::from_millis(ROUTE_TIMEOUT_MS),
+            elapsed < WEDGED_SUMMARY_BUDGET,
+            "the live-residents list waited {elapsed:?} behind one wedged resident"
+        );
+    }
+
+    /// A resident with no cached row (its registration pull failed and it
+    /// never pushed) serves today's degraded offline row immediately — the
+    /// row the summary timeout used to fabricate after the full 5 s wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_resident_without_a_cached_row_serves_the_offline_row_instantly() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let _w_uncached_rx = insert_wedged(dir.path(), &supervisor, "w-uncached").await;
+
+        let start = tokio::time::Instant::now();
+        let response = supervisor
+            .handle_list("l3".to_string(), "list".to_string(), Some(true), None, None)
+            .await;
+        let elapsed = start.elapsed();
+
+        let rows = list_rows(&response);
+        let row = row_for(&rows, "w-uncached");
+        assert_eq!(
+            row.get("lifecycle").and_then(Value::as_str),
+            Some("recovering")
+        );
+        assert!(
+            elapsed < WEDGED_SUMMARY_BUDGET,
+            "the offline fallback waited {elapsed:?} on an uncached resident"
+        );
+    }
+
+    /// The create-path name check reads the cached names: a wedged resident
+    /// cannot hold a `create` for the summary budget, and its real session
+    /// name still refuses a duplicate create.
+    #[tokio::test(start_paused = true)]
+    async fn a_named_create_name_check_reads_the_cached_names() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let _w_named_rx = insert_wedged(dir.path(), &supervisor, "w-named").await;
+        let summary = live_summary(
+            "w-named",
+            &dir.path().join("w-named.jsonl"),
+            &json!({ "sessionName": "taken-name" }),
+        );
+        publish_roster_delta(&supervisor, "w-named", summary).await;
+
+        let start = tokio::time::Instant::now();
+        let conflict = supervisor.assert_session_name_available("taken-name").await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            conflict
+                .unwrap_err()
+                .to_string()
+                .contains("Agent name \"taken-name\" is unavailable"),
+            "the cached name still refuses a duplicate create"
+        );
+        assert!(
+            elapsed < WEDGED_SUMMARY_BUDGET,
             "the name check waited {elapsed:?} behind one wedged resident"
+        );
+        let fresh = supervisor.assert_session_name_available("fresh-name").await;
+        assert!(fresh.is_ok(), "a fresh name stays available");
+    }
+
+    /// The exact public wire line, driven through the real client connection
+    /// (`handle_client` runs the hello/envelope/dispatch path): one `list`
+    /// command must answer inside the summary budget while a resident worker
+    /// is silent, and the silent resident's row is its pushed live summary —
+    /// the desktop Cmd-R contract.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_wire_list_never_waits_on_a_silent_resident_worker() {
+        use pa_types::platform::transport::TransportStream;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor = Arc::new(supervisor(dir.path()));
+        let _w_silent_rx = insert_wedged(dir.path(), &supervisor, "w-silent").await;
+        let _w_second_rx = insert_wedged(dir.path(), &supervisor, "w-second").await;
+        let busy = live_summary(
+            "w-silent",
+            &dir.path().join("w-silent.jsonl"),
+            &json!({ "activity": "working", "isStreaming": true, "isSessionActive": true }),
+        );
+        publish_roster_delta(&supervisor, "w-silent", busy).await;
+        let idle = live_summary(
+            "w-second",
+            &dir.path().join("w-second.jsonl"),
+            &json!({ "activity": "idle", "isStreaming": false }),
+        );
+        publish_roster_delta(&supervisor, "w-second", idle).await;
+
+        let (server_side, client_side) = tokio::net::UnixStream::pair().expect("socket pair");
+        let served = {
+            let supervisor = Arc::clone(&supervisor);
+            let stream: Box<dyn TransportStream> = Box::new(server_side);
+            tokio::spawn(async move { supervisor.handle_client(stream).await })
+        };
+        let (read, mut write) = client_side.into_split();
+        let mut reader = BufReader::new(read);
+        let mut hello = String::new();
+        reader
+            .read_line(&mut hello)
+            .await
+            .expect("the daemon hello");
+
+        let line = r#"{"type":"command","id":"l1","protocol":{"name":"prime-agent.daemon","version":7},"command":{"type":"list","all":true}}"#;
+        let start = tokio::time::Instant::now();
+        write
+            .write_all(line.as_bytes())
+            .await
+            .expect("send the line");
+        write.write_all(b"\n").await.expect("newline");
+        let mut buffer = String::new();
+        let response = loop {
+            reader.read_line(&mut buffer).await.expect("read a frame");
+            let frame = serde_json::from_str::<Value>(buffer.trim_end()).expect("the frame parses");
+            if frame.get("id").and_then(Value::as_str) == Some("l1") {
+                break frame;
+            }
+            buffer.clear();
+        };
+        let elapsed = start.elapsed();
+        served.abort();
+
+        assert_eq!(
+            response["success"], true,
+            "the wire list failed: {response}"
+        );
+        let rows = response["data"]["sessions"]
+            .as_array()
+            .cloned()
+            .expect("session rows");
+        let silent_row = row_for(&rows, "w-silent");
+        assert_eq!(
+            silent_row.get("activity").and_then(Value::as_str),
+            Some("working"),
+            "the silent resident serves its pushed busy summary, not the offline fallback: {silent_row}"
+        );
+        assert_eq!(
+            silent_row.get("isStreaming").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            silent_row.get("sessionName").and_then(Value::as_str),
+            Some("w-silent-name")
+        );
+        let second_row = row_for(&rows, "w-second");
+        assert_eq!(
+            second_row.get("activity").and_then(Value::as_str),
+            Some("idle")
+        );
+        assert!(
+            elapsed < WEDGED_SUMMARY_BUDGET,
+            "the wire list waited {elapsed:?} behind one silent resident"
         );
     }
 }

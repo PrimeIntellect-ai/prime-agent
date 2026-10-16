@@ -945,3 +945,210 @@ async fn the_released_token_set_caps_at_8192() {
         "a late registration on the overflowing token is rejected"
     );
 }
+
+// ---------------------------------------------------------------------------
+// THE RAW-DISCONNECT ROSTER FLUSH (the list-cache lane): the attach/close
+// lifecycle's residual window — the socket's own drop. The attach/detach arms
+// enqueue their roster delta so the supervisor's cached list row counts the
+// viewer, but a viewer that just drops the socket never runs either arm; the
+// guard's Drop (the release below) was the only post-attach event, and
+// pre-fix it flushed nothing, so the cached row kept the pre-disconnect
+// `attachedClients` until some later session event.
+// ---------------------------------------------------------------------------
+
+/// The roster-delta probe: a real newline-JSON supervisor socket the worker's
+/// roster link dials (the same wire the stub-supervisor queue tests in
+/// `roster_activity` speak), recording every flushed `worker_roster_delta`'s
+/// `attachedClients`. The served-path oracle: the cache's freshness is
+/// observed as the exact frames the product sends, never inferred from a
+/// side effect.
+struct RosterProbe {
+    socket: PathBuf,
+    counts: Arc<Mutex<Vec<u64>>>,
+    _dir: tempfile::TempDir,
+}
+
+impl RosterProbe {
+    /// Bind the probe socket and spawn its accept loop (the link dials one
+    /// fresh socket per request, so every flush is its own connection).
+    fn spawn() -> Self {
+        let dir = tempfile::TempDir::new().expect("probe dir");
+        let socket = dir.path().join("roster.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind roster probe");
+        let counts: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&counts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let sink = Arc::clone(&sink);
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                    let (reader, mut writer) = stream.into_split();
+                    writer
+                        .write_all(b"{\"type\":\"daemon_hello\"}\n")
+                        .await
+                        .expect("greet roster link");
+                    let mut lines = BufReader::new(reader);
+                    loop {
+                        let mut line = String::new();
+                        if lines.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let Ok(request) = serde_json::from_str::<Value>(line.trim()) else {
+                            continue;
+                        };
+                        // Only the count is recorded — the flush summaries
+                        // ride real session identity, which no panic here
+                        // may print (the CodeQL cleartext-logging gate).
+                        if let Some(count) =
+                            request["command"]["summary"]["attachedClients"].as_u64()
+                        {
+                            sink.lock().unwrap().push(count);
+                        }
+                        let response = serde_json::to_string(&crate::protocol::response_line(
+                            &crate::protocol::response_success(
+                                request["id"].as_str(),
+                                "worker_roster_delta",
+                                None,
+                            ),
+                        ))
+                        .expect("serialize roster ack");
+                        writer
+                            .write_all(response.as_bytes())
+                            .await
+                            .expect("ack roster link");
+                        writer.write_all(b"\n").await.expect("terminate ack");
+                    }
+                });
+            }
+        });
+        Self {
+            socket,
+            counts,
+            _dir: dir,
+        }
+    }
+
+    /// Wait for the first flush counting `count` attached clients, returning
+    /// its index in the flush order (the ordering the disconnect assertion
+    /// below rides).
+    async fn wait_for_count(&self, count: u64) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(index) = self.counts.lock().unwrap().iter().position(|c| *c == count) {
+                return index;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no roster delta ever counted {count} attached clients (flushes so far: {:?})",
+                self.counts.lock().unwrap().clone()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Wait for a flush counting `count` attached clients strictly after
+    /// flush `after`.
+    async fn wait_for_count_after(&self, count: u64, after: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if self
+                .counts
+                .lock()
+                .unwrap()
+                .iter()
+                .skip(after + 1)
+                .any(|flush| *flush == count)
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no roster delta counted {count} attached clients after flush {after} (flushes so far: {:?})",
+                self.counts.lock().unwrap().clone()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// The interleave worker with its roster link aimed at the probe (the
+/// attach/close tests above run the queue disabled; the probe needs the
+/// real flushes). The queue's worker token comes from the spawn environment
+/// (the supervisor sets it for the workers it launches) — set around the
+/// construction only: the queue captures the token at spawn, so the window
+/// is one statement.
+async fn roster_worker(probe_socket: &std::path::Path) -> (Arc<Worker>, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().expect("worker dir");
+    let config = WorkerConfig {
+        socket_path: dir.path().join("worker.sock"),
+        supervisor_socket_path: probe_socket.to_path_buf(),
+        token: "token".to_string(),
+        worker_instance_id: "roster-instance".to_string(),
+        active_session_id: "roster-worker".to_string(),
+        agent_dir: dir.path().join("agent"),
+        recovery_journal_path: dir.path().join("recovery.jsonl"),
+        telemetry_disabled: None,
+        script: Some(json!({ "responses": [] })),
+    };
+    std::env::set_var(WORKER_TOKEN_ENV, "roster-push-token");
+    let worker = Arc::new(Worker::new(config, None));
+    std::env::remove_var(WORKER_TOKEN_ENV);
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "noSession": true, "cwd": dir.path().to_string_lossy(), "name": "roster" }),
+        )
+        .await;
+    assert!(created.success, "the worker's create failed: {created:?}");
+    (worker, dir)
+}
+
+/// A viewer's raw disconnect flushes the post-disconnect attach count: the
+/// attach's own flush counts the viewer, the socket's drop releases the hold
+/// through the guard's Drop — the exact release call below, no detach command
+/// ever ran — and the release must mirror the attach/detach arms' roster
+/// push, so the flush after the drop carries the post-disconnect count.
+/// Pre-fix this wait times out: the release flushed nothing and the
+/// supervisor's cached list row kept the pre-disconnect `attachedClients`
+/// until some later session event.
+#[tokio::test]
+async fn a_raw_disconnect_flushes_the_post_disconnect_attach_count() {
+    let probe = RosterProbe::spawn();
+    let (worker, _dir) = roster_worker(&probe.socket).await;
+    // THE VIEWER'S ATTACH: the connection token the private connection loop
+    // injects; the guard holds it for the socket's lifetime.
+    let attached = worker.handle_attach(&json!({
+        "clientId": "viewer-1",
+        "connectionToken": "viewer-conn",
+    }));
+    assert!(
+        attached.success,
+        "the viewer's attach answers: {attached:?}"
+    );
+    assert!(
+        worker
+            .core
+            .lock()
+            .unwrap()
+            .attached_client_ids
+            .iter()
+            .any(|id| id.as_str() == "viewer-1"),
+        "the probe: the viewer's retain stands"
+    );
+    // The attach's own flush: the cache now counts the viewer.
+    let one_at = probe.wait_for_count(1).await;
+
+    // THE RAW DISCONNECT: the socket's EOF drops the guard, whose Drop is
+    // exactly this release.
+    worker.release_session_attachments("viewer-conn", true);
+    assert!(
+        worker.core.lock().unwrap().attached_client_ids.is_empty(),
+        "the probe: the drop frees the viewer's retain"
+    );
+
+    // THE FIX: the release's roster delta flushes the post-disconnect count.
+    probe.wait_for_count_after(0, one_at).await;
+}

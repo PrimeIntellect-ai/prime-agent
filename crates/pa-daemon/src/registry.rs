@@ -120,6 +120,16 @@ pub(crate) struct ResidentWorker {
     /// The last selector-less `cron_list` answer, tagged with its generation: served without
     /// forwarding while current (at most one consult per generation).
     pub(crate) cron_snapshot: Mutex<Option<WorkerCronSnapshot>>,
+    /// The last FULL live summary the worker pushed or an authoritative pull
+    /// captured (registration/adoption/create/wake): the summary the user-facing
+    /// list rows serve, so no list waits on worker responsiveness. The roster
+    /// row stores the slim classified projection; this slot keeps the full wire
+    /// shape (session actions and all). Written under the roster pipeline's
+    /// per-worker critical sections (the delta and pull sequence gates order
+    /// it); `None` serves the offline fallback — the only residents without a
+    /// cached summary are those whose registration pull failed and never
+    /// pushed (their bounded identity-reconciliation retry is already running).
+    pub(crate) summary_snapshot: std::sync::Mutex<Option<Value>>,
     /// The heartbeat-catalog generation, bumped by every
     /// `heartbeats_changed`: a snapshot is fresh only while its generation is current.
     pub(crate) heartbeat_snapshot_generation: AtomicU64,
@@ -189,6 +199,7 @@ impl ResidentWorker {
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             cron_snapshot: Mutex::new(None),
+            summary_snapshot: std::sync::Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
             route_state_tx,
             identity_persist_pending: AtomicBool::new(false),
