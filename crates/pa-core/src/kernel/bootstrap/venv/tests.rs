@@ -679,7 +679,7 @@ fn live_probe_memo_reprobes_when_installed_rlm_is_removed() {
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let identity = resolve_runtime_identity();
+    let identity = hash_runtime_source(&require_runtime_source_dir().unwrap()).unwrap();
     write_bootstrap_version(&fake, &identity, &[]).unwrap();
 
     let probe_count = || {

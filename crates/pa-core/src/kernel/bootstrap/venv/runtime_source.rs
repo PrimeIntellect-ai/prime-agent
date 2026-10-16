@@ -58,25 +58,8 @@ pub(in crate::kernel::bootstrap) fn require_runtime_source_dir() -> anyhow::Resu
     )
 }
 
-/// Content identity of the runtime: a hash of every `rlm/*.py` file, the
-/// packaged machine library under `src/rlm/machines` (wheel package data:
-/// machine changes are runtime changes), and `pyproject.toml`, so any
+/// Hash the manifest, Python sources, and packaged machine library so any
 /// runtime change invalidates an existing venv.
-///
-/// # Panics
-///
-/// Panics when the local runtime is missing, invalid, or cannot be hashed.
-#[must_use]
-pub fn resolve_runtime_identity() -> String {
-    let source_dir = require_runtime_source_dir().expect("local runtime source is required");
-    hash_runtime_source(&source_dir).unwrap_or_else(|error| {
-        panic!(
-            "cannot hash runtime source at {}: {error}",
-            source_dir.display()
-        )
-    })
-}
-
 pub(in crate::kernel::bootstrap) fn hash_runtime_source(
     source_dir: &Path,
 ) -> anyhow::Result<String> {

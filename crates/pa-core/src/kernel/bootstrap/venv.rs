@@ -39,7 +39,6 @@ pub(crate) use probe::{
 };
 use probe::{has_prime_agent_runtime_memoized, installed_runtime_identity};
 use runtime_source::collect_python_files;
-pub use runtime_source::resolve_runtime_identity;
 pub(super) use runtime_source::{hash_runtime_source, require_runtime_source_dir};
 pub(super) use runtime_source::{package_dir, packaged_runtime_dir};
 #[cfg(test)]
