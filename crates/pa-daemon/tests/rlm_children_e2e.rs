@@ -197,6 +197,7 @@ fn children(socket: &Path, agent_dir: &Path, script: &Path, depth: u32) -> Super
             agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
+        String::new(),
     );
     sessions.set_identity(ParentIdentity {
         rlm_depth: depth,

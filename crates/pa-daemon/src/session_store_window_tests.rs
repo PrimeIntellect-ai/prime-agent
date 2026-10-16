@@ -279,6 +279,61 @@ fn usage_of(input: u64, output: u64, cache_read: u64, total: f64) -> Value {
     })
 }
 
+/// The tool-call seed walk counts on both sides of the window cut: the
+/// folded prefix rides `older_path_stats`, the retained rows the store
+/// entries, and a windowed open seeds the same count a full open does.
+#[test]
+fn windowed_tool_call_count_matches_the_full_open_across_the_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tools.jsonl");
+    let mut full = SessionFile::create("/tmp", None, 0);
+    full.set_path(path.clone());
+    let old = full.append_message(&json!({
+        "role":"assistant", "provider":"p", "model":"m",
+        "content":[{"type":"text","text":"old"},
+                   {"type":"toolCall","id":"call-1","name":"bash","arguments":{}}],
+        "stopReason":"toolUse", "timestamp":0
+    }));
+    let mut boundary = String::new();
+    for i in 1..220 {
+        let id = full.append_message(&json!({
+            "role":"user", "content": format!("message {i}"), "timestamp": i,
+        }));
+        if i == 210 {
+            boundary = id;
+        }
+    }
+    // The compaction boundary is what folds the windowed open's prefix.
+    full.append_entry(
+        "compaction",
+        json!({"summary":"summary","firstKeptEntryId":boundary,"tokensBefore":10000}),
+    );
+    let kept = full.append_message(&json!({
+        "role":"assistant", "provider":"p", "model":"m",
+        "content":[{"type":"toolCall","id":"call-2","name":"edit","arguments":{}},
+                   {"type":"toolCall","id":"call-3","name":"edit","arguments":{}}],
+        "stopReason":"toolUse", "timestamp":221
+    }));
+    full.rewrite().unwrap();
+
+    let windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(
+        windowed.window.is_some(),
+        "the fixture must serve a windowed open"
+    );
+    // The fixture really spans the cut: the pre-cut row folded away, the
+    // kept row retained.
+    assert!(windowed.entry(&old).is_none());
+    assert!(windowed.entry(&kept).is_some());
+    let full = SessionFile::open(&path).unwrap();
+    assert_eq!(full.tool_call_count(), 3);
+    assert_eq!(
+        windowed.tool_call_count(),
+        full.tool_call_count(),
+        "the windowed open seeds the same count as the full open"
+    );
+}
+
 /// One shared walk backs both the materialized fold and the scalar scan:
 /// across every window shape the scan must reproduce exactly the scalars the
 /// old full-clone fold computed.

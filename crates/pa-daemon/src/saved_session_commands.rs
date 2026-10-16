@@ -729,9 +729,12 @@ impl Supervisor {
             {
                 continue;
             }
-            let root_active_session_id = {
+            let (root_active_session_id, worker_instance_id) = {
                 let descriptor = resident.descriptor.lock().await;
-                descriptor.root_active_session_id.clone()
+                (
+                    descriptor.root_active_session_id.clone(),
+                    descriptor.worker_instance_id.clone(),
+                )
             };
             if root_active_session_id.is_empty() {
                 continue;
@@ -746,6 +749,15 @@ impl Supervisor {
                     .map(|entry| entry.summary.clone())
             };
             if let Some(summary) = summary {
+                // A replacement may not have pushed yet. Never serve the old
+                // process's snapshot as the new resident's live state.
+                if summary
+                    .get("workerInstanceId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|instance| Some(instance) != worker_instance_id.as_deref())
+                {
+                    continue;
+                }
                 peers.push(agent_peer_summary(&summary));
             }
         }
@@ -793,6 +805,12 @@ fn agent_peer_summary(summary: &Value) -> Value {
         "parentActiveSessionId",
         "parentSessionId",
         "parentSessionPath",
+        // The child's live note and tool count ride the peer rows: the
+        // parent registry's roster read joins them onto its subagent rows.
+        "progressNote",
+        "toolUseCount",
+        "workerInstanceId",
+        "rosterDeltaSequence",
     ] {
         if let Some(value) = summary.get(key).filter(|value| !value.is_null()) {
             peer[key] = value.clone();

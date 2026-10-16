@@ -5,11 +5,12 @@
 use super::{
     assert_thinking_supported, bail, create_default_rlm_subagent_session_name, json, now_ms,
     resolve_child_model, rlm_child_label, rlm_depth_limit_error, spawn_name_unavailable_error, Arc,
-    ChildCloseReason, ChildRecord, Context, DaemonCommand, Duration, Instant, Mutex, Path, PathBuf,
-    Result, RlmChildResult, RlmCreateSessionHandle, RlmCreateSessionRequest,
-    RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle, RlmSpawnRequest, RlmSubagentEntry,
-    RlmSubagentHost, SpawnNameReservationGuard, SupervisorChildSessions,
-    SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS, RENAME_TIMEOUT_MS,
+    ChildCloseReason, ChildObservationSource, ChildRecord, Context, DaemonCommand, Duration,
+    Instant, Mutex, Path, PathBuf, Result, RlmChildResult, RlmCreateSessionHandle,
+    RlmCreateSessionRequest, RlmDeleteSubagentResult, RlmHostFuture, RlmSpawnHandle,
+    RlmSpawnRequest, RlmSubagentEntry, RlmSubagentHost, SpawnNameReservationGuard,
+    SupervisorChildSessions, SupervisorChildSessionsInner, Value, KILL_TIMEOUT_MS,
+    RENAME_TIMEOUT_MS,
 };
 
 /// Resolve the child model with the daemon `allowedModels` allowlist enforced, refusing loudly with
@@ -164,6 +165,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     answer_text: None,
                     answer_captured: false,
                     replied_since_task: false,
+                    progress_note: None,
+                    tool_use_count: None,
+                    live_observation: None,
+                    direct_observation: Arc::new(Mutex::new(())),
                     notice_delivered: false,
                     prompt_admitted: false,
                     error: None,
@@ -372,10 +377,49 @@ impl RlmSubagentHost for SupervisorChildSessions {
         let this = Arc::clone(&self.inner);
         Box::pin(async move {
             let records = this.children.lock().await.clone();
+            // The children's live note and tool count join from the
+            // supervisor's pushed roster: one in-memory read, never a busy
+            // child worker round trip. A failed read keeps the last values
+            // each record observed; the settle watcher owns worker refreshes.
+            let request_order = this
+                .observation_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(peers) = this.child_roster_rows(&records).await {
+                for record in &records {
+                    let (rlm_child_id, active_session_id) = {
+                        let record = record.lock().await;
+                        (
+                            record.rlm_child_id.clone(),
+                            record.active_session_id.clone(),
+                        )
+                    };
+                    let live = peers
+                        .iter()
+                        .find(|row| {
+                            row.get("rlmChildId").and_then(Value::as_str)
+                                == Some(rlm_child_id.as_str())
+                        })
+                        .or_else(|| {
+                            peers.iter().find(|row| {
+                                row.get("activeSessionId").and_then(Value::as_str)
+                                    == Some(active_session_id.as_str())
+                            })
+                        });
+                    if let Some(live) = live {
+                        this.observe_live_state(
+                            record,
+                            live,
+                            request_order,
+                            ChildObservationSource::Roster,
+                        )
+                        .await;
+                    }
+                }
+            }
             let mut entries = Vec::with_capacity(records.len());
             for record in &records {
-                // The settle watcher owns worker refreshes. A roster read is a
-                // snapshot and must not queue behind a long supervisor request.
+                // A roster read is a snapshot: the rows serve the records'
+                // last observed state without another round trip.
                 let record = record.lock().await;
                 entries.push(SupervisorChildSessions::entry(&record));
             }

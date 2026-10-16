@@ -341,6 +341,7 @@ pub(crate) async fn push_roster_delta(context: &RosterPushContext) {
                 .roster_delta_sequence
                 .load(std::sync::atomic::Ordering::SeqCst),
         );
+        summary.worker_instance_id = Some(context.worker_instance_id.clone());
         let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
         let sequence_value = context
             .roster_delta_sequence
@@ -580,6 +581,7 @@ pub(crate) fn session_summary(core: &SessionCore, inputs: SummaryInputs) -> Sess
         modified,
         first_message: store.and_then(crate::session_store::SessionFile::first_message),
         progress_note: inputs.progress_note,
+        tool_use_count: (core.tool_use_count > 0).then_some(core.tool_use_count),
         parent_session_path: store.and_then(|store| store.header.parent_session.clone()),
         parent_active_session_id: core.parent_active_session_id.clone(),
         parent_session_id: core.parent_session_id.clone(),
