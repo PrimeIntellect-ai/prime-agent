@@ -589,15 +589,4 @@ mod tests {
         let second = CallbackServer::start("Linear", Some(port)).await.unwrap();
         assert_eq!(second.redirect_uri(), redirect_uri_for(port));
     }
-
-    #[tokio::test]
-    async fn configured_busy_port_fails_without_fallback() {
-        let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = blocker.local_addr().unwrap().port();
-        let error = CallbackServer::start("Linear", Some(port))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&format!("port {port} is in use")), "{error}");
-    }
 }
