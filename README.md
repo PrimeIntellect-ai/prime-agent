@@ -66,6 +66,12 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
 
+## Slack
+
+Connect Slack from `/mcp` or run `/mcp login slack` inside Prime Agent to search
+your workspace and use Slack tools. See the [Slack connector guide](docs/slack-mcp.md)
+for OAuth setup and troubleshooting.
+
 ## Clipboard over SSH and tmux
 
 Prime Agent uses the local clipboard tool (such as `pbcopy`) when available. In tmux it asks the attached tmux client to forward a clipboard buffer if that client advertises the `Ms` capability. This works with tmux's default `set-clipboard external`, unlike application-origin OSC 52. Without tmux, remote copies request delivery using OSC 52. Terminal requests cannot confirm that your local clipboard changed, so Prime Agent reports them as unconfirmed.

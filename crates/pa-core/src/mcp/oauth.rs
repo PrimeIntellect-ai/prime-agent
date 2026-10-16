@@ -34,6 +34,8 @@ pub struct McpOAuthConfig {
     pub url: String,
     /// Pre-registered client id (servers without dynamic registration).
     pub client_id: Option<String>,
+    /// Fixed loopback port registered for a public client; otherwise use the DCR port range.
+    pub callback_port: Option<u16>,
     /// Requested scopes; defaults to the server's advertised scopes.
     pub scopes: Option<String>,
 }
@@ -124,6 +126,15 @@ enum ManualOutcome {
     Failed(anyhow::Error),
 }
 
+/// Cancelling a login also cancels its pending paste prompt, which owns a callback-server handle.
+struct ManualInputTask(tokio::task::JoinHandle<ManualOutcome>);
+
+impl Drop for ManualInputTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Run one interactive login; the returned credential is ready to persist under `mcp:<server>`.
 ///
 /// # Errors
@@ -182,7 +193,7 @@ pub async fn mcp_login(
     // `state` is independent of the PKCE verifier: the verifier is the
     // token-exchange secret, `state` is echoed on the redirect URL.
     let state = random_state();
-    let callback = Arc::new(CallbackServer::start(&config.label).await?);
+    let callback = Arc::new(CallbackServer::start(&config.label, config.callback_port).await?);
     let redirect_uri = callback.redirect_uri();
     let mut auth_params: Vec<(String, String)> = vec![
         ("client_id".to_string(), client_id.clone()),
@@ -211,7 +222,7 @@ pub async fn mcp_login(
     let mut manual_task = ui.on_manual_code_input().map(|manual| {
         let callback = Arc::clone(&callback);
         let state = state.clone();
-        tokio::spawn(async move {
+        ManualInputTask(tokio::spawn(async move {
             let Some(input) = manual.await else {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 callback.cancel().await;
@@ -236,14 +247,14 @@ pub async fn mcp_login(
                     }
                 }
             }
-        })
+        }))
     });
 
     let mut result = callback.wait_for_code().await;
     let mut manual_error: Option<anyhow::Error> = None;
     if result.is_none() {
-        if let Some(task) = manual_task.take() {
-            match task.await {
+        if let Some(mut task) = manual_task.take() {
+            match (&mut task.0).await {
                 Ok(ManualOutcome::Code(code)) => result = Some(code),
                 Ok(ManualOutcome::Cancelled) => {}
                 Ok(ManualOutcome::Failed(error)) => manual_error = Some(error),
@@ -264,9 +275,8 @@ pub async fn mcp_login(
             result = Some(CallbackCode { code, state });
         }
     }
-    if let Some(task) = &manual_task {
-        task.abort();
-    }
+    drop(manual_task);
+    callback.cancel().await;
     let Some(result) = result else {
         return Err(manual_error.unwrap_or_else(|| anyhow!("Missing authorization code")));
     };
@@ -667,6 +677,7 @@ mod tests {
             label: server.to_string(),
             url: url.to_string(),
             client_id: None,
+            callback_port: None,
             scopes: None,
         }
     }

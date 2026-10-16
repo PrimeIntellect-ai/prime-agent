@@ -626,7 +626,7 @@ fn real_github_entry_is_pasteable_with_one_aliased_credential() {
 fn the_real_catalog_resolves_through_the_manager() {
     let agent_dir = tempfile::tempdir().expect("tempdir");
     let manager = manager_with_remote(agent_dir.path().to_path_buf(), real_catalog().entries);
-    assert_eq!(manager.service_descriptors().len(), 68);
+    assert_eq!(manager.service_descriptors().len(), 69);
     assert!(manager.is_reserved_server_name("linear"));
     assert!(manager.is_reserved_server_name("notion"));
     assert!(!manager.is_reserved_server_name("github"));
@@ -636,7 +636,7 @@ fn the_real_catalog_resolves_through_the_manager() {
             .iter()
             .filter(|entry| !entry.user_declared)
             .count(),
-        68
+        69
     );
 }
 

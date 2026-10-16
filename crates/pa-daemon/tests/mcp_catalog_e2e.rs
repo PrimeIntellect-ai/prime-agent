@@ -296,7 +296,7 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         .unwrap_or_else(|| panic!("services array: {roster}"));
     assert_eq!(
         services.len(),
-        69,
+        70,
         "the resolved catalog surfaces: {services:?}"
     );
     let linear = services
@@ -304,6 +304,14 @@ fn catalog_surfaces_and_paste_installs_through_the_daemon() {
         .find(|service| service["serviceId"] == "linear")
         .expect("linear discovery row");
     assert_eq!(linear["connectionStatus"], "not_connected");
+    let slack = services
+        .iter()
+        .find(|service| service["serviceId"] == "slack")
+        .expect("compiled Slack connector row");
+    assert_eq!(
+        (&slack["connectionStatus"], &slack["connectable"]),
+        (&json!("not_connected"), &json!(true)),
+    );
     assert_eq!(
         linear["connectable"], true,
         "the metadata-reviewed OAuth builtin is connectable"

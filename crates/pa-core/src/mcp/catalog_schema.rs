@@ -506,8 +506,7 @@ pub fn parse_plugins_catalog(bytes: &[u8]) -> Result<PluginsCatalog, String> {
     })
 }
 
-/// The compiled legacy built-ins (the offline fallback when no snapshot is available): the
-/// pre-catalog integrations whose ids stay reserved.
+/// The compiled integrations, available offline alongside the remote catalog.
 pub fn compiled_builtin_services() -> Vec<McpServiceEntry> {
     let json = serde_json::json!([
         {
@@ -546,6 +545,25 @@ pub fn compiled_builtin_services() -> Vec<McpServiceEntry> {
             "setup": { "status": "ready", "readiness": "oauth-ready" },
             "verification": { "status": "metadata-reviewed" },
             "legacyBuiltin": true,
+            "provenance": [{ "source": "prime" }],
+            "oauth": { "kind": "oauth" }
+        },
+        {
+            "server": "slack",
+            "service": "slack",
+            "label": "Slack",
+            "url": "https://mcp.slack.com/mcp",
+            "description": "Search Slack, read channels and threads, and work with messages, files, and canvases.",
+            "category": "Productivity",
+            "publisher": "Slack",
+            "homepage": "https://slack.com/",
+            "docsUrl": "https://docs.slack.dev/ai/slack-mcp-server/connect-to-harnesses/",
+            "aliases": [],
+            "transport": { "type": "http", "url": "https://mcp.slack.com/mcp" },
+            "auth": { "strategy": "oauth", "clientRegistration": "pre-registered" },
+            "setup": { "status": "ready", "readiness": "oauth-ready" },
+            "verification": { "status": "metadata-reviewed" },
+            "legacyBuiltin": false,
             "provenance": [{ "source": "prime" }],
             "oauth": { "kind": "oauth" }
         }
@@ -729,7 +747,7 @@ mod tests {
     fn compiled_builtins_match_the_catalog_entries() {
         let catalog = parse(REAL_PAYLOAD.as_bytes());
         let builtins = compiled_builtin_services();
-        for builtin in &builtins {
+        for builtin in builtins.iter().filter(|entry| entry.legacy_builtin) {
             let shipped = catalog
                 .entries
                 .iter()
@@ -737,6 +755,5 @@ mod tests {
                 .expect("builtin in the shipped catalog");
             assert_eq!(builtin, shipped, "compiled fallback mirrors the payload");
         }
-        assert_eq!(builtins.len(), 2);
     }
 }
