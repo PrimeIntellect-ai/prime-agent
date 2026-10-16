@@ -433,6 +433,91 @@ jobs:
           python3 scripts/test_ci_test_shard_summary.py
           python3 scripts/ci_test_shard_summary.py --total ${{ env.SHARD_COUNT }} --dir manifests
 
+  # Build/export only. Measurement, controller transport and publication remain separate.
+  # No runner cache: each revision gets a fresh hosted build filesystem.
+  performance-artifacts:
+    name: Linux performance payload (${{ matrix.side }})
+    needs: trust
+    if: github.event_name == 'pull_request' && needs.trust.result == 'success' && needs.trust.outputs.allowed == 'true' && !github.event.pull_request.draft
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    container:
+      image: ubuntu:22.04@sha256:b8b6ee6aa931ecd9d0d952abc34dc0e5f7c6a30c6bb71b079fe399fde0329c02
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [base, head]
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SOURCE_SHA: ${{ matrix.side == 'base' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+      BUILDER_SHA: ${{ github.workflow_sha }}
+      SOURCE_REPOSITORY: ${{ matrix.side == 'head' && github.event.pull_request.head.repo.full_name || github.repository }}
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Install build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential curl ca-certificates python3 python3-venv git binutils
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: tooling
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ env.SOURCE_REPOSITORY }}
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Validate bounded artifact input preparation
+        run: python3 -m unittest discover -s tooling/scripts/performance/tests -p 'test_inputs.py' -v
+      - name: Build exact release and pa-core library tests
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          cargo build --release --locked --target x86_64-unknown-linux-gnu -j 2 -p pa-cli --bin prime-agent
+          cargo test --release --locked --target x86_64-unknown-linux-gnu -j 2 -p pa-core --lib --no-run --message-format=json > "$RUNNER_TEMP/compiler-artifacts.jsonl"
+      - name: Export release source bundle and runnable test payload
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SIDE: ${{ matrix.side }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/tooling-bootstrap"
+          "$RUNNER_TEMP/tooling-bootstrap/bin/pip" install --require-hashes -r tooling/scripts/performance/bootstrap.lock
+          "$RUNNER_TEMP/tooling-bootstrap/bin/uv" python install 3.12.13
+          wheel_python="$("$RUNNER_TEMP/tooling-bootstrap/bin/uv" python find 3.12.13)"
+          "$wheel_python" -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/tooling-bootstrap/bin/uv" pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" --require-hashes --only-binary :all: -r tooling/scripts/performance/wheel-build.lock
+          python3 tooling/scripts/performance/export.py \
+            --source "$GITHUB_WORKSPACE/source" --tooling "$GITHUB_WORKSPACE/tooling" \
+            --out "$RUNNER_TEMP/performance-export" \
+            --cargo-records "$RUNNER_TEMP/compiler-artifacts.jsonl" --cargo-metadata "$RUNNER_TEMP/cargo-metadata.json" \
+            --wheel-python "$RUNNER_TEMP/wheel-venv/bin/python" \
+            --sha "$SOURCE_SHA" --builder-sha "$BUILDER_SHA" --base-sha "$BASE_SHA" --head-sha "$HEAD_SHA" \
+            --repository "$GITHUB_REPOSITORY" --source-repository "$SOURCE_REPOSITORY" --workflow-ref "$WORKFLOW_REF" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --pr "$PR_NUMBER" --side "$SIDE"
+      - name: Upload bounded build payload and receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: performance-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.side }}-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/performance-export/
+          retention-days: 14
+          if-no-files-found: error
+
   # The Windows job set + the supply-chain deny gate:
   #
   #   windows-cross — the cfg-hygiene cross-target gate, the CI mirror of
