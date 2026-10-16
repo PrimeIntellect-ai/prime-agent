@@ -28,6 +28,7 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	getDelegatedProviderOptionsFromEnvironment,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
@@ -1817,6 +1818,9 @@ export class AgentSession {
 		headers?: Record<string, string>;
 		requestModel: Model<Api>;
 	}> {
+		if (getDelegatedProviderOptionsFromEnvironment()) {
+			return { apiKey: "delegated-provider-request", requestModel: model as Model<Api> };
+		}
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!result.ok) {
 			if (result.error.startsWith("No API key found")) {
@@ -10531,6 +10535,11 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		const delegatedBroker = getDelegatedProviderOptionsFromEnvironment();
+		if (delegatedBroker) {
+			const { installDelegatedProviderAdapters } = await import("@earendil-works/pi-ai");
+			installDelegatedProviderAdapters(delegatedBroker);
+		}
 
 		const hasBindings =
 			this._extensionUIContext ||

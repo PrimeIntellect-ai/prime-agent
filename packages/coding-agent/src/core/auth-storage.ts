@@ -9,6 +9,7 @@
 import { createHash } from "node:crypto";
 import {
 	findEnvKeys,
+	getDelegatedProviderOptionsFromEnvironment,
 	getEnvApiKey,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
@@ -297,6 +298,8 @@ export class AuthStorage {
 	 * Used for CLI --api-key flag.
 	 */
 	setRuntimeApiKey(provider: string, apiKey: string): void {
+		if (getDelegatedProviderOptionsFromEnvironment())
+			throw new Error("Provider login and API keys must be managed by the trusted host");
 		this.clearStaleAuthSource(provider, "runtime");
 		this.runtimeOverrides.set(provider, apiKey);
 	}
@@ -682,6 +685,8 @@ export class AuthStorage {
 	 * Set credential for a provider.
 	 */
 	set(provider: string, credential: AuthCredential): void {
+		if (getDelegatedProviderOptionsFromEnvironment())
+			throw new Error("Provider login and API keys must be managed by the trusted host");
 		this.clearStaleAuthSource(provider, "stored");
 		this.data[provider] = credential;
 		this.persistProviderChange(provider, credential);
@@ -1008,6 +1013,8 @@ export class AuthStorage {
 	}
 
 	setPrimeInferenceApiKey(apiKey: string, team?: PrimeTeam | null): void {
+		if (getDelegatedProviderOptionsFromEnvironment())
+			throw new Error("Provider login and API keys must be managed by the trusted host");
 		this.updatePrimeInferenceCredential((existing) => ({
 			type: "api_key",
 			key: apiKey,

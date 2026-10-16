@@ -1,6 +1,16 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple, supportsFastMode } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	createDelegatedProviderAdapter,
+	getDelegatedProviderOptionsFromEnvironment,
+	installDelegatedProviderAdapters,
+	type Message,
+	type Model,
+	type SimpleStreamOptions,
+	streamSimple,
+	supportsFastMode,
+} from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
 import type { AgentSessionCreationOptions } from "./agent-session-services.js";
@@ -143,6 +153,8 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	const delegatedBroker = getDelegatedProviderOptionsFromEnvironment();
+	const delegatedAdapter = delegatedBroker ? createDelegatedProviderAdapter(delegatedBroker) : undefined;
 	const cwd = options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd();
 	const agentDir = options.agentDir ?? getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
@@ -292,6 +304,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
+			if (delegatedAdapter) return delegatedAdapter.streamSimple(model, context, options as SimpleStreamOptions);
 			const auth = await modelRegistry.getApiKeyAndHeaders(model, options?.headers);
 			if (!auth.ok) {
 				throw new Error(auth.error);
@@ -385,6 +398,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
 	});
+	if (delegatedBroker) installDelegatedProviderAdapters(delegatedBroker);
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

@@ -9,6 +9,7 @@ import {
 	type Api,
 	type AssistantMessageEventStream,
 	type Context,
+	getDelegatedProviderOptionsFromEnvironment,
 	getModels,
 	getProviders,
 	type KnownProvider,
@@ -830,6 +831,8 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
+		if (getDelegatedProviderOptionsFromEnvironment())
+			return this.getAll().filter((model) => !isPrivatePrimeInferenceModel(model));
 		return this.getAll().filter((model) => {
 			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
@@ -1161,6 +1164,7 @@ export class ModelRegistry {
 	}
 
 	async getExecutableModels(): Promise<Model<Api>[]> {
+		if (getDelegatedProviderOptionsFromEnvironment()) return this.getAvailable();
 		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization());
 		const availableModels = this.getAvailable();
 		const codexModels = availableModels.filter((model) => model.provider === "openai-codex");
@@ -1222,6 +1226,7 @@ export class ModelRegistry {
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		if (getDelegatedProviderOptionsFromEnvironment()) return !isPrivatePrimeInferenceModel(model);
 		return this.authStorage.hasAuth(model.provider) || this.hasConfiguredProviderRequestAuth(model.provider);
 	}
 
@@ -1499,6 +1504,9 @@ export class ModelRegistry {
 	 * Get API key and request headers for a model.
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>, requestHeaders?: Record<string, string>): Promise<ResolvedRequestAuth> {
+		if (getDelegatedProviderOptionsFromEnvironment()) {
+			return { ok: true, apiKey: "delegated-provider-request", headers: requestHeaders };
+		}
 		try {
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const authStorageAuth = await this.authStorage.getApiKeyWithSourceToken(model.provider, {
@@ -1595,6 +1603,7 @@ export class ModelRegistry {
 	 * This intentionally does not execute command-backed config values.
 	 */
 	getProviderAuthStatus(provider: string): AuthStatus {
+		if (getDelegatedProviderOptionsFromEnvironment()) return { configured: true, source: "runtime" };
 		const authStatus = this.authStorage.getAuthStatus(provider);
 		if (authStatus.source && authStatus.source !== "stale") {
 			return authStatus;

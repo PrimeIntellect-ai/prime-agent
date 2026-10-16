@@ -1,8 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, rm } from "node:fs/promises";
-import { dirname } from "node:path";
 import { createServer, type Socket } from "node:net";
-import { stream, type AssistantMessageEvent, type Context, type Model, type SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { dirname } from "node:path";
+import { type Context, type Model, type SimpleStreamOptions, stream } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "./model-registry.js";
 
 const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
@@ -23,7 +23,17 @@ interface StartFrame {
 	capability: string;
 	model: { provider: string; api: string; id: string };
 	context: Context;
-	options: Pick<SimpleStreamOptions, "temperature" | "maxTokens" | "transport" | "serviceTier" | "cacheRetention" | "sessionId" | "reasoning" | "thinkingBudgets">;
+	options: Pick<
+		SimpleStreamOptions,
+		| "temperature"
+		| "maxTokens"
+		| "transport"
+		| "serviceTier"
+		| "cacheRetention"
+		| "sessionId"
+		| "reasoning"
+		| "thinkingBudgets"
+	>;
 }
 
 /**
@@ -31,25 +41,36 @@ interface StartFrame {
  * and consumed only in this process; the socket protocol only carries model
  * identity, prompt context, bounded options, and a short-lived capability.
  */
-export async function startDelegatedProviderBroker(options: DelegatedProviderBrokerOptions): Promise<{ close(): Promise<void> }> {
+export async function startDelegatedProviderBroker(
+	options: DelegatedProviderBrokerOptions,
+): Promise<{ close(): Promise<void> }> {
 	if (Buffer.byteLength(options.capability) < 32) throw new Error("Broker capability must contain at least 32 bytes");
 	const maxRequests = options.maxRequests ?? MAX_REQUESTS_PER_BROKER;
 	const maxOutputTokens = options.maxOutputTokens ?? 8192;
 	let requestCount = 0;
+	let connectionCount = 0;
+	const sockets = new Set<Socket>();
 	const allowed = new Set(options.allowedModels.map((model) => `${model.provider}\0${model.api}\0${model.id}`));
 	if (allowed.size === 0) throw new Error("Broker requires at least one allowed model");
 
 	await mkdir(dirname(options.socketPath), { recursive: true, mode: 0o700 });
+	await chmod(dirname(options.socketPath), 0o700);
 	await rm(options.socketPath, { force: true });
 	const server = createServer((socket) => {
-		void serveRequest(socket).catch((error) => {
-			writeFrame(socket, { type: "error", id: "", message: safeError(error) }).catch(() => {});
+		if (++connectionCount > maxRequests * 2) {
 			socket.destroy();
-		});
+			return;
+		}
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+		void serveRequest(socket).catch(() => socket.destroy());
 	});
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(options.socketPath, () => { server.off("error", reject); resolve(); });
+		server.listen(options.socketPath, () => {
+			server.off("error", reject);
+			resolve();
+		});
 	});
 	await chmod(options.socketPath, 0o600);
 
@@ -58,7 +79,8 @@ export async function startDelegatedProviderBroker(options: DelegatedProviderBro
 		socket.once("close", () => abort.abort());
 		const line = await readFirstLine(socket, MAX_REQUEST_BYTES, abort.signal);
 		const request = JSON.parse(line) as StartFrame;
-		if (request.type !== "start" || typeof request.id !== "string" || request.id.length > 80) throw new Error("Invalid broker request");
+		if (request.type !== "start" || typeof request.id !== "string" || request.id.length > 80)
+			throw new Error("Invalid broker request");
 		if (!equalCapability(request.capability, options.capability)) throw new Error("Invalid broker capability");
 		if (++requestCount > maxRequests) throw new Error("Broker request limit reached");
 		const key = `${request.model?.provider}\0${request.model?.api}\0${request.model?.id}`;
@@ -68,7 +90,14 @@ export async function startDelegatedProviderBroker(options: DelegatedProviderBro
 		if (!model || model.api !== request.model.api) throw new Error("Requested model is unavailable");
 		const auth = await options.modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok || !auth.apiKey) throw new Error(auth.ok ? "Provider is not authenticated" : auth.error);
-		const maxTokens = Math.max(1, Math.min(Number.isInteger(request.options?.maxTokens) ? request.options!.maxTokens! : maxOutputTokens, maxOutputTokens, model.maxTokens));
+		const maxTokens = Math.max(
+			1,
+			Math.min(
+				Number.isInteger(request.options?.maxTokens) ? request.options!.maxTokens! : maxOutputTokens,
+				maxOutputTokens,
+				model.maxTokens,
+			),
+		);
 		const providerStream = stream(model, request.context, {
 			...request.options,
 			maxTokens,
@@ -78,14 +107,19 @@ export async function startDelegatedProviderBroker(options: DelegatedProviderBro
 		});
 		for await (const event of providerStream) {
 			if (abort.signal.aborted) break;
-			await writeFrame(socket, { type: "event", id: request.id, event: redactSecrets(event, [auth.apiKey, ...Object.values(auth.headers ?? {})]) });
+			await writeFrame(socket, {
+				type: "event",
+				id: request.id,
+				event: redactSecrets(event, [auth.apiKey, ...Object.values(auth.headers ?? {})]),
+			});
 			if (event.type === "done" || event.type === "error") break;
 		}
 	}
 
 	return {
 		close: async () => {
-			server.close();
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 			await rm(options.socketPath, { force: true });
 		},
 	};
@@ -96,11 +130,6 @@ function equalCapability(candidate: unknown, expected: string): boolean {
 	const left = Buffer.from(candidate);
 	const right = Buffer.from(expected);
 	return left.length === right.length && timingSafeEqual(left, right);
-}
-
-function safeError(error: unknown): string {
-	const message = error instanceof Error ? error.message : String(error);
-	return message.replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_.-]{20,})\b/g, "[redacted]").slice(0, 500);
 }
 
 function redactSecrets(value: unknown, secrets: string[]): unknown {
@@ -126,12 +155,25 @@ function readFirstLine(socket: Socket, maxBytes: number, signal: AbortSignal): P
 		};
 		const onData = (chunk: Buffer) => {
 			buffer += chunk.toString("utf8");
-			if (Buffer.byteLength(buffer) > maxBytes) { cleanup(); reject(new Error("Broker request is too large")); return; }
+			if (Buffer.byteLength(buffer) > maxBytes) {
+				cleanup();
+				reject(new Error("Broker request is too large"));
+				return;
+			}
 			const newline = buffer.indexOf("\n");
-			if (newline >= 0) { cleanup(); resolve(buffer.slice(0, newline)); }
+			if (newline >= 0) {
+				cleanup();
+				resolve(buffer.slice(0, newline));
+			}
 		};
-		const onError = (error: Error) => { cleanup(); reject(error); };
-		const onAbort = () => { cleanup(); reject(new Error("Broker client disconnected")); };
+		const onError = (error: Error) => {
+			cleanup();
+			reject(error);
+		};
+		const onAbort = () => {
+			cleanup();
+			reject(new Error("Broker client disconnected"));
+		};
 		socket.on("data", onData);
 		socket.once("error", onError);
 		signal.addEventListener("abort", onAbort, { once: true });

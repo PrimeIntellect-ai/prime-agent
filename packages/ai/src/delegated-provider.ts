@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
+import { getApiProviders, registerApiProvider } from "./api-registry.js";
 import type {
 	Api,
 	AssistantMessage,
@@ -21,13 +22,46 @@ export interface DelegatedProviderOptions {
 	maxFrameBytes?: number;
 }
 
+export function getDelegatedProviderOptionsFromEnvironment(): DelegatedProviderOptions | undefined {
+	const socketPath = process.env.PRIME_PROVIDER_BROKER_SOCKET;
+	const capability = process.env.PRIME_PROVIDER_BROKER_CAPABILITY;
+	if (!socketPath && !capability) return undefined;
+	if (!socketPath || !capability) throw new Error("Incomplete delegated provider broker configuration");
+	return { socketPath, capability };
+}
+
+/** Override every currently registered provider API with the host adapter. */
+export function installDelegatedProviderAdapters(options: DelegatedProviderOptions): void {
+	const adapter = createDelegatedProviderAdapter(options);
+	for (const provider of getApiProviders()) {
+		registerApiProvider(
+			{
+				api: provider.api,
+				stream: adapter.stream as typeof provider.stream,
+				streamSimple: adapter.streamSimple as typeof provider.streamSimple,
+			},
+			"prime-delegated-provider-broker",
+		);
+	}
+}
+
 export interface DelegatedStreamRequest {
 	type: "start";
 	id: string;
 	capability: string;
 	model: { provider: string; api: string; id: string };
 	context: Context;
-	options: Pick<SimpleStreamOptions, "temperature" | "maxTokens" | "transport" | "serviceTier" | "cacheRetention" | "sessionId" | "reasoning" | "thinkingBudgets">;
+	options: Pick<
+		SimpleStreamOptions,
+		| "temperature"
+		| "maxTokens"
+		| "transport"
+		| "serviceTier"
+		| "cacheRetention"
+		| "sessionId"
+		| "reasoning"
+		| "thinkingBudgets"
+	>;
 }
 
 type BrokerFrame =
@@ -46,11 +80,24 @@ export function createDelegatedProviderAdapter(options: DelegatedProviderOptions
 	if (!options.capability || Buffer.byteLength(options.capability) > 512) throw new Error("Invalid broker capability");
 	const maxFrameBytes = options.maxFrameBytes ?? MAX_FRAME_BYTES;
 
-	const delegate = (model: Model<Api>, context: Context, streamOptions?: StreamOptions): AssistantMessageEventStream => {
+	const delegate = (
+		model: Model<Api>,
+		context: Context,
+		streamOptions?: StreamOptions,
+	): AssistantMessageEventStream => {
 		const stream = createAssistantMessageEventStream();
 		const id = randomUUID();
 		const safeOptions: DelegatedStreamRequest["options"] = {};
-		for (const key of ["temperature", "maxTokens", "transport", "serviceTier", "cacheRetention", "sessionId", "reasoning", "thinkingBudgets"] as const) {
+		for (const key of [
+			"temperature",
+			"maxTokens",
+			"transport",
+			"serviceTier",
+			"cacheRetention",
+			"sessionId",
+			"reasoning",
+			"thinkingBudgets",
+		] as const) {
 			const value = (streamOptions as SimpleStreamOptions | undefined)?.[key];
 			if (value !== undefined) (safeOptions as Record<string, unknown>)[key] = value;
 		}
@@ -135,7 +182,14 @@ function emitError(stream: AssistantMessageEventStream, model: Model<Api>, error
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 		stopReason: error.message.includes("aborted") ? "aborted" : "error",
 		errorMessage: error.message,
 		timestamp: Date.now(),

@@ -1,5 +1,10 @@
 import * as path from "node:path";
-import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
+import {
+	getDelegatedProviderOptionsFromEnvironment,
+	getProviders,
+	type OAuthProviderId,
+	type OAuthSelectPrompt,
+} from "@earendil-works/pi-ai";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
@@ -200,6 +205,10 @@ export class ProviderAuthFlows {
 	}
 
 	loginProvider(providerOption: AuthSelectorProvider): Promise<AuthenticationResult> {
+		if (getDelegatedProviderOptionsFromEnvironment()) {
+			this.host.showStatus("Provider login is managed by the trusted host client in this sandbox.");
+			return Promise.resolve({ status: "failed" });
+		}
 		const kind = providerOption.category === "service" ? "service" : "provider";
 		if (providerOption.authType === "oauth") {
 			return this.showLoginDialog(providerOption.id, providerOption.name, kind);
