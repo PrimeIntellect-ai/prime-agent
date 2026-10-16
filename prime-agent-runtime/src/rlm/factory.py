@@ -317,6 +317,8 @@ def _validate_state_fields(
 
     if "retries" in state and not (_is_int(state.get("retries")) and 0 <= state.get("retries") <= MAX_RETRIES):
         errors.append(f"{noun} {ref} retries must be an integer between 0 and {MAX_RETRIES}")
+    elif is_resident and state.get("retries", NODE_RETRIES_DEFAULT) > 0:
+        errors.append(f"resident {noun} {ref} cannot declare retries")
 
     if "failure_policy" in state and state.get("failure_policy") not in FAILURE_POLICIES:
         errors.append(
@@ -491,7 +493,7 @@ def validate_factory_machine(machine: Any) -> list[str]:
     the machine is valid. Rules: states are 1..1024 with unique slug ids and
     at least one entry state; every state requires a subagent and entry
     states declare no inputs; resident states declare no outputs, foreach,
-    or outgoing transitions; wait blocks are rejected (the watch host
+    retries, or outgoing transitions; wait blocks are rejected (the watch host
     handlers arrive with the communication series); transitions reference
     existing states (self-loops are legal re-entry) and may carry one guard
     over the from-state's latest settle output; a transition with a LIST of
@@ -4683,9 +4685,10 @@ rlm.harness.create_factory(
             {
                 "id": "fixing",
                 "subagent": {"prompt": (
-                    "Address the review findings in the verdict below. Make the "
-                    "smallest targeted fixes, run the relevant tests, and return a "
-                    "fenced json block of the form "
+                    "Address the review findings in the verdict below. First "
+                    "reconcile any changes an earlier attempt left in the working "
+                    "tree. Make the smallest targeted fixes, run the relevant "
+                    "tests, and return a fenced json block of the form "
                     '{"fix_report": {"fixed": ["finding that was addressed"], '
                     '"skipped": ["finding left alone and why"]}}. '
                     "Output only the json block.\n\n{verdict}")},
@@ -4785,9 +4788,9 @@ the cap and fails to bind.
   child rendered with its item bound as that input; an empty list settles
   the entry with no children.
 - **Residents**: `"lifecycle": "resident"` states declare no outputs, no
-  foreach, and no outgoing transitions, nothing reads from them, and their
-  instance stays alive under the parent session after the run completes
-  (stop the run to retire it).
+  foreach, no retries, and no outgoing transitions, nothing reads from
+  them, and their instance stays alive under the parent session after the
+  run completes (stop the run to retire it).
 - **Bounds and policies**: `run.max_parallel` (1..64, default 8) is the
   run's global budget of simultaneously running instances — not a
   per-node limit. `run.max_children` (default 10,000, capped at
@@ -4806,6 +4809,15 @@ the cap and fails to bind.
   errored; the run finishes and reports failed if any state errored), or
   `escalate` (the default: pause the run; resuming is the operator's
   decision).
+- **Retry re-renders the same prompt into a changed world**: a retry runs
+  the same prompt after an earlier attempt already changed the external
+  state it works on, so a prompt that mutates external state — a fixing
+  state's worktree, a tracker, a remote API — states its recovery posture:
+  reconcile (start from what the earlier attempt left with `git status`
+  and `git diff`, keep the changes that already serve the task, revert
+  half-finished edits) or reset to a clean baseline, never fail on the
+  old state or duplicate finished work. Retries with no recovery note
+  still validate: validation cannot judge prose.
 - **Dead configurations fail loudly, never wedge**: a pending entry whose
   input source never settled, a `max_parallel` cap held entirely by
   never-settling residents with work queued, or nothing in flight and

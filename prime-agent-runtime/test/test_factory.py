@@ -644,6 +644,14 @@ class ValidateFactorySpecTest(unittest.TestCase):
         errors = validate_factory_spec(uses_foreach)
         self.assertEqual(errors, ["resident node watcher cannot use foreach"])
 
+        declares_retries = {"nodes": [node("watcher", lifecycle="resident", retries=2)]}
+        errors = validate_factory_spec(declares_retries)
+        self.assertEqual(errors, ["resident node watcher cannot declare retries"])
+
+        # Retries 0 is the canonical default, so nothing is declared.
+        zero_retries = {"nodes": [node("watcher", lifecycle="resident", retries=0)]}
+        self.assertEqual(validate_factory_spec(zero_retries), [])
+
         # Empty outputs list on a resident node is fine: nothing is declared.
         empty_outputs = {"nodes": [node("watcher", lifecycle="resident", outputs=[])]}
         self.assertEqual(validate_factory_spec(empty_outputs), [])
@@ -1400,6 +1408,14 @@ class ValidateFactoryMachineTest(unittest.TestCase):
             "transitions": [{"from": "src", "to": "watcher"}],
         }
         self.assertEqual(validate_factory_machine(uses_foreach), ["resident state watcher cannot use foreach"])
+        declares_retries = {
+            "states": [state("watcher", entry=True, lifecycle="resident", retries=1)],
+            "transitions": [],
+        }
+        self.assertEqual(
+            validate_factory_machine(declares_retries),
+            ["resident state watcher cannot declare retries"],
+        )
         leaves_resident = {
             "states": [
                 {"id": "entry", "entry": True, "subagent": "w"},

@@ -124,9 +124,14 @@ fn positions_of(events: &[Value], frame_type: &str) -> Vec<usize> {
 // race is deterministic.
 struct GateProbeEngine {
     frames: Vec<EngineEvent>,
+    boundaries: Mutex<Vec<Option<String>>>,
 }
 
 impl SessionEngine for GateProbeEngine {
+    fn set_prompt_context_boundary(&self, leaf_id: Option<String>) {
+        self.boundaries.lock().unwrap().push(leaf_id);
+    }
+
     fn run_prompt(
         &self,
         _prompt_index: usize,
@@ -189,7 +194,10 @@ async fn gate_sighting_events(
     abort_requested: bool,
     suppress_aborted_row: bool,
 ) -> Vec<Value> {
-    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine { frames });
+    let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+        frames,
+        boundaries: Mutex::new(Vec::new()),
+    });
     let runner = burst_runner(Arc::clone(&engine));
     {
         let mut core = runner.core.lock().unwrap();
@@ -282,4 +290,169 @@ async fn the_suppressed_row_sighting_drops_and_arms_the_silence() {
         positions_of(&events, "agent_end").is_empty(),
         "the suppressed-row sighting arms the silence: {events:?}"
     );
+}
+
+/// Engine-only stores cannot persist these transitions: the worker must
+/// commit both rows in the same stream order as the assistant/tool rows.
+#[tokio::test]
+async fn model_transitions_reach_the_worker_owned_session_file() {
+    for abort_suppressed in [None, Some(false), Some(true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let expected = vec![
+            json!({"provider": "backup", "modelId": "model/with/slashes"}),
+            json!({"provider": "primary", "modelId": "model/with/slashes"}),
+        ];
+        let mut frames = vec![
+            EngineEvent::ModelChange(pa_types::session::ModelChangeEntry {
+                provider: "backup".to_string(),
+                model_id: "model/with/slashes".to_string(),
+            }),
+            EngineEvent::AssistantMessage(
+                json!({"role": "assistant", "content": [], "stopReason": "toolUse"}),
+            ),
+            EngineEvent::ModelChange(pa_types::session::ModelChangeEntry {
+                provider: "primary".to_string(),
+                model_id: "model/with/slashes".to_string(),
+            }),
+            EngineEvent::ToolResultMessage(
+                json!({"role": "toolResult", "toolCallId": "probe", "content": []}),
+            ),
+            EngineEvent::Done(Ok(())),
+        ];
+        if abort_suppressed.is_some() {
+            frames.retain(|event| {
+                matches!(event, EngineEvent::ModelChange(_) | EngineEvent::Done(_))
+            });
+        }
+        let engine: Arc<dyn SessionEngine> = Arc::new(GateProbeEngine {
+            frames,
+            boundaries: Mutex::new(Vec::new()),
+        });
+        let runner = burst_runner(Arc::clone(&engine));
+        let mut store = crate::session_store::SessionFile::create("/fixture", None, 0);
+        store.set_path(path.clone());
+        store.rewrite().unwrap();
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.store = Some(store);
+            core.abort_requested = abort_suppressed.is_some();
+            core.suppress_aborted_row = abort_suppressed.unwrap_or(false);
+        }
+        runner
+            .run_turn(
+                engine,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "probe".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let rows: Vec<Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let transitions: Vec<Value> = rows
+            .iter()
+            .filter(|row| row["type"] == "model_change")
+            .map(|row| json!({"provider": row["provider"], "modelId": row["modelId"]}))
+            .collect();
+        assert_eq!(transitions, expected);
+        let relevant: Vec<&str> = rows
+            .iter()
+            .filter_map(|row| match row["type"].as_str() {
+                Some("model_change") => Some("model"),
+                Some("message") => row["message"]["role"].as_str(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            relevant,
+            if abort_suppressed.is_some() {
+                vec!["model", "model"]
+            } else {
+                vec!["model", "assistant", "model", "toolResult"]
+            }
+        );
+    }
+}
+
+/// noSession keeps its prefix IDs in the worker's in-memory store; they
+/// cannot fence the engine's durable restore. File-backed prompts capture the
+/// leaf after next-turn prefix rows have persisted.
+#[tokio::test]
+async fn prompt_restore_boundary_is_supplied_only_for_file_backed_stores() {
+    let dir = tempfile::tempdir().unwrap();
+    for file_backed in [false, true] {
+        let engine = Arc::new(GateProbeEngine {
+            frames: vec![EngineEvent::Done(Ok(()))],
+            boundaries: Mutex::new(Vec::new()),
+        });
+        let dynamic: Arc<dyn SessionEngine> = engine.clone();
+        let runner = burst_runner(Arc::clone(&dynamic));
+        let mut store = crate::session_store::SessionFile::create("/tmp", None, 0);
+        store.append_session_info("prefix");
+        assert!(store.leaf_id().is_some(), "in-memory prefixes have IDs too");
+        if file_backed {
+            store.set_path(dir.path().join("backed.jsonl"));
+            store.rewrite().unwrap();
+        }
+        {
+            let mut core = runner.core.lock().unwrap();
+            core.store = Some(store);
+            core.pending_next_turn.push(json!({
+                "role":"custom", "customType":"prior_context", "content":"keep this prefix",
+                "display":false,
+            }));
+        }
+        runner
+            .run_turn(
+                dynamic,
+                vec![QueuedItem {
+                    priority: QueuePriority::Human,
+                    preview: None,
+                    message: "go".to_string(),
+                    custom_message: None,
+                    agent_message: None,
+                    queue_key: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    done: None,
+                    queue_visible: true,
+                    policy: TurnPolicy::Queued,
+                    forced_batch: false,
+                }],
+            )
+            .await;
+        let expected = if file_backed {
+            let path = dir.path().join("backed.jsonl");
+            let persisted = crate::session_store::SessionFile::open(&path).unwrap();
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("prior_context"),
+                "the captured boundary follows the prefix on disk"
+            );
+            vec![persisted.leaf_id().map(str::to_string)]
+        } else {
+            assert!(!dir.path().join("backed.jsonl").exists());
+            Vec::new()
+        };
+        assert_eq!(
+            *engine.boundaries.lock().unwrap(),
+            expected,
+            "boundary capture must match durable ownership (file_backed={file_backed})"
+        );
+    }
 }

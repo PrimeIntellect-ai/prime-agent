@@ -1606,6 +1606,12 @@ ts_stop_rust_stopped=""
 windows_stop_summary=""
 ts_socket="${TMPDIR:-/tmp}/prime-agent-$(id -u)/daemon.sock"
 rust_socket="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+# The launcher pins /tmp when the TMPDIR path exceeds the non-Linux
+# 103-byte sun_path limit (pa-daemon socket_dir() owns the rule); the
+# stop probe must look where the launcher actually pinned.
+if [ "$OS" != "Linux" ] && [ "$(printf '%s' "$rust_socket" | wc -c)" -gt 103 ]; then
+  rust_socket="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+fi
 env_socket="${PRIME_AGENT_DAEMON_SOCKET:-}"
 # THE TILDE EXPANSION (the CLI's own spelling: the products' clients
 # expand a leading ~/ in PRIME_AGENT_DAEMON_SOCKET before connecting, so
@@ -2847,7 +2853,15 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 if [ -f "$(dirname "$0")/../share/.prime-agent-npm-bridge/legacy-daemon-socket" ]; then
   export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-${TMP:-${TEMP:-/tmp}}}/prime-agent-$(id -u)/daemon.sock}"
 else
-  export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+  if [ -z "${PRIME_AGENT_DAEMON_SOCKET:-}" ]; then
+    # Same rule as pa-daemon socket_dir(): non-Linux sun_path caps a unix
+    # socket at 103 bytes, so a too-deep TMPDIR pins /tmp/prime-agent-rust-<uid>.
+    PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
+    if [ "$(printf '%s' "$PRIME_AGENT_DAEMON_SOCKET" | wc -c)" -gt 103 ] && [ "$(uname -s)" != "Linux" ]; then
+      PRIME_AGENT_DAEMON_SOCKET="/tmp/prime-agent-rust-$(id -u)/daemon.sock"
+    fi
+    export PRIME_AGENT_DAEMON_SOCKET
+  fi
 fi
 exec "$(dirname "$0")/../share/prime-agent/prime-agent" "$@"
 EOF

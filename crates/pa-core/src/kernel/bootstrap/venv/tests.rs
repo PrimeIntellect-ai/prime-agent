@@ -679,7 +679,7 @@ fn live_probe_memo_reprobes_when_installed_rlm_is_removed() {
         std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let identity = resolve_runtime_identity();
+    let identity = hash_runtime_source(&require_runtime_source_dir().unwrap()).unwrap();
     write_bootstrap_version(&fake, &identity, &[]).unwrap();
 
     let probe_count = || {
@@ -981,6 +981,7 @@ async fn skill_sync_batches_missing_installs_into_one_uv_call() {
         uv.to_str().unwrap(),
         &venv,
         dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
         "sha256:rt",
         &skills,
         &EnsureKernelPythonOptions::default(),
@@ -998,6 +999,7 @@ async fn skill_sync_batches_missing_installs_into_one_uv_call() {
         "the installed skill is not reinstalled: {calls:?}"
     );
     assert_eq!(calls[0].matches("--editable").count(), 1);
+    assert!(calls[0].contains(dir.path().join("prime-agent-runtime").to_str().unwrap()));
     let version = read_bootstrap_version(&venv).expect("version written");
     assert_eq!(
         version.python_skills.as_ref().map(Vec::len),
@@ -1034,6 +1036,7 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
         uv.to_str().unwrap(),
         &venv,
         dir.path().join("python").as_path(),
+        dir.path().join("prime-agent-runtime").as_path(),
         "sha256:rt",
         &skills,
         &options,
@@ -1050,6 +1053,9 @@ async fn skill_sync_falls_back_to_per_skill_installs_on_batch_failure() {
         calls[0].contains("edit") && calls[0].contains("broken"),
         "the batch covers both skills: {calls:?}"
     );
+    for call in &calls {
+        assert!(call.contains(dir.path().join("prime-agent-runtime").to_str().unwrap()));
+    }
     let warnings = warnings.lock().unwrap();
     assert!(
         warnings.len() == 1 && warnings[0].contains("broken"),

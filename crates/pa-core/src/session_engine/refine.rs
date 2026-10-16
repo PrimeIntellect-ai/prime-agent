@@ -625,11 +625,12 @@ pub fn default_refiner_call(api_key: Option<String>) -> crate::refinement::execu
                 })],
                 tools: None,
             };
-            let stream_options =
+            let mut stream_options =
                 pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
                     api_key,
                     ..Default::default()
                 });
+            stream_options.reasoning = pa_types::ai::minimum_reasoning(&model);
             Ok(pa_ai::complete_simple(&model, &context, Some(stream_options)).await?)
         })
     })

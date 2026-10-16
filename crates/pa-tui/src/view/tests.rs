@@ -253,8 +253,8 @@ fn hint_rows_carry_the_platform_alt_label() {
     v.queue_selected = Some(crate::queued::QueueSelectionItem {
         lane: crate::queued::QueueLane::Steering,
         index: 0,
+        position: 0,
         text: "turn right".to_string(),
-        internal: false,
     });
     let frame = v.render_frame(80, 24);
     let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
@@ -1428,8 +1428,8 @@ fn browse_header_pair_sits_below_the_editor_top_row() {
     v.queue_selected = Some(crate::queued::QueueSelectionItem {
         lane: crate::queued::QueueLane::Steering,
         index: 0,
+        position: 0,
         text: "turn right".to_string(),
-        internal: false,
     });
     let frame = v.render_frame(80, 24);
     let joined: Vec<String> = frame.iter().map(text_of).collect();

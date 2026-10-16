@@ -1490,6 +1490,7 @@ async fn run_prompts_and_emit(
                 global_harness_dir.clone(),
                 &autonomous_state,
                 &command,
+                &images,
             )
             .await;
             if let Some(error) = execution.error {
@@ -1905,11 +1906,17 @@ mod tests {
         )
         .unwrap();
         let built_manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
-        assert_eq!(
-            built_manager.get_enabled_persistent_generic_servers(),
-            vec!["fixture-echo".to_string()]
-        );
         let manager = std::sync::Arc::new(std::sync::Mutex::new(built_manager));
+        let gating_manager = std::sync::Arc::clone(&manager);
+        let enabled = tokio::task::spawn_blocking(move || {
+            gating_manager
+                .lock()
+                .unwrap()
+                .get_enabled_persistent_generic_servers()
+        })
+        .await
+        .unwrap();
+        assert_eq!(enabled, vec!["fixture-echo".to_string()]);
         let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
         pa_core::mcp::McpManager::register_host_handlers(&manager, &mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
@@ -1935,14 +1942,17 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        {
-            let mut manager = manager.lock().unwrap();
+        let gating_manager = std::sync::Arc::clone(&manager);
+        tokio::task::spawn_blocking(move || {
+            let mut manager = gating_manager.lock().unwrap();
             manager.refresh();
             assert_eq!(
                 manager.get_enabled_persistent_generic_servers(),
                 vec!["second-echo".to_string()]
             );
-        }
+        })
+        .await
+        .unwrap();
         let result = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "second-echo" }),
         })

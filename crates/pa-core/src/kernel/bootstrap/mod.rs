@@ -24,9 +24,7 @@ use venv::{
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,
     resolve_writable_kernel_venv_dir, sync_python_skills, BootstrapPythonSkill,
 };
-pub use venv::{
-    invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python, resolve_runtime_identity,
-};
+pub use venv::{invalidate_runtime_probe_cache, kernel_venv_dir, kernel_venv_python};
 use venv::{kernel_base_ready, kernel_ready};
 
 /// One Python skill the kernel should import at bootstrap.
@@ -101,7 +99,7 @@ impl EnsureKernelPythonOptions {
 fn format_bootstrap_failure(error: &anyhow::Error) -> anyhow::Error {
     let mut message = format!(
         "Failed to set up the Python kernel runtime. {error:#}\n\
-         First-time setup needs internet to install uv, Python, prime-agent-runtime, and default Python packages; once set up, prime-agent runs offline. \
+         First-time setup needs the bundled local runtime and internet to install uv, Python, and default Python packages; once set up, Prime Agent runs offline. \
          An interrupted runtime upgrade needs network once more, so re-run this while online. \
          Set PRIME_AGENT_KERNEL_PYTHON to a Python with a current prime-agent-runtime and default Python packages installed to skip auto-bootstrap."
     );
@@ -230,7 +228,12 @@ async fn ensure_kernel_venv(
 ) -> anyhow::Result<PathBuf> {
     let python = kernel_venv_python(&venv);
     let python_str = python.to_string_lossy().to_string();
-    let runtime_identity = resolve_runtime_identity();
+    // Validate the local source before probing any installed runtime or
+    // removing an existing venv. Missing payloads must fail closed.
+    let source_dir =
+        venv::require_runtime_source_dir().map_err(|error| format_bootstrap_failure(&error))?;
+    let runtime_identity =
+        venv::hash_runtime_source(&source_dir).map_err(|error| format_bootstrap_failure(&error))?;
     if kernel_ready(&python_str, &venv, &runtime_identity, python_skills) {
         return Ok(python);
     }
@@ -246,6 +249,7 @@ async fn ensure_kernel_venv(
                 &uv,
                 &venv,
                 &python,
+                &source_dir,
                 &runtime_identity,
                 python_skills,
                 options,
@@ -260,7 +264,14 @@ async fn ensure_kernel_venv(
             std::fs::remove_dir_all(&venv)
                 .with_context(|| format!("removing {}", venv.display()))?;
         }
-        bootstrap_venv(&venv, python_skills, options).await?;
+        bootstrap_venv(
+            &venv,
+            &source_dir,
+            &runtime_identity,
+            python_skills,
+            options,
+        )
+        .await?;
         Ok(python)
     }
     .await;

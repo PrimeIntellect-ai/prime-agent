@@ -99,6 +99,14 @@ pub(crate) const QUOTA_WAKE_MAX_RETRIES: u32 = 3;
 pub(crate) type SettledKernelRelease =
     std::sync::Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 
+/// A captured prompt boundary: an empty transcript or a stable durable leaf.
+/// The owning slot's None means no worker boundary has been supplied.
+#[derive(Clone, PartialEq, Eq)]
+enum PromptContextBoundary {
+    Empty,
+    Leaf(String),
+}
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -201,6 +209,8 @@ pub struct AgentSessionEngine {
     /// A branch move that landed before the first turn: consumed at build so
     /// the session starts on the moved branch.
     pending_branch: std::sync::Mutex<Option<Vec<pa_types::session::FileEntry>>>,
+    /// The worker's captured pre-admission boundary; None means unset.
+    prompt_context_boundary: std::sync::Mutex<Option<PromptContextBoundary>>,
     /// The `goal_update` payload a branch rebuild's goal reload stashed,
     /// taken by the worker that announces it. `None` when it changed nothing.
     reloaded_goal_update: std::sync::Mutex<Option<Value>>,

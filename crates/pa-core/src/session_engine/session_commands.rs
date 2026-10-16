@@ -167,6 +167,7 @@ pub async fn execute_session_command(
     engine: &SessionEngine,
     params: &mut SessionCommandParams<'_>,
     command: &SessionSlashCommand,
+    images: &[pa_agent::types::ImageContent],
 ) -> SessionCommandExecution {
     let mut execution = SessionCommandExecution::default();
     // The echo row is recorded BEFORE the command runs, so the command's
@@ -180,7 +181,7 @@ pub async fn execute_session_command(
     let result = match command.name {
         "compact" => execute_compact(engine, params, command, &mut execution).await,
         "refine" => execute_refine(engine, params, command, &mut execution).await,
-        "goal" => execute_goal(engine, command, &mut execution).await,
+        "goal" => execute_goal(engine, command, images, &mut execution).await,
         "autonomous" => execute_autonomous(params, command, &mut execution),
         other => Err(format!("Unknown session command: {other}")),
     };
@@ -307,6 +308,7 @@ async fn execute_refine(
 async fn execute_goal(
     engine: &SessionEngine,
     command: &SessionSlashCommand,
+    images: &[pa_agent::types::ImageContent],
     execution: &mut SessionCommandExecution,
 ) -> Result<(), String> {
     let goal = parse_goal_command(&command.args)?;
@@ -361,8 +363,10 @@ async fn execute_goal(
                 let state = driver
                     .start(&mut session, &objective, token_budget)
                     .map_err(|error| format!("{error:#}"))?;
+                // TS `_startGoal`: only the objective-start context takes the
+                // prompt's attached images; the other goal arms ignore them.
                 context_message = Some(
-                    create_goal_context_message(&state, GoalContextKind::Continuation)
+                    create_goal_context_message(&state, GoalContextKind::Continuation, images)
                         .map_err(|error| format!("{error:#}"))?,
                 );
             }
