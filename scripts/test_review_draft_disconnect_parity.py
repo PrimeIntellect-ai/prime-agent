@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Decision-only regression tests; these never launch either product binary."""
+"""Fixture and decision regressions; these never launch either product binary."""
 import copy
+import json
+import pathlib
+import socket
+import tempfile
 import unittest
 
-from review_draft_disconnect_parity import classify_validation
+from review_draft_disconnect_parity import Supervisor, classify_validation
 
 
 def completed_observations():
@@ -25,6 +29,55 @@ def completed_observations():
         "prompts": ["sentinel"], "accepted_logical_messages": ["sentinel"],
         "wire_prompt_messages": ["sentinel"]}
     return {"results": {"ts": ts, "rust": rust}}
+
+
+class SupervisorReconnectTests(unittest.TestCase):
+    def test_reconnect_reads_settled_history_without_readmitting_the_prompt(self):
+        with tempfile.TemporaryDirectory(prefix="draft-fixture-", dir="/tmp") as directory:
+            root = pathlib.Path(directory)
+            path = root / "supervisor.sock"
+            supervisor = Supervisor(path, {"type": "hello", "protocol": 1}, "queued_close", root)
+            try:
+                with socket.socket(socket.AF_UNIX) as sock:
+                    sock.settimeout(2)
+                    sock.connect(str(path))
+                    with sock.makefile("rb") as stream:
+                        self.assertEqual(json.loads(stream.readline())["type"], "hello")
+                        prompt = {"type": "prompt", "activeSessionId": "s1", "message": "sentinel"}
+                        sock.sendall((json.dumps({"id": "p1", "clientId": "client", "command": prompt}) + "\n").encode())
+                        self.assertEqual(stream.readline(), b"", "completed admission loses its reply")
+                expected_messages = [
+                    {"role": "user", "content": [{"type": "text", "text": "sentinel"}],
+                     "timestamp": 1750000000000},
+                    {"role": "assistant", "stopReason": "stop", "api": "openai-completions",
+                     "provider": "parity-local", "model": "parity-1", "timestamp": 1750000000000,
+                     "usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0,
+                               "totalTokens": 0, "cost": {"input": 0, "output": 0,
+                               "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+                     "content": [{"type": "text", "text": "Fixture settled 1"}]},
+                ]
+                with socket.socket(socket.AF_UNIX) as sock:
+                    sock.settimeout(2)
+                    sock.connect(str(path))
+                    with sock.makefile("rb") as stream:
+                        json.loads(stream.readline())
+                        for name, data in (
+                            ("get_messages", {"messages": expected_messages}),
+                            ("get_session_context", {"context": {"messages": expected_messages,
+                                "thinkingLevel": "off", "serviceTier": "default", "model": None}}),
+                        ):
+                            with self.subTest(command=name):
+                                sock.sendall((json.dumps({"id": name, "clientId": "client",
+                                    "command": {"type": name, "activeSessionId": "s1"}}) + "\n").encode())
+                                self.assertEqual(json.loads(stream.readline()), {
+                                    "type": "response", "id": name, "command": name,
+                                    "success": True, "data": data})
+                self.assertEqual(supervisor.errors, [])
+                self.assertEqual(supervisor.prompts, [prompt])
+                self.assertEqual(supervisor.accepted_prompts, [
+                    {"id": "p1", "clientId": "client", "command": prompt}])
+            finally:
+                supervisor.close()
 
 
 class ValidationDecisionTests(unittest.TestCase):

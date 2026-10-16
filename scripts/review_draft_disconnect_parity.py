@@ -365,6 +365,16 @@ class Supervisor:
                         response["data"] = {"contextFiles": [], "skills": [], "prompts": [],
                                             "extensions": [], "themes": [], "diagnostics": {
                                             "skills": [], "prompts": [], "extensions": [], "themes": []}}
+                    elif name in ("get_messages", "get_session_context"):
+                        # Pinned TS getInitialSnapshot reads these after reconnect when
+                        # its streamed snapshot is stale. Preserve the settled transcript.
+                        with self.lock:
+                            messages = list(self.messages)
+                        if name == "get_messages":
+                            response["data"] = {"messages": messages}
+                        else:
+                            response["data"] = {"context": {"messages": messages,
+                                "thinkingLevel": "off", "serviceTier": "default", "model": None}}
                     elif name == "get_session_stats":
                         # AgentSession.getSessionStats's empty-session return shape.
                         response["data"] = {"sessionId": "fixture-durable", "userMessages": 0,

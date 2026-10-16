@@ -122,6 +122,7 @@ pub enum CompactOutcome {
 }
 
 pub(crate) struct CompactionAttempt {
+    session_id: String,
     /// The session leaf at prepare: the commit is valid while the active
     /// branch still grows through it with no compaction between.
     prefix_leaf: Option<String>,
@@ -206,6 +207,7 @@ pub(crate) fn prepare_attempt(
     let details: CompactionDetails =
         details_for(&file_op_messages, &entries, prev_compaction_index);
     Ok(CompactionAttempt {
+        session_id: session.get_session_id().to_string(),
         prefix_leaf,
         cut,
         previous_summary,
@@ -317,6 +319,7 @@ pub(crate) async fn summarize_attempt(
             |headers| {
                 complete_summary_call(
                     &model,
+                    &attempt.session_id,
                     api_key.clone(),
                     headers,
                     history_max_tokens,
@@ -339,6 +342,7 @@ pub(crate) async fn summarize_attempt(
             |headers| {
                 complete_summary_call(
                     &model,
+                    &attempt.session_id,
                     api_key.clone(),
                     headers,
                     turn_prefix_max_tokens,

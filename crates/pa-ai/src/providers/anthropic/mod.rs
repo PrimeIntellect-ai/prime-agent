@@ -350,7 +350,7 @@ pub(crate) fn build_request_headers(
             .collect()
     });
 
-    let mut default_headers = match model.provider.as_str() {
+    let default_headers = match model.provider.as_str() {
         "cloudflare-ai-gateway" => {
             let mut headers = Map::new();
             headers.insert("accept".into(), json!("application/json"));
@@ -410,14 +410,8 @@ pub(crate) fn build_request_headers(
         }
     };
 
-    // withOpenCodeHeaders: session header for opencode providers.
-    if model.provider == "opencode" || model.provider == "opencode-go" {
-        if let Some(session_id) = session_id {
-            default_headers.insert("session_id".into(), json!(session_id));
-        }
-    }
-
     let mut pairs = headers_to_pairs(&default_headers);
+    crate::providers::opencode_headers::apply(&mut pairs, &model.provider, session_id);
     // The Anthropic SDK always sends the API version; mirror it.
     pairs.insert(0, ("anthropic-version".into(), "2023-06-01".into()));
     if model.provider == "cloudflare-ai-gateway" || model.provider == "github-copilot" || is_oauth {
