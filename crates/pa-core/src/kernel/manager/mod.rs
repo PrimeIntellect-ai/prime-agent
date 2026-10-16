@@ -83,15 +83,9 @@ struct ExitInfo {
 
 /// Fields of a settled execution shared with the stdout reader task.
 #[derive(Default)]
-// The mirrored TS API shape is deliberate (the booleans are the product's own surface).
-#[allow(clippy::struct_excessive_bools)]
 struct ExecBuffers {
-    stdout: String,
-    stderr: String,
-    stdout_chars: usize,
-    stderr_chars: usize,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
+    stdout: HeadTailBuffer,
+    stderr: HeadTailBuffer,
     result: Option<String>,
     diffs: Vec<KernelDiffDisplay>,
     attachments: Vec<KernelAttachment>,
@@ -415,7 +409,7 @@ mod snapshot;
 mod startup;
 mod teardown;
 
-use requests::{append_truncated, describe_failure, Signal};
+use requests::{append_truncated, describe_failure, HeadTailBuffer, Signal};
 
 // Public API
 
