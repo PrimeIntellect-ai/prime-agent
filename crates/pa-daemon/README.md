@@ -84,10 +84,8 @@ merge non-resident ledger children (walk roots = saved + resident session
 files), so passivated children stay roster-visible (TS
 `walkPassiveRlmSubagents` / `withPassiveRlmDescendantInfos`). The saved
 session scan (`session_store.rs`) folds each file once into the durable
-catalog row, including the agents-view search corpus the TS scan builds:
-the capped `allMessagesText` transcript text (64 KiB). Archived sessions live in
-`<agent-dir>/sessions-archive` and never reach the catalog scan, so search
-covers live sessions only.
+catalog row. Archived sessions live in `<agent-dir>/sessions-archive` and
+never reach the catalog scan, so search covers live sessions only.
 Supervisor-backed RLM child sessions
 (`rlm_children.rs`, the daemon side of the pa-core `RlmSubagentHost` seam):
 `rlm.spawn`/`rlm.create_session` create real daemon sessions through the

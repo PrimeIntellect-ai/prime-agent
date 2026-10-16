@@ -910,6 +910,66 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The whole catalog row on one fixture that exercises every optional key
+/// (name, state, model, thinking level, parent binding, usage): one literal
+/// comparison, so any wire change — a key added, renamed, or dropped — fails
+/// here first, before any client depends on the new shape.
+#[test]
+fn saved_session_rows_match_the_catalog_row_golden() {
+    let dir = std::env::temp_dir().join(format!("pa-saved-golden-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut session =
+        crate::session_store::SessionFile::create("/repo", Some("/s/parent.jsonl"), 1);
+    // The row's id and created timestamp read from the session header: pin
+    // both, so the golden stays one literal.
+    session.header.id = "golden-session".to_string();
+    session.header.timestamp = "2026-09-21T00:00:00.000Z".to_string();
+    let path = dir.join("golden-session.jsonl");
+    session.set_path(path.clone());
+    session.append_session_info("golden name");
+    // An assistant message with provider/model later overrides the change,
+    // pinning the fold's last-write-wins row.
+    session.append_model_change("prime", "superb");
+    session.append_thinking_level_change("high");
+    session.append_session_state("active");
+    session.append_message(&json!({
+        "role": "user", "content": "fix the login bug", "timestamp": 1_790_000_000_000_u64
+    }));
+    session.append_message(&json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "fixed in auth.rs" }],
+        "provider": "p", "model": "m", "timestamp": 1_790_000_060_000_u64,
+        "usage": {
+            "input": 100, "output": 10, "cacheRead": 5, "cacheWrite": 0,
+            "totalTokens": 115,
+            "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+        }
+    }));
+    session.rewrite().unwrap();
+
+    let info = crate::session_store::read_session_info(&path).unwrap();
+    assert_eq!(
+        saved_session_row(&info),
+        json!({
+            "path": path.to_string_lossy(),
+            "id": "golden-session",
+            "cwd": "/repo",
+            "rlmDepth": 1,
+            "created": "2026-09-21T00:00:00.000Z",
+            "modified": "2026-09-21T14:14:20.000Z",
+            "messageCount": 2,
+            "firstMessage": "fix the login bug",
+            "state": { "status": "active" },
+            "name": "golden name",
+            "parentSessionPath": "/s/parent.jsonl",
+            "model": { "provider": "p", "modelId": "m" },
+            "usage": { "inputTokens": 105, "outputTokens": 10, "cost": 0.25 },
+            "thinkingLevel": "high"
+        })
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `parentSessionPath` only when one is recorded (TS's `undefined` is omitted), so a
 /// non-resident bound session keeps its family edge.
 #[test]

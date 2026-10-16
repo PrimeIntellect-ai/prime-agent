@@ -70,16 +70,12 @@ mod info;
 mod info_sidecar;
 
 pub(crate) use info::read_session_info_from;
+pub use info::{find_most_recent_session_for_cwd, read_session_info, SessionInfo};
 #[cfg(test)]
 use info::{
-    append_capped_search_text, fold_scan_entry, message_content_text, raw_string, raw_u64,
-    session_info_cache, SessionInfoEntry, SessionInfoGeneration, SessionInfoScanCache,
-    SessionScanAccumulator, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
+    message_content_text, raw_string, raw_u64, session_info_cache, SessionInfoEntry,
+    SessionInfoGeneration, SessionInfoScanCache, SessionScanState, SESSION_SCAN_MAX_CACHED_STATES,
     SESSION_SCAN_RESUME_TAIL_BYTES,
-};
-pub use info::{
-    find_most_recent_session_for_cwd, read_session_info, SessionInfo,
-    SESSION_LIST_SEARCH_TEXT_MAX_CHARS,
 };
 pub(crate) use info_sidecar::persist_info_sidecar;
 
