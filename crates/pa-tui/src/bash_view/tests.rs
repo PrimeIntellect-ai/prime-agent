@@ -1109,3 +1109,63 @@ fn durations_format_compactly() {
     assert_eq!(format_duration(Some(3_412)), "3.4s");
     assert_eq!(format_duration(Some(125_000)), "2m 05s");
 }
+
+#[test]
+fn replacing_the_entire_view_rejects_previous_output_and_errors() {
+    let mut previous = BashView::new(activities(), 40);
+    previous.open("a");
+    let old_generation = previous.detail_generation;
+    for id in ["a", "b"] {
+        let mut replacement = BashView::new(activities(), 40);
+        replacement.open(id);
+        replacement.set_output(id, "current output", replacement.detail_generation);
+        replacement.set_output(id, "stale output", old_generation);
+        replacement.set_error("stale error".to_string(), true, Some(old_generation));
+        let text = frame_text(&replacement.render(&theme(), 70, &kb())).join("\n");
+        assert!(text.contains("current output"), "{text}");
+        assert!(
+            !text.contains("stale output") && !text.contains("stale error"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn registry_changes_preserve_failed_tail_fetches_and_their_retry() {
+    let mut view = BashView::new(activities(), 40);
+    let action = view.open("a");
+    let BashViewAction::OpenDetail { generation, .. } = action else {
+        panic!("open detail")
+    };
+    view.set_error(
+        "Bash output: unavailable".to_string(),
+        true,
+        Some(generation),
+    );
+    let mut refreshed = activities();
+    refreshed[0].command = "changed metadata".to_string();
+    view.apply_activities(refreshed);
+    view.clear_error();
+    let text = frame_text(&view.render(&theme(), 70, &kb())).join("\n");
+    assert!(text.contains("Bash output: unavailable"), "{text}");
+    assert_eq!(
+        view.handle_key("up", &kb()),
+        BashViewAction::OpenDetail {
+            id: "a".to_string(),
+            generation,
+        }
+    );
+    view.set_output("a", "recovered output", generation);
+    let text = frame_text(&view.render(&theme(), 70, &kb())).join("\n");
+    assert!(
+        text.contains("recovered output") && !text.contains("unavailable"),
+        "{text}"
+    );
+    view.set_error("Bash output: row gone".to_string(), true, Some(generation));
+    view.apply_activities(Vec::new());
+    view.clear_error();
+    assert!(
+        view.error.is_none(),
+        "a vanished row retires its fetch error"
+    );
+}

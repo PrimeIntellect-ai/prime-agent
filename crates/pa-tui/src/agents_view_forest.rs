@@ -54,7 +54,7 @@ pub struct AgentsViewRow {
     pub has_spawn_code: bool,
 }
 
-/// The four list row shapes (TS `AgentsViewRowKind`).
+/// The list row shapes (TS `AgentsViewRowKind`, plus the persistent shells).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// A top-level agent row.
@@ -65,6 +65,8 @@ pub enum RowKind {
     Subagent,
     /// A read-only spawn-program line.
     Code,
+    /// One machine-wide persistent shell with its assigned session.
+    PersistentShell,
 }
 
 /// The summary line's identity prefix (the `subagents:` prefix, so a carried selection
@@ -84,7 +86,10 @@ impl AgentsViewRow {
     pub fn selectable(&self) -> bool {
         match self.kind {
             RowKind::Code => false,
-            RowKind::Agent | RowKind::SubagentSummary | RowKind::Subagent => true,
+            RowKind::Agent
+            | RowKind::SubagentSummary
+            | RowKind::Subagent
+            | RowKind::PersistentShell => true,
         }
     }
 }

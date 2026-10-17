@@ -2,19 +2,29 @@
 //! `bash(..., persistent=True)`): every session's shells live in one home,
 //! `<agent dir>/persistent-shells/`, as a `<id>.json` record assigned to the
 //! session that started it, plus the shell's `<id>.out` and `<id>.rc`. The
-//! daemon reads the records to list each saved session's live shells. Nothing
-//! in the session lifecycle kills them: a deleted session's shells keep
+//! daemon reads the records to list each saved session's live shells and every
+//! shell machine-wide, reads a shell's output, and kills one on request.
+//! Nothing in the session lifecycle kills them: a deleted session's shells keep
 //! running as orphans, still assigned to it.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
+use pa_core::platform::process::{process_group_exists, signal_process_group, Signal};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::protocol::{response_failure, response_line, response_success};
+
 const HOME_DIR: &str = "persistent-shells";
+/// How long a shell may exit on its own after SIGTERM before its group gets SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(2);
 /// The kernel activity rows cap the command at the same length.
 const COMMAND_CAP: usize = 512;
+/// The output read serves its lines from at most this many trailing bytes.
+const TAIL_BYTES: u64 = 64 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +35,10 @@ struct Shell {
     command: String,
     started_at: String,
     session_id: String,
+}
+
+fn shell_file(agent_dir: &Path, id: &str, kind: &str) -> PathBuf {
+    agent_dir.join(HOME_DIR).join(format!("{id}.{kind}"))
 }
 
 fn registered_shells(agent_dir: &Path) -> Vec<Shell> {
@@ -42,31 +56,190 @@ fn registered_shells(agent_dir: &Path) -> Vec<Shell> {
     shells
 }
 
+fn find_shell(agent_dir: &Path, id: &str) -> Option<Shell> {
+    registered_shells(agent_dir)
+        .into_iter()
+        .find(|shell| shell.id == id)
+}
+
+fn pid_alive(pid: u32) -> bool {
+    matches!(crate::lease::is_process_alive(pid), Ok(true))
+}
+
 /// Whether the shell's pid still runs under the recorded start identity.
 fn runs_as_registered(shell: &Shell) -> bool {
-    matches!(crate::lease::is_process_alive(shell.pid), Ok(true))
+    pid_alive(shell.pid)
         && crate::lease::get_process_start_id(shell.pid).as_deref() == Some(shell.start_id.as_str())
 }
 
-/// The live persistent shells by assigned session id, as rows with the
-/// kernel bash activity row field names: a recycled pid or an unreadable
-/// identity never counts as live.
+/// An extant group with no verified leader is not safely attributable to this record.
+fn group_unverified(shell: &Shell) -> bool {
+    !runs_as_registered(shell) && process_group_exists(shell.pid as i32).unwrap_or(true)
+}
+
+/// One shell as a row with the kernel bash activity row field names.
+fn activity_row(shell: &Shell, status: &str) -> Value {
+    json!({
+        "id": shell.id,
+        "command": shell.command.chars().take(COMMAND_CAP).collect::<String>(),
+        "pid": shell.pid,
+        "startedAt": shell.started_at,
+        "status": status,
+        "persistent": true,
+    })
+}
+
+/// The live persistent shells by assigned session id: a recycled pid or an
+/// unreadable identity never counts as live.
 pub(crate) fn live_shell_rows_by_session(agent_dir: &Path) -> HashMap<String, Vec<Value>> {
     let mut rows: HashMap<String, Vec<Value>> = HashMap::new();
     for shell in registered_shells(agent_dir)
         .into_iter()
         .filter(runs_as_registered)
     {
-        rows.entry(shell.session_id).or_default().push(json!({
-            "id": shell.id,
-            "command": shell.command.chars().take(COMMAND_CAP).collect::<String>(),
-            "pid": shell.pid,
-            "startedAt": shell.started_at,
-            "status": "running",
-            "persistent": true,
-        }));
+        let row = activity_row(&shell, "running");
+        rows.entry(shell.session_id).or_default().push(row);
     }
     rows
+}
+
+/// Every registered shell with its assigned `sessionId`: running while its
+/// leader runs as registered, unverified when a group remains without that
+/// proof, otherwise finished with its recorded exit code (if any). Its
+/// `durationMs` runs from `startedAt` to now, or to the exit code's write
+/// once finished.
+pub(crate) fn shell_rows(agent_dir: &Path) -> Vec<Value> {
+    registered_shells(agent_dir)
+        .iter()
+        .map(|shell| {
+            let running = runs_as_registered(shell);
+            let status = if running {
+                "running"
+            } else if group_unverified(shell) {
+                "unverified"
+            } else {
+                "finished"
+            };
+            let mut row = activity_row(shell, status);
+            row["sessionId"] = json!(shell.session_id);
+            let rc = shell_file(agent_dir, &shell.id, "rc");
+            let ended_ms = if status == "finished" {
+                row["exitCode"] = json!(std::fs::read_to_string(&rc)
+                    .ok()
+                    .and_then(|rc| rc.trim().parse::<i64>().ok()));
+                std::fs::metadata(&rc)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                    .and_then(|since| u64::try_from(since.as_millis()).ok())
+            } else {
+                Some(crate::util::now_ms())
+            };
+            row["durationMs"] = json!(crate::util::iso_to_unix_ms(&shell.started_at)
+                .zip(ended_ms)
+                .map(|(started, ended)| ended.saturating_sub(started)));
+            row
+        })
+        .collect()
+}
+
+/// The newest `lines` lines of the shell's output (read from its last
+/// [`TAIL_BYTES`]); `None` for an unknown shell.
+pub(crate) fn output_tail(agent_dir: &Path, id: &str, lines: usize) -> Option<String> {
+    let shell = find_shell(agent_dir, id)?;
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = std::fs::File::open(shell_file(agent_dir, &shell.id, "out")) {
+        let size = file.metadata().map_or(0, |metadata| metadata.len());
+        if file
+            .seek(SeekFrom::Start(size.saturating_sub(TAIL_BYTES)))
+            .is_ok()
+        {
+            let _ = file.take(TAIL_BYTES).read_to_end(&mut bytes);
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let all: Vec<&str> = text.lines().collect();
+    Some(all[all.len().saturating_sub(lines)..].join("\n"))
+}
+
+/// Kill a shell only while the recorded leader identity still proves ownership.
+/// A durable leaderless group may belong to a reused PGID: refuse and retain it.
+pub(crate) fn kill_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
+    let Some(shell) = find_shell(agent_dir, id) else {
+        return Ok(false);
+    };
+    if !runs_as_registered(&shell) {
+        return if group_unverified(&shell) {
+            Err("Cannot verify persistent shell group ownership; no signal sent".to_string())
+        } else {
+            Ok(true)
+        };
+    }
+    if !signal_process_group(shell.pid as i32, Signal::Term) {
+        return Err("Could not signal persistent shell group".to_string());
+    }
+    let deadline = Instant::now() + TERM_GRACE;
+    while Instant::now() < deadline && runs_as_registered(&shell) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    kill_group(&shell)?;
+    Ok(true)
+}
+
+pub(crate) fn delete_shell(agent_dir: &Path, id: &str) -> Result<bool, String> {
+    let Some(shell) = find_shell(agent_dir, id) else {
+        return Ok(false);
+    };
+    if runs_as_registered(&shell) {
+        return Err("Cannot delete a running persistent shell".to_string());
+    }
+    if group_unverified(&shell) {
+        return Err("Cannot verify persistent shell group ownership; record kept".to_string());
+    }
+    for kind in ["rc", "out", "json"] {
+        if let Err(error) = std::fs::remove_file(shell_file(agent_dir, &shell.id, kind)) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(format!("Could not delete persistent shell: {error}"));
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// A missing or changed leader no longer proves the durable group's identity.
+fn kill_group(shell: &Shell) -> Result<(), String> {
+    if runs_as_registered(shell) {
+        if signal_process_group(shell.pid as i32, Signal::Kill) {
+            Ok(())
+        } else {
+            Err("Could not signal persistent shell group".to_string())
+        }
+    } else if group_unverified(shell) {
+        Err("Cannot verify persistent shell group ownership; no further signal sent".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// One persistent-shell supervisor arm, run off the runtime (file reads and
+/// the kill's grace block): `None` answers an unknown shell.
+pub(crate) async fn respond(
+    command_id: &str,
+    type_name: &str,
+    run: impl FnOnce() -> Result<Option<Value>, String> + Send + 'static,
+) -> Value {
+    let response = match tokio::task::spawn_blocking(run).await {
+        Ok(Ok(Some(data))) => response_success(Some(command_id), type_name, Some(data)),
+        Ok(Ok(None)) => response_failure(
+            Some(command_id),
+            type_name,
+            "Unknown persistent shell",
+            None,
+        ),
+        Ok(Err(error)) => response_failure(Some(command_id), type_name, &error, None),
+        Err(error) => response_failure(Some(command_id), type_name, &error.to_string(), None),
+    };
+    response_line(&response)
 }
 
 #[cfg(all(test, unix))]
@@ -89,9 +262,15 @@ pub(crate) mod test_support {
             || crate::lease::get_process_start_id(child.id()).expect("start id"),
             str::to_string,
         );
+        register(agent_dir, child.id(), &start_id, session_id);
+        child
+    }
+
+    /// Write one record for shell `pid` under `start_id`, assigned to
+    /// `session_id`; returns its id.
+    pub(crate) fn register(agent_dir: &Path, pid: u32, start_id: &str, session_id: &str) -> String {
         let home = agent_dir.join(super::HOME_DIR);
         std::fs::create_dir_all(&home).expect("persistent-shell home");
-        let pid = child.id();
         let id = format!("{pid:032}");
         let record = serde_json::json!({
             "id": id,
@@ -102,14 +281,44 @@ pub(crate) mod test_support {
             "sessionId": session_id,
         });
         std::fs::write(home.join(format!("{id}.json")), record.to_string()).expect("write record");
-        child
+        id
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::test_support::registered_sleeper;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Child, Command};
+
+    use nix::sys::signal::{kill, Signal as NixSignal};
+    use nix::unistd::Pid;
+
+    use super::test_support::{register, registered_sleeper};
     use super::*;
+
+    /// Send `child` our own SIGTERM and return the signal it died by: an
+    /// earlier SIGKILL is already pending and wins.
+    fn fatal_signal_after_own_term(mut child: Child) -> Option<i32> {
+        let _ = kill(Pid::from_raw(child.id() as i32), NixSignal::SIGTERM);
+        child.wait().unwrap().signal()
+    }
+
+    /// A registered `sleep` leading its own process group, plus one member in
+    /// that group.
+    fn registered_group(agent_dir: &std::path::Path) -> (Child, Child, String) {
+        let mut leader_command = Command::new("sleep");
+        leader_command.arg("60");
+        pa_core::platform::process::set_new_process_group(&mut leader_command);
+        let leader = leader_command.spawn().unwrap();
+        let start_id = crate::lease::get_process_start_id(leader.id()).unwrap();
+        let id = register(agent_dir, leader.id(), &start_id, "s1");
+        let member = Command::new("sleep")
+            .arg("60")
+            .process_group(leader.id() as i32)
+            .spawn()
+            .unwrap();
+        (leader, member, id)
+    }
 
     #[test]
     fn session_delete_leaves_its_shells_running_as_orphans() {
@@ -138,12 +347,152 @@ mod tests {
     }
 
     #[test]
-    fn recycled_pid_is_not_reported() {
+    fn recycled_pid_is_neither_reported_nor_killed() {
         let root = tempfile::tempdir().unwrap();
-        let mut stranger = registered_sleeper(root.path(), "s1", Some("proc:not-this-process"));
+        let stranger = registered_sleeper(root.path(), "s1", Some("proc:not-this-process"));
+        let id = format!("{:032}", stranger.id());
 
         assert!(live_shell_rows_by_session(root.path()).is_empty());
-        stranger.kill().unwrap();
-        stranger.wait().unwrap();
+        assert_eq!(shell_rows(root.path())[0]["status"], "unverified");
+        assert!(kill_shell(root.path(), &id).is_err());
+
+        assert_eq!(
+            fatal_signal_after_own_term(stranger),
+            Some(NixSignal::SIGTERM as i32),
+            "never signalled"
+        );
+    }
+
+    #[test]
+    fn kill_stops_the_whole_group_and_leaves_the_shell_listed_as_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut leader, member, id) = registered_group(root.path());
+        std::fs::write(shell_file(root.path(), &id, "out"), "line\n").unwrap();
+
+        let _outcome = kill_shell(root.path(), &id);
+
+        assert!(!leader.wait().unwrap().success(), "the leader was killed");
+        let member_status = member.wait_with_output().unwrap().status;
+        assert_eq!(
+            member_status.signal(),
+            Some(NixSignal::SIGTERM as i32),
+            "the group's TERM reached the member"
+        );
+        assert_eq!(shell_rows(root.path())[0]["status"], "finished");
+        assert_eq!(output_tail(root.path(), &id, 1).as_deref(), Some("line"));
+        assert_eq!(kill_shell(root.path(), "unknown"), Ok(false));
+    }
+
+    #[test]
+    fn delete_removes_a_finished_shell_and_refuses_a_running_one() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sleeper = registered_sleeper(root.path(), "s1", None);
+        let running = format!("{:032}", sleeper.id());
+        let mut done = Command::new("true").spawn().unwrap();
+        done.wait().unwrap();
+        let finished = register(root.path(), done.id(), "proc:0", "gone");
+        for kind in ["rc", "out"] {
+            std::fs::write(shell_file(root.path(), &finished, kind), "0\n").unwrap();
+        }
+
+        assert!(delete_shell(root.path(), &running).is_err());
+        assert_eq!(delete_shell(root.path(), &finished), Ok(true));
+
+        for kind in ["json", "rc", "out"] {
+            assert!(!shell_file(root.path(), &finished, kind).exists());
+        }
+        let rows = shell_rows(root.path());
+        assert_eq!(
+            (rows.len(), &rows[0]["id"], &rows[0]["status"]),
+            (1, &json!(running), &json!("running"))
+        );
+        assert_eq!(delete_shell(root.path(), "unknown"), Ok(false));
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
+    }
+
+    #[test]
+    fn exited_leaders_group_is_unverified_and_never_signalled() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut leader, member, id) = registered_group(root.path());
+        leader.kill().unwrap();
+        leader.wait().unwrap();
+        // The same observable state also describes an unrelated group after
+        // durable PID/PGID reuse. No old leader start-id can distinguish them.
+        let record = shell_file(root.path(), &id, "json");
+        let mut stale: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+        stale["startId"] = json!("proc:old-unrelated-leader");
+        std::fs::write(&record, stale.to_string()).unwrap();
+
+        assert_eq!(shell_rows(root.path())[0]["status"], "unverified");
+        assert!(kill_shell(root.path(), &id).is_err());
+        assert!(record.exists());
+        assert_eq!(
+            fatal_signal_after_own_term(member),
+            Some(NixSignal::SIGTERM as i32),
+            "no earlier KILL reached the unverified group"
+        );
+    }
+
+    #[test]
+    fn pid_recycled_during_the_grace_is_not_killed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut stranger = registered_sleeper(root.path(), "s1", Some("proc:not-this-process"));
+        let shells = registered_shells(root.path());
+
+        assert!(kill_group(&shells[0]).is_err());
+        assert!(signal_process_group(stranger.id() as i32, Signal::Term));
+
+        let status = stranger.wait().unwrap();
+        assert_eq!(
+            status.signal(),
+            Some(NixSignal::SIGTERM as i32),
+            "no SIGKILL came first"
+        );
+    }
+
+    #[test]
+    fn shell_rows_list_every_shell_with_its_session_and_the_output_tail_reads_the_newest_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sleeper = registered_sleeper(root.path(), "s1", None);
+        let mut done = Command::new("true").spawn().unwrap();
+        done.wait().unwrap();
+        let finished = register(root.path(), done.id(), "proc:0", "gone");
+        std::fs::write(shell_file(root.path(), &finished, "rc"), "3\n").unwrap();
+        std::fs::write(
+            shell_file(root.path(), &finished, "out"),
+            "one\ntwo\nthree\n",
+        )
+        .unwrap();
+
+        let rows = shell_rows(root.path());
+
+        let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap().clone();
+        let running = row(&format!("{:032}", sleeper.id()));
+        assert_eq!(
+            (
+                &running["status"],
+                &running["sessionId"],
+                running.get("exitCode")
+            ),
+            (&json!("running"), &json!("s1"), None)
+        );
+        let done_row = row(&finished);
+        assert_eq!(
+            (
+                &done_row["status"],
+                &done_row["sessionId"],
+                &done_row["exitCode"]
+            ),
+            (&json!("finished"), &json!("gone"), &json!(3))
+        );
+        assert!(running["durationMs"].is_u64() && done_row["durationMs"].is_u64());
+        assert_eq!(
+            output_tail(root.path(), &finished, 2).as_deref(),
+            Some("two\nthree")
+        );
+        assert_eq!(output_tail(root.path(), "unknown", 2), None);
+        sleeper.kill().unwrap();
+        sleeper.wait().unwrap();
     }
 }

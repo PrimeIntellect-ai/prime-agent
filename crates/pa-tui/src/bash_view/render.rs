@@ -220,7 +220,7 @@ pub(super) fn clean_line(value: &str) -> String {
 
 /// The duration cell: whole milliseconds read as a compact human word
 /// (`780ms`, `3.4s`, `2m 05s`), `—` when the wire carries none.
-pub(super) fn format_duration(duration_ms: Option<u64>) -> String {
+pub(crate) fn format_duration(duration_ms: Option<u64>) -> String {
     let Some(ms) = duration_ms else {
         return "\u{2014}".to_string();
     };

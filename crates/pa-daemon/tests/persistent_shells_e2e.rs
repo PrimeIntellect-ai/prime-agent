@@ -258,6 +258,23 @@ fn inactive_session_row_lists_only_its_live_persistent_shells() {
                  "startedAt": "2026-01-01T00:00:00+00:00", "status": "running",
                  "persistent": true }])
     );
+    let listed = client.request("s1", &json!({ "type": "list_persistent_shells" }));
+    let mut shells: Vec<String> = listed["data"]["activities"]
+        .as_array()
+        .expect("activities")
+        .iter()
+        .map(|row| format!("{} {} {}", row["id"], row["status"], row["sessionId"]))
+        .collect();
+    shells.sort();
+    assert_eq!(
+        shells,
+        [
+            format!("\"{}\" \"running\" \"{session_id}\"", "a".repeat(32)),
+            format!("\"{}\" \"finished\" \"{session_id}\"", "b".repeat(32)),
+            format!("\"{}\" \"running\" \"another-session\"", "c".repeat(32)),
+        ],
+        "the machine-wide list holds every shell with its assignment"
+    );
     sleeper.kill().expect("kill sleeper");
     sleeper.wait().expect("reap sleeper");
 }
@@ -400,6 +417,44 @@ fn persistent_shell_survives_daemon_shutdown_is_reattached_and_outlives_session_
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["pid"], pid);
     assert_eq!(records[0]["sessionId"], session_id.as_str());
+
+    // The machine-wide list still names the deleted session; its kill ends the orphan.
+    let listed = client.request("s1", &json!({ "type": "list_persistent_shells" }));
+    let shell = &listed["data"]["activities"][0];
+    assert_eq!(
+        (&shell["pid"], &shell["sessionId"], &shell["status"]),
+        (&json!(pid), &json!(session_id), &json!("running"))
+    );
+    client.request(
+        "x1",
+        &json!({ "type": "kill_persistent_shell", "shellId": shell["id"] }),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while group_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the kill left the orphan's group alive"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let listed = client.request("s2", &json!({ "type": "list_persistent_shells" }));
+    assert_eq!(
+        listed["data"]["activities"][0]["status"], "finished",
+        "the killed orphan stays listed as finished"
+    );
+    client.request(
+        "r1",
+        &json!({ "type": "delete_persistent_shell", "shellId": shell["id"] }),
+    );
+    let listed = client.request("s3", &json!({ "type": "list_persistent_shells" }));
+    assert_eq!(listed["data"]["activities"], json!([]));
+    assert_eq!(
+        std::fs::read_dir(agent_dir.join("persistent-shells"))
+            .expect("persistent-shell home")
+            .count(),
+        0,
+        "the delete removed the record and its files"
+    );
 }
 
 fn write_faux_script(path: &Path, cell: &str) -> PathBuf {

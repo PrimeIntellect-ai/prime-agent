@@ -19,6 +19,7 @@ impl AgentsViewMode {
             RowKind::SubagentSummary => self.toggle_subagent_list(&row),
             RowKind::Subagent => self.open_subagent_row(&row),
             RowKind::Agent => self.open_row(&row, Vec::new()),
+            RowKind::PersistentShell => self.open_persistent_shell(&row),
             // A program row is read-only context: the open action never fires on it.
             RowKind::Code => {}
         }
@@ -32,8 +33,8 @@ impl AgentsViewMode {
             RowKind::Agent => row.identity.as_str(),
             RowKind::SubagentSummary | RowKind::Subagent => row.parent_identity.as_deref()?,
             // Unreachable (code rows are not selectable), exhaustive by
-            // the match rule.
-            RowKind::Code => return None,
+            // the match rule; a shell row has no subagents.
+            RowKind::Code | RowKind::PersistentShell => return None,
         };
         self.rows.iter().find(|row| {
             row.kind == RowKind::SubagentSummary && row.parent_identity.as_deref() == Some(target)

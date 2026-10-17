@@ -627,10 +627,16 @@ fn pad_start(value: &str, width: usize) -> String {
 #[must_use]
 pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: usize) -> RowLayout {
     // The program's code rows contribute no columns and read no detail cell (TS
-    // `buildCompactAgentsViewLayout` excludes them).
+    // `buildCompactAgentsViewLayout` excludes them); neither do the persistent shells.
     let rows: Vec<_> = rows
         .iter()
-        .filter(|row| row.kind != crate::agents_view_forest::RowKind::Code)
+        .filter(|row| {
+            !matches!(
+                row.kind,
+                crate::agents_view_forest::RowKind::Code
+                    | crate::agents_view_forest::RowKind::PersistentShell
+            )
+        })
         .collect();
     let cost_width = rows
         .iter()

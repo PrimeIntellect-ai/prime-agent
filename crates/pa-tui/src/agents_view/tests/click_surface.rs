@@ -268,3 +268,126 @@ fn short_session_names_pad_to_the_name_column() {
     let name_cell = format!("short name{}", " ".repeat(28 - 2 - 10));
     assert_eq!(text, expected_row(&name_cell, &layout));
 }
+
+#[test]
+fn a_shell_overlay_consumes_hidden_row_clicks_and_scrolls_its_output() {
+    let _guard = crate::mouse_tracking::STATE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::mouse_tracking::enable(&mut std::io::stdout()).expect("enable");
+    let (mut mode, index) = mode_with_row("hidden session", "mock-1");
+    let mut bindings = crate::keybindings::KeybindingsConfig::new();
+    bindings.insert("tui.select.up".to_string(), vec!["alt+k".to_string()]);
+    bindings.insert("tui.select.down".to_string(), vec!["alt+j".to_string()]);
+    mode.keybindings = crate::keybindings::KeybindingsManager::with_user_bindings(bindings);
+    mode.render_frame(100, 24);
+    let (hidden_row, _) = mode
+        .click_rows
+        .iter()
+        .find(|(_, row_index)| *row_index == index)
+        .copied()
+        .expect("session row");
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "shell-a", "command": "watch build", "status": "running", "persistent": true
+    }]}));
+    let row = mode
+        .rows
+        .iter()
+        .find(|row| row.kind == RowKind::PersistentShell)
+        .cloned()
+        .expect("shell row");
+    mode.open_persistent_shell(&row);
+    let crate::bash_view::BashViewAction::OpenDetail { generation, .. } =
+        mode.pending_shell_action.take().expect("tail action")
+    else {
+        panic!("open detail")
+    };
+    let output = (0..50)
+        .map(|n| format!("output line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    mode.shell_view
+        .as_mut()
+        .unwrap()
+        .set_output("shell-a", &output, generation);
+    let before = mode.render_frame(100, 24);
+    let selected = mode.selected;
+    mode.handle_mouse(&mouse_report(hidden_row, true, false));
+    mode.handle_mouse(&mouse_report(hidden_row, false, false));
+    assert_eq!(mode.selected, selected);
+    assert!(mode.running && mode.opened.is_none() && mode.shell_view.is_some());
+    let wheel = crate::mouse::parse_sgr_mouse_event("\x1b[<64;3;3M").unwrap();
+    mode.handle_mouse(&wheel);
+    let after = mode.render_frame(100, 24);
+    assert_ne!(before, after, "the wheel scrolls the overlay's output");
+    assert_eq!(mode.selected, selected);
+    crate::mouse_tracking::disable(&mut std::io::stdout()).expect("disable");
+}
+
+#[test]
+fn unverified_persistent_group_stays_visible_without_an_unsafe_cancel() {
+    let (mut mode, _) = mode_with_row("holder", "mock-1");
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [{
+        "id": "orphan", "command": "sleep 60", "sessionId": "deleted",
+        "status": "unverified", "durationMs": 4_000, "persistent": true,
+    }]}));
+    let row = mode.persistent_shell_rows(&[]).remove(0);
+    assert_eq!(
+        AgentsViewMode::persistent_shell_text(&row, 100),
+        "$ sleep 60 \u{b7} 4.0s"
+    );
+    mode.open_persistent_shell(&row);
+    mode.pending_shell_action.take();
+    mode.handle_shell_view_key("enter");
+    assert!(mode.pending_shell_action.is_none());
+}
+
+#[test]
+fn persistent_shells_head_the_list_above_every_section() {
+    let mut mode = fresh_mode(vec![
+        roster_entry("r", "running", &parent_summary("r")),
+        roster_entry("i", "idle", &parent_summary("i")),
+    ]);
+    mode.apply_saved_loaded(vec![
+        saved_catalog_row("/x/old-a.jsonl", "old-a", "old session a"),
+        saved_catalog_row("/x/old-b.jsonl", "old-b", "old session b"),
+    ]);
+    mode.rebuild_rows();
+    mode.selected = mode
+        .rows
+        .iter()
+        .position(|row| row.summary.get("sessionId").and_then(Value::as_str) == Some("i"))
+        .expect("idle row");
+    mode.sync_selected_row_state();
+    mode.apply_persistent_shells(serde_json::json!({ "activities": [
+        { "id": "s1", "command": "cargo watch", "sessionId": "i", "status": "running" },
+        { "id": "s2", "command": "sleep 600", "sessionId": "gone", "status": "running" },
+    ]}));
+
+    assert_eq!(
+        mode.rows[mode.selected].summary["sessionId"], "i",
+        "the late shells keep the selection on its session"
+    );
+    let (lines, _) = mode.render_frame(100, 40);
+    let texts: Vec<String> = lines.iter().map(flat).collect();
+    let position = |needle: &str| {
+        texts
+            .iter()
+            .position(|text| text.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} in:\n{}", texts.join("\n")))
+    };
+    let shells = position("Persistent shells (2)");
+    assert!(
+        texts[shells + 1].contains("$ cargo watch") && texts[shells + 2].contains("$ sleep 600"),
+        "the shell rows sit under their heading:\n{}",
+        texts.join("\n")
+    );
+    assert_eq!(texts[shells + 3].trim(), "");
+    assert_eq!(position("Running (1)"), shells + 4);
+    assert!(position("Running (1)") < position("Idle (1)"));
+    assert!(position("Idle (1)") < position("Inactive (2)"));
+    assert!(
+        mode.click_rows.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "the row order is the display order"
+    );
+}

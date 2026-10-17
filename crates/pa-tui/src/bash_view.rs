@@ -15,12 +15,15 @@ use crate::{Line, Span};
 
 mod render;
 
-#[cfg(test)]
-use render::format_duration;
+pub(crate) use render::format_duration;
 use render::{
     action_row, clean_line, error_line, hint_line, marker_line, metadata_row, pane_header_lines,
     Columns,
 };
+
+// A tail response may outlive its entire pane, so tokens belong to the process,
+// not one BashView instance. Relaxed ordering only allocates distinct tokens.
+static NEXT_DETAIL_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 const PREFERRED_VISIBLE: usize = 8;
 
@@ -135,8 +138,8 @@ pub enum BashViewAction {
 pub struct BashView {
     /// The latest registry snapshot (kept current by the host's refresh).
     activities: Vec<BashActivity>,
-    /// Each open increments it; the host stamps tail requests with the open's
-    /// generation, so a late response never overwrites the newer open's output.
+    /// A process-unique token for this open; tail requests retain it even when
+    /// the host replaces the entire view before their responses arrive.
     detail_generation: u64,
     selected_id: Option<String>,
     mode: Mode,
@@ -291,11 +294,13 @@ impl BashView {
         self.fetch_error = fetch;
     }
 
-    /// A landed registry update supersedes a shown error; the host calls
-    /// this only when the registry itself changed.
+    /// A changed registry supersedes a kill error. A fetch error keeps its
+    /// retry state until output lands; metadata alone cannot satisfy a fetch.
     pub fn clear_error(&mut self) {
-        self.error = None;
-        self.fetch_error = false;
+        if !self.fetch_error || matches!(self.mode, Mode::List) {
+            self.error = None;
+            self.fetch_error = false;
+        }
     }
 
     /// The selected row's index (first when unset).
@@ -370,7 +375,7 @@ impl BashView {
 
     /// Scroll the detail's output region: up lifts the window off the newest lines,
     /// down lowers it back; at the loaded top, load more or stop.
-    fn scroll_output(&mut self, delta: isize) -> BashViewAction {
+    pub(crate) fn scroll_output(&mut self, delta: isize) -> BashViewAction {
         let Mode::Detail { id } = self.mode.clone() else {
             return BashViewAction::None;
         };
@@ -426,6 +431,12 @@ impl BashView {
         }
     }
 
+    /// Open row `id`'s detail drill-in directly, as Enter on its list row does.
+    pub fn open(&mut self, id: &str) -> BashViewAction {
+        self.selected_id = Some(id.to_string());
+        self.confirm_selection()
+    }
+
     /// Enter on the list opens the row's detail drill-in (the host fetches
     /// the output tail); Enter in the detail runs the cancel action.
     fn confirm_selection(&mut self) -> BashViewAction {
@@ -436,7 +447,8 @@ impl BashView {
                 };
                 if self.find_activity(&id).is_some() {
                     self.mode = Mode::Detail { id: id.clone() };
-                    self.detail_generation = self.detail_generation.wrapping_add(1);
+                    self.detail_generation =
+                        NEXT_DETAIL_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.reset_detail_output();
                     return BashViewAction::OpenDetail {
                         id,

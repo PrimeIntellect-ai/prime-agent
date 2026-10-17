@@ -157,6 +157,54 @@ pub fn kill_pid(pid: i32, signal: Signal) -> bool {
     unsafe { libc::kill(pid, sig) == 0 }
 }
 
+/// Whether a process group currently exists, without delivering a signal.
+/// Existence alone never establishes ownership of a durable group's old id.
+///
+/// # Errors
+/// Returns the native probe error when group existence cannot be established.
+#[cfg(unix)]
+pub fn process_group_exists(pgid: i32) -> std::io::Result<bool> {
+    if pgid <= 1 {
+        return Ok(false);
+    }
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(not(unix))]
+pub fn process_group_exists(_pgid: i32) -> std::io::Result<bool> {
+    Ok(false)
+}
+
+/// Signal every member of process group `pgid` (`kill(-pgid, sig)`). Returns
+/// true only when the signal was delivered to at least one member.
+#[cfg(unix)]
+#[must_use]
+pub fn signal_process_group(pgid: i32, signal: Signal) -> bool {
+    if pgid <= 1 {
+        return false;
+    }
+    let sig = match signal {
+        Signal::Term => libc::SIGTERM,
+        Signal::Kill => libc::SIGKILL,
+    };
+    unsafe { libc::kill(-pgid, sig) == 0 }
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn signal_process_group(_pgid: i32, _signal: Signal) -> bool {
+    // No process groups: persistent shells are POSIX-only.
+    false
+}
+
 /// Windows: `OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess` on the
 /// single pid (every signal terminates; the `Term`/`Kill` distinction
 /// collapses there). Descendants are NOT killed: teardown paths needing
