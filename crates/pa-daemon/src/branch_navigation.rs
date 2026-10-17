@@ -569,6 +569,9 @@ impl Worker {
     /// fork file, retire the live runtime, swap the store, prewarm the replacement.
     /// Tree moves (`navigate_tree`) never run this teardown.
     pub(crate) async fn handle_fork(&self, payload: &Value) -> DaemonResponse {
+        // The pause spans settle and replacement: no steer admits on the
+        // branch being left.
+        let _queued_work = self.hold_queued_work_pause("fork");
         let (forked, selected_text) = match self.tree_navigation.prepare_fork(payload).await {
             Ok(prepared) => prepared,
             Err(response) => return response,

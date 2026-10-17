@@ -85,10 +85,9 @@ pub enum TurnUpdate {
     /// carries the error message and its severity.
     CompactionEnd {
         reason: String,
-        /// The TS `CompactionResult` on success.
+        /// The TS `CompactionResult` on success, carrying the transcript the
+        /// store read at the compaction's own sequence.
         result: Option<Value>,
-        /// `/compact <instructions>` focus guidance.
-        custom_instructions: Option<String>,
         aborted: bool,
         error_message: Option<String>,
         /// `warning` or `error`.
@@ -174,10 +173,6 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 .get("result")
                 .cloned()
                 .filter(|value| !value.is_null()),
-            custom_instructions: event
-                .get("customInstructions")
-                .and_then(Value::as_str)
-                .map(str::to_string),
             aborted: event
                 .get("aborted")
                 .and_then(Value::as_bool)

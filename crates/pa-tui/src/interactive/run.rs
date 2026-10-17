@@ -1288,6 +1288,8 @@ async fn run_interactive_surface(
             }
         }
         let was_active = session.turn_active;
+        let was_compacting = view.compaction.is_some();
+        let compaction_generation = view.compaction_generation;
         // The quiet tick's arming state, snapshotted before the select: the arm future reads these
         // locals instead of borrowing the surface.
         let autocomplete_pending = view.editor.has_pending_autocomplete();
@@ -1328,15 +1330,15 @@ async fn run_interactive_surface(
                     while let Ok(event) = events.try_recv() {
                         session.apply_client_event(event, &mut view);
                     }
-                    // A succeeded compaction rebuilt the durable transcript: replace the view's
-                    // chat with it, and refresh the tray usage the same way a settled turn does.
-                    if session.transcript_stale {
+                    if session.compaction_refresh_pending {
                         session.rebuild_transcript(&mut view).await;
-                        session.refresh_stats().await;
-                        session.rebuild_tray(&mut view);
                     }
-                    // A settled turn refreshes the tray's context usage.
-                    if was_active && !session.turn_active {
+                    // A settled turn or a settled compaction refreshes the tray's
+                    // context usage: a compaction rewrites the durable transcript's size,
+                    // and its frames may arrive without a turn pairing them.
+                    let compaction_settled = view.compaction.is_none()
+                        && (was_compacting || view.compaction_generation != compaction_generation);
+                    if (was_active && !session.turn_active) || compaction_settled {
                         session.refresh_stats().await;
                         session.rebuild_tray(&mut view);
                     }

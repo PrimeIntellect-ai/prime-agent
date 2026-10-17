@@ -249,31 +249,21 @@ impl CompactionManager {
     /// Persist the post-compaction `ipython_state` row and broadcast its `message_start`/
     /// `message_end` pair (TS `appendCustomMessageEntry`).
     fn persist_and_emit_ipython_state(&self, message: &Value) {
-        {
-            let mut core = self.core.lock().unwrap();
-            if let Some(store) = core.store.as_mut() {
-                let _ = store.persist_entry(
-                    "custom_message",
-                    json!({
-                        "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                        "content": message.get("content").cloned().unwrap_or(Value::Null),
-                        "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                        "details": message.get("details").cloned().unwrap_or(Value::Null),
-                    }),
-                );
-            }
-        }
-        for event_type in ["message_start", "message_end"] {
-            let _ = self.emit_session_event(json!({
-                "type": event_type,
-                "message": message,
-            }));
-        }
+        let mut core = self.core.lock().unwrap();
+        crate::worker::persist_custom_row(&mut core, message);
+        crate::worker::broadcast_custom_row_locked(&mut core, &self.events, message);
     }
 
     /// Sequence and broadcast one compaction `session_event` frame.
-    fn emit_session_event(&self, event: Value) -> serde_json::Result<()> {
+    fn emit_session_event(&self, mut event: Value) -> serde_json::Result<()> {
         let mut core = self.core.lock().unwrap();
+        // A replacement transcript must cover every row sequenced before it.
+        if let (Some("compaction_end"), Some(store)) = (
+            event.get("type").and_then(Value::as_str),
+            core.store.as_ref(),
+        ) {
+            attach_collapse_transcript(&mut event, store);
+        }
         let sequence = core.last_event_sequence + 1;
         core.last_event_sequence = sequence;
         let meta = crate::protocol::create_daemon_event_meta(
@@ -289,8 +279,8 @@ impl CompactionManager {
             rest: Map::default(),
         };
         let payload = serde_json::to_vec(&outbound)?;
-        drop(core);
         self.events.send(OutboundFrame::session_event(payload));
+        drop(core);
         Ok(())
     }
 }
@@ -348,6 +338,20 @@ pub(crate) fn compaction_end_success(
         event["customInstructions"] = json!(custom_instructions);
     }
     event
+}
+
+/// Inject the store's post-compaction walk (the same one `get_messages`
+/// serves, image payloads elided) into a succeeded `compaction_end` result.
+pub(crate) fn attach_collapse_transcript(
+    event: &mut Value,
+    store: &crate::session_store::SessionFile,
+) {
+    let Some(result) = event.get_mut("result").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let mut transcript = store.messages();
+    crate::snapshot_stream::elide_snapshot_image_payloads(&mut transcript);
+    result.insert("transcript".to_string(), json!(transcript));
 }
 
 /// The `compaction_end` payload of an unsuccessful compaction: `aborted` marks a cancelled
@@ -447,6 +451,175 @@ fn compaction_end_event(outcome: &CompactionOutcome, custom_instructions: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_collapse_includes_rows_committed_before_its_event_sequence() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"collapse-race","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let store = crate::session_store::SessionFile::open(&path).unwrap();
+        let core = Arc::new(Mutex::new(SessionCore::test_core(
+            Some(store),
+            dir.path().display().to_string(),
+        )));
+        let events = Arc::new(EventPump::new());
+        let mut subscription = events.subscribe();
+        let manager = CompactionManager::new(
+            Arc::new(crate::engine::ScriptedEngine::default()),
+            Arc::clone(&events),
+            Arc::clone(&core),
+            "collapse-race".to_string(),
+            dir.path().to_path_buf(),
+        );
+        let mut end = compaction_end_success(
+            "manual",
+            &json!({ "summary": "the collapsed history", "tokensBefore": 1234 }),
+            false,
+            None,
+        );
+        // Reproduce a custom append between preparing the collapse and sequencing it.
+        {
+            let core = core.lock().unwrap();
+            attach_collapse_transcript(&mut end, core.store.as_ref().unwrap());
+        }
+        let row = json!({
+            "role": "custom", "customType": "notice", "content": "raced notice",
+            "display": true, "details": null,
+        });
+        {
+            let mut core = core.lock().unwrap();
+            core.store
+                .as_mut()
+                .unwrap()
+                .persist_entry(
+                    "custom_message",
+                    json!({
+                        "customType": "notice", "content": "raced notice",
+                        "display": true, "details": null,
+                    }),
+                )
+                .unwrap();
+        }
+        for event_type in ["message_start", "message_end"] {
+            manager
+                .emit_session_event(json!({ "type": event_type, "message": row }))
+                .unwrap();
+        }
+        manager.emit_session_event(end).unwrap();
+        let frames: Vec<Value> = (0..3)
+            .map(|_| serde_json::from_slice(&subscription.try_recv().unwrap().payload).unwrap())
+            .collect();
+        assert_eq!(frames[2]["meta"]["sequence"], json!(3));
+        assert_eq!(
+            frames[2]["event"]["result"]["transcript"],
+            json!(core.lock().unwrap().store.as_ref().unwrap().messages()),
+            "the collapse must not erase the custom row whose frames precede it",
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_rows_on_each_side_of_collapse_appear_once_in_wire_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"collapse-order","version":3,"timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let worker = crate::worker::Worker::new(
+            crate::worker::WorkerConfig {
+                socket_path: dir.path().join("worker.sock"),
+                supervisor_socket_path: std::path::PathBuf::new(),
+                token: "token".to_string(),
+                worker_instance_id: String::new(),
+                active_session_id: "collapse-order".to_string(),
+                agent_dir: dir.path().join("agent"),
+                recovery_journal_path: dir.path().join("recovery.jsonl"),
+                script: Some(json!({ "responses": ["ack"] })),
+                telemetry_disabled: Some(true),
+            },
+            None,
+        );
+        worker.core.lock().unwrap().store =
+            Some(crate::session_store::SessionFile::open(&path).unwrap());
+        let mut subscription = worker.events.subscribe();
+        let row = |content| {
+            json!({
+                "role": "custom", "customType": "notice", "content": content,
+                "display": true, "details": null,
+            })
+        };
+        let before = row("before collapse");
+        let after = row("after collapse");
+        worker.emit_custom_row(&before);
+        let transcript = worker
+            .core
+            .lock()
+            .unwrap()
+            .store
+            .as_ref()
+            .unwrap()
+            .messages();
+        let result = json!({ "summary": "collapsed history", "tokensBefore": 1234 });
+        worker
+            .compaction
+            .emit_session_event(compaction_end_success("manual", &result, false, None))
+            .unwrap();
+        worker.emit_custom_row(&after);
+        let frames: Vec<Value> = (0..5)
+            .map(|_| serde_json::from_slice(&subscription.try_recv().unwrap().payload).unwrap())
+            .collect();
+        let expected_events = [
+            json!({ "type": "message_start", "message": before }),
+            json!({ "type": "message_end", "message": before }),
+            json!({
+                "type": "compaction_end", "reason": "manual",
+                "result": {
+                    "summary": "collapsed history", "tokensBefore": 1234,
+                    "transcript": transcript,
+                },
+                "aborted": false, "willRetry": false,
+            }),
+            json!({ "type": "message_start", "message": after }),
+            json!({ "type": "message_end", "message": after }),
+        ];
+        let actual: Vec<Value> = frames.iter().map(|frame| frame["event"].clone()).collect();
+        assert_eq!(actual, expected_events);
+        let sequences: Vec<Value> = frames
+            .iter()
+            .map(|frame| frame["meta"]["sequence"].clone())
+            .collect();
+        assert_eq!(
+            sequences,
+            vec![json!(1), json!(2), json!(3), json!(4), json!(5)]
+        );
+        let mut visible = Vec::new();
+        for event in &actual {
+            if event["type"] == "compaction_end" {
+                visible = event["result"]["transcript"].as_array().unwrap().clone();
+            } else if event["type"] == "message_start" {
+                visible.push(event["message"].clone());
+            }
+        }
+        let contents: Vec<Value> = visible
+            .iter()
+            .map(|message| message["content"].clone())
+            .collect();
+        assert_eq!(
+            contents,
+            vec![json!("before collapse"), json!("after collapse")]
+        );
+    }
 
     #[test]
     fn compaction_result_value_mirrors_the_ts_datakeys() {

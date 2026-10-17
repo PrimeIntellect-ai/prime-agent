@@ -213,7 +213,20 @@ fn compaction_commands_scripted_session() {
     let golden_end = &golden["compactionEndSuccess"];
     assert_eq!(end_success["type"], golden_end["type"]);
     assert_eq!(end_success["reason"], golden_end["reason"]);
-    assert_eq!(end_success["result"], *data, "end result equals response");
+    // The broadcast result is the compact response's `CompactionResult` plus
+    // the in-stream collapse transcript (the store walk at the event's own
+    // sequence — pinned equal to the fetched messages below, once the read
+    // lands).
+    let mut result_without_transcript = end_success["result"].clone();
+    let broadcast_transcript = result_without_transcript
+        .as_object_mut()
+        .expect("result object")
+        .remove("transcript")
+        .expect("the broadcast result carries the collapse transcript");
+    assert_eq!(
+        result_without_transcript, *data,
+        "end result equals response"
+    );
     assert_eq!(end_success["aborted"], serde_json::json!(false));
     assert_eq!(end_success["willRetry"], serde_json::json!(false));
     assert_eq!(
@@ -240,6 +253,11 @@ fn compaction_commands_scripted_session() {
             .unwrap_or_default()
             > 0,
         "the empty scripted cut retains the transcript"
+    );
+    assert_eq!(
+        broadcast_transcript,
+        serde_json::json!(messages),
+        "the broadcast collapse transcript equals the fetched messages"
     );
 
     let (mut third, _hello) = Client::connect(&socket);

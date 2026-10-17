@@ -507,6 +507,25 @@ fn threshold_compaction_streams_summary_deltas_to_attached_clients() {
             .expect("result summary"),
         FULL_SUMMARY
     );
+    // The auto-compaction's end result carries the in-stream collapse
+    // transcript (the turn-loop injection): the store walk at this event's
+    // sequence, the summary message first.
+    let transcript = end_event["result"]["transcript"]
+        .as_array()
+        .expect("the collapse transcript rides the broadcast");
+    assert_eq!(
+        transcript[0]["role"], "compactionSummary",
+        "the walk's first row is the summary message: {transcript:?}"
+    );
+    assert_eq!(
+        transcript[0]["summary"],
+        json!(FULL_SUMMARY),
+        "the transcript's summary row matches the result: {transcript:?}"
+    );
+    assert!(
+        transcript[0]["retainedMessageCount"].as_u64().is_some(),
+        "the summary row carries the retained count: {transcript:?}"
+    );
 
     // The delta frames are ephemeral: the session file carries the compaction entry but never a
     // delta frame.

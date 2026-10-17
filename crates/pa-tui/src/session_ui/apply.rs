@@ -107,17 +107,15 @@ impl SessionUi {
         self.note(text, view);
     }
 
-    /// A compaction succeeded and the durable transcript was rebuilt: re-fetch it. Best effort — a
-    /// failed fetch keeps the pushed outcome row instead of an empty transcript.
+    /// Re-fetch the whole transcript and replace the view with it (the
+    /// fork/navigation/import/reload rebuilds). Best effort — a failed fetch
+    /// keeps the current view.
     pub(crate) async fn rebuild_transcript(&mut self, view: &mut AgentView) {
-        let incomplete_history =
-            self.pending_backfill.is_some() || self.transcript_backfill.is_some();
-        self.transcript_stale = false;
-        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
-        self.transcript_backfill = None;
-        self.pending_backfill = None;
-        self.last_status_index = None;
-        self.pressed_click = None;
+        let incomplete_history = self.compaction_refresh_pending
+            || self.pending_backfill.is_some()
+            || self.transcript_backfill.is_some();
+        self.compaction_refresh_pending = false;
+        self.retire_history_paging();
         let data = self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -145,13 +143,17 @@ impl SessionUi {
             }
             return;
         };
-        let entries = crate::snapshot::transcript_to_entries(messages);
-        view.clear_chat();
-        for entry in entries {
-            view.push_entry(entry);
-        }
+        self.replace_transcript(crate::snapshot::transcript_to_entries(messages), view);
         view.follow();
         self.dirty = true;
+    }
+
+    /// Fence in-flight history pages: a queued backfill note must not
+    /// prepend rows to the replaced transcript.
+    pub(crate) fn retire_history_paging(&mut self) {
+        self.transcript_epoch = self.transcript_epoch.wrapping_add(1);
+        self.transcript_backfill = None;
+        self.pending_backfill = None;
     }
 
     pub(crate) fn spawn_pending_backfill(&mut self) {
@@ -682,28 +684,27 @@ impl SessionUi {
             TurnUpdate::CompactionEnd {
                 reason,
                 result,
-                custom_instructions,
                 aborted,
                 error_message,
                 error_severity,
             } => {
                 view.compaction = None;
                 if let Some(result) = result {
-                    // A succeeded compaction rebuilt the durable transcript: show the outcome
-                    // row immediately, then re-fetch so the compacted-away rows drop.
-                    view.push_entry(ChatEntry::CompactionSummary {
-                        summary: result
-                            .get("summary")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        tokens_before: result
-                            .get("tokensBefore")
-                            .and_then(Value::as_u64)
-                            .unwrap_or_default(),
-                        custom_instructions,
-                    });
-                    self.transcript_stale = true;
+                    // The store walk at this event's sequence rides the result.
+                    if let Some(messages) = result.get("transcript").and_then(Value::as_array) {
+                        self.retire_history_paging();
+                        self.replace_transcript(
+                            crate::snapshot::transcript_to_entries(messages),
+                            view,
+                        );
+                        view.follow();
+                        self.dirty = true;
+                    } else {
+                        // Protocol 7 TS/older Rust daemons publish a successful
+                        // summary without a transcript. Retain their refresh
+                        // path; only an in-stream replacement can skip it.
+                        self.compaction_refresh_pending = true;
+                    }
                 } else if reason == "manual" {
                     // Aborts and error messages surface only for user-issued compactions.
                     if aborted {
