@@ -180,10 +180,10 @@ jobs:
             echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
             exit 1
           fi
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
+          python3 scripts/release/bundle_catalog.py generate --network \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
@@ -267,10 +267,10 @@ jobs:
       # no consumer (~26% of the build step, measured).
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4 -p pa-cli --bin prime-agent
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
+          python3 scripts/release/bundle_catalog.py generate --network \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |

@@ -202,10 +202,10 @@ jobs:
             echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
             exit 1
           fi
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
+          python3 scripts/release/bundle_catalog.py generate --network \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest
         # Assemble from the separate SHIPPED image; the Cargo binary stays
@@ -343,10 +343,10 @@ jobs:
           bin="target/${{ matrix.target }}/release/prime-agent"
           out="$("${bin}" --version)"
           [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      - name: Generate bundled catalog assets (live catalog)
         run: |
           set -euo pipefail
-          python3 scripts/release/bundle_catalog.py generate --fixture \
+          python3 scripts/release/bundle_catalog.py generate --network \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest
         run: |
@@ -458,11 +458,11 @@ jobs:
           bin="target/${{ matrix.target }}/release/prime-agent.exe"
           out="$("${bin}" --version)"
           [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
-      - name: Generate bundled catalog assets (fixture, offline-safe)
+      - name: Generate bundled catalog assets (live catalog)
         shell: bash
         run: |
           set -euo pipefail
-          "${PY}" scripts/release/bundle_catalog.py generate --fixture \
+          "${PY}" scripts/release/bundle_catalog.py generate --network \
             --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest
         shell: bash
