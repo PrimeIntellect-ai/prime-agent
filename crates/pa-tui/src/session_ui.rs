@@ -320,7 +320,7 @@ pub(crate) struct SessionUi {
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
-    /// The subagent summary line holds keyboard focus.
+    /// The activity dock holds keyboard focus (and renders expanded).
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
     subagent_counts: crate::subagents::SubagentCounts,
@@ -331,6 +331,9 @@ pub(crate) struct SessionUi {
     /// Whether this run may hand the terminal back to the agents view:
     /// false only for `--no-session` runs.
     pub(crate) return_to_agents_view: bool,
+    /// The open panel was mounted by an agents-view activity line: its close hands the pane back
+    /// to the agents view instead of the dock.
+    panel_returns_to_agents_view: bool,
     client_auth: Option<crate::client_auth::ClientAuthCommandsHandle>,
     keybindings: crate::keybindings::KeybindingsManager,
     prompt_stash: std::sync::Arc<std::sync::Mutex<crate::prompt_stash::PromptStashStore>>,
@@ -484,7 +487,7 @@ impl SessionUi {
         std::mem::take(&mut self.trim_after_frame)
     }
 
-    /// Hand the keyboard focus to the compact dock on its selected group (operator ruling
+    /// Hand the keyboard focus to the dock on its selected group (operator ruling
     /// 2026-09-26: leaving a panel lands on the panel's own dock item, never the prompt bar).
     fn focus_activity_dock(&mut self, view: &mut AgentView) {
         self.subagents_focused = true;

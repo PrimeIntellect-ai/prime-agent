@@ -134,6 +134,20 @@ impl FactoryRunSnapshot {
     }
 }
 
+/// The activity dock's factory row: the live runs (the dock count's own
+/// set), paused first, each `<name> <state>`.
+#[must_use]
+pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
+    let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
+    live.sort_by_key(|run| run.state.as_deref() != Some("paused"));
+    live.iter()
+        .map(|run| match &run.state {
+            Some(state) => format!("{} {state}", run.display_name()),
+            None => run.display_name(),
+        })
+        .collect()
+}
+
 /// One run-level action the page offers on a live run (the heartbeats
 /// picker's action-row grammar): the stop that tears the run and its
 /// children down, and the pause complement's resume.
@@ -187,6 +201,57 @@ pub fn parse_factory_runs(data: &Value) -> Vec<FactoryRunSnapshot> {
 #[must_use]
 pub fn factory_reply_lists_runs(data: &Value) -> bool {
     data.get("runs").is_some_and(Value::is_array)
+}
+
+/// The live runs in a graph reply ([`FactoryRunSnapshot::is_live`]).
+#[must_use]
+pub fn live_run_count(data: &Value) -> usize {
+    parse_factory_runs(data)
+        .iter()
+        .filter(|run| run.is_live())
+        .count()
+}
+
+/// A session's stored factory specs: the host's `factorySpecs` count, carried by the unscoped
+/// graph reply and by an inactive session's catalog row (absent reads zero).
+#[must_use]
+pub fn stored_spec_count(data: &Value) -> usize {
+    data.get("factorySpecs")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or_default()
+}
+
+/// A session's stored factory specs (durable) and its live runs (their active state).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FactoryCounts {
+    pub specs: usize,
+    pub runs: usize,
+}
+
+impl FactoryCounts {
+    /// The counts of an unscoped graph reply.
+    #[must_use]
+    pub fn of(data: &Value) -> Self {
+        Self {
+            specs: stored_spec_count(data),
+            runs: live_run_count(data),
+        }
+    }
+
+    /// `N factories · M running`, or `None` while the session has neither: the agents view's
+    /// factory line and the expanded dock's factory row show exactly then.
+    #[must_use]
+    pub fn label(self) -> Option<String> {
+        (self.specs > 0 || self.runs > 0).then(|| {
+            let noun = if self.specs == 1 {
+                "factory"
+            } else {
+                "factories"
+            };
+            format!("{} {noun} \u{b7} {} running", self.specs, self.runs)
+        })
+    }
 }
 
 /// The malformed-lane error line (one message for the mount and the

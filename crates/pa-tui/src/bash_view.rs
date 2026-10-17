@@ -15,7 +15,6 @@ use crate::{Line, Span};
 
 mod render;
 
-#[cfg(test)]
 use render::format_duration;
 use render::{
     action_row, clean_line, error_line, hint_line, marker_line, metadata_row, pane_header_lines,
@@ -47,6 +46,8 @@ pub struct BashActivity {
     pub status: String,
     pub exit_code: Option<i64>,
     pub duration_ms: Option<u64>,
+    /// A persistent shell outlives its session's kernel (absent on the wire: false).
+    pub persistent: bool,
 }
 
 impl BashActivity {
@@ -92,11 +93,59 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                     .map_or_else(|| "unknown".to_string(), crate::menu_panel::scrub_controls),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
+                persistent: row.get("persistent").and_then(Value::as_bool) == Some(true),
             })
         })
         .collect();
     activities.sort_by_key(|activity| !activity.running());
     activities
+}
+
+/// The command's cell budget inside one activity-dock shell item.
+const DOCK_COMMAND_CELLS: usize = 32;
+
+/// The activity dock's shells row: the running shells only, one item each.
+pub(crate) fn dock_shell_items(activities: &[BashActivity]) -> Vec<String> {
+    activities
+        .iter()
+        .filter(|activity| activity.running())
+        .map(dock_shell_item)
+        .collect()
+}
+
+/// One running shell in the activity dock: `<command, truncated> · <elapsed>`.
+fn dock_shell_item(activity: &BashActivity) -> String {
+    let command = crate::heartbeats_picker::single_line(&activity.command);
+    format!(
+        "{} · {}",
+        crate::width::truncate_to_width(&command, DOCK_COMMAND_CELLS, "\u{2026}"),
+        format_duration(activity.duration_ms)
+    )
+}
+
+/// The running shells and the persistent ones among them: finished shells stay in the bash view
+/// only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShellCounts {
+    pub running: usize,
+    pub persistent: usize,
+}
+
+impl ShellCounts {
+    #[must_use]
+    pub fn of(activities: &[BashActivity]) -> Self {
+        let running = activities.iter().filter(|activity| activity.running());
+        Self {
+            running: running.clone().count(),
+            persistent: running.filter(|activity| activity.persistent).count(),
+        }
+    }
+}
+
+/// The shell counts of a `list_kernel_bash` reply (or a bare row array).
+#[must_use]
+pub fn running_shell_counts(data: &Value) -> ShellCounts {
+    ShellCounts::of(&parse_bash_activities(data))
 }
 
 /// The pane's interactive mode: the columned list, or a row's detail

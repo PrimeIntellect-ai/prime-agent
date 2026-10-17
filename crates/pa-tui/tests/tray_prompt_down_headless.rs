@@ -251,9 +251,9 @@ fn up() -> KeyEvent {
     KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)
 }
 
-/// One right-arrow key event (the dock's next-section step).
-fn right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
+/// One left-arrow key event (the focused dock's return to the prompt).
+fn left() -> KeyEvent {
+    KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)
 }
 
 /// One plain Enter key event (the focused section's open).
@@ -323,8 +323,8 @@ fn prompt_down_enters_the_all_zero_dock_and_enter_opens_subagents() {
     );
 }
 
-/// Every empty group stays reachable from the prompt's Down: Right walks
-/// to the empty heartbeats and shells groups, and Enter opens each view's
+/// Every empty group stays reachable from the prompt's Down: Down walks
+/// to the empty heartbeats and shells rows, and Enter opens each view's
 /// empty state.
 #[test]
 fn prompt_down_reaches_every_empty_group() {
@@ -334,7 +334,7 @@ fn prompt_down_reaches_every_empty_group() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Key(down()),
-        HeadlessStep::Key(right()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "No running or paused heartbeats".to_string(),
@@ -342,7 +342,7 @@ fn prompt_down_reaches_every_empty_group() {
         },
         // The panel's exit lands back on its own dock item.
         HeadlessStep::Key(escape()),
-        HeadlessStep::Key(right()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "No background commands".to_string(),
@@ -362,7 +362,7 @@ fn prompt_down_reaches_every_empty_group() {
 }
 
 /// Bug 2: with a shell running and zero subagents, the prompt's Down
-/// enters the dock and two Right presses reach the shells group, whose
+/// enters the dock and two more Down presses reach the shells row, whose
 /// Enter opens the bash view listing the running shell.
 #[test]
 fn prompt_down_reaches_the_shells_group_with_zero_subagents() {
@@ -373,8 +373,8 @@ fn prompt_down_reaches_the_shells_group_with_zero_subagents() {
             timeout_ms: 5_000,
         },
         HeadlessStep::Key(down()),
-        HeadlessStep::Key(right()),
-        HeadlessStep::Key(right()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         HeadlessStep::WaitRender {
             needle: "render the frames".to_string(),
@@ -390,20 +390,25 @@ fn prompt_down_reaches_the_shells_group_with_zero_subagents() {
     assert!(!outcome.return_to_agents_view);
 }
 
-/// Up and Esc from the focused dock return to the prompt: the Enter that
-/// follows reaches the empty prompt, never the dock's heartbeats group
-/// (whose view would render its empty state), and the typed text after it
-/// lands in the prompt — the barrier proves the Enter was handled.
+/// Up from the top row, and Esc or Left from any row, return to the
+/// prompt: the Enter that follows reaches the empty prompt, never a dock
+/// page (the agents view or the heartbeats view's empty state), and the
+/// typed text after it lands in the prompt — the barrier proves the Enter
+/// was handled.
 #[test]
-fn up_and_esc_return_from_the_dock_to_the_prompt() {
-    for back in [up(), escape()] {
-        let steps = vec![
-            HeadlessStep::WaitRender {
-                needle: ALL_ZERO_DOCK.to_string(),
-                timeout_ms: 5_000,
-            },
-            HeadlessStep::Key(down()),
-            HeadlessStep::Key(right()),
+fn up_from_the_top_row_and_esc_or_left_return_from_the_dock_to_the_prompt() {
+    let cases = [
+        (vec![down()], up()),
+        (vec![down(), down()], escape()),
+        (vec![down(), down()], left()),
+    ];
+    for (grab, back) in cases {
+        let mut steps = vec![HeadlessStep::WaitRender {
+            needle: ALL_ZERO_DOCK.to_string(),
+            timeout_ms: 5_000,
+        }];
+        steps.extend(grab.into_iter().map(HeadlessStep::Key));
+        steps.extend([
             HeadlessStep::Key(back),
             HeadlessStep::Key(enter()),
             HeadlessStep::Type("back at the prompt".to_string()),
@@ -411,12 +416,16 @@ fn up_and_esc_return_from_the_dock_to_the_prompt() {
                 needle: "back at the prompt".to_string(),
                 timeout_ms: 5_000,
             },
-        ];
+        ]);
         let outcome = run_plan(steps, false);
         let all = outcome.frames.join("\n");
+        let last = outcome.frames.last().cloned().unwrap_or_default();
         assert!(
-            all.contains("back at the prompt") && !all.contains("No running or paused heartbeats"),
-            "{back:?} returned the focus to the prompt before the Enter:\n{all}"
+            last.contains("back at the prompt")
+                && last.contains(ALL_ZERO_DOCK)
+                && !all.contains("No running or paused heartbeats")
+                && !outcome.return_to_agents_view,
+            "{back:?} collapsed the dock and returned the focus to the prompt before the Enter:\n{all}"
         );
     }
 }

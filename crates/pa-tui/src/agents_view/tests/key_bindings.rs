@@ -95,6 +95,7 @@ fn new_key_in_a_scoped_view_creates_under_the_scope_root() {
             has_children: false,
             status_message: None,
             cwd: Some("/work/p".into()),
+            panel: None,
         })
     );
 }

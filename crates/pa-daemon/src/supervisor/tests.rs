@@ -823,15 +823,56 @@ fn saved_session_rows_publish_deleted_descendant_usage() {
         output_tokens: 110,
         cost: 0.5,
     });
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["deletedDescendantUsage"],
         json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
     );
     // Absent again: the field never rides as a null.
     info.deleted_descendant_usage = None;
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert!(row.get("deletedDescendantUsage").is_none());
+}
+
+/// A catalog row carries the session's own stored factory specs (its local harness store's factory
+/// entries), read from disk without a kernel; a session without any carries no field.
+#[tokio::test]
+async fn saved_session_rows_count_the_sessions_stored_factory_specs() {
+    let root = std::env::temp_dir().join(format!("pa-saved-fs-{}", uuid::Uuid::new_v4()));
+    let sessions = root.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+    let path = sessions.join(format!("{}.jsonl", session.session_id()));
+    session.set_path(path.clone());
+    session.rewrite().unwrap();
+    let info = crate::session_store::read_session_info(&path).unwrap();
+    assert!(saved_session_row(&info, &std::collections::HashMap::new())
+        .get("factorySpecs")
+        .is_none());
+    let harness = pa_core::refinement::get_local_harness_state_dir(
+        crate::scheduled_jobs::session_artifact_dir(&path, &info.id).as_deref(),
+    )
+    .unwrap();
+    crate::test_support::write_factory_specs(&harness, &["a", "b"]);
+    assert_eq!(
+        saved_session_row(&info, &std::collections::HashMap::new())["factorySpecs"],
+        json!(2)
+    );
+    #[cfg(unix)]
+    {
+        let state_path = pa_core::refinement::get_harness_state_path(&harness);
+        let rows = crate::test_support::assert_async_file_read(
+            &state_path,
+            super::sessions::saved_session_rows(
+                vec![info],
+                Arc::new(std::collections::HashMap::new()),
+            ),
+        )
+        .await
+        .expect("asynchronous catalog rows");
+        assert_eq!(rows[0]["factorySpecs"], json!(2));
+    }
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -850,7 +891,7 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     let summary = saved_session_summary(&info);
     assert_eq!(summary["thinkingLevel"], json!("high"));
     assert!(summary["model"].is_null(), "saved rows carry no model");
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(row["thinkingLevel"], json!("high"));
     assert_eq!(row["model"], json!({ "provider": "p", "modelId": "m" }));
     // A session file without a persisted level stays bare (a fresh
@@ -864,9 +905,11 @@ fn saved_session_rows_carry_the_persisted_thinking_level() {
     assert!(saved_session_summary(&draft_info)
         .get("thinkingLevel")
         .is_none());
-    assert!(saved_session_row(&draft_info)
-        .get("thinkingLevel")
-        .is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("thinkingLevel")
+            .is_none()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -889,7 +932,7 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     }));
     session.rewrite().unwrap();
     let info = crate::session_store::read_session_info(&path).unwrap();
-    let row = saved_session_row(&info);
+    let row = saved_session_row(&info, &std::collections::HashMap::new());
     assert_eq!(
         row["usage"],
         json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
@@ -905,7 +948,11 @@ fn saved_session_rows_publish_the_own_usage_summary() {
     draft.set_path(draft_path.clone());
     draft.rewrite().unwrap();
     let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
-    assert!(saved_session_row(&draft_info).get("usage").is_none());
+    assert!(
+        saved_session_row(&draft_info, &std::collections::HashMap::new())
+            .get("usage")
+            .is_none()
+    );
     assert!(saved_session_summary(&draft_info).get("usage").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
