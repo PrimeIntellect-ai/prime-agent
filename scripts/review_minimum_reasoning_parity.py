@@ -6,7 +6,9 @@ cells through their offered REPL tool. Only auxiliary request thinking controls
 are compared, recording TS summary thinking-off as the intended correction:
 prompt wording, token budgets, and whole UI/frame parity are not
 claimed. Branch summary uses an owned daemon and its real navigate_tree command.
-All providers, homes, sessions, and subprocesses belong to this fixture.
+Both binaries use the same raw daemon commands; the owned supervisor shuts down
+workers and kernels before temporary files are removed. All providers, homes,
+sessions, and subprocesses belong to this fixture.
 """
 import argparse
 import http.server
@@ -14,15 +16,15 @@ import json
 import os
 from pathlib import Path
 import sys
-import socket
 import subprocess
-import time
 import tempfile
 import threading
+import time
 
 from review_goal_backoff_parity import TS_ARCHIVE_SHA256, sha256
-from review_restore_notice_parity import invoke, probe_from
-from review_draft_disconnect_parity import stop
+from review_restore_notice_parity import invoke, probe_from, texts
+from review_kernel_env_parity import KernelClient
+from review_goal_fixture_lifecycle import OwnedProcesses, TAG, finish
 
 MARKER = 'MINIMUM_REASONING_RESULT='
 
@@ -96,59 +98,53 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(wire.encode())
 
 
-def summarize_branch(binary, root, cwd, env, session_file, observation):
+def summarize_branch(client, active, session_file):
     entries = [json.loads(line) for line in session_file.read_text().splitlines()]
     target = next(row['id'] for row in entries
                   if row.get('type') == 'message' and row.get('message', {}).get('role') == 'assistant')
-    path = root / 'daemon.sock'
-    with (root / 'daemon.log').open('wb') as log:
-        process = subprocess.Popen([str(binary), '--mode', 'daemon', '--daemon-socket', str(path)],
-                                   cwd=cwd, env=env, stdout=log, stderr=log, start_new_session=True)
-        connection = None
-        try:
-            deadline = time.monotonic() + 35
-            while time.monotonic() < deadline:
-                assert process.poll() is None, 'owned daemon exited before socket readiness'
-                try:
-                    connection = socket.socket(socket.AF_UNIX)
-                    connection.settimeout(60)
-                    connection.connect(str(path))
-                    break
-                except (FileNotFoundError, ConnectionRefusedError):
-                    connection.close()
-                    connection = None
-                    threading.Event().wait(0.05)
-            assert connection is not None, 'owned daemon socket never became ready'
-            with connection.makefile('rb') as reader:
-                hello = json.loads(reader.readline())
-                assert hello.get('type') == 'daemon_hello', hello
-                observation['daemon_hello'] = hello
-                def command(identifier, payload):
-                    connection.sendall((json.dumps({'type': 'command', 'id': identifier,
-                        'protocol': hello['protocol'], 'command': payload}) + '\n').encode())
-                    deadline = time.monotonic() + 60
-                    while time.monotonic() < deadline:
-                        line = reader.readline()
-                        assert line, 'owned daemon closed before response'
-                        row = json.loads(line)
-                        observation.setdefault('daemon_wire', []).append(row)
-                        if row.get('type') == 'response' and row.get('id') == identifier:
-                            assert row.get('success') is True, row
-                            return row
-                    raise TimeoutError('no response for ' + identifier)
-                created = command('create', {'type': 'create', 'sessionPath': str(session_file),
-                    'config': {'cwd': str(cwd), 'sessionDir': str(session_file.parent)}})
-                active = created['data'].get('id') or created['data'].get('sessionId')
-                assert active, created
-                moved = command('branch', {'type': 'navigate_tree', 'activeSessionId': active,
-                    'targetId': target, 'summarize': True,
-                    'customInstructions': 'Verify mandatory thinking'})
-                assert moved.get('data', {}).get('cancelled') is not True, moved
-        finally:
-            if connection is not None:
-                connection.close()
-            stop(process)
-            observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')
+    moved = client.call('navigate_tree', timeout_seconds=60, activeSessionId=active,
+                        targetId=target, summarize=True,
+                        customInstructions='Verify mandatory thinking')
+    assert moved.get('cancelled') is not True, moved
+
+
+def wait_for_operation(server, scenario, sessions, timeout_seconds=90):
+    """Turn-idle can precede the deferred operation and its continuation."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        assert server.error is None, server.error
+        bodies = [row['body'] for row in server.requests]
+        probe_ready = any(line.startswith(MARKER)
+            for body in bodies for message in body.get('messages', [])
+            if message.get('role') == 'tool'
+            for text in texts(message.get('content')) for line in text.splitlines())
+        scheduled = ({'scheduled': True} if scenario == 'branch' else
+                     probe_from(bodies, MARKER) if probe_ready else None)
+        entries = []
+        complete = True
+        for path in sessions.rglob('*.jsonl'):
+            try:
+                data = path.read_bytes()
+            except FileNotFoundError:
+                complete = False  # Listed inode retired before the read.
+                break
+            # Both writers terminate persisted records with a newline. Do not
+            # decode an in-flight tail, which may even split a UTF-8 character.
+            # Malformed complete records and other I/O errors remain failures.
+            if data and not data.endswith(b'\n'):
+                complete = False
+                break
+            entries.extend(json.loads(line) for line in data.splitlines() if line.strip())
+        outcomes = [entry for entry in entries if
+                    (scenario == 'compact' and entry.get('type') == 'compaction') or
+                    (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
+                    (scenario == 'branch' and entry.get('type') == 'branch_summary')]
+        if scheduled is not None and complete and outcomes:
+            return scheduled, outcomes
+        if time.monotonic() >= deadline:
+            raise AssertionError('timed out waiting for current scheduled probe and durable '
+                                 + scenario + ' outcome')
+        threading.Event().wait(0.025)
 
 
 def run_case(binary, label, scenario, root, observation):
@@ -167,6 +163,7 @@ def run_case(binary, label, scenario, root, observation):
                PRIME_AGENT_SESSION_DIR=str(sessions), XDG_CONFIG_HOME=str(root / 'config'),
                XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'),
                PYTHONPATH=os.pathsep.join(paths))
+    env[TAG] = str(root)
     if label == 'ts':
         env['PI_PACKAGE_DIR'] = os.environ['PI_PACKAGE_DIR']
     server = Server(scenario)
@@ -190,21 +187,34 @@ def run_case(binary, label, scenario, root, observation):
         'prewarmPythonKernel': False, 'compaction': {'enabled': False, 'keepRecentTokens': 100,
                                                    'reserveTokens': 1024},
         'autoRefine': {'enabled': False}}))
-    command = [str(binary), '--mode', 'json', '--provider', 'fixture', '--model',
-               'mandatory-fixture', '--thinking', 'low', '--session-dir', str(sessions),
-               'Seed the fixture.', 'Schedule the requested auxiliary operation.']
+    socket_path = root / 'daemon.sock'
+    scope = OwnedProcesses(binary, root, socket_path)
+    process = client = None
+    primary_error = None
+    log = (root / 'daemon.log').open('wb')
     try:
         observation['version'] = invoke([str(binary), '--version'], cwd, env)
-        observation['process'] = invoke(command, cwd, env)
+        command = [str(binary), '--mode', 'daemon', '--daemon-socket', str(socket_path)]
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=log,
+                                   stderr=log, start_new_session=True)
+        scope.register(process, command)
+        client = KernelClient(socket_path, process)
+        observation['daemon_hello'] = client.hello
+        created = client.call('create', config={
+            'cwd': str(cwd), 'agentDir': str(agent), 'sessionDir': str(sessions),
+            'provider': 'fixture', 'model': 'mandatory-fixture', 'thinkingLevel': 'low',
+            'telemetryDisabled': True, 'noExtensions': True, 'noContextFiles': True})
+        active = created.get('activeSessionId') or created.get('id')
+        assert active, created
+        for message in ('Seed the fixture.', 'Schedule the requested auxiliary operation.'):
+            client.call('prompt_and_wait', timeout_seconds=90,
+                        activeSessionId=active, message=message)
         assert server.error is None, server.error
-        bodies = [row['body'] for row in server.requests]
         if scenario == 'branch':
             session_files = list(sessions.rglob('*.jsonl'))
             assert len(session_files) == 1, session_files
-            summarize_branch(binary, root, cwd, env, session_files[0], observation)
-            scheduled = {'scheduled': True}
-        else:
-            scheduled = probe_from(bodies, MARKER)
+            summarize_branch(client, active, session_files[0])
+        scheduled, outcomes = wait_for_operation(server, scenario, sessions)
         observation['scheduled'] = scheduled
         assert scheduled.get('scheduled') is True, scheduled
         auxiliary = [row['body'] for row in server.requests if row['auxiliary']]
@@ -213,21 +223,26 @@ def run_case(binary, label, scenario, root, observation):
                     'reasoning', 'chat_template_kwargs') if key in body} for body in auxiliary]
         expected = {'enable_thinking': label == 'rust' or scenario == 'refine'}
         assert all(control == expected for control in controls), {'expected': expected, 'actual': controls}
-        # A scheduled cell alone is insufficient: check the persisted operation result.
-        entries = [json.loads(line) for path in sessions.rglob('*.jsonl')
-                   for line in path.read_text().splitlines() if line.strip()]
-        outcomes = [entry for entry in entries if
-                    (scenario == 'compact' and entry.get('type') == 'compaction') or
-                    (scenario == 'refine' and entry.get('customType') == 'refinement_outcome') or
-                    (scenario == 'branch' and entry.get('type') == 'branch_summary')]
-        assert outcomes, 'no durable completed ' + scenario + ' outcome'
         observation.update(controls=controls, outcome_count=len(outcomes), tool_name=server.tool_name)
         return {'scheduled': scheduled['scheduled'], 'completed': bool(outcomes)}
+    except BaseException as error:
+        primary_error = error
+        observation['primary_error'] = str(error)
+        raise
     finally:
         observation['requests'] = server.requests
+        observation['daemon_wire'] = list(client.wire) if client else []
+        # CLI exit leaves the TS kernel alive. Owning the supervisor gives both
+        # binaries the same acknowledged shutdown before temporary files vanish.
+        finish(scope, client, process, observation)
+        log.close()
+        observation['daemon_log'] = (root / 'daemon.log').read_text(errors='replace')[-6000:]
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+        assert not thread.is_alive(), 'fixture provider did not stop'
+        if not observation['cleanup_verified'] and primary_error is None:
+            raise AssertionError('fixture cleanup failed: ' + observation['cleanup_error'])
 
 
 def main():

@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import signal
 from unittest.mock import patch, MagicMock
-from review_kernel_env_parity import current_probe, CODE, MARKER, owned_kernel, finish_daemon, KernelClient, signal_owned, reap_leftovers
+from review_kernel_env_parity import current_probe, CODE, MARKER, owned_kernel, finish_daemon, KernelClient, signal_owned, reap_leftovers, wait_gone, live_identities
 
 
 def requests(content=None):
@@ -80,6 +80,18 @@ class ProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'refused'):
             finish_daemon(client, process)
         process.wait.assert_not_called()
+
+    def test_process_exiting_during_proc_read_is_gone(self):
+        with patch('review_kernel_env_parity.process_identity', side_effect=ProcessLookupError(3, 'No such process')):
+            wait_gone({(789, 'proc:456')})
+            self.assertEqual(live_identities({(789, 'proc:456')}), set())
+
+    def test_other_proc_read_errors_still_fail_cleanup(self):
+        with patch('review_kernel_env_parity.process_identity', side_effect=PermissionError('denied')):
+            with self.assertRaises(PermissionError):
+                wait_gone({(789, 'proc:456')})
+            with self.assertRaises(PermissionError):
+                live_identities({(789, 'proc:456')})
 
     def test_cold_kernel_response_after_35_seconds_uses_request_budget(self):
         client = KernelClient.__new__(KernelClient)

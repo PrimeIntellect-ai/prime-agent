@@ -1217,3 +1217,176 @@ fn a_model_switch_keeps_the_agent_slot_in_sync_with_the_reported_level() {
         "the agent slot re-syncs to the restored level"
     );
 }
+
+async fn private_default_create_worker(
+    dir: &std::path::Path,
+    responses: Vec<Vec<u8>>,
+) -> std::sync::Arc<crate::worker::Worker> {
+    let agent_dir = dir.join("agent");
+    write_prime_auth(&agent_dir);
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({
+            "defaultProvider": "prime-inference",
+            "defaultModel": "internal/glm-5.3-fast",
+            "enabledModels": [
+                "prime-inference/z-ai/glm-5.3",
+                "prime-inference/internal/glm-5.3-fast",
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let server = MockCatalogServer::start(responses).await;
+    install_loopback_catalog(&agent_dir, &server);
+    std::sync::Arc::new(crate::worker::Worker::new(
+        crate::worker::WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: std::path::PathBuf::new(),
+            token: "model-race".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "race-create".to_string(),
+            agent_dir,
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            script: None,
+            telemetry_disabled: Some(true),
+        },
+        None,
+    ))
+}
+
+async fn create_state(worker: &crate::worker::Worker, dir: &std::path::Path) -> Value {
+    let created = worker
+        .dispatch(
+            "create",
+            &json!({ "sessionPath": dir.join("race-session.jsonl"), "cwd": dir }),
+        )
+        .await;
+    assert!(created.success, "create failed: {created:?}");
+    let state = worker
+        .dispatch(
+            "get_connection_state",
+            &json!({ "activeSessionId": "race-create" }),
+        )
+        .await;
+    state.data.expect("state data")
+}
+
+#[tokio::test]
+async fn a_fresh_scoped_create_waits_for_the_private_default() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let pi = pi_payload();
+    let layer_a = json!({ "schemaVersion": 1, "models": [] }).to_string();
+    let worker = private_default_create_worker(
+        dir.path(),
+        vec![
+            catalog_ok_json(&layer_a),
+            catalog_ok_json(&pi),
+            catalog_ok_json(&pi),
+        ],
+    )
+    .await;
+    let data = create_state(&worker, dir.path()).await;
+    assert_eq!(
+        data["model"]["provider"], "prime-inference",
+        "the session runs on the provider default: {data}"
+    );
+    assert_eq!(
+        data["model"]["id"], "internal/glm-5.3-fast",
+        "the private default the patterns scope in wins the startup pick: {data}"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_scoped_create_falls_back_with_a_recorded_message() {
+    for no_session in [false, true] {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worker = private_default_create_worker(dir.path(), Vec::new()).await;
+        let mut payload = json!({ "cwd": dir.path() });
+        if no_session {
+            payload["noSession"] = json!(true);
+        } else {
+            payload["sessionPath"] = json!(dir.path().join("race-session.jsonl"));
+        }
+        let created = worker.dispatch("create", &payload).await;
+        assert!(created.success, "create failed: {created:?}");
+        let summary = created.data.expect("create summary");
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "race-create" }),
+            )
+            .await;
+        let data = state.data.expect("state data");
+        assert_eq!(
+            data["model"]["id"], "z-ai/glm-5.3",
+            "the fallback is the first scoped model: {data}"
+        );
+        assert_eq!(
+            summary["modelFallbackMessage"],
+            "Default model prime-inference/internal/glm-5.3-fast is not available. Using prime-inference/z-ai/glm-5.3",
+            "the fallback is on the record (noSession={no_session}): {summary}"
+        );
+        let attached = worker
+            .dispatch("attach", &json!({ "activeSessionId": "race-create" }))
+            .await;
+        assert!(attached.success, "attach failed: {attached:?}");
+        let snapshot = attached.data.expect("attach data");
+        assert_eq!(
+            snapshot["snapshot"]["summary"]["modelFallbackMessage"],
+            summary["modelFallbackMessage"],
+            "the attach summary delivers the warning to the TUI"
+        );
+        if no_session {
+            let path = dir.path().join("authorized-session.jsonl");
+            let mut target =
+                crate::session_store::SessionFile::create(dir.path().to_str().unwrap(), None, 0);
+            target.set_path(path.clone());
+            target.append_model_change("prime-inference", "z-ai/glm-5.3");
+            target.rewrite().unwrap();
+            let switched = worker
+                .dispatch(
+                    "switch_session",
+                    &json!({ "activeSessionId": "race-create", "sessionPath": path }),
+                )
+                .await;
+            assert!(switched.success, "switch failed: {switched:?}");
+            let attached = worker
+                .dispatch("attach", &json!({ "activeSessionId": "race-create" }))
+                .await;
+            assert!(attached.success, "attach failed: {attached:?}");
+            let snapshot = attached.data.expect("replacement attach data");
+            assert!(
+                snapshot["snapshot"]["summary"]["modelFallbackMessage"].is_null(),
+                "navigation must not replay the old in-memory warning: {snapshot}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_explicit_scope_with_no_matches_does_not_warn_about_an_excluded_default() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let agent_dir = dir.path().join("agent");
+    write_custom_provider_models_json(&agent_dir, "http://127.0.0.1:9");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({"defaultProvider": "anthropic", "defaultModel": "excluded-default"}).to_string(),
+    )
+    .unwrap();
+    let engine = restore_test_engine(dir.path(), None, None);
+    *engine.startup_scope.lock().unwrap() = Some(StartupScope {
+        scoped_models: Vec::new(),
+        patterns: vec!["battery/no-such-model".to_string()],
+        is_continuing: false,
+    });
+    let resolved = engine.resolve_registry_model().expect("available fallback");
+    assert_eq!(
+        (resolved.provider.as_str(), resolved.id.as_str()),
+        ("battery", "mock-1")
+    );
+    assert!(
+        engine.model_fallback_message().is_none(),
+        "explicitly excluded defaults do not imply an unavailable-model fallback"
+    );
+}

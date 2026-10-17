@@ -303,7 +303,8 @@ impl SessionEngine for AgentSessionEngine {
             .session_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()?;
+            .clone()
+            .unwrap_or_default();
         if decision.session_file != current {
             return None;
         }
@@ -549,10 +550,12 @@ impl SessionEngine for AgentSessionEngine {
     fn configure_startup_scope(
         &self,
         scoped_models: Vec<pa_core::models::ScopedModel>,
+        patterns: Vec<String>,
         is_continuing: bool,
     ) {
         *self.startup_scope.lock().unwrap() = Some(StartupScope {
             scoped_models,
+            patterns,
             is_continuing,
         });
         // The scope changed the startup decisions: drop the stale level; the

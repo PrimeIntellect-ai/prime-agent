@@ -101,7 +101,7 @@ class OwnedProcesses:
                 current, state = process_identity(pid)
                 if current == identity and state != 'Z':
                     alive.append(pid)
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 pass
         return alive
 

@@ -411,3 +411,46 @@ fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
     assert!(grok.thinking_level_map.is_none());
     assert!(grok.compat.is_none());
 }
+
+#[tokio::test]
+async fn scope_readiness_timeout_keeps_models_available_before_refresh() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let auth = auth_without_env(&serde_json::json!({
+        "prime-inference": {
+            "type": "api_key", "key": "fixture-key",
+            "primeTeam": {"teamId": "team-1", "name": "Fixture"}
+        }
+    }));
+    let mut registry = ModelRegistry::in_memory(auth);
+    registry.catalog = Arc::new(pa_models::ModelCatalog::with_urls(None, None, &url, &url));
+    let existing = model("internal/existing", "prime-inference");
+    let missing = model("internal/missing", "prime-inference");
+    registry.models = vec![existing.clone(), missing];
+    registry.authorized_private_ids.insert(existing.id.clone());
+    registry.authorized_private_models = vec![existing.clone()];
+    registry.authorized_team_id = Some("team-1".to_string());
+    let patterns = vec![
+        "prime-inference/internal/existing".to_string(),
+        "prime-inference/internal/missing".to_string(),
+    ];
+    let resolved = super::super::session_restore::resolve_model_scope_from_models_with_readiness(
+        &mut registry,
+        &patterns,
+        Some(("prime-inference", "internal/missing")),
+        false,
+        0,
+    )
+    .await;
+    assert!(
+        registry.authorized_private_ids.is_empty(),
+        "refresh started before timing out"
+    );
+    assert_eq!(
+        resolved
+            .into_iter()
+            .map(|entry| entry.model)
+            .collect::<Vec<_>>(),
+        vec![existing]
+    );
+}

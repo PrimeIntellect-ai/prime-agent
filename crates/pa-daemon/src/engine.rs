@@ -263,6 +263,7 @@ pub trait SessionEngine: Send + Sync {
     fn configure_startup_scope(
         &self,
         _scoped_models: Vec<pa_core::models::ScopedModel>,
+        _patterns: Vec<String>,
         _is_continuing: bool,
     ) {
     }

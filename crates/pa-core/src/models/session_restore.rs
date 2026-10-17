@@ -8,6 +8,10 @@ use std::time::Duration;
 use pa_types::ai::Model;
 
 use super::registry::ModelRegistry;
+use super::resolver::{
+    is_private_prime_inference_reference, resolve_model_scope_from_models,
+    scope_patterns_select_reference, ScopedModel,
+};
 
 /// The bounded window a session-model restore waits for in-flight catalog/auth refreshes to settle
 /// before the lookup may fail.
@@ -43,6 +47,45 @@ pub async fn find_session_model_with_readiness_wait(
     )
     .await;
     find_restorable(registry, provider, model_id)
+}
+
+pub async fn resolve_model_scope_from_models_with_readiness(
+    registry: &mut ModelRegistry,
+    patterns: &[String],
+    default: Option<(&str, &str)>,
+    is_continuing: bool,
+    readiness_timeout_ms: u64,
+) -> Vec<ScopedModel> {
+    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+    let scoped = resolve_model_scope_from_models(patterns, &available);
+    let default_missing = !is_continuing
+        && default.is_some_and(|(provider, model_id)| {
+            is_private_prime_inference_reference(provider, model_id)
+                && !scoped
+                    .iter()
+                    .any(|scoped| scoped.model.provider == provider && scoped.model.id == model_id)
+                && scope_patterns_select_reference(
+                    patterns,
+                    provider,
+                    model_id,
+                    &available,
+                    registry.get_all(),
+                )
+        });
+    if !default_missing {
+        return scoped;
+    }
+    if tokio::time::timeout(
+        Duration::from_millis(readiness_timeout_ms),
+        registry.refresh_available_models(),
+    )
+    .await
+    .is_err()
+    {
+        return scoped;
+    }
+    let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
+    resolve_model_scope_from_models(patterns, &available)
 }
 
 #[cfg(test)]
