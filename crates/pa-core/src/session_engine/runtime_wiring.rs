@@ -211,7 +211,9 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// (`PRIME_AGENT_CODING_AGENT_DIR`): an embedding host whose ambient env differs must not
 /// leak its own paths into the kernel (#109). A persistent session's artifact dir is
 /// likewise propagated (`RLM_SESSION_DIR` + `RLM_HARNESS_STATE_DIR`), so kernel-side
-/// harness writes land in the session-local store. `cwd` is the SESSION's working directory.
+/// harness writes land in the session-local store. The artifact dir is keyed by the
+/// durable session id (the session file's stem), exported as `RLM_SESSION_ID` for the
+/// persistent `bash()` shells' assignment. `cwd` is the SESSION's working directory.
 /// `shell_path` is the session-start-resolved kernel shell: an invalid `shellPath` fails
 /// `create_session`, not the kernel boot.
 #[allow(clippy::too_many_arguments)] // one wiring funnel, same style as AgentSession::from_session_arc
@@ -236,6 +238,15 @@ pub fn kernel_provisioner(
         "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
         agent_dir.to_string_lossy().to_string(),
     );
+    if let Some(id) = session_artifact_dir
+        .as_deref()
+        .and_then(std::path::Path::file_name)
+    {
+        env.insert(
+            "RLM_SESSION_ID".to_string(),
+            id.to_string_lossy().to_string(),
+        );
+    }
     for (key, value) in [
         ("RLM_SESSION_DIR", session_artifact_dir.clone()),
         (
