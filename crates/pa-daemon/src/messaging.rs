@@ -216,13 +216,13 @@ impl Supervisor {
                 Err(error) => return WakeOutcome::Failed(error.to_string()),
             },
         };
-        let archive_dir = crate::session_archive::archive_dir(&self.options.agent_dir);
-        let info = match crate::session_catalog::resolve_saved_session(
+        let resolved = crate::session_catalog::resolve_saved_session(
             &sessions_dir,
-            &archive_dir,
+            &self.options.agent_dir.join("sessions-archive"),
             selector,
             &cwd,
-        ) {
+        );
+        let info = match resolved {
             Ok(Some(info)) => info,
             // The saved-session catalog misses RLM children (they persist in
             // the parent's session-artifacts tree); the spawn ledger still

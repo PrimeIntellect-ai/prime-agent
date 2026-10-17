@@ -48,17 +48,6 @@ impl Supervisor {
         (switch.enabled)()
     }
 
-    /// Emit the `daemon event` adoption signal for a session-archive sweep
-    /// (best-effort, non-blocking; no-op when the daemon is opted out).
-    pub(crate) fn note_sessions_archived(&self, count: usize) {
-        if !self.telemetry_recording_on() {
-            return;
-        }
-        if let Some(client) = &*self.telemetry.lock().unwrap() {
-            pa_core::session_engine::telemetry::track_sessions_archived(client, count);
-        }
-    }
-
     /// Emit the parent-death child close's `daemon event`: a count only. Zero closes
     /// never emit (no children died with the worker).
     pub(crate) fn note_children_closed(&self, count: usize) {

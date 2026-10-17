@@ -92,12 +92,6 @@ records (`parentSession`/`child` are canonical paths).
   the warm scan via the daemon's in-process cache instead.
 - `pa-perf run` generates BOTH corpora (cold for the cold scenarios, warm
   for warm-start/warm-ready) — every scenario runs on the state it needs.
-- The corpus settings disable BOTH archive rules (`sessionArchiveMaxAgeDays`
-  / `sessionArchiveMaxSessions` "off"): the product's defaults sweep the
-  live store down to 200 unarchived sessions (the operator's real store:
-  196 live + 211 archived), so large/xl with archiving off are scaling
-  stress profiles, not typical stores, and the boot sweep itself is not
-  measured.
 
 ## The bench harness
 

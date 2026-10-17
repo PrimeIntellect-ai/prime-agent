@@ -330,11 +330,6 @@ fn a_paged_catalog_folds_the_newest_page_and_the_cursor_reaches_the_oldest() {
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{"sessionArchiveMaxSessions":"off"}"#,
-    )
-    .expect("write settings");
     let base = SystemTime::now() - Duration::from_hours(24);
     for index in 0..FILES {
         write_fixture(

@@ -315,13 +315,6 @@ pub struct Settings {
     pub rlm_max_depth: Option<u64>,
     /// `number | "off" | "none"`; raw JSON because the TS getter validates at access time.
     pub idle_eviction_minutes: Option<serde_json::Value>,
-    /// Session archiving age rule: sessions untouched for this many days are
-    /// moved to the daemon's archive directory. `number | "off" | "none"`; raw
-    /// JSON validated at access time (same grammar as `idleEvictionMinutes`).
-    pub session_archive_max_age_days: Option<serde_json::Value>,
-    /// Session archiving count rule: keep at most this many unarchived sessions (newest by mtime
-    /// win); `0 | "off" | "none"` disables. Raw JSON validated at access time.
-    pub session_archive_max_sessions: Option<serde_json::Value>,
     pub transport: Option<TransportSetting>,
     pub steering_mode: Option<QueueModeSetting>,
     pub follow_up_mode: Option<QueueModeSetting>,
