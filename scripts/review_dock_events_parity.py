@@ -4,8 +4,9 @@
 Both ordinary clients receive controlled protocol-7 roster/goal events after
 observable attach. No headless flags, provider or live sessions are used. The
 receipt records full-frame differences instead of normalizing TS's boxed dock
-into Rust's one-line dock. Behavioral assertions cover event-driven refresh;
-full-frame/style equality is reported separately and never claimed by them.
+into Rust's one-line dock, which expands into per-group rows on focus.
+Behavioral assertions cover event-driven refresh; full-frame/style equality is
+reported separately and never claimed by them.
 """
 import argparse
 import json
@@ -106,8 +107,10 @@ class DockSupervisor(Supervisor):
                 'timeUsedSeconds': 12, 'continuationsUsed': 0}}})
 
 
-def running_visible(text, kind, count):
-    label = 'running' if kind == 'ts' else 'subagents'
+def running_visible(text, kind, count, expanded=False):
+    # Rust's collapsed dock reads "N subagents"; its focused (expanded) dock's
+    # subagents row reads the "N running · …" breakdown, like TS's box.
+    label = 'running' if kind == 'ts' or expanded else 'subagents'
     return re.search(r'(?<!\d)' + str(count) + r'\s+' + label + r'\b', text) is not None
 
 
@@ -180,7 +183,7 @@ def run_case(binary, kind, root, observed):
         terminal.send('\x1b[B')  # Same ordinary Down key from an empty editor.
         terminal.wait('dock focus changes rendered attributes',
             lambda: terminal.screen.dock_styles() != before_focus, server)
-        snap('dock_focused', lambda text: running_visible(text, kind, 2))
+        snap('dock_focused', lambda text: running_visible(text, kind, 2, expanded=True))
         assert observed['frames']['dock_focused']['dock_styled_rows'] != before_focus
         terminal.send('\x1b')
         terminal.wait('Escape restores editor focus', lambda: terminal.screen.dock_styles() == before_focus, server)
@@ -232,7 +235,7 @@ def main():
     args = parser.parse_args()
     receipt = {'verified': False, 'runs': {}, 'scope': __doc__,
         'frame_scope': '120x40 decoded text + dock SGR cells and complete raw ANSI, not pixels/font rendering.',
-        'preexisting_ts_limitation': 'Pinned TS uses a boxed running/idle/inactive dock; Rust uses a one-line fixed-group dock. Layouts are not normalized into equality.',
+        'preexisting_ts_limitation': 'Pinned TS uses a boxed running/idle/inactive dock; Rust uses a one-line fixed-group dock that expands into per-group rows on focus. Layouts are not normalized into equality.',
         'preexisting_cost_difference': 'TS binds initial family cost from get_context_tree and does not refresh it on roster-only events. Rust refreshes cost from the live roster. Exact phase costs asserted and retained without normalization or synthetic refresh events.',
         'not_verified': ['frame/style equality', 'actual daemon roster production', 'new-session/no-session fallback', 'agents-view lazy query search']}
     try:

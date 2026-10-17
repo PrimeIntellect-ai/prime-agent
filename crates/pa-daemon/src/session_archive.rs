@@ -429,6 +429,35 @@ mod tests {
         assert!(restore_session(&archive, &sessions, "missing").is_err());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn archive_sweep_leaves_persistent_shells_running() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let sessions = root.path().join("sessions");
+        fs::create_dir_all(&sessions).expect("sessions dir");
+        let old = write_session(&sessions, "old");
+        set_mtime_days_ago(&old, 40);
+        let mut sleeper =
+            crate::persistent_shells::test_support::registered_sleeper(root.path(), "old", None);
+
+        let archived = sweep_sessions(
+            &sessions,
+            &root.path().join("sessions-archive"),
+            &HashSet::new(),
+            &policy(Some(30), None),
+            SystemTime::now(),
+        )
+        .expect("sweep");
+
+        assert_eq!(archived, vec!["old".to_string()]);
+        assert!(
+            sleeper.try_wait().expect("try_wait").is_none(),
+            "the shell still runs"
+        );
+        sleeper.kill().expect("kill");
+        sleeper.wait().expect("wait");
+    }
+
     /// A minimal valid session file: the `session` header line carries the
     /// id, and the file name matches it (the sessions-dir layout).
     fn write_session(dir: &Path, id: &str) -> PathBuf {

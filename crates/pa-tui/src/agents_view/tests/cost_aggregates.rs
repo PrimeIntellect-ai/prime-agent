@@ -29,19 +29,25 @@ fn the_summary_line_renders_the_aggregate_in_the_cost_column() {
         roster_entry("x1", "inactive", &inactive_child),
     ];
     mode.rebuild_rows();
-    assert_eq!(mode.rows[1].title, "4 subagents (2 running)");
+    assert_eq!(mode.rows[1].title, "4 subagents · 2 running");
     let (lines, _) = mode.render_frame(120, 36);
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
     let summary = flat_lines
         .iter()
-        .find(|line| line.contains("4 subagents (2 running)"))
+        .find(|line| line.contains("4 subagents · 2 running"))
         .expect("the ONE line renders");
     let parent_line = flat_lines
         .iter()
         .find(|line| line.contains("p name"))
         .expect("parent row renders");
-    let cost_at = summary.find("$4.75").expect("the aggregate prints");
-    let parent_cost_at = parent_line.find("$5.00").expect("the parent total prints");
+    let cost_at = summary
+        .find("$4.75")
+        .map(|at| str_width(&summary[..at]))
+        .expect("the aggregate prints");
+    let parent_cost_at = parent_line
+        .find("$5.00")
+        .map(|at| str_width(&parent_line[..at]))
+        .expect("the parent total prints");
     assert_eq!(
         cost_at, parent_cost_at,
         "the aggregate shares the agent rows' Cost column"
@@ -105,12 +111,12 @@ fn a_search_keeps_the_rows_totals() {
 #[test]
 fn the_summary_line_renders_zero_when_nothing_bills() {
     let mut mode = mode_with_parent_and_child();
-    assert_eq!(mode.rows[1].title, "1 subagents (1 running)");
+    assert_eq!(mode.rows[1].title, "1 subagent · 1 running");
     let (lines, _) = mode.render_frame(120, 36);
     let summary = lines
         .iter()
         .map(flat)
-        .find(|line| line.contains("1 subagents (1 running)"))
+        .find(|line| line.contains("1 subagent · 1 running"))
         .expect("the ONE line renders");
     assert!(
         summary.contains("$0.00"),
@@ -136,21 +142,27 @@ fn the_summary_line_renders_the_aggregate_in_the_all_done_state() {
     ];
     mode.rebuild_rows();
     assert_eq!(
-        mode.rows[1].title, "2 subagents (0 running)",
+        mode.rows[1].title, "2 subagents · 0 running",
         "the ONE line keeps its row in the all-done state"
     );
     let (lines, _) = mode.render_frame(120, 36);
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
     let summary = flat_lines
         .iter()
-        .find(|line| line.contains("2 subagents (0 running)"))
+        .find(|line| line.contains("2 subagents · 0 running"))
         .expect("the ONE line renders in the all-done state");
     let parent_line = flat_lines
         .iter()
         .find(|line| line.contains("p name"))
         .expect("parent row renders");
-    let cost_at = summary.find("$2.00").expect("the aggregate prints");
-    let parent_cost_at = parent_line.find("$2.25").expect("the parent total prints");
+    let cost_at = summary
+        .find("$2.00")
+        .map(|at| str_width(&summary[..at]))
+        .expect("the aggregate prints");
+    let parent_cost_at = parent_line
+        .find("$2.25")
+        .map(|at| str_width(&parent_line[..at]))
+        .expect("the parent total prints");
     assert_eq!(
         cost_at, parent_cost_at,
         "the summary line shares the agent rows' Cost column"
@@ -191,7 +203,7 @@ fn aggregate_survives_the_incident_notice_render_path() {
     );
     let summary = text
         .iter()
-        .find(|line| line.contains("1 subagents (0 running)"))
+        .find(|line| line.contains("1 subagent · 0 running"))
         .expect("the ONE line renders behind the notice");
     assert!(
         summary.contains("$1.25"),
@@ -224,7 +236,7 @@ fn aggregate_survives_the_click_surface_render_path() {
     let flat_lines: Vec<String> = lines.iter().map(flat).collect();
     let summary = flat_lines
         .iter()
-        .find(|line| line.contains("1 subagents (0 running)"))
+        .find(|line| line.contains("1 subagent · 0 running"))
         .expect("the ONE line renders");
     assert!(
         summary.contains("$1.25"),
@@ -251,7 +263,7 @@ fn aggregate_survives_the_click_surface_render_path() {
     );
     let summary = flat_lines
         .iter()
-        .find(|line| line.contains("1 subagents (0 running)"))
+        .find(|line| line.contains("1 subagent · 0 running"))
         .expect("the ONE line still renders expanded");
     assert!(
         summary.contains("$1.25"),

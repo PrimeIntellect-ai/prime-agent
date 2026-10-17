@@ -156,6 +156,7 @@ impl SessionUi {
             session_file: None,
             pending_selection: None,
             return_to_agents_view: !options.no_session,
+            panel_returns_to_agents_view: false,
             client_auth: options.client_auth.clone(),
             keybindings: options.keybindings.clone(),
             prompt_stash: options.prompt_stash.clone(),
@@ -582,6 +583,9 @@ impl SessionUi {
                 self.factory_view_session = None;
                 self.factory_graph = serde_json::json!({"runs": []});
             }
+            // An agents-view panel the rebind tore down takes its return-to-agents-view flag
+            // with it; a kept factory page keeps it.
+            self.panel_returns_to_agents_view &= view.factory_view.is_some();
             // The goal panel dies with the old session too: it is a
             // snapshot of the previous session's goal state, and until
             // the new session's own `goal_update` lands it would keep
@@ -783,12 +787,12 @@ mod backfill_tests {
     use serde_json::json;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    #[tokio::test]
-    async fn a_rebuild_rejects_an_already_queued_backfill_note() {
-        tokio::time::timeout(Duration::from_secs(10), async {
-        let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("backfill.sock");
-        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    /// One session attached over a mock daemon that answers `attach` and `get_messages`.
+    async fn mock_session(
+        socket: &std::path::Path,
+        backfill_tx: mpsc::UnboundedSender<TranscriptBackfillNote>,
+    ) -> (SessionUi, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
@@ -820,13 +824,12 @@ mod backfill_tests {
                 write.write_all(&reply).await.unwrap();
             }
         });
-            let mut options =
-                crate::interactive::tests::options(crate::interactive::ModelSelection::default());
-        options.socket_path = socket.clone();
+        let mut options =
+            crate::interactive::tests::options(crate::interactive::ModelSelection::default());
+        options.socket_path = socket.to_path_buf();
         options.session = SessionSelection::Attach("s1".to_string());
-        let (client, _events) = DaemonClient::connect(&socket).await.unwrap();
-        let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel();
-        let mut session = SessionUi::open(
+        let (client, _events) = DaemonClient::connect(socket).await.unwrap();
+        let session = SessionUi::open(
             client,
             &options,
             mpsc::unbounded_channel().0,
@@ -844,35 +847,80 @@ mod backfill_tests {
                 factory: mpsc::unbounded_channel().0,
                 commands: mpsc::unbounded_channel().0,
             },
-            backfill_tx.clone(),
+            backfill_tx,
         )
         .await
         .unwrap();
-        let old_epoch = session.transcript_epoch;
-        assert!(backfill_tx
-            .send(TranscriptBackfillNote {
-                epoch: old_epoch,
-                entries: Ok(crate::snapshot::transcript_to_entries(&[
-                    json!({"role": "user", "content": "stale history", "timestamp": 0}),
-                ])),
-            })
-            .is_ok());
-        let mut view = AgentView::new(crate::theme::Theme::builtin(
-            "prime",
-            crate::theme::ColorMode::TrueColor,
-        ));
-        session.rebuild_transcript(&mut view).await;
-        assert_ne!(session.transcript_epoch, old_epoch);
-        assert_eq!(view.chat.len(), 1, "rebuild applied the current transcript");
-        let expected = view.chat.clone();
-        // Deliver the note that was demonstrably queued before the real rebuild.
-        session.apply_transcript_backfill(backfill_rx.try_recv().unwrap(), &mut view);
-        assert_eq!(
-            view.chat, expected,
-            "an obsolete queued page cannot prepend rows after rebuild"
-        );
-        drop(session);
-        server.abort();
-        }).await.expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
+        (session, server)
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_rejects_an_already_queued_backfill_note() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("backfill.sock");
+            let (backfill_tx, mut backfill_rx) = mpsc::unbounded_channel();
+            let (mut session, server) = mock_session(&socket, backfill_tx.clone()).await;
+            let old_epoch = session.transcript_epoch;
+            assert!(backfill_tx
+                .send(TranscriptBackfillNote {
+                    epoch: old_epoch,
+                    entries: Ok(crate::snapshot::transcript_to_entries(&[
+                        json!({"role": "user", "content": "stale history", "timestamp": 0}),
+                    ])),
+                })
+                .is_ok());
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.rebuild_transcript(&mut view).await;
+            assert_ne!(session.transcript_epoch, old_epoch);
+            assert_eq!(view.chat.len(), 1, "rebuild applied the current transcript");
+            let expected = view.chat.clone();
+            // Deliver the note that was demonstrably queued before the real rebuild.
+            session.apply_transcript_backfill(backfill_rx.try_recv().unwrap(), &mut view);
+            assert_eq!(
+                view.chat, expected,
+                "an obsolete queued page cannot prepend rows after rebuild"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, rebuild and stale-note delivery complete within ten seconds");
+    }
+
+    /// A rebind that tears down an agents-view panel drops its return: a later dock-opened shells
+    /// panel closes back to the dock, never to the agents view.
+    #[tokio::test]
+    async fn a_rebind_drops_the_agents_view_panel_return() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("panel.sock");
+            let (mut session, server) = mock_session(&socket, mpsc::unbounded_channel().0).await;
+            let mut view = AgentView::new(crate::theme::Theme::builtin(
+                "prime",
+                crate::theme::ColorMode::TrueColor,
+            ));
+            session.open_agents_view_panel(crate::interactive::SessionPanel::Shells, &mut view);
+            session.rebuild_view(&mut view, &RebuildKind::Rebind);
+            assert!(view.bash_view.is_none(), "the rebind tore the panel down");
+            session.open_bash_view(&mut view);
+            let esc = crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            );
+            session.handle_bash_view_key(esc, &mut view).unwrap();
+            assert!(view.bash_view.is_none(), "Esc closed the dock's panel");
+            assert!(
+                !session.open_agents_view && !session.exit_requested,
+                "the dock's panel closes to the dock"
+            );
+            drop(session);
+            server.abort();
+        })
+        .await
+        .expect("mock session open, rebind and panel close complete within ten seconds");
     }
 }

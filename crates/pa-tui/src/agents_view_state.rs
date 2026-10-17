@@ -856,6 +856,7 @@ mod tests {
             &std::collections::HashSet::default(),
             &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         assert_eq!(rows[0].section, Section::Running);
@@ -1046,6 +1047,7 @@ mod tests {
             &std::collections::HashSet::default(),
             &std::collections::HashSet::default(),
             &std::collections::HashMap::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         let layout = build_layout(&rows, 120);
@@ -1091,6 +1093,7 @@ mod tests {
             None,
             &std::collections::HashSet::default(),
             &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             &std::collections::HashMap::default(),
             None,
         );

@@ -33,7 +33,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from . import factory as factory_module
-from .bash import _kill_live_handles
+from .bash import _kill_live_handles, _rehydrate_persistent_shells
 
 PROTOCOL_VERSION = 3
 
@@ -1746,6 +1746,8 @@ def main() -> None:
     _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
 
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
+    # On the loop, so re-attached shells can deliver their completion notices.
+    _loop.call_soon(_rehydrate_persistent_shells)
     # A KeyboardInterrupt escaping a cell or background task stops
     # run_until_complete; the interrupt is already recorded, so resume serving.
     while not _serve_task.done():

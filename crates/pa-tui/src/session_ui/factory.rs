@@ -13,7 +13,7 @@ use pa_types::daemon::DaemonCommand;
 use super::AgentView;
 
 use crate::factory_view::{
-    factory_reply_lists_runs, parse_factory_runs, FactoryView, FactoryViewAction,
+    factory_reply_lists_runs, live_run_count, parse_factory_runs, FactoryView, FactoryViewAction,
     FACTORY_WATCH_TICK_MS,
 };
 use crate::session_ui::{picker_viewport_rows, UI_REQUEST_TIMEOUT_MS};
@@ -106,6 +106,7 @@ impl super::SessionUi {
                 self.factory_selected_run = None;
                 self.factory_view_session = None;
                 view.factory_view = None;
+                self.close_panel_to_agents_view();
                 self.dirty = true;
             }
             Some(FactoryViewAction::Stop { run_id }) => {
@@ -212,12 +213,7 @@ impl super::SessionUi {
         if !factory_reply_lists_runs(&reply) {
             return None;
         }
-        Some(
-            parse_factory_runs(&reply)
-                .iter()
-                .filter(|run| run.is_live())
-                .count(),
-        )
+        Some(live_run_count(&reply))
     }
 
     /// The refresh cadence (the run's collect cycle): a bounded watch on

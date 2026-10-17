@@ -1,7 +1,8 @@
 //! Headless e2e for the agents view's hover + click affordances (operator
 //! directive 2026-09-29): EVERY row opens on a plain click (inactive
 //! saved rows resume, the merged summary row expands its dropdown,
-//! expanded child rows open the subagent); hover motions ride along.
+//! expanded child rows open the subagent); hover motions ride along. The same mock also pins the
+//! shells poll's one-cycle-in-flight contract.
 #![cfg(unix)]
 // Casts: structurally bounded terminal-layout arithmetic; guarded conversions add panic paths.
 #![allow(
@@ -22,6 +23,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pa_tui::agents_view::{
@@ -82,14 +85,38 @@ fn saved_row(path: &str, id: &str, name: &str) -> Value {
     })
 }
 
+/// The shells-poll probe: the first `list_kernel_bash` answers only after a hold longer than the
+/// poll interval; a request arriving while another is still unanswered means the poll stacked.
+#[derive(Default)]
+struct ShellsProbe {
+    requests: AtomicUsize,
+    unanswered: AtomicUsize,
+    overlapped: AtomicBool,
+}
+
+fn shells_reply(running: usize) -> Value {
+    let activities: Vec<Value> = (0..running)
+        .map(|index| json!({"id": format!("shell-{index}"), "command": "sleep", "status": "running"}))
+        .collect();
+    json!({ "activities": activities })
+}
+
 struct MockSupervisor {
     listener: UnixListener,
+    roster: Vec<Value>,
+    /// `Some` advertises the kernel-bash capability and serves the probe's shells replies.
+    shells: Option<Arc<ShellsProbe>>,
 }
 
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
+            roster: vec![
+                roster_row("p", "idle", &parent_summary("p")),
+                roster_row("c", "running", &child_summary("c", "p", "worker one")),
+            ],
+            shells: None,
         }
     }
 
@@ -101,10 +128,15 @@ impl MockSupervisor {
         let write_stream = stream.try_clone().expect("clone socket");
         let mut writer = write_stream;
         let mut reader = BufReader::new(stream);
+        let capabilities: &[&str] = if self.shells.is_some() {
+            &["kernel_bash_activity"]
+        } else {
+            &[]
+        };
         let hello = json!({
             "type": "daemon_hello",
             "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
+            "serverCapabilities": capabilities,
         });
         write_line(&mut writer, &hello);
         loop {
@@ -130,12 +162,7 @@ impl MockSupervisor {
                         &mut writer,
                         id,
                         "roster_subscribe",
-                        &json!({
-                            "roster": [
-                                roster_row("p", "idle", &parent_summary("p")),
-                                roster_row("c", "running", &child_summary("c", "p", "worker one")),
-                            ]
-                        }),
+                        &json!({ "roster": self.roster }),
                     );
                 }
                 "list_saved_sessions" => {
@@ -149,6 +176,26 @@ impl MockSupervisor {
                 "roster_unsubscribe" => {
                     respond(&mut writer, id, "roster_unsubscribe", &Value::Null);
                 }
+                "list_kernel_bash" if self.shells.is_some() => {
+                    let probe = Arc::clone(self.shells.as_ref().expect("the probe"));
+                    if probe.unanswered.fetch_add(1, Ordering::SeqCst) > 0 {
+                        probe.overlapped.store(true, Ordering::SeqCst);
+                    }
+                    // The unanswered count drops before the reply is written: the client may send
+                    // its next request the moment the reply lands.
+                    if probe.requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let mut writer = writer.try_clone().expect("clone socket");
+                        let id = id.to_string();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(Duration::from_millis(2700));
+                            probe.unanswered.fetch_sub(1, Ordering::SeqCst);
+                            respond(&mut writer, &id, "list_kernel_bash", &shells_reply(1));
+                        });
+                    } else {
+                        probe.unanswered.fetch_sub(1, Ordering::SeqCst);
+                        respond(&mut writer, id, "list_kernel_bash", &shells_reply(2));
+                    }
+                }
                 other => {
                     respond_failure(&mut writer, id, other, "not handled by the mock");
                 }
@@ -158,6 +205,9 @@ impl MockSupervisor {
 }
 
 fn write_line(writer: &mut UnixStream, value: &Value) {
+    // The probe's held reply writes from its own thread: one line at a time, never interleaved.
+    static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = WRITE_LOCK.lock().expect("write lock");
     let mut line = serde_json::to_string(value).expect("serialize line");
     line.push('\n');
     writer.write_all(line.as_bytes()).expect("write");
@@ -244,10 +294,17 @@ fn view_options(socket: &std::path::Path) -> AgentsViewOptions {
 /// Run one headless plan and return the outcome. Holds the run lock: the click dispatch gates on
 /// the process-global tracking state.
 async fn run_plan(steps: Vec<AgentsStep>) -> pa_tui::agents_view::AgentsViewOutcome {
+    run_plan_with(steps, |mock| mock).await
+}
+
+async fn run_plan_with(
+    steps: Vec<AgentsStep>,
+    configure: impl FnOnce(MockSupervisor) -> MockSupervisor,
+) -> pa_tui::agents_view::AgentsViewOutcome {
     let _guard = RUN_LOCK.lock().await;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("agents-view.sock");
-    let mock = MockSupervisor::bind(&socket);
+    let mock = configure(MockSupervisor::bind(&socket));
     let server = std::thread::spawn(move || mock.serve());
     let plan = AgentsHeadlessPlan {
         steps,
@@ -324,16 +381,16 @@ async fn a_click_on_an_inactive_row_opens_it() {
     );
 }
 
-/// A plain click on the merged `N subagents (M running)` row EXPANDS the dropdown — the toggle, not
+/// A plain click on the merged `N subagents · M running` row EXPANDS the dropdown — the toggle, not
 /// an open: the frame renders the child rows and the run keeps running with no selection.
 #[tokio::test]
 async fn a_click_on_the_merged_summary_expands_the_dropdown() {
-    let frames = settled_frames("subagents (").await;
-    let row = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("1 subagent \u{b7}").await;
+    let row = locate_row(&frames, "1 subagent \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "1 subagent \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click { row, col: 4 },
@@ -358,12 +415,12 @@ async fn a_click_on_the_merged_summary_expands_the_dropdown() {
 /// row.
 #[tokio::test]
 async fn a_click_on_the_expanded_child_opens_the_subagent() {
-    let frames = settled_frames("subagents (").await;
-    let summary = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("1 subagent \u{b7}").await;
+    let summary = locate_row(&frames, "1 subagent \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "1 subagent \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -380,7 +437,7 @@ async fn a_click_on_the_expanded_child_opens_the_subagent() {
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "1 subagent \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -405,12 +462,12 @@ async fn a_click_on_the_expanded_child_opens_the_subagent() {
 /// merged line, the child rows, and the headings, then a plain click — the subagent still opens.
 #[tokio::test]
 async fn hover_motions_never_disturb_the_agents_view_click() {
-    let frames = settled_frames("subagents (").await;
-    let summary = locate_row(&frames, "subagents (").expect("the merged line renders");
+    let frames = settled_frames("1 subagent \u{b7}").await;
+    let summary = locate_row(&frames, "1 subagent \u{b7}").expect("the merged line renders");
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "1 subagent \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         AgentsStep::Click {
@@ -427,7 +484,7 @@ async fn hover_motions_never_disturb_the_agents_view_click() {
     let outcome = run_plan(vec![
         AgentsStep::WaitSettle { timeout_ms: 2500 },
         AgentsStep::WaitRender {
-            needle: "subagents (".to_string(),
+            needle: "1 subagent \u{b7}".to_string(),
             timeout_ms: 8000,
         },
         // Hover motions across the parent row, the merged line, the heading, and the expanded child
@@ -452,5 +509,180 @@ async fn hover_motions_never_disturb_the_agents_view_click() {
         outcome.selection,
         Some(SessionSelection::Attach("c-live".to_string())),
         "the click opened the subagent after the hover motions"
+    );
+}
+
+/// The shells poll never stacks: with the first `list_kernel_bash` held past the poll interval, the
+/// next request waits for it to land, and the line reaches the second answer's count.
+#[tokio::test]
+async fn a_slow_shells_read_never_stacks_the_poll() {
+    let probe = Arc::new(ShellsProbe::default());
+    let outcome = run_plan_with(
+        vec![AgentsStep::WaitRender {
+            needle: "$ 2 shells".to_string(),
+            timeout_ms: 10_000,
+        }],
+        |mut mock| {
+            mock.roster = vec![roster_row("p", "idle", &parent_summary("p"))];
+            mock.shells = Some(Arc::clone(&probe));
+            mock
+        },
+    )
+    .await;
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains("$ 2 shells")),
+        "the poll re-armed after the held read landed"
+    );
+    assert!(
+        !probe.overlapped.load(Ordering::SeqCst),
+        "a list_kernel_bash arrived while another was unanswered"
+    );
+}
+
+/// A cycle held across a session handoff belongs to the returning view, not the old UI channel.
+#[tokio::test]
+async fn a_held_shells_read_survives_the_agents_view_handoff() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let _guard = RUN_LOCK.lock().await;
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("handoff.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock socket");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept view connection");
+        let (read, mut write) = stream.into_split();
+        let hello = json!({
+            "type": "daemon_hello",
+            "protocol": { "name": "prime-agent.daemon", "version": 7 },
+            "serverCapabilities": ["kernel_bash_activity"],
+        });
+        write
+            .write_all(format!("{hello}\n").as_bytes())
+            .await
+            .unwrap();
+        let mut lines = tokio::io::BufReader::new(read).lines();
+        let mut shells_requests = 0;
+        let mut heartbeat_requests = 0;
+        let mut held_shell = None;
+        let mut held_catalog = None;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.is_empty() {
+                break;
+            }
+            let envelope: Value = serde_json::from_str(&line).unwrap();
+            let id = envelope["id"].as_str().unwrap().to_string();
+            let command = envelope["command"]["type"].as_str().unwrap();
+            let mut replies = Vec::new();
+            match command {
+                "roster_subscribe" => replies.push((
+                    id,
+                    json!({
+                        "roster": [roster_row("p", "idle", &parent_summary("p"))],
+                    }),
+                )),
+                "list_saved_sessions" => held_catalog = Some(id),
+                "list_kernel_bash" => {
+                    shells_requests += 1;
+                    if shells_requests == 1 {
+                        held_shell = Some(id);
+                    } else {
+                        replies.push((id, shells_reply(2)));
+                    }
+                }
+                "heartbeats_list" => {
+                    heartbeat_requests += 1;
+                    replies.push((id, json!({"heartbeats": []})));
+                    if heartbeat_requests == 2 {
+                        replies.push((
+                            held_shell.take().expect("the first view issued its poll"),
+                            shells_reply(1),
+                        ));
+                    }
+                }
+                "roster_unsubscribe" => replies.push((id, Value::Null)),
+                other => panic!("unexpected command: {other}"),
+            }
+            // The first view can open only after the server observed its unanswered shells read.
+            if let (true, Some(id)) = (shells_requests > 0, held_catalog.as_ref()) {
+                replies.push((
+                    id.clone(),
+                    json!({"sessions": [saved_row(
+                        "/tmp/sessions/old.jsonl", "old", "archived run",
+                    )]}),
+                ));
+                held_catalog = None;
+            }
+            for (id, data) in replies {
+                let response_command = if data.get("activities").is_some() {
+                    "list_kernel_bash"
+                } else if data.get("sessions").is_some() {
+                    "list_saved_sessions"
+                } else {
+                    command
+                };
+                let reply = json!({
+                    "type": "response", "id": id, "command": response_command,
+                    "success": true, "data": data,
+                });
+                write
+                    .write_all(format!("{reply}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        }
+        shells_requests
+    });
+    let first = run_agents_view(
+        view_options(&socket),
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps: vec![
+                AgentsStep::WaitRender {
+                    needle: "archived run".to_string(),
+                    timeout_ms: 2500,
+                },
+                AgentsStep::Key("home".to_string()),
+                AgentsStep::Key("enter".to_string()),
+            ],
+            width: 120,
+            height: 36,
+        }),
+        None,
+    )
+    .await
+    .expect("the first view opens its session");
+    assert_eq!(
+        first.outcome.selection,
+        Some(SessionSelection::Attach("p-live".to_string()))
+    );
+    let second = run_agents_view(
+        view_options(&socket),
+        AgentsViewUiMode::Headless(AgentsHeadlessPlan {
+            steps: vec![AgentsStep::WaitRender {
+                needle: "$ 1 shell".to_string(),
+                timeout_ms: 2500,
+            }],
+            width: 120,
+            height: 36,
+        }),
+        Some(
+            first
+                .link
+                .expect("the handoff retains the roster connection"),
+        ),
+    )
+    .await
+    .expect("the returning view consumes the held cycle");
+    assert!(second
+        .outcome
+        .frames
+        .iter()
+        .any(|frame| frame.contains("$ 1 shell")));
+    assert_eq!(
+        server.await.unwrap(),
+        1,
+        "re-entry must not issue a second shells request"
     );
 }

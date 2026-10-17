@@ -5,6 +5,7 @@
 
 use super::*;
 
+mod activity_lines;
 mod click_surface;
 mod cost_aggregates;
 mod delete_stop;

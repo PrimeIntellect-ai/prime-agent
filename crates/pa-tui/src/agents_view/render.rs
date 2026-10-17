@@ -471,7 +471,7 @@ impl AgentsViewMode {
         let theme = &self.theme;
         // A muted, truncated program line on the tool-panel background; never selection-painted.
         if row.kind == RowKind::Code {
-            let text = format!("{}  {}", "  ".repeat(row.depth), row.title);
+            let text = format!("{}  {}", depth_indent(row.depth), row.title);
             let line = pad_line(
                 vec![theme.fg(ThemeColor::Muted, truncate_text(&text, width))],
                 width,
@@ -480,8 +480,14 @@ impl AgentsViewMode {
         }
         let selected = Some(row.identity.as_str())
             == self.rows.get(self.selected).map(|r| r.identity.as_str());
+        // The activity lines' glyph sits in the summary line's marker slot; no cost cell.
+        if matches!(row.kind, RowKind::Shells | RowKind::FactoryRuns) {
+            let text = format!("{}{}", depth_indent(row.depth), row.title);
+            let line = pad_line(vec![crate::Span::raw(truncate_text(&text, width))], width);
+            return finish_session_row(theme, line, selected, hovered, width);
+        }
         if row.kind == RowKind::SubagentSummary {
-            let indent = "  ".repeat(row.depth);
+            let indent = depth_indent(row.depth);
             let marker = if row.expanded { "\u{25be}" } else { "\u{25b8}" };
             let text = format!("{indent}{marker} {}", row.title);
             // BOTH summary lines bill the descendant tree in the Cost column (operator directive
@@ -526,7 +532,7 @@ impl AgentsViewMode {
         let icon_style = theme
             .fg_style(icon_color)
             .add_modifier(ratatui::style::Modifier::BOLD);
-        let indent = "  ".repeat(row.depth);
+        let indent = depth_indent(row.depth);
         let indent_width = str_width(&indent);
         let mut line: Line = Vec::new();
         if indent_width > 0 {
@@ -627,11 +633,7 @@ impl AgentsViewMode {
             return Vec::new();
         };
         // Keep room for a wide character when nesting exceeds the pane.
-        let indent_width = row
-            .depth
-            .saturating_add(1)
-            .saturating_mul(2)
-            .min(width.saturating_sub(2));
+        let indent_width = (str_width(&depth_indent(row.depth)) + 2).min(width.saturating_sub(2));
         let indent = " ".repeat(indent_width);
         let dim = self.theme.fg_style(ThemeColor::Dim);
         let wrap_width = width.saturating_sub(str_width(&indent)).max(1);
@@ -835,6 +837,12 @@ pub(super) fn finish_session_row(
         theme.paint_hover_band(&mut line, 0..width);
     }
     line
+}
+
+/// Every row's leading indent: one step per nesting level, so a row's child lines sit a full
+/// step past its `• ` prefix.
+fn depth_indent(depth: usize) -> String {
+    " ".repeat(4 * depth)
 }
 
 pub(super) fn cell(value: &str, width: usize) -> String {
