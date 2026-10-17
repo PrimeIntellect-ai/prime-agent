@@ -378,7 +378,9 @@ impl SessionUi {
                 view.bash_view = None;
                 // The exit restores the dock's own group (the operator's 2026-09-26 panel-exit
                 // ruling): ESC/left lands back on the Shells item, not the prompt bar.
-                self.focus_activity_dock(view);
+                if !self.close_panel_to_agents_view() {
+                    self.focus_activity_dock(view);
+                }
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
                 // The open asks for the first window only; the detail's upward scroll

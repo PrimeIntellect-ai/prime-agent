@@ -743,7 +743,13 @@ pub fn render_activity_dock_segments(
         let start = line.iter().map(|s| str_width(&s.content)).sum();
         let spans = match group {
             ActivityGroup::Subagents => {
-                vec![theme.fg_span(running_color(running), format!("◆ {running} subagents"))]
+                vec![theme.fg_span(
+                    running_color(running),
+                    format!(
+                        "◆ {running} subagent{}",
+                        if running == 1 { "" } else { "s" }
+                    ),
+                )]
             }
             ActivityGroup::Heartbeats => {
                 let mut heartbeats = vec![theme.fg_span(

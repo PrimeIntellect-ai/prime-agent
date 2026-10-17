@@ -111,11 +111,7 @@ impl SessionUi {
         let goal_label = tray_goal_label(&self.goal_view.goal);
         // The dock's bash indicator counts only runs actively running right now (operator scoping):
         // finished runs stay in the bash view.
-        let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
-        let bash_running = bash_rows
-            .iter()
-            .filter(|activity| activity.running())
-            .count();
+        let bash_running = crate::bash_view::running_shell_count(&self.bash_activities);
         // The dock's factory indicator counts live runs only — the
         // view's one liveness rule (`FactoryRunSnapshot::is_live`: a
         // live state, or children still in flight — a `done` run whose
@@ -123,10 +119,7 @@ impl SessionUi {
         // and its stop control). Fully terminal runs stay as panels
         // inside the factory page, never in the indicator — the bash
         // group's running-only scoping, one lane over.
-        let factory_runs = crate::factory_view::parse_factory_runs(&self.factory_graph)
-            .iter()
-            .filter(|run| run.is_live())
-            .count();
+        let factory_runs = crate::factory_view::live_run_count(&self.factory_graph);
         // The dock's subagent count is the live running count only:
         // idle and dead registry rows (passivated children the ledger
         // still seeds) never bloat the indicator — they render in the
@@ -234,6 +227,31 @@ impl SessionUi {
             );
         }
         self.dirty = true;
+    }
+
+    /// Mount the panel an agents-view activity line requested; its close returns to the agents
+    /// view.
+    pub(crate) fn open_agents_view_panel(
+        &mut self,
+        panel: crate::interactive::SessionPanel,
+        view: &mut AgentView,
+    ) {
+        match panel {
+            crate::interactive::SessionPanel::Shells => self.open_bash_view(view),
+            crate::interactive::SessionPanel::FactoryRuns => self.open_factory_page(view),
+        }
+        self.panel_returns_to_agents_view = view.bash_view.is_some() || view.factory_view.is_some();
+    }
+
+    /// The close of a panel the agents view requested hands the pane back to it; returns whether
+    /// it did.
+    pub(super) fn close_panel_to_agents_view(&mut self) -> bool {
+        if !std::mem::take(&mut self.panel_returns_to_agents_view) {
+            return false;
+        }
+        self.open_agents_view = true;
+        self.exit_requested = true;
+        true
     }
 
     /// The dock's Enter hand-off (the operator's direct-navigation redesign):

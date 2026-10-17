@@ -315,7 +315,7 @@ fn prompt_bar_subagent_segment_is_the_running_count_only() {
         .collect::<String>();
     assert_eq!(
         text,
-        " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
+        " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells  ·  ⚙ 0 factory"
     );
 }
 

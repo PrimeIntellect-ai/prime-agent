@@ -99,6 +99,15 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
     activities
 }
 
+/// The running shells in a `list_kernel_bash` reply: finished shells stay in the bash view only.
+#[must_use]
+pub fn running_shell_count(data: &Value) -> usize {
+    parse_bash_activities(data)
+        .iter()
+        .filter(|activity| activity.running())
+        .count()
+}
+
 /// The pane's interactive mode: the columned list, or a row's detail
 /// drill-in.
 #[derive(Debug, Clone, PartialEq, Eq)]

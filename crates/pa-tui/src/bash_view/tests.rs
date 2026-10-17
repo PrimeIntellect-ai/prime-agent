@@ -1109,3 +1109,13 @@ fn durations_format_compactly() {
     assert_eq!(format_duration(Some(3_412)), "3.4s");
     assert_eq!(format_duration(Some(125_000)), "2m 05s");
 }
+
+#[test]
+fn running_shell_count_skips_finished_shells() {
+    let data = json!({"activities": [
+        {"id": "a", "command": "x", "status": "running"},
+        {"id": "b", "command": "y", "status": "done"},
+        {"id": "c", "command": "z", "status": "failed"},
+    ]});
+    assert_eq!(running_shell_count(&data), 1);
+}
