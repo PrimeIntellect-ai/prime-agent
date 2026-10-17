@@ -134,6 +134,20 @@ impl FactoryRunSnapshot {
     }
 }
 
+/// The activity dock's factory row: the live runs (the dock count's own
+/// set), paused first, each `<name> <state>`.
+#[must_use]
+pub fn dock_factory_items(runs: &[FactoryRunSnapshot]) -> Vec<String> {
+    let mut live: Vec<&FactoryRunSnapshot> = runs.iter().filter(|run| run.is_live()).collect();
+    live.sort_by_key(|run| run.state.as_deref() != Some("paused"));
+    live.iter()
+        .map(|run| match &run.state {
+            Some(state) => format!("{} {state}", run.display_name()),
+            None => run.display_name(),
+        })
+        .collect()
+}
+
 /// One run-level action the page offers on a live run (the heartbeats
 /// picker's action-row grammar): the stop that tears the run and its
 /// children down, and the pause complement's resume.

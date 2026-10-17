@@ -815,12 +815,7 @@ fn alt_a() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)
 }
 
-/// One right-arrow key event (the dock's next-section step).
-fn dock_right() -> KeyEvent {
-    KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)
-}
-
-/// One down-arrow key event (the page's `tui.select.down`).
+/// One down-arrow key event (`tui.select.down`: the dock's next row, the page's next run).
 fn down() -> KeyEvent {
     KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)
 }
@@ -838,7 +833,7 @@ fn escape() -> KeyEvent {
 /// The page's picker keys repaint on the key itself, never waiting for
 /// the 2-second refresh poll (the input loop's render contract: every
 /// dispatched input paints — the same TS `handleInput` parity that
-/// carries the dock's arrows and every other picker key). The pin closes
+/// carries the dock's keys and every other picker key). The pin closes
 /// the page on the input right after the arrow, so no poll window can
 /// sit between the move and the paint: the moved selection marker must
 /// land in a captured frame on the arrow's own repaint — and the poll
@@ -857,12 +852,12 @@ fn factory_page_picker_keys_paint_the_moved_selection_on_the_key() {
         ]
     });
     let steps = vec![
-        // Focus the dock and step to the factory group (subagents ->
-        // heartbeats -> shells -> factory); Enter opens the page.
+        // Focus the dock and step down to the factory row (subagents ->
+        // heartbeats -> shells -> factory rows); Enter opens the page.
         HeadlessStep::Key(alt_a()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
-        HeadlessStep::Key(dock_right()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
+        HeadlessStep::Key(down()),
         HeadlessStep::Key(enter()),
         // The page opens on the feed's live head: the newest run.
         HeadlessStep::WaitRender {

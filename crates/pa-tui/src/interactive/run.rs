@@ -1898,6 +1898,7 @@ async fn run_interactive_surface(
             } => {
                 last_bash_refresh = Instant::now();
                 session.spawn_bash_activity_refresh();
+                session.refresh_expanded_dock(&mut view);
             }
             () = async {
                 // The factory lane's 2s poll: the bash poll's cadence

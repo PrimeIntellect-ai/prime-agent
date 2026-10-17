@@ -320,7 +320,7 @@ pub(crate) struct SessionUi {
     factory_updates: mpsc::UnboundedSender<FactoryUpdate>,
     /// The open view's selected run id: the refresh's watch target.
     factory_selected_run: Option<String>,
-    /// The subagent summary line holds keyboard focus.
+    /// The activity dock holds keyboard focus (and renders expanded).
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
     subagent_counts: crate::subagents::SubagentCounts,
@@ -484,7 +484,7 @@ impl SessionUi {
         std::mem::take(&mut self.trim_after_frame)
     }
 
-    /// Hand the keyboard focus to the compact dock on its selected group (operator ruling
+    /// Hand the keyboard focus to the dock on its selected group (operator ruling
     /// 2026-09-26: leaving a panel lands on the panel's own dock item, never the prompt bar).
     fn focus_activity_dock(&mut self, view: &mut AgentView) {
         self.subagents_focused = true;

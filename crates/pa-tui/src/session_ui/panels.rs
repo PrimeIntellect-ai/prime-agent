@@ -71,7 +71,7 @@ impl SessionUi {
         }
     }
 
-    /// Refresh the one-line activity dock and the title's cost (the only writer
+    /// Refresh the activity dock and the title's cost (the only writer
     /// of `chrome.cost_usd`).
     pub(super) fn update_subagent_summary(&mut self, view: &mut AgentView) {
         let identity = crate::subagents::SessionIdentity::new(
@@ -84,8 +84,8 @@ impl SessionUi {
         // session's row.
         view.chrome.cost_usd = crate::subagents::family_cost(&self.roster, &identity);
         let dock = self.activity_dock_state();
-        // A focused selection must stay on a rendered group: only the goal group can leave the row
-        // (its goal ended), and the selection steps back to the group that now ends the row.
+        // A focused selection must stay on a rendered group: only the goal group can leave the dock
+        // (its goal ended), and the selection steps back to the group that is now last.
         if self.subagents_focused && !dock.groups().contains(&self.activity_group) {
             self.activity_group =
                 dock.step(self.activity_group, crate::chrome::ActivityDirection::Prev);
@@ -102,41 +102,42 @@ impl SessionUi {
         }
     }
 
-    /// The dock's feed state: the live counts, the goal row's label, and the selection/focus the
-    /// caller owns. A group renders exactly when it stays traversable.
+    /// The dock's feed state: the live counts and each group's details, the goal row's label, and
+    /// the selection/focus the caller owns. A group renders exactly when it stays traversable.
     pub(super) fn activity_dock_state(&self) -> crate::chrome::ActivityDock {
         // The dock is the goal's one chrome surface (the operator's 2026-09-24 directive): every
         // live state renders its row — pursuing reads the elapsed time, the paused and
         // budget-limited states keep their label here.
         let goal_label = tray_goal_label(&self.goal_view.goal);
-        // The dock's bash indicator counts only runs actively running right now (operator scoping):
+        // The dock's shells group lists only runs actively running right now (operator scoping):
         // finished runs stay in the bash view.
-        let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
-        let bash_running = bash_rows
-            .iter()
-            .filter(|activity| activity.running())
-            .count();
-        // The dock's factory indicator counts live runs only — the
-        // view's one liveness rule (`FactoryRunSnapshot::is_live`: a
-        // live state, or children still in flight — a `done` run whose
-        // resident children still run keeps its count like its panel
-        // and its stop control). Fully terminal runs stay as panels
-        // inside the factory page, never in the indicator — the bash
-        // group's running-only scoping, one lane over.
-        let factory_runs = crate::factory_view::parse_factory_runs(&self.factory_graph)
-            .iter()
-            .filter(|run| run.is_live())
-            .count();
+        let shells = crate::bash_view::dock_shell_items(&crate::bash_view::parse_bash_activities(
+            &self.bash_activities,
+        ));
+        // The dock's factory group lists live runs only — the view's one liveness rule
+        // (`FactoryRunSnapshot::is_live`: a live state, or children still in flight — a `done`
+        // run whose resident children still run keeps its entry like its panel and its stop
+        // control). Fully terminal runs stay as panels inside the factory page, never in the
+        // dock — the shells group's running-only scoping, one lane over.
+        let factory_runs = crate::factory_view::dock_factory_items(
+            &crate::factory_view::parse_factory_runs(&self.factory_graph),
+        );
         // The dock's subagent count is the live running count only:
         // idle and dead registry rows (passivated children the ledger
-        // still seeds) never bloat the indicator — they render in the
-        // scoped agents view.
+        // still seeds) never bloat the collapsed indicator — the expanded
+        // row breaks them out.
         crate::chrome::ActivityDock {
             subagents_running_direct: self.subagent_counts.running_direct,
             subagents_running_nested: self.subagent_counts.running_nested,
+            subagents_idle: self.subagent_counts.idle,
+            subagents_inactive: self.subagent_counts.inactive,
             heartbeats: self.heartbeat_catalog.len(),
+            heartbeats_active: crate::heartbeats_picker::dock_heartbeat_items(
+                &self.heartbeat_catalog,
+                crate::agents_view_state::now_ms(),
+            ),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
-            bash_running,
+            shells,
             factory_runs,
             // The group renders exactly while the daemon advertises the
             // lane: the factory's opt-in gate (a daemon without the
@@ -148,7 +149,7 @@ impl SessionUi {
         }
     }
 
-    /// The editor's Down and Alt+A hand focus to the compact dock.
+    /// The editor's Down and Alt+A hand focus to the dock, which expands it.
     pub(super) fn focus_subagents_summary(
         &mut self,
         source: &DockFocusSource,
@@ -166,8 +167,7 @@ impl SessionUi {
                 // all-zero dock, or one with only shells running, must stay
                 // reachable — TS `SubagentSummaryLine.isSelectable()` gated
                 // this on existing subagents, a sanctioned divergence). The
-                // grab lands on the row's first group; Left/Right walk the
-                // rest.
+                // grab lands on the top row; Up/Down walk the rest.
                 self.activity_group = crate::chrome::ActivityGroup::Subagents;
             }
             DockFocusSource::Shortcut => {}
@@ -352,6 +352,14 @@ impl SessionUi {
         }
         self.dirty = true;
         Ok(())
+    }
+
+    /// The expanded dock's heartbeat countdowns ride the run loop's 2s bash-activity poll (the
+    /// collapsed line carries no time label, so it skips the recount).
+    pub(crate) fn refresh_expanded_dock(&mut self, view: &mut AgentView) {
+        if self.subagents_focused {
+            self.sync_activity_dock(view);
+        }
     }
 
     /// The activity dock follows the scoped heartbeat catalog (the tray no
