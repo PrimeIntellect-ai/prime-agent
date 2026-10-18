@@ -203,6 +203,10 @@ async fn run_interactive_surface(
     // into the session — the open page's panels and the dock's count.
     let (factory_tx, mut factory_rx) =
         mpsc::unbounded_channel::<crate::session_ui::FactoryUpdate>();
+    // The machine-library page's open-path list fetch reports here; the
+    // loop folds the reply into the open page.
+    let (library_tx, mut library_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::LibraryUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
     // autocomplete provider.
@@ -309,6 +313,7 @@ async fn run_interactive_surface(
         let heartbeats_tx = heartbeats_tx.clone();
         let bash_tx = bash_tx.clone();
         let factory_tx = factory_tx.clone();
+        let library_tx = library_tx.clone();
         let commands_tx = commands_tx.clone();
         let backfill_tx = backfill_tx.clone();
         let waits_through_update_restart = route == SessionOpenRoute::AgentsView;
@@ -337,6 +342,7 @@ async fn run_interactive_surface(
                     let heartbeats_tx = heartbeats_tx.clone();
                     let bash_tx = bash_tx.clone();
                     let factory_tx = factory_tx.clone();
+                    let library_tx = library_tx.clone();
                     let commands_tx = commands_tx.clone();
                     let backfill_tx = backfill_tx.clone();
                     async move {
@@ -364,6 +370,7 @@ async fn run_interactive_surface(
                                 heartbeats: heartbeats_tx,
                                 bash: bash_tx,
                                 factory: factory_tx,
+                                library: library_tx,
                                 commands: commands_tx,
                             },
                             backfill_tx,
@@ -1586,6 +1593,11 @@ async fn run_interactive_surface(
             maybe_factory = factory_rx.recv() => {
                 if let Some(update) = maybe_factory {
                     session.apply_factory_update(update, &mut view);
+                }
+            }
+            maybe_library = library_rx.recv() => {
+                if let Some(update) = maybe_library {
+                    session.apply_library_update(update, &mut view);
                 }
             }
             maybe_commands = commands_rx.recv() => {
